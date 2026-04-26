@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go 内存模型可视化</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e4e4e4;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        /* 核心区域布局 */
+        .memory-overview {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .memory-diagram {
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 30px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .memory-diagram h2 {
+            color: #00d9ff;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+        
+        /* 内存布局图 */
+        .memory-layout {
+            position: relative;
+            height: 500px;
+            background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid #30363d;
+        }
+        
+        .memory-section {
+            position: absolute;
+            left: 20px;
+            right: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .memory-section:hover {
+            transform: scale(1.02);
+            box-shadow: 0 0 30px rgba(0,217,255,0.3);
+        }
+        
+        .section-header {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .section-desc {
+            font-size: 0.85em;
+            color: #aaa;
+            line-height: 1.5;
+        }
+        
+        /* 内存区域颜色 */
+        .kernel { top: 0; height: 12%; background: linear-gradient(90deg, #2d1b4e, #4a2c6a); border-left: 4px solid #8b5cf6; }
+        .stack { top: 12%; height: 20%; background: linear-gradient(90deg, #1a3a4a, #1e5a6a); border-left: 4px solid #00d9ff; }
+        .heap { top: 32%; height: 35%; background: linear-gradient(90deg, #1a4a2e, #1e6a3e); border-left: 4px solid #00ff88; }
+        .runtime { top: 67%; height: 18%; background: linear-gradient(90deg, #4a3a1a, #6a5a2e); border-left: 4px solid #ffaa00; }
+        .text { top: 85%; height: 15%; background: linear-gradient(90deg, #4a1a1a, #6a2e2e); border-left: 4px solid #ff6b6b; }
+        
+        /* 地址标签 */
+        .addr-label {
+            position: absolute;
+            right: 30px;
+            font-size: 0.75em;
+            color: #666;
+            font-family: monospace;
+        }
+        
+        .addr-high { top: 5%; }
+        .addr-low { bottom: 5%; }
+        
+        /* 原理说明卡片 */
+        .principles {
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 30px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .principles h2 {
+            color: #00ff88;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+        
+        .principle-item {
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 4px solid #00d9ff;
+            transition: all 0.3s ease;
+        }
+        
+        .principle-item:hover {
+            background: rgba(0,217,255,0.1);
+            transform: translateX(5px);
+        }
+        
+        .principle-item h3 {
+            color: #00d9ff;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        
+        .principle-item p {
+            color: #ccc;
+            line-height: 1.6;
+            font-size: 0.95em;
+        }
+        
+        .principle-item code {
+            background: rgba(0,217,255,0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.9em;
+        }
+        
+        /* 技术详情区 */
+        .tech-section {
+            margin-bottom: 40px;
+        }
+        
+        .tech-section h2 {
+            color: #00d9ff;
+            font-size: 1.8em;
+            margin-bottom: 25px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(0,217,255,0.3);
+        }
+        
+        .tech-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+        }
+        
+        .tech-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 25px;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .tech-card:hover {
+            border-color: #00d9ff;
+            box-shadow: 0 0 40px rgba(0,217,255,0.2);
+            transform: translateY(-5px);
+        }
+        
+        .tech-card h3 {
+            color: #00ff88;
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .tech-card .icon {
+            font-size: 1.5em;
+        }
+        
+        .tech-card p {
+            color: #bbb;
+            line-height: 1.7;
+            margin-bottom: 15px;
+        }
+        
+        .tech-card .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .tech-card .feature-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+        
+        .tech-card .feature-list li::before {
+            content: "▸";
+            color: #00d9ff;
+        }
+        
+        /* 流程图样式 */
+        .flow-diagram {
+            background: rgba(0,0,0,0.4);
+            border-radius: 12px;
+            padding: 25px;
+            margin-top: 15px;
+        }
+        
+        .flow-step {
+            display: flex;
+            align-items: center;
+            padding: 12px 0;
+            gap: 15px;
+        }
+        
+        .step-num {
+            width: 30px;
+            height: 30px;
+            background: linear-gradient(135deg, #00d9ff, #00ff88);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: #1a1a2e;
+            flex-shrink: 0;
+        }
+        
+        .step-content {
+            flex: 1;
+            color: #ddd;
+        }
+        
+        .step-arrow {
+            color: #00d9ff;
+            font-size: 1.2em;
+        }
+        
+        /* 交互提示 */
+        .hover-hint {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 15px;
+        }
+        
+        /* 动画效果 */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        /* 响应式 */
+        @media (max-width: 900px) {
+            .memory-overview {
+                grid-template-columns: 1fr;
+            }
+            
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            .memory-layout {
+                height: 400px;
+            }
+        }
+        
+        /* 底部总结 */
+        .summary {
+            background: linear-gradient(135deg, rgba(0,217,255,0.1), rgba(0,255,136,0.1));
+            border-radius: 20px;
+            padding: 30px;
+            margin-top: 40px;
+            border: 1px solid rgba(0,217,255,0.3);
+        }
+        
+        .summary h2 {
+            color: #00d9ff;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+        
+        .summary-item {
+            text-align: center;
+            padding: 20px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+        }
+        
+        .summary-item .num {
+            font-size: 2em;
+            font-weight: bold;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .summary-item .label {
+            color: #888;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Go 内存模型可视化</h1>
+        <p class="subtitle">核心结构 · 核心原理 · 核心技术</p>
+        
+        <!-- 内存布局总览 -->
+        <div class="memory-overview">
+            <!-- 内存布局图 -->
+            <div class="memory-diagram">
+                <h2>📍 进程内存布局</h2>
+                <div class="memory-layout">
+                    <div class="addr-label addr-high">0xFFFFFFFFFFFF ↑ 高地址</div>
+                    
+                    <div class="memory-section kernel">
+                        <div class="section-header">
+                            <span>🔒 内核空间 (Kernel Space)</span>
+                            <span>~1GB</span>
+                        </div>
+                        <div class="section-desc">
+                            操作系统内核代码、数据结构、系统调用接口<br>
+                            <small style="color:#8b5cf6">用户代码无法直接访问</small>
+                        </div>
+                    </div>
+                    
+                    <div class="memory-section stack">
+                        <div class="section-header">
+                            <span>📚 栈 (Stack)</span>
+                            <span>~8MB/Goroutine</span>
+                        </div>
+                        <div class="section-desc">
+                            存储函数参数、局部变量、返回地址<br>
+                            <small style="color:#00d9ff">• 每个 G 独立栈，起始 2KB<br>• 动态增长，最大 1GB</small>
+                        </div>
+                    </div>
+                    
+                    <div class="memory-section heap">
+                        <div class="section-header">
+                            <span>🏠 堆 (Heap)</span>
+                            <span>动态分配</span>
+                        </div>
+                        <div class="section-desc">
+                            存储动态分配的对象（new/make 创建）<br>
+                            <small style="color:#00ff88">• GC 管理的区域<br>• 逃逸分析决定对象分配位置</small>
+                        </div>
+                    </div>
+                    
+                    <div class="memory-section runtime">
+                        <div class="section-header">
+                            <span>⚙️ 运行时数据区 (Runtime)</span>
+                            <span>M Heidelberg</span>
+                        </div>
+                        <div class="section-desc">
+                            Go 运行时管理：G/M/P 调度器、GC 元数据、内存分配器<br>
+                            <small style="color:#ffaa00">• G: Goroutine<br>• M: Machine (OS线程)<br>• P: Processor</small>
+                        </div>
+                    </div>
+                    
+                    <div class="memory-section text">
+                        <div class="section-header">
+                            <span>📝 程序代码区 (Text)</span>
+                            <span>只读</span>
+                        </div>
+                        <div class="section-desc">
+                            编译后的机器指令，只读不可修改<br>
+                            <small style="color:#ff6b6b">代码自修改会被阻止</small>
+                        </div>
+                    </div>
+                    
+                    <div class="addr-label addr-low">0x000000000000 ↓ 低地址</div>
+                </div>
+                <p class="hover-hint">👆 悬停各区域查看详情</p>
+            </div>
+            
+            <!-- 核心原理 -->
+            <div class="principles">
+                <h2>⚡ 核心原理</h2>
+                
+                <div class="principle-item">
+                    <h3>1️⃣ G-M-P 调度模型</h3>
+                    <p>
+                        Go 使用<strong>轻量级协程 (Goroutine)</strong>替代传统线程，
+                        由 <code>MPG</code> 三元组实现高效调度。
+                    </p>
+                    <div style="margin-top:10px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;">
+                        <code style="color:#00ff88">G (Goroutine)</code> → 任务<br>
+                        <code style="color:#ff6b6b">M (Machine)</code> → OS线程<br>
+                        <code style="color:#00d9ff">P (Processor)</code> → 调度上下文
+                    </div>
+                </div>
+                
+                <div class="principle-item">
+                    <h3>2️⃣ 逃逸分析 (Escape Analysis)</h3>
+                    <p>
+                        编译器分析决定变量应该分配在<strong>栈</strong>还是<strong>堆</strong>：
+                    </p>
+                    <p>
+                        <span style="color:#00ff88">✓ 栈分配</span>：函数返回后自动回收，零开销<br>
+                        <span style="color:#ff6b6b">✗ 堆分配</span>：需要 GC 回收，有一定开销
+                    </p>
+                    <p style="margin-top:10px;">
+                        <code>go build -gcflags '-m'</code> 可查看逃逸分析结果
+                    </p>
+                </div>
+                
+                <div class="principle-item">
+                    <h3>3️⃣ 垃圾回收 (GC)</h3>
+                    <p>
+                        Go 采用<strong>三色标记并发 GC</strong>，最小化 Stop The World：
+                    </p>
+                    <p>
+                        <span style="color:#888">⚪ 白</span> → 
+                        <span style="color:#00d9ff">🔵 灰</span> → 
+                        <span style="color:#00ff88">🟢 黑</span> → 完成
+                    </p>
+                </div>
+                
+                <div class="principle-item">
+                    <h3>4️⃣ 内存分配器 (TCMalloc)</h3>
+                    <p>
+                        采用<strong>线程缓存分配 (TCMalloc)</strong> 策略：
+                    </p>
+                    <p>
+                        <code>span</code> (大对象) | 
+                        <code>cache</code> (小对象) | 
+                        <code>central</code> (中转)
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 核心技术详解 -->
+        <div class="tech-section">
+            <h2>🛠️ 核心技术详解</h2>
+            
+            <div class="tech-grid">
+                <!-- 栈 -->
+                <div class="tech-card">
+                    <h3><span class="icon">📚</span> 栈内存管理</h3>
+                    <p>
+                        Go 的栈是<strong>动态增长</strong>的，每个 Goroutine 起始只有 2KB，
+                        按需扩张，最大可达 1GB。
+                    </p>
+                    <ul class="feature-list">
+                        <li>函数调用时分配栈帧，返回时释放</li>
+                        <li>栈内存访问速度极快（寄存器级别）</li>
+                        <li>相比 C++ 手动管理，更安全且无泄漏</li>
+                        <li>小栈帧避免内存浪费</li>
+                    </ul>
+                    <div class="flow-diagram">
+                        <div class="flow-step">
+                            <span class="step-num">1</span>
+                            <span class="step-content">函数调用 → 分配新栈帧</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">2</span>
+                            <span class="step-content">栈帧不足 → 触发扩容 (2x)</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">3</span>
+                            <span class="step-content">函数返回 → 栈帧自动释放</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 堆 -->
+                <div class="tech-card">
+                    <h3><span class="icon">🏠</span> 堆内存管理</h3>
+                    <p>
+                        堆是 GC 的主战场，存储需要<strong>跨函数存活</strong>的对象。
+                        Go 的堆分配采用多级管理。
+                    </p>
+                    <ul class="feature-list">
+                        <li>span: 8KB 页组成的内存块</li>
+                        <li>mcache: 每 P 私有的快速分配缓存</li>
+                        <li>mcentral: 跨 P 共享的分配中心</li>
+                        <li>mheap: 全局堆，管理大对象</li>
+                    </ul>
+                    <div class="flow-diagram">
+                        <div class="flow-step">
+                            <span class="step-num">1</span>
+                            <span class="step-content">小对象 → mcache (无锁，极快)</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">2</span>
+                            <span class="step-content">mcache 空 → mcentral 补充</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">3</span>
+                            <span class="step-content">大对象 → 直接找 mheap</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 逃逸分析 -->
+                <div class="tech-card">
+                    <h3><span class="icon">🔍</span> 逃逸分析</h3>
+                    <p>
+                        编译器静态分析决定变量应该分配在哪里。
+                        <strong>能栈不堆</strong>是 Go 的核心理念。
+                    </p>
+                    <ul class="feature-list">
+                        <li>返回局部变量指针 → 逃逸到堆</li>
+                        <li>interface{} 动态类型 → 必然逃逸</li>
+                        <li>大结构体 (>64KB) → 强制堆分配</li>
+                        <li>channel 发送指针 → 可能逃逸</li>
+                    </ul>
+                    <p style="margin-top:10px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;">
+                        <code>// 不会逃逸，栈分配<br>
+                        func add(a, b int) int { return a + b }</code><br><br>
+                        <code>// 会逃逸，堆分配<br>
+                        func initMap() *map[int]int { 
+                            m := make(map[int]int) 
+                            return &m 
+                        }</code>
+                    </p>
+                </div>
+                
+                <!-- GC -->
+                <div class="tech-card">
+                    <h3><span class="icon">🧹</span> 垃圾回收器</h3>
+                    <p>
+                        Go 1.5+ 采用<strong>并发三色标记</strong> GC，
+                        通过 Write Barrier 保证一致性。
+                    </p>
+                    <ul class="feature-list">
+                        <li>标记阶段：并发遍历对象图</li>
+                        <li>清除阶段：并发回收白色对象</li>
+                        <li>STW 时间极短 (~100μs)</li>
+                        <li>GOGC 环境变量控制回收节奏</li>
+                    </ul>
+                    <div class="flow-diagram">
+                        <div class="flow-step">
+                            <span class="step-num">1</span>
+                            <span class="step-content">STW → 根节点标记</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">2</span>
+                            <span class="step-content">并发标记 → 三色遍历</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">3</span>
+                            <span class="step-content">STW → 标记完成</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-num">4</span>
+                            <span class="step-content">并发清除 → 回收内存</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 调度器 -->
+                <div class="tech-card">
+                    <h3><span class="icon">🎛️</span> 调度器原理</h3>
+                    <p>
+                        Go 的调度器将百万级 Goroutine 映射到少量 OS 线程，
+                        实现<strong>高效并发</strong>。
+                    </p>
+                    <ul class="feature-list">
+                        <li>Goroutine: 极轻量 (~2KB)，可创建百万个</li>
+                        <li>Work Stealing: 空闲 P 偷取其他 P 的任务</li>
+                        <li>抢占式调度: 防止单个 G 饿死其他 G</li>
+                        <li>sysmon: 后台监控，回收阻塞 G</li>
+                    </ul>
+                    <p style="margin-top:10px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;">
+                        <span style="color:#00ff88">✓</span> 对比线程：创建快 1000x<br>
+                        <span style="color:#00ff88">✓</span> 切换快：只需切换 SP/PC/寄存器<br>
+                        <span style="color:#00ff88">✓</span> 调度灵活：用户态完成
+                    </p>
+                </div>
+                
+                <!-- 内存屏障 -->
+                <div class="tech-card">
+                    <h3><span class="icon">⚡</span> 内存屏障与同步</h3>
+                    <p>
+                        Go 内存模型定义了<strong>Happens Before</strong>关系，
+                        保证并发程序的可预测性。
+                    </p>
+                    <ul class="feature-list">
+                        <li>channel send → channel receive</li>
+                        <li>sync.Mutex Lock → Unlock</li>
+                        <li>sync.WaitGroup Done → Wait</li>
+                        <li>sync.Once Do → 后续调用</li>
+                    </ul>
+                    <p style="margin-top:10px;padding:10px;background:rgba(0,0,0,0.3);border-radius:8px;">
+                        <code>var a string<br>
+                        var done bool<br><br>
+                        func setup() {<br>
+                        &nbsp;&nbsp;a = "hello"<br>
+                        &nbsp;&nbsp;done = true<br>
+                        }<br><br>
+                        func main() {<br>
+                        &nbsp;&nbsp;go setup()<br>
+                        &nbsp;&nbsp;for !done {}<br>
+                        &nbsp;&nbsp;print(a) // 可能打印空!</code>
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 总结 -->
+        <div class="summary">
+            <h2>📊 Go 内存模型要点速览</h2>
+            <div class="summary-grid">
+                <div class="summary-item">
+                    <div class="num">2KB</div>
+                    <div class="label">Goroutine 初始栈大小</div>
+                </div>
+                <div class="summary-item">
+                    <div class="num">~100μs</div>
+                    <div class="label">GC STW 时间</div>
+                </div>
+                <div class="summary-item">
+                    <div class="num">M</div>
+                    <div class="label">Goroutine 数量 vs OS线程</div>
+                </div>
+                <div class="summary-item">
+                    <div class="num">3色</div>
+                    <div class="label">并发 GC 标记算法</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

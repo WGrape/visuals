@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL MVCC 多版本并发控制 - 动态原理演示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 30px 20px;
+        }
+
+        /* 头部样式 */
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 1.1rem;
+        }
+
+        /* 章节通用样式 */
+        .section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            color: #00d9ff;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: linear-gradient(180deg, #00d9ff, #00ff88);
+            border-radius: 2px;
+        }
+
+        /* 概念卡片 */
+        .concept-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .concept-card {
+            background: rgba(0, 217, 255, 0.1);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .concept-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 217, 255, 0.2);
+        }
+
+        .concept-card h3 {
+            color: #00ff88;
+            margin-bottom: 10px;
+            font-size: 1.2rem;
+        }
+
+        .concept-card p {
+            color: #aaa;
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }
+
+        /* 表格行结构可视化 */
+        .row-structure {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 2px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+
+        .row-cell {
+            padding: 15px 25px;
+            text-align: center;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 0.9rem;
+        }
+
+        .row-id { background: #667eea; }
+        .row-name { background: #f093fb; color: #333; }
+        .row-age { background: #4facfe; color: #333; }
+        .row-trx-id { background: #ff6b6b; }
+        .row-roll-ptr { background: #feca57; color: #333; }
+
+        .row-cell span {
+            display: block;
+            font-size: 0.75rem;
+            opacity: 0.8;
+            margin-top: 5px;
+            font-weight: normal;
+        }
+
+        .arrow-down {
+            width: 0;
+            height: 0;
+            border-left: 15px solid transparent;
+            border-right: 15px solid transparent;
+            border-top: 20px solid #00ff88;
+            margin: 20px auto;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; transform: translateY(0); }
+            50% { opacity: 1; transform: translateY(5px); }
+        }
+
+        /* 动画演示区域 */
+        .animation-area {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 30px;
+            min-height: 500px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* 事务时间线 */
+        .timeline {
+            position: relative;
+            height: 80px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+
+        .timeline-line {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            transform: translateY(-50%);
+        }
+
+        .timeline-point {
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            z-index: 10;
+        }
+
+        .timeline-point:hover {
+            transform: translate(-50%, -50%) scale(1.2);
+        }
+
+        .timeline-point.active {
+            box-shadow: 0 0 20px currentColor;
+        }
+
+        .t1 { background: #ff6b6b; left: 10%; }
+        .t2 { background: #4ecdc4; left: 30%; }
+        .t3 { background: #ffe66d; left: 50%; color: #333; }
+        .t4 { background: #95e1d3; left: 70%; color: #333; }
+        .t5 { background: #dda0dd; left: 90%; }
+
+        /* 数据区域 */
+        .data-area {
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .database-box, .undo-box {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 15px;
+            padding: 20px;
+            min-width: 300px;
+        }
+
+        .box-title {
+            text-align: center;
+            font-size: 1.1rem;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .db-title { color: #00d9ff; }
+        .undo-title { color: #ff6b6b; }
+
+        /* 数据行 */
+        .data-row {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.5s;
+            position: relative;
+        }
+
+        .data-row.highlight {
+            background: rgba(0, 255, 136, 0.3);
+            transform: scale(1.02);
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+        }
+
+        .data-row.old-version {
+            background: rgba(255, 107, 107, 0.2);
+            border-left: 4px solid #ff6b6b;
+        }
+
+        .data-row.ghost {
+            opacity: 0.4;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .row-value {
+            font-weight: bold;
+        }
+
+        .row-meta {
+            font-size: 0.8rem;
+            color: #888;
+        }
+
+        /* Undo Log 链 */
+        .undo-chain {
+            position: relative;
+        }
+
+        .undo-segment {
+            background: rgba(255, 107, 107, 0.2);
+            border: 1px solid rgba(255, 107, 107, 0.5);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 10px;
+            position: relative;
+        }
+
+        .undo-segment::after {
+            content: '→';
+            position: absolute;
+            right: -25px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #ff6b6b;
+            font-size: 1.2rem;
+        }
+
+        .undo-segment:last-child::after {
+            content: '✓';
+            color: #00ff88;
+        }
+
+        /* Read View 可视化 */
+        .readview-box {
+            background: rgba(78, 205, 196, 0.2);
+            border: 2px solid #4ecdc4;
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px auto;
+            max-width: 500px;
+        }
+
+        .readview-title {
+            text-align: center;
+            color: #4ecdc4;
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+        }
+
+        .readview-content {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .readview-item {
+            background: rgba(78, 205, 196, 0.3);
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+        }
+
+        /* 控制按钮 */
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin: 30px 0;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 25px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #00d9ff, #00ff88);
+            color: #1a1a2e;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(0, 217, 255, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* 日志面板 */
+        .log-panel {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 30px;
+            max-height: 250px;
+            overflow-y: auto;
+            font-family: "Fira Code", "Consolas", monospace;
+            font-size: 0.9rem;
+        }
+
+        .log-entry {
+            padding: 8px 12px;
+            margin-bottom: 5px;
+            border-radius: 5px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .log-time { color: #666; margin-right: 10px; }
+        .log-tx { color: #4ecdc4; margin-right: 10px; }
+        .log-action { color: #fff; }
+        .log-success { background: rgba(0, 255, 136, 0.2); border-left: 3px solid #00ff88; }
+        .log-wait { background: rgba(255, 230, 109, 0.2); border-left: 3px solid #ffe66d; }
+        .log-block { background: rgba(255, 107, 107, 0.2); border-left: 3px solid #ff6b6b; }
+
+        /* 步骤指示器 */
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+
+        .step {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px 20px;
+            border-radius: 20px;
+            position: relative;
+            transition: all 0.3s;
+        }
+
+        .step.active {
+            background: linear-gradient(135deg, #00d9ff, #00ff88);
+            color: #1a1a2e;
+        }
+
+        .step.completed {
+            background: rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+        }
+
+        /* 连接箭头动画 */
+        .connection-arrow {
+            position: absolute;
+            stroke: #00ff88;
+            stroke-width: 3;
+            fill: none;
+            stroke-dasharray: 10, 5;
+            animation: dash 1s linear infinite;
+        }
+
+        @keyframes dash {
+            to { stroke-dashoffset: -15; }
+        }
+
+        /* 说明面板 */
+        .explanation {
+            background: rgba(0, 217, 255, 0.1);
+            border-left: 4px solid #00d9ff;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .explanation h4 {
+            color: #00d9ff;
+            margin-bottom: 10px;
+        }
+
+        .explanation p {
+            color: #ccc;
+            line-height: 1.7;
+        }
+
+        /* 隔离级别对比 */
+        .isolation-compare {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .isolation-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .isolation-card h4 {
+            color: #ffe66d;
+            margin-bottom: 15px;
+        }
+
+        .isolation-card ul {
+            list-style: none;
+            color: #aaa;
+        }
+
+        .isolation-card li {
+            padding: 8px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .isolation-card li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: #00ff88;
+        }
+
+        /* 动画元素 */
+        .anim-elem {
+            transition: all 0.8s ease;
+        }
+
+        .moving {
+            animation: moveRight 1s ease-out forwards;
+        }
+
+        @keyframes moveRight {
+            from { transform: translateX(0); }
+            to { transform: translateX(100px); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.5s ease forwards;
+        }
+
+        .glow {
+            animation: glow 1s ease-in-out infinite alternate;
+        }
+
+        @keyframes glow {
+            from { box-shadow: 0 0 5px #00ff88; }
+            to { box-shadow: 0 0 20px #00ff88, 0 0 30px #00ff88; }
+        }
+
+        /* 指针动画 */
+        .pointer {
+            position: absolute;
+            width: 0;
+            height: 0;
+            border-top: 10px solid transparent;
+            border-bottom: 10px solid transparent;
+            border-left: 15px solid #00ff88;
+            transition: all 0.5s;
+        }
+
+        /* 事务信息卡片 */
+        .transaction-card {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 10px;
+            padding: 15px;
+            min-width: 200px;
+            border: 2px solid;
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .transaction-card.visible {
+            opacity: 1;
+        }
+
+        .transaction-card h5 {
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+
+        .transaction-card .status {
+            font-size: 0.85rem;
+            opacity: 0.8;
+        }
+
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            h1 { font-size: 1.8rem; }
+            .section { padding: 20px; }
+            .timeline-point { width: 40px; height: 40px; font-size: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔄 MySQL MVCC 原理详解</h1>
+            <p class="subtitle">Multi-Version Concurrency Control 多版本并发控制</p>
+        </header>
+
+        <!-- 核心概念 -->
+        <div class="section">
+            <h2 class="section-title">核心概念</h2>
+            <div class="concept-grid">
+                <div class="concept-card">
+                    <h3>📌 隐藏列</h3>
+                    <p>InnoDB 为每行记录添加了两个隐藏列：<strong>DB_TRX_ID</strong>（事务ID）和 <strong>DB_ROLL_PTR</strong>（回滚指针），用于实现多版本。</p>
+                </div>
+                <div class="concept-card">
+                    <h3>📜 Undo Log</h3>
+                    <p>记录数据修改前的值，形成<strong>版本链</strong>。每次修改都会生成一条 undo 记录，通过回滚指针串联起来。</p>
+                </div>
+                <div class="concept-card">
+                    <h3>👁️ Read View</h3>
+                    <p>读事务开始时创建的<strong>快照</strong>，记录当前活跃事务ID列表，用于判断数据版本的可见性。</p>
+                </div>
+                <div class="concept-card">
+                    <h3>🎯 可见性判断</h3>
+                    <p>根据 Read View 判断：数据的<strong>事务ID</strong>是否对当前事务可见，决定读取哪个版本的数据。</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据行结构 -->
+        <div class="section">
+            <h2 class="section-title">InnoDB 行记录结构</h2>
+            <p style="color: #888; margin-bottom: 20px;">每一行数据背后，都隐藏着 MVCC 的关键信息：</p>
+
+            <div class="row-structure">
+                <div class="row-cell row-id">id <span>主键</span></div>
+                <div class="row-cell row-name">name <span>用户名</span></div>
+                <div class="row-cell row-age">age <span>年龄</span></div>
+                <div class="row-cell row-trx-id">trx_id <span>事务ID</span></div>
+                <div class="row-cell row-roll-ptr">roll_ptr <span>回滚指针</span></div>
+            </div>
+
+            <div class="explanation">
+                <h4>💡 工作原理</h4>
+                <p>
+                    <strong>DB_TRX_ID</strong>：记录最近一次修改该行的事务ID<br>
+                    <strong>DB_ROLL_PTR</strong>：指向 undo log 记录的指针，形成版本链的链表头
+                </p>
+            </div>
+        </div>
+
+        <!-- 动画演示区 -->
+        <div class="section">
+            <h2 class="section-title">动态演示：事务并发场景</h2>
+
+            <div class="step-indicator">
+                <div class="step active" data-step="1">① 初始化数据</div>
+                <div class="step" data-step="2">② 并发修改</div>
+                <div class="step" data-step="3">③ 版本链形成</div>
+                <div class="step" data-step="4">④ 可见性判断</div>
+            </div>
+
+            <div class="animation-area" id="animationArea">
+                <!-- 时间线 -->
+                <div class="timeline">
+                    <div class="timeline-line"></div>
+                    <div class="timeline-point t1" data-tx="T1" onclick="highlightTx('T1')">T1</div>
+                    <div class="timeline-point t2" data-tx="T2" onclick="highlightTx('T2')">T2</div>
+                    <div class="timeline-point t3" data-tx="T3" onclick="highlightTx('T3')">T3</div>
+                    <div class="timeline-point t4" data-tx="T4" onclick="highlightTx('T4')">T4</div>
+                </div>
+
+                <!-- 数据和Undo区域 -->
+                <div class="data-area">
+                    <div class="database-box">
+                        <div class="box-title db-title">📦 数据页 (Data Pages)</div>
+                        <div id="dataRows">
+                            <!-- 数据行动态生成 -->
+                        </div>
+                    </div>
+                    <div class="undo-box">
+                        <div class="box-title undo-title">📜 Undo Log 链</div>
+                        <div id="undoChain" class="undo-chain">
+                            <div class="undo-segment">
+                                <div>初始值 (age=25)</div>
+                                <div class="row-meta">trx_id: 100</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Read View -->
+                <div class="readview-box" id="readViewBox" style="display: none;">
+                    <div class="readview-title">👁️ Read View (快照)</div>
+                    <div class="readview-content">
+                        <div class="readview-item">m_ids: [T2, T3]</div>
+                        <div class="readview-item">min_trx_id: T2</div>
+                        <div class="readview-item">max_trx_id: T4</div>
+                        <div class="readview-item">creator_trx_id: T3</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button class="btn btn-primary" onclick="resetDemo()" id="resetBtn">🔄 重置</button>
+                <button class="btn btn-secondary" onclick="step1()" id="step1Btn">① 初始化</button>
+                <button class="btn btn-secondary" onclick="step2()" id="step2Btn" disabled>② 并发修改</button>
+                <button class="btn btn-secondary" onclick="step3()" id="step3Btn" disabled>③ 版本链</button>
+                <button class="btn btn-secondary" onclick="step4()" id="step4Btn" disabled>④ 可见性判断</button>
+                <button class="btn btn-secondary" onclick="autoPlay()" id="autoBtn">▶️ 自动播放</button>
+            </div>
+
+            <!-- 日志 -->
+            <div class="log-panel" id="logPanel">
+                <div class="log-entry log-success">
+                    <span class="log-time">[系统]</span>
+                    <span class="log-action">点击按钮开始演示 MVCC 工作流程...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 可见性判断算法 -->
+        <div class="section">
+            <h2 class="section-title">可见性判断算法</h2>
+
+            <div class="explanation">
+                <h4>🎯 核心规则</h4>
+                <p>
+                    当事务读取一行数据时，通过 Read View 判断该行数据的某个版本是否可见：
+                </p>
+            </div>
+
+            <div style="background: rgba(0,0,0,0.3); border-radius: 12px; padding: 25px; margin: 20px 0; font-family: monospace;">
+                <p style="color: #00ff88; margin-bottom: 15px;">IF (trx_id == creator_trx_id) THEN</p>
+                <p style="color: #fff; margin-left: 30px; margin-bottom: 15px;">// 自己修改的，可以看见</p>
+                <p style="color: #00ff88; margin-bottom: 15px;">ELSE IF (trx_id < min_trx_id) THEN</p>
+                <p style="color: #fff; margin-left: 30px; margin-bottom: 15px;">// 提交过且比快照还早，可以看见</p>
+                <p style="color: #00ff88; margin-bottom: 15px;">ELSE IF (trx_id > max_trx_id) THEN</p>
+                <p style="color: #fff; margin-left: 30px; margin-bottom: 15px;">// 快照创建后才开始的，看不见</p>
+                <p style="color: #00ff88; margin-bottom: 15px;">ELSE IF (trx_id in m_ids) THEN</p>
+                <p style="color: #fff; margin-left: 30px; margin-bottom: 15px;">// 活跃事务修改的，看不见</p>
+                <p style="color: #ffe66d;">→ 通过 roll_ptr 顺着版本链往下找...</p>
+            </div>
+        </div>
+
+        <!-- 隔离级别对比 -->
+        <div class="section">
+            <h2 class="section-title">隔离级别与 MVCC</h2>
+
+            <div class="isolation-compare">
+                <div class="isolation-card">
+                    <h4>🔒 READ COMMITTED</h4>
+                    <ul>
+                        <li>每次读取都生成新的 Read View</li>
+                        <li>可避免脏读和不可重复读</li>
+                        <li>同一事务中两次读取可能不同</li>
+                        <li>PostgreSQL 的默认级别</li>
+                    </ul>
+                </div>
+                <div class="isolation-card">
+                    <h4>🔐 REPEATABLE READ</h4>
+                    <ul>
+                        <li>事务开始时创建 Read View</li>
+                        <li>整个事务期间复用同一个快照</li>
+                        <li>InnoDB 默认隔离级别</li>
+                        <li>解决脏读、不可重复读、幻读</li>
+                    </ul>
+                </div>
+                <div class="isolation-card">
+                    <h4>📖 READ UNCOMMITTED</h4>
+                    <ul>
+                        <li>不使用 MVCC</li>
+                        <li>读取最新版本（可能有脏数据）</li>
+                        <li>可能脏读，实际很少用</li>
+                    </ul>
+                </div>
+                <div class="isolation-card">
+                    <h4>🏛️ SERIALIZABLE</h4>
+                    <ul>
+                        <li>MVCC + 锁机制</li>
+                        <li>读取时会加锁</li>
+                        <li>最强隔离，性能最差</li>
+                        <li>并发度最低</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- 实际案例演示 -->
+        <div class="section">
+            <h2 class="section-title">场景案例：余额修改</h2>
+
+            <div style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                    <thead>
+                        <tr style="background: rgba(0, 217, 255, 0.2);">
+                            <th style="padding: 12px; text-align: left;">时间</th>
+                            <th style="padding: 12px; text-align: left;">事务A (转账)</th>
+                            <th style="padding: 12px; text-align: left;">事务B (查询)</th>
+                            <th style="padding: 12px; text-align: left;">账户余额</th>
+                            <th style="padding: 12px; text-align: left;">说明</th>
+                        </tr>
+                    </thead>
+                    <tbody id="caseTable">
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T1</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">BEGIN</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">1000</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">初始余额</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T2</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">UPDATE SET balance=900</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">事务A修改，未提交</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T3</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">BEGIN → SELECT</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #00ff88;">1000</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">读到了旧版本！</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T4</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">COMMIT</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">900</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">事务A提交</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T5</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">SELECT again</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ffe66d;">1000</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">RC下新快照，RR下仍1000</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">T6</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">-</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">COMMIT</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">900</td>
+                            <td style="padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.1);">事务B提交，余额900</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 总结 -->
+        <div class="section">
+            <h2 class="section-title">核心要点总结</h2>
+            <div class="concept-grid">
+                <div class="concept-card">
+                    <h3>✅ MVCC 优势</h3>
+                    <p>
+                        • 读不阻塞写，写不阻塞读<br>
+                        • 大幅提升并发性能<br>
+                        • 快照读避免幻读问题<br>
+                        • 减少锁争用
+                    </p>
+                </div>
+                <div class="concept-card">
+                    <h3>⚠️ 注意事项</h3>
+                    <p>
+                        • 需要定期清理旧版本（purge）<br>
+                        • 极端情况下可能产生长事务<br>
+                        • RR 级别下仍有幻读可能（需 gap lock）<br>
+                        • 只适用于快照读
+                    </p>
+                </div>
+                <div class="concept-card">
+                    <h3>🔍 适用场景</h3>
+                    <p>
+                        • 高并发读多写少<br>
+                        • 需要一致性快照<br>
+                        • 长事务处理<br>
+                        • 报表查询
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 状态管理
+        let currentStep = 0;
+        let isPlaying = false;
+        let playInterval = null;
+
+        // 日志记录
+        function log(message, type = 'success') {
+            const panel = document.getElementById('logPanel');
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.innerHTML = `
+                <span class="log-time">[${time}]</span>
+                <span class="log-action">${message}</span>
+            `;
+            panel.appendChild(entry);
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        // 更新步骤指示器
+        function updateSteps(step) {
+            document.querySelectorAll('.step').forEach((el, i) => {
+                el.classList.remove('active', 'completed');
+                if (i + 1 < step) el.classList.add('completed');
+                if (i + 1 === step) el.classList.add('active');
+            });
+        }
+
+        // 初始化数据
+        function step1() {
+            currentStep = 1;
+            updateSteps(1);
+
+            const dataRows = document.getElementById('dataRows');
+            dataRows.innerHTML = `
+                <div class="data-row highlight anim-elem" id="mainRow">
+                    <div>
+                        <span class="row-value">张三</span>
+                        <span style="color: #888; margin-left: 10px;">age</span>
+                    </div>
+                    <div class="row-meta">
+                        trx: T1 | ptr: -
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('step2Btn').disabled = false;
+            log('初始化：用户"张三"，age=25，事务T1创建', 'success');
+            log('系统记录：trx_id=T1, roll_ptr=null（初始版本，无Undo）', 'success');
+        }
+
+        // 并发修改
+        function step2() {
+            currentStep = 2;
+            updateSteps(2);
+
+            const dataRows = document.getElementById('dataRows');
+            dataRows.innerHTML = `
+                <div class="data-row anim-elem" id="mainRow" style="border: 2px solid #4ecdc4;">
+                    <div>
+                        <span class="row-value" style="color: #4ecdc4;">张三</span>
+                        <span style="color: #888; margin-left: 10px;">age</span>
+                    </div>
+                    <div class="row-meta">
+                        trx: T2 | ptr: →Undo2
+                    </div>
+                </div>
+            `;
+
+            log('事务T2开始：UPDATE user SET age=30 WHERE name="张三"', 'wait');
+            setTimeout(() => {
+                log('T2修改了age：25 → 30', 'wait');
+                setTimeout(() => {
+                    log('T2未提交，但修改已写入数据页（未持久化）', 'wait');
+                }, 500);
+            }, 500);
+
+            document.getElementById('step3Btn').disabled = false;
+        }
+
+        // 版本链形成
+        function step3() {
+            currentStep = 3;
+            updateSteps(3);
+
+            // 更新数据行
+            const dataRows = document.getElementById('dataRows');
+            dataRows.innerHTML = `
+                <div class="data-row anim-elem" id="mainRow" style="border: 2px solid #ffe66d;">
+                    <div>
+                        <span class="row-value" style="color: #ffe66d;">张三</span>
+                        <span style="color: #888; margin-left: 10px;">age</span>
+                    </div>
+                    <div class="row-meta">
+                        trx: T3 | ptr: →Undo3
+                    </div>
+                </div>
+            `;
+
+            // 更新Undo链
+            const undoChain = document.getElementById('undoChain');
+            undoChain.innerHTML = `
+                <div class="undo-segment anim-elem" style="border-color: #ffe66d;">
+                    <div style="color: #ffe66d;">age = 30 <span style="color: #888;">(新)</span></div>
+                    <div class="row-meta">trx_id: T3</div>
+                </div>
+                <div class="undo-segment anim-elem" style="border-color: #4ecdc4; animation-delay: 0.3s;">
+                    <div style="color: #4ecdc4;">age = 25 <span style="color: #888;">(旧)</span></div>
+                    <div class="row-meta">trx_id: T2 → <span style="color: #ff6b6b;">指向初始</span></div>
+                </div>
+                <div class="undo-segment anim-elem" style="border-color: #ff6b6b; animation-delay: 0.6s;">
+                    <div style="color: #ff6b6b;">age = 25 <span style="color: #888;">(初始)</span></div>
+                    <div class="row-meta">trx_id: T1 | 链表尾部 ✓</div>
+                </div>
+            `;
+
+            log('事务T3开始：UPDATE user SET age=35 WHERE name="张三"', 'wait');
+            setTimeout(() => {
+                log('T3修改了age：30 → 35', 'wait');
+                setTimeout(() => {
+                    log('Undo Log 形成版本链：T3 → T2 → 初始值', 'success');
+                }, 500);
+            }, 500);
+
+            document.getElementById('step4Btn').disabled = false;
+        }
+
+        // 可见性判断
+        function step4() {
+            currentStep = 4;
+            updateSteps(4);
+
+            // 显示Read View
+            document.getElementById('readViewBox').style.display = 'block';
+
+            // 演示可见性判断过程
+            const dataRows = document.getElementById('dataRows');
+            dataRows.innerHTML = `
+                <div class="data-row anim-elem" style="background: rgba(255, 107, 107, 0.2); border: 2px solid #ff6b6b;">
+                    <div>
+                        <span class="row-value">张三</span>
+                        <span style="color: #888; margin-left: 10px;">age</span>
+                    </div>
+                    <div class="row-meta">
+                        trx: T3 ❌ 不可见！
+                    </div>
+                </div>
+            `;
+
+            setTimeout(() => {
+                log('事务T4执行 SELECT：创建 Read View', 'success');
+                setTimeout(() => {
+                    log('Read View: m_ids=[T2,T3], min=T2, max=T4, creator=T4', 'success');
+                    setTimeout(() => {
+                        log('检查 age 版本：trx_id=T3 在 m_ids 中 → 不可见！', 'block');
+                        setTimeout(() => {
+                            log('沿 roll_ptr 顺着版本链查找...', 'wait');
+                            setTimeout(() => {
+                                dataRows.innerHTML = `
+                                    <div class="data-row anim-elem" style="background: rgba(255, 107, 107, 0.2); border: 2px solid #ff6b6b;">
+                                        <div>
+                                            <span class="row-value" style="color: #aaa; text-decoration: line-through;">张三</span>
+                                            <span style="color: #888; margin-left: 10px;">age</span>
+                                        </div>
+                                        <div class="row-meta">
+                                            trx: T3 ❌
+                                        </div>
+                                    </div>
+                                    <div class="data-row anim-elem" style="background: rgba(255, 107, 107, 0.2); border: 2px solid #ff6b6b;">
+                                        <div>
+                                            <span class="row-value" style="color: #aaa; text-decoration: line-through;">张三</span>
+                                            <span style="color: #888; margin-left: 10px;">age</span>
+                                        </div>
+                                        <div class="row-meta">
+                                            trx: T2 ❌ 在m_ids中
+                                        </div>
+                                    </div>
+                                    <div class="data-row anim-elem glow" style="background: rgba(0, 255, 136, 0.2); border: 2px solid #00ff88;">
+                                        <div>
+                                            <span class="row-value" style="color: #00ff88;">张三</span>
+                                            <span style="color: #888; margin-left: 10px;">age</span>
+                                        </div>
+                                        <div class="row-meta">
+                                            trx: T1 ✅ 可见！
+                                        </div>
+                                    </div>
+                                `;
+                                log('找到版本！trx_id=T1 < min_trx_id(T2) → 可见！', 'success');
+                                log('事务T4 读取到 age=25（旧版本）', 'success');
+                            }, 800);
+                        }, 800);
+                    }, 800);
+                }, 800);
+            }, 500);
+        }
+
+        // 重置
+        function resetDemo() {
+            currentStep = 0;
+            isPlaying = false;
+            if (playInterval) clearInterval(playInterval);
+
+            document.getElementById('dataRows').innerHTML = '';
+            document.getElementById('undoChain').innerHTML = `
+                <div class="undo-segment">
+                    <div>初始值 (age=25)</div>
+                    <div class="row-meta">trx_id: 100</div>
+                </div>
+            `;
+            document.getElementById('readViewBox').style.display = 'none';
+            document.getElementById('logPanel').innerHTML = `
+                <div class="log-entry log-success">
+                    <span class="log-time">[系统]</span>
+                    <span class="log-action">已重置，点击"自动播放"或逐步执行...</span>
+                </div>
+            `;
+
+            updateSteps(0);
+            document.getElementById('step2Btn').disabled = true;
+            document.getElementById('step3Btn').disabled = true;
+            document.getElementById('step4Btn').disabled = true;
+        }
+
+        // 高亮事务
+        function highlightTx(tx) {
+            document.querySelectorAll('.timeline-point').forEach(el => {
+                el.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            const messages = {
+                'T1': '事务T1：初始创建数据，设置 trx_id=T1，roll_ptr=null',
+                'T2': '事务T2：开始修改，读取到 trx_id=T1（旧版本）',
+                'T3': '事务T3：再次修改，形成版本链',
+                'T4': '事务T4：创建 Read View，执行一致性读'
+            };
+            log(messages[tx], 'success');
+        }
+
+        // 自动播放
+        function autoPlay() {
+            if (isPlaying) {
+                isPlaying = false;
+                clearInterval(playInterval);
+                document.getElementById('autoBtn').textContent = '▶️ 自动播放';
+                return;
+            }
+
+            resetDemo();
+            isPlaying = true;
+            document.getElementById('autoBtn').textContent = '⏸️ 暂停';
+
+            const steps = [step1, step2, step3, step4];
+            let current = 0;
+
+            playInterval = setInterval(() => {
+                if (current < steps.length) {
+                    steps[current]();
+                    current++;
+                } else {
+                    clearInterval(playInterval);
+                    isPlaying = false;
+                    document.getElementById('autoBtn').textContent = '▶️ 重播';
+                    log('=== MVCC 演示完成 ===', 'success');
+                }
+            }, 3500);
+        }
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            resetDemo();
+        });
+    </script>
+</body>
+</html>

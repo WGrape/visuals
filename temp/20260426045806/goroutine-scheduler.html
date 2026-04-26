@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go 协程调度原理 - G-M-P 模型可视化</title>
+    <style>
+        :root {
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --bg-card-hover: #1f2937;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-green: #3fb950;
+            --accent-blue: #58a6ff;
+            --accent-purple: #a371f7;
+            --accent-orange: #f0883e;
+            --accent-red: #f85149;
+            --accent-cyan: #39d353;
+            --gradient-g: linear-gradient(135deg, #238636, #3fb950);
+            --gradient-m: linear-gradient(135deg, #1f6feb, #58a6ff);
+            --gradient-p: linear-gradient(135deg, #8957e5, #a371f7);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-green), var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        header p {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        /* Section */
+        .section {
+            margin-bottom: 80px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: var(--accent-green);
+            border-radius: 2px;
+        }
+
+        /* GMP Model Diagram */
+        .gmp-overview {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .component-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .component-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent-green);
+            box-shadow: 0 12px 40px rgba(63, 185, 80, 0.15);
+        }
+
+        .component-icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 2rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .component-card.g .component-icon { background: var(--gradient-g); }
+        .component-card.m .component-icon { background: var(--gradient-m); }
+        .component-card.p .component-icon { background: var(--gradient-p); }
+
+        .component-card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 8px;
+        }
+
+        .component-card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .component-detail {
+            background: rgba(63, 185, 80, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 16px;
+            font-size: 0.85rem;
+            color: var(--accent-green);
+        }
+
+        /* Main Diagram */
+        .diagram-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 40px;
+            overflow-x: auto;
+        }
+
+        .gmp-diagram {
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 40px;
+            min-width: 1000px;
+            position: relative;
+        }
+
+        .processor-column {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .processor-box {
+            width: 140px;
+            background: linear-gradient(135deg, #8957e5 0%, #a371f7 100%);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            font-weight: 600;
+            box-shadow: 0 4px 20px rgba(163, 113, 247, 0.3);
+        }
+
+        .local-runq {
+            background: rgba(163, 113, 247, 0.15);
+            border: 1px dashed rgba(163, 113, 247, 0.4);
+            border-radius: 8px;
+            padding: 12px;
+            min-height: 100px;
+            width: 140px;
+        }
+
+        .local-runq-title {
+            font-size: 0.75rem;
+            color: var(--accent-purple);
+            margin-bottom: 8px;
+            text-align: center;
+        }
+
+        .goroutine-mini {
+            background: linear-gradient(135deg, #238636 0%, #3fb950 100%);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 0.7rem;
+            margin-bottom: 6px;
+            color: #fff;
+            text-align: center;
+        }
+
+        .goroutine-mini.running {
+            background: linear-gradient(135deg, #f0883e 0%, #ffa657 100%);
+            box-shadow: 0 0 12px rgba(240, 136, 62, 0.5);
+        }
+
+        /* Center area */
+        .center-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding-top: 20px;
+        }
+
+        .sched-queue {
+            background: rgba(88, 166, 255, 0.1);
+            border: 2px dashed rgba(88, 166, 255, 0.4);
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 200px;
+        }
+
+        .sched-queue-title {
+            text-align: center;
+            color: var(--accent-blue);
+            font-size: 0.85rem;
+            margin-bottom: 12px;
+        }
+
+        .global-runq {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+            min-height: 40px;
+        }
+
+        .goroutine-global {
+            background: linear-gradient(135deg, #238636 0%, #3fb950 100%);
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-size: 0.8rem;
+            color: #fff;
+        }
+
+        /* Machines */
+        .machine-box {
+            width: 100px;
+            background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 100%);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            font-weight: 600;
+            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
+        }
+
+        /* Arrows */
+        .arrow-label {
+            position: absolute;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            background: var(--bg-dark);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        /* Connectors SVG */
+        .connectors {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .connector-line {
+            stroke: var(--border);
+            stroke-width: 2;
+            fill: none;
+            stroke-dasharray: 8 4;
+        }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            margin-top: 32px;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .legend-dot.g { background: var(--accent-green); }
+        .legend-dot.m { background: var(--accent-blue); }
+        .legend-dot.p { background: var(--accent-purple); }
+
+        /* Scheduling Flow Section */
+        .flow-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .flow-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .flow-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .flow-card:nth-child(1)::before { background: var(--accent-green); }
+        .flow-card:nth-child(2)::before { background: var(--accent-blue); }
+        .flow-card:nth-child(3)::before { background: var(--accent-purple); }
+        .flow-card:nth-child(4)::before { background: var(--accent-orange); }
+
+        .flow-number {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--bg-dark);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .flow-card:nth-child(1) .flow-number { color: var(--accent-green); border: 2px solid var(--accent-green); }
+        .flow-card:nth-child(2) .flow-number { color: var(--accent-blue); border: 2px solid var(--accent-blue); }
+        .flow-card:nth-child(3) .flow-number { color: var(--accent-purple); border: 2px solid var(--accent-purple); }
+        .flow-card:nth-child(4) .flow-number { color: var(--accent-orange); border: 2px solid var(--accent-orange); }
+
+        .flow-card h4 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+        }
+
+        .flow-card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        /* Work Stealing */
+        .stealing-demo {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 32px;
+        }
+
+        .stealing-scenario {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 24px;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .stealing-before, .stealing-after {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+        }
+
+        .stealing-box {
+            background: var(--bg-dark);
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 160px;
+        }
+
+        .stealing-box h5 {
+            text-align: center;
+            margin-bottom: 16px;
+            font-size: 0.95rem;
+        }
+
+        .stealing-box.idle {
+            border-color: var(--accent-red);
+            background: rgba(248, 81, 73, 0.05);
+        }
+
+        .stealing-box.busy {
+            border-color: var(--accent-green);
+            background: rgba(63, 185, 80, 0.05);
+        }
+
+        .stealing-arrow {
+            font-size: 2.5rem;
+            color: var(--accent-orange);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.1); }
+        }
+
+        .stealing-explain {
+            background: rgba(240, 136, 62, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .stealing-explain p {
+            color: var(--accent-orange);
+            font-weight: 500;
+        }
+
+        /* Key Points */
+        .key-points {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .key-point {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            gap: 16px;
+        }
+
+        .key-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            flex-shrink: 0;
+        }
+
+        .key-point:nth-child(1) .key-icon { background: rgba(63, 185, 80, 0.2); }
+        .key-point:nth-child(2) .key-icon { background: rgba(88, 166, 255, 0.2); }
+        .key-point:nth-child(3) .key-icon { background: rgba(163, 113, 247, 0.2); }
+        .key-point:nth-child(4) .key-icon { background: rgba(240, 136, 62, 0.2); }
+
+        .key-point h5 {
+            font-size: 1rem;
+            margin-bottom: 6px;
+        }
+
+        .key-point p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* Animation Controls */
+        .animation-section {
+            margin-top: 40px;
+        }
+
+        .demo-controls {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .demo-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+
+        .demo-btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent-green);
+        }
+
+        .demo-btn.active {
+            background: var(--accent-green);
+            border-color: var(--accent-green);
+            color: #fff;
+        }
+
+        /* Timeline Animation */
+        .timeline-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+        }
+
+        .timeline {
+            position: relative;
+            height: 200px;
+            background: var(--bg-dark);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .time-label {
+            position: absolute;
+            bottom: 8px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .goroutine-timeline {
+            position: absolute;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #fff;
+        }
+
+        .gt-g1 { background: linear-gradient(90deg, #238636, #3fb950); top: 20px; }
+        .gt-g2 { background: linear-gradient(90deg, #1f6feb, #58a6ff); top: 60px; }
+        .gt-g3 { background: linear-gradient(90deg, #8957e5, #a371f7); top: 100px; }
+        .gt-g4 { background: linear-gradient(90deg, #f0883e, #ffa657); top: 140px; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            header h1 { font-size: 1.8rem; }
+            .gmp-overview { grid-template-columns: 1fr; }
+            .stealing-scenario { grid-template-columns: 1fr; }
+            .stealing-arrow { transform: rotate(90deg); }
+        }
+
+        /* Code blocks */
+        .code-block {
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .code-block code {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+            color: var(--accent-green);
+        }
+
+        .code-block .comment { color: var(--text-secondary); }
+        .code-block .keyword { color: var(--accent-purple); }
+        .code-block .func { color: var(--accent-blue); }
+        .code-block .type { color: var(--accent-orange); }
+
+        /* Comparison */
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-card);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .comparison-table th,
+        .comparison-table td {
+            padding: 16px 20px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .comparison-table th {
+            background: var(--bg-dark);
+            font-weight: 600;
+        }
+
+        .comparison-table td {
+            color: var(--text-secondary);
+        }
+
+        .comparison-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .check { color: var(--accent-green); }
+        .cross { color: var(--accent-red); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Go 协程调度原理</h1>
+            <p>深入理解 G-M-P 模型与用户态调度机制，探索 Go 如何在用户空间实现高性能并发</p>
+        </header>
+
+        <!-- GMP Overview -->
+        <section class="section">
+            <h2 class="section-title">核心概念：G-M-P 模型</h2>
+
+            <div class="gmp-overview">
+                <div class="component-card g">
+                    <div class="component-icon">G</div>
+                    <h3>Goroutine</h3>
+                    <p>Go 语言的并发执行单元</p>
+                    <div class="component-detail">
+                        <strong>类似：</strong>轻量级线程<br>
+                        <strong>大小：</strong>2KB 初始栈<br>
+                        <strong>特点：</strong>由 Go 运行时管理
+                    </div>
+                </div>
+
+                <div class="component-card m">
+                    <div class="component-icon">M</div>
+                    <h3>Machine</h3>
+                    <p>操作系统线程的抽象</p>
+                    <div class="component-detail">
+                        <strong>类似：</strong>内核线程<br>
+                        <strong>数量：</strong>可超过 CPU 核心数<br>
+                        <strong>特点：</strong>执行 G 的载体
+                    </div>
+                </div>
+
+                <div class="component-card p">
+                    <div class="component-icon">P</div>
+                    <h3>Processor</h3>
+                    <p>调度器的执行上下文</p>
+                    <div class="component-detail">
+                        <strong>数量：</strong>GOMAXPROCS<br>
+                        <strong>默认：</strong>= CPU 核心数<br>
+                        <strong>特点：</strong>持有调度资源
+                    </div>
+                </div>
+            </div>
+
+            <!-- Main Diagram -->
+            <div class="diagram-container">
+                <div class="gmp-diagram">
+                    <!-- P1 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G6 (running)</div>
+                            <div class="goroutine-mini">G7</div>
+                            <div class="goroutine-mini">G8</div>
+                        </div>
+                    </div>
+
+                    <!-- P2 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G3 (running)</div>
+                            <div class="goroutine-mini">G4</div>
+                        </div>
+                    </div>
+
+                    <!-- P3 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G5 (running)</div>
+                        </div>
+                    </div>
+
+                    <!-- Center: Global Queue -->
+                    <div class="center-area">
+                        <div class="processor-box" style="background: linear-gradient(135deg, #1f6feb, #58a6ff);">
+                            M (Machine)
+                        </div>
+                        <div class="sched-queue">
+                            <div class="sched-queue-title">🔵 全局运行队列 (Global RunQueue)</div>
+                            <div class="global-runq">
+                                <div class="goroutine-global">G1</div>
+                                <div class="goroutine-global">G2</div>
+                                <div class="goroutine-global">G9</div>
+                                <div class="goroutine-global">G10</div>
+                            </div>
+                        </div>
+                        <div class="processor-box" style="background: linear-gradient(135deg, #1f6feb, #58a6ff);">
+                            M (Machine)
+                        </div>
+                    </div>
+
+                    <!-- P4 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G11 (running)</div>
+                            <div class="goroutine-mini">G12</div>
+                            <div class="goroutine-mini">G13</div>
+                            <div class="goroutine-mini">G14</div>
+                        </div>
+                    </div>
+
+                    <!-- P5 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G15 (running)</div>
+                            <div class="goroutine-mini">G16</div>
+                        </div>
+                    </div>
+
+                    <!-- P6 -->
+                    <div class="processor-column">
+                        <div class="processor-box">P (Processor)</div>
+                        <div class="local-runq">
+                            <div class="local-runq-title">本地运行队列</div>
+                            <div class="goroutine-mini running">G17 (running)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-dot g"></div>
+                        <span>Goroutine (协程)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot m"></div>
+                        <span>Machine (系统线程)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot p"></div>
+                        <span>Processor (执行上下文)</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Why User-Space Scheduling -->
+        <section class="section">
+            <h2 class="section-title">为什么是用户态调度？</h2>
+
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>特性</th>
+                        <th>传统内核线程</th>
+                        <th>Go 协程 (用户态)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>创建成本</td>
+                        <td>~1MB 栈，需要系统调用</td>
+                        <td>~2KB 栈，Go 运行时分配</td>
+                    </tr>
+                    <tr>
+                        <td>切换成本</td>
+                        <td>用户态→内核态→用户态 (~1-10μs)</td>
+                        <td>纯用户态切换 (~0.2-0.5μs)</td>
+                    </tr>
+                    <tr>
+                        <td>调度方式</td>
+                        <td>OS 内核抢占式调度</td>
+                        <td>Go 运行时协作式+抢占式</td>
+                    </tr>
+                    <tr>
+                        <td>上下文保存</td>
+                        <td>完整寄存器+栈+内核态</td>
+                        <td>仅需保存寄存器+栈指针</td>
+                    </tr>
+                    <tr>
+                        <td>数量限制</td>
+                        <td>受限于系统线程数 (数千)</td>
+                        <td>可轻松创建数十万</td>
+                    </tr>
+                    <tr>
+                        <td>调度延迟</td>
+                        <td>取决于内核调度器</td>
+                        <td>可控制在微秒级</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Scheduling Flow -->
+        <section class="section">
+            <h2 class="section-title">调度流程详解</h2>
+
+            <div class="flow-cards">
+                <div class="flow-card">
+                    <div class="flow-number">1</div>
+                    <h4>创建协程</h4>
+                    <p>使用 <code>go func()</code> 创建 G，加入 <strong>全局队列</strong> 或 <strong>本地队列</strong>。新协程初始栈仅 2KB，按需增长。</p>
+                </div>
+
+                <div class="flow-card">
+                    <div class="flow-number">2</div>
+                    <h4>M 获取 P</h4>
+                    <p>M (Machine/线程) 必须绑定一个 P 才能执行协程。P 持有运行队列和调度资源。GOMAXPROCS 决定 P 的数量。</p>
+                </div>
+
+                <div class="flow-card">
+                    <div class="flow-number">3</div>
+                    <h4>从队列取 G</h4>
+                    <p>优先从 P 的<strong>本地队列</strong>取 G执行，若为空则尝试从<strong>全局队列</strong>或<strong>偷取</strong>其他 P 的队列。</p>
+                </div>
+
+                <div class="flow-card">
+                    <div class="flow-number">4</div>
+                    <h4>执行与让出</h4>
+                    <p>G 执行中可能：① 主动调用 <code>runtime.Gosched()</code> 让出；② 阻塞等待 (channel/锁)；③ 被抢占式调度中断。</p>
+                </div>
+            </div>
+
+            <div class="code-block">
+                <code>
+<span class="comment">// 调度伪代码简化版</span>
+<span class="keyword">func</span> <span class="func">schedule</span>() {
+    <span class="keyword">var</span> gp *g
+    <span class="comment">// 1. 尝试从本地队列获取</span>
+    <span class="keyword">if</span> gp = <span class="type">getg</span>().m.p.runq.pop(); gp != <span class="keyword">nil</span> {
+        <span class="func">execute</span>(gp)
+        <span class="keyword">return</span>
+    }
+    
+    <span class="comment">// 2. 尝试从全局队列获取</span>
+    <span class="keyword">if</span> gp = <span class="func">globrunqget</span>(); gp != <span class="keyword">nil</span> {
+        <span class="func">execute</span>(gp)
+        <span class="keyword">return</span>
+    }
+    
+    <span class="comment">// 3. 工作窃取：从其他 P 偷一半</span>
+    <span class="func">work stealing</span>(<span class="type">getg</span>().m.p)
+}
+                </code>
+            </div>
+        </section>
+
+        <!-- Work Stealing -->
+        <section class="section">
+            <h2 class="section-title">工作窃取调度算法</h2>
+
+            <div class="stealing-demo">
+                <div class="stealing-scenario">
+                    <div class="stealing-box busy">
+                        <h5>🍀 P1 (忙碌)</h5>
+                        <div class="goroutine-mini">G1</div>
+                        <div class="goroutine-mini">G2</div>
+                        <div class="goroutine-mini">G3</div>
+                        <div class="goroutine-mini">G4</div>
+                        <div class="goroutine-mini">G5</div>
+                        <div style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 8px;">队列长度: 5</div>
+                    </div>
+
+                    <div class="stealing-arrow">⟷</div>
+
+                    <div class="stealing-box idle">
+                        <h5>😴 P2 (空闲)</h5>
+                        <div style="color: var(--text-secondary); font-size: 0.85rem; padding: 20px;">
+                            队列长度: 0<br>
+                            <span style="color: var(--accent-red);">等待任务中...</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stealing-explain">
+                    <p>🎯 P2 空闲时会随机选择其他 P，偷走其一半的协程（这里偷走 G3, G4）</p>
+                </div>
+
+                <div style="margin-top: 24px;">
+                    <h4 style="margin-bottom: 16px;">窃取算法要点</h4>
+                    <div class="key-points">
+                        <div class="key-point">
+                            <div class="key-icon">⚡</div>
+                            <div>
+                                <h5>触发条件</h5>
+                                <p>本地队列为空 + 全局队列为空时触发</p>
+                            </div>
+                        </div>
+                        <div class="key-point">
+                            <div class="key-icon">📋</div>
+                            <div>
+                                <h5>窃取数量</h5>
+                                <p>从目标 P 的本地队列尾部取走一半（约 50%）</p>
+                            </div>
+                        </div>
+                        <div class="key-point">
+                            <div class="key-icon">🎲</div>
+                            <div>
+                                <h5>选择目标</h5>
+                                <p>随机选择其他 P，避免全局竞争</p>
+                            </div>
+                        </div>
+                        <div class="key-point">
+                            <div class="key-icon">⚖️</div>
+                            <div>
+                                <h5>负载均衡</h5>
+                                <p>保证所有 CPU 核心充分利用，最小化空闲</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Timeline Demo -->
+        <section class="section">
+            <h2 class="section-title">协程切换时序示意</h2>
+
+            <div class="animation-section">
+                <div class="demo-controls">
+                    <button class="demo-btn" onclick="resetTimeline()">重置</button>
+                    <button class="demo-btn active" onclick="animateTimeline('normal')">普通调度</button>
+                    <button class="demo-btn" onclick="animateTimeline('workSteal')">工作窃取</button>
+                    <button class="demo-btn" onclick="animateTimeline('preempt')">抢占调度</button>
+                </div>
+
+                <div class="timeline-container">
+                    <div class="timeline" id="timeline">
+                        <span class="time-label" style="left: 10px;">0ms</span>
+                        <span class="time-label" style="left: 25%;">25ms</span>
+                        <span class="time-label" style="left: 50%;">50ms</span>
+                        <span class="time-label" style="left: 75%;">75ms</span>
+                        <span class="time-label" style="right: 10px;">100ms</span>
+                    </div>
+
+                    <div style="margin-top: 20px; padding: 16px; background: var(--bg-dark); border-radius: 8px;">
+                        <p id="timeline-explain" style="color: var(--text-secondary); font-size: 0.95rem;">
+                            <strong style="color: var(--accent-green);">普通调度：</strong>时间片到期后，M 从 P1 本地队列取下一个 G 执行
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Takeaways -->
+        <section class="section">
+            <h2 class="section-title">核心要点总结</h2>
+
+            <div class="key-points">
+                <div class="key-point">
+                    <div class="key-icon">🏗️</div>
+                    <div>
+                        <h5>三级队列结构</h5>
+                        <p>每个 P 有本地队列 + 全局队列 + 网络轮询器，形成高效的分布式调度</p>
+                    </div>
+                </div>
+                <div class="key-point">
+                    <div class="key-icon">🔄</div>
+                    <div>
+                        <h5>用户态切换</h5>
+                        <p>协程切换仅保存/恢复寄存器，无需进入内核，开销是内核线程的 1/100</p>
+                    </div>
+                </div>
+                <div class="key-point">
+                    <div class="key-icon">⚖️</div>
+                    <div>
+                        <h5>工作窃取保证均衡</h5>
+                        <p>空闲 P 主动从繁忙 P 偷任务，确保 CPU 100% 利用，无任务饥饿</p>
+                    </div>
+                </div>
+                <div class="key-point">
+                    <div class="key-icon">🎯</div>
+                    <div>
+                        <h5>M:N 映射</h5>
+                        <p>M 个线程映射到 N 个协程，通过 P 解耦，实现高并发同时控制资源</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture Summary -->
+        <section class="section">
+            <h2 class="section-title">调度器架构全景</h2>
+
+            <div class="diagram-container" style="text-align: center;">
+                <div style="padding: 40px 20px;">
+                    <div style="display: inline-flex; flex-direction: column; align-items: center; gap: 20px;">
+                        <div style="display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;">
+                            <div style="background: linear-gradient(135deg, #1f6feb, #58a6ff); padding: 16px 32px; border-radius: 12px; font-weight: 600;">
+                                OS Kernel
+                            </div>
+                        </div>
+
+                        <div style="font-size: 1.5rem; color: var(--text-secondary);">↑ 阻塞/系统调用</div>
+
+                        <div style="display: flex; gap: 24px; flex-wrap: wrap; justify-content: center;">
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #1f6feb, #58a6ff); padding: 12px 24px; border-radius: 10px; font-weight: 600;">M</div>
+                                <div style="color: var(--text-secondary); font-size: 0.85rem;">Machine 1</div>
+                            </div>
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #1f6feb, #58a6ff); padding: 12px 24px; border-radius: 10px; font-weight: 600;">M</div>
+                                <div style="color: var(--text-secondary); font-size: 0.85rem;">Machine 2</div>
+                            </div>
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #1f6feb, #58a6ff); padding: 12px 24px; border-radius: 10px; font-weight: 600;">M</div>
+                                <div style="color: var(--text-secondary); font-size: 0.85rem;">Machine 3</div>
+                            </div>
+                        </div>
+
+                        <div style="font-size: 1.5rem; color: var(--text-secondary);">↓ 绑定关系</div>
+
+                        <div style="display: flex; gap: 24px; flex-wrap: wrap; justify-content: center;">
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #8957e5, #a371f7); padding: 12px 24px; border-radius: 10px; font-weight: 600;">P</div>
+                                <div style="display: flex; gap: 6px;">
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                </div>
+                            </div>
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #8957e5, #a371f7); padding: 12px 24px; border-radius: 10px; font-weight: 600;">P</div>
+                                <div style="display: flex; gap: 6px;">
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                </div>
+                            </div>
+                            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                                <div style="background: linear-gradient(135deg, #8957e5, #a371f7); padding: 12px 24px; border-radius: 10px; font-weight: 600;">P</div>
+                                <div style="display: flex; gap: 6px;">
+                                    <div style="background: var(--accent-green); width: 20px; height: 20px; border-radius: 4px;"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="font-size: 0.9rem; color: var(--accent-purple); margin-top: 8px;">(绿色方块 = G 协程)</div>
+                    </div>
+
+                    <div style="margin-top: 40px; padding: 24px; background: rgba(88, 166, 255, 0.1); border-radius: 12px; max-width: 800px; margin-left: auto; margin-right: auto;">
+                        <p style="font-size: 1.1rem; line-height: 1.8;">
+                            <strong style="color: var(--accent-blue);">核心洞察：</strong>
+                            P 是调度资源的抽象（类似 CPU 核心），M 是执行载体，G 是任务单元。<br>
+                            通过 M:N 映射 + 工作窃取，Go 在用户态实现了高效、灵活的多核调度。
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        function resetTimeline() {
+            const timeline = document.getElementById('timeline');
+            const explain = document.getElementById('timeline-explain');
+
+            // Clear existing G blocks
+            const existing = timeline.querySelectorAll('.goroutine-timeline');
+            existing.forEach(el => el.remove());
+
+            // Reset explain
+            explain.innerHTML = '<strong style="color: var(--accent-green);">普通调度：</strong>时间片到期后，M 从 P1 本地队列取下一个 G 执行';
+        }
+
+        function animateTimeline(mode) {
+            resetTimeline();
+            const timeline = document.getElementById('timeline');
+            const explain = document.getElementById('timeline-explain');
+
+            // Update buttons
+            document.querySelectorAll('.demo-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            if (mode === 'normal') {
+                explain.innerHTML = '<strong style="color: var(--accent-green);">普通调度：</strong>G1 运行 → 时间片到期 → 切换到 G2 → 继续执行';
+
+                createG(timeline, 'g1', 0, 45, 'G1 执行中', 'gt-g1');
+                createG(timeline, 'g2', 45, 100, 'G2 执行中', 'gt-g2');
+            }
+            else if (mode === 'workSteal') {
+                explain.innerHTML = '<strong style="color: var(--accent-orange);">工作窃取：</strong>P2 空闲时从 P1 偷走 G3，保持负载均衡';
+
+                createG(timeline, 'g1', 0, 30, 'P1: G1 执行', 'gt-g1');
+                createG(timeline, 'g2', 30, 55, 'P1: G2 执行', 'gt-g2');
+                createG(timeline, 'g3', 55, 100, 'P2: G3 (被偷)', 'gt-g3', true);
+            }
+            else if (mode === 'preempt') {
+                explain.innerHTML = '<strong style="color: var(--accent-red);">抢占调度：</strong>长时间运行的 G 被标记为"可抢占"，sysmon 强制中断';
+
+                createG(timeline, 'g1', 0, 60, 'G1 运行中...', 'gt-g1');
+                createMarker(timeline, 60, '⚠️ 抢占!');
+                createG(timeline, 'g2', 60, 100, 'G2 接手执行', 'gt-g2');
+            }
+        }
+
+        function createG(container, id, startPct, endPct, label, className, isStolen = false) {
+            const el = document.createElement('div');
+            el.className = 'goroutine-timeline ' + className;
+            el.style.left = startPct + '%';
+            el.style.width = (endPct - startPct) + '%';
+            el.textContent = label;
+            if (isStolen) {
+                el.style.border = '2px dashed var(--accent-orange)';
+            }
+            container.appendChild(el);
+        }
+
+        function createMarker(container, pct, text) {
+            const el = document.createElement('div');
+            el.style.position = 'absolute';
+            el.style.left = pct + '%';
+            el.style.top = '50%';
+            el.style.transform = 'translateX(-50%)';
+            el.style.fontSize = '0.75rem';
+            el.style.color = 'var(--accent-red)';
+            el.style.fontWeight = 'bold';
+            el.textContent = text;
+            container.appendChild(el);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            animateTimeline({ target: document.querySelector('.demo-btn.active') });
+        });
+    </script>
+</body>
+</html>

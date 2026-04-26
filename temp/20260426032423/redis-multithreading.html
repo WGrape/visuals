@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 多线程核心原理</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+            color: #fff;
+        }
+        
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #e94560, #ff6b6b);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #94a3b8;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        /* 主架构图 */
+        .main-arch {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 30px;
+            margin-bottom: 60px;
+            flex-wrap: wrap;
+        }
+        
+        .arch-section {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            min-width: 200px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .arch-section h3 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #e94560;
+            font-size: 1.1em;
+        }
+        
+        .client-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .client {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 12px 20px;
+            border-radius: 10px;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            animation: pulse 2s infinite;
+        }
+        
+        .client:nth-child(2) { animation-delay: 0.3s; }
+        .client:nth-child(3) { animation-delay: 0.6s; }
+        
+        @keyframes pulse {
+            0%, 100% { transform: translateX(0); }
+            50% { transform: translateX(5px); }
+        }
+        
+        .arrow {
+            font-size: 2em;
+            color: #4ade80;
+            animation: arrowMove 1s infinite;
+        }
+        
+        @keyframes arrowMove {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+        
+        /* 主处理区 */
+        .processing-core {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        .thread-box {
+            background: linear-gradient(135deg, rgba(233, 69, 96, 0.2) 0%, rgba(233, 69, 96, 0.05) 100%);
+            border: 2px solid #e94560;
+            border-radius: 15px;
+            padding: 25px;
+            min-width: 280px;
+            text-align: center;
+        }
+        
+        .thread-box.io-thread {
+            background: linear-gradient(135deg, rgba(74, 222, 128, 0.2) 0%, rgba(74, 222, 128, 0.05) 100%);
+            border-color: #4ade80;
+        }
+        
+        .thread-box h4 {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+        }
+        
+        .thread-box.io-thread h4 { color: #4ade80; }
+        .thread-box.main-thread h4 { color: #e94560; }
+        
+        .thread-duties {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+        }
+        
+        .duty-tag {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        /* 工作流程图 */
+        .workflow {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 60px;
+        }
+        
+        .workflow h2 {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #e94560;
+        }
+        
+        .workflow-steps {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        
+        .step {
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f2744 100%);
+            border-radius: 15px;
+            padding: 25px 20px;
+            text-align: center;
+            min-width: 180px;
+            position: relative;
+            border: 1px solid rgba(233, 69, 96, 0.3);
+        }
+        
+        .step-num {
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #e94560;
+            color: #fff;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .step-icon {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .step h4 {
+            color: #e94560;
+            margin-bottom: 8px;
+        }
+        
+        .step p {
+            color: #94a3b8;
+            font-size: 0.85em;
+        }
+        
+        .step-connector {
+            font-size: 2em;
+            color: #4ade80;
+        }
+        
+        /* 对比图 */
+        .comparison {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+            margin-bottom: 60px;
+        }
+        
+        .compare-box {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            border: 2px solid;
+        }
+        
+        .compare-box.before {
+            border-color: #f59e0b;
+        }
+        
+        .compare-box.after {
+            border-color: #4ade80;
+        }
+        
+        .compare-box h3 {
+            text-align: center;
+            margin-bottom: 25px;
+            font-size: 1.3em;
+        }
+        
+        .compare-box.before h3 { color: #f59e0b; }
+        .compare-box.after h3 { color: #4ade80; }
+        
+        .feature-list {
+            list-style: none;
+        }
+        
+        .feature-list li {
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .feature-list li:last-child {
+            border-bottom: none;
+        }
+        
+        .feature-icon {
+            font-size: 1.2em;
+        }
+        
+        /* 配置说明 */
+        .config-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 60px;
+        }
+        
+        .config-section h2 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #e94560;
+        }
+        
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .config-item {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            border-left: 4px solid #e94560;
+        }
+        
+        .config-item h4 {
+            color: #4ade80;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+        
+        .config-item p {
+            color: #94a3b8;
+            font-size: 0.9em;
+        }
+        
+        /* 核心要点 */
+        .key-points {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+        }
+        
+        .key-point {
+            background: linear-gradient(135deg, rgba(233, 69, 96, 0.15) 0%, rgba(233, 69, 96, 0.05) 100%);
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+        }
+        
+        .key-point-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+        
+        .key-point h4 {
+            color: #e94560;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        
+        .key-point p {
+            color: #cbd5e1;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        
+        /* 数据流向动画 */
+        .data-flow-demo {
+            position: relative;
+            height: 300px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 20px;
+            margin: 40px 0;
+            overflow: hidden;
+        }
+        
+        .flow-item {
+            position: absolute;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #e94560, #ff6b6b);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            box-shadow: 0 0 20px rgba(233, 69, 96, 0.5);
+        }
+        
+        .flow-label {
+            position: absolute;
+            font-size: 0.75em;
+            color: #94a3b8;
+            white-space: nowrap;
+        }
+        
+        .flow-path {
+            position: absolute;
+            border: 2px dashed rgba(74, 222, 128, 0.5);
+            border-radius: 50%;
+        }
+        
+        footer {
+            text-align: center;
+            margin-top: 60px;
+            color: #64748b;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Redis 多线程核心原理</h1>
+        <p class="subtitle">Redis 6.0+ I/O Multithreading Architecture</p>
+        
+        <!-- 核心架构图 -->
+        <div class="workflow">
+            <h2>📊 核心架构</h2>
+            <div class="main-arch">
+                <!-- 客户端 -->
+                <div class="arch-section">
+                    <h3>👥 客户端</h3>
+                    <div class="client-list">
+                        <div class="client">Client A</div>
+                        <div class="client">Client B</div>
+                        <div class="client">Client C</div>
+                    </div>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <!-- 网络监听 -->
+                <div class="arch-section">
+                    <h3>🔌 Socket 队列</h3>
+                    <div style="font-size: 4em; text-align: center;">📥</div>
+                    <p style="text-align: center; color: #94a3b8; margin-top: 10px;">等待读取</p>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <!-- IO线程 -->
+                <div class="arch-section" style="border-color: #4ade80;">
+                    <h3 style="color: #4ade80;">⚡ IO 线程池</h3>
+                    <div style="display: flex; gap: 10px; justify-content: center; margin: 15px 0;">
+                        <div style="background: #4ade80; padding: 10px 20px; border-radius: 8px;">IO-1</div>
+                        <div style="background: #4ade80; padding: 10px 20px; border-radius: 8px;">IO-2</div>
+                        <div style="background: #4ade80; padding: 10px 20px; border-radius: 8px;">IO-3</div>
+                    </div>
+                    <p style="text-align: center; color: #94a3b8; font-size: 0.85em;">并行读写 Socket</p>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <!-- 主线程 -->
+                <div class="arch-section" style="border-color: #e94560;">
+                    <h3 style="color: #e94560;">🎯 主线程</h3>
+                    <div style="font-size: 3em; text-align: center; margin: 15px 0;">🔄</div>
+                    <div style="text-align: left; font-size: 0.85em; color: #cbd5e1;">
+                        <p>• 命令解析</p>
+                        <p>• 命令执行</p>
+                        <p>• 结果组装</p>
+                    </div>
+                </div>
+                
+                <div class="arrow">→</div>
+                
+                <!-- 响应 -->
+                <div class="arch-section">
+                    <h3>📤 响应队列</h3>
+                    <div style="font-size: 4em; text-align: center;">📤</div>
+                    <p style="text-align: center; color: #94a3b8; margin-top: 10px;">返回结果</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 处理流程 -->
+        <div class="workflow">
+            <h2>⚙️ 处理流程</h2>
+            <div class="workflow-steps">
+                <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-icon">🤝</div>
+                    <h4>接收连接</h4>
+                    <p>主线程 accept<br>客户端连接</p>
+                </div>
+                
+                <div class="step-connector">→</div>
+                
+                <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-icon">📖</div>
+                    <h4>IO 线程读取</h4>
+                    <p>并行读取<br>Socket 数据</p>
+                </div>
+                
+                <div class="step-connector">→</div>
+                
+                <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-icon">📝</div>
+                    <h4>命令解析</h4>
+                    <p>主线程解析<br>命令协议</p>
+                </div>
+                
+                <div class="step-connector">→</div>
+                
+                <div class="step">
+                    <div class="step-num">4</div>
+                    <div class="step-icon">⚡</div>
+                    <h4>命令执行</h4>
+                    <p>单线程执行<br>数据操作</p>
+                </div>
+                
+                <div class="step-connector">→</div>
+                
+                <div class="step">
+                    <div class="step-num">5</div>
+                    <div class="step-icon">📤</div>
+                    <h4>IO 线程写回</h4>
+                    <p>并行写入<br>响应数据</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 前后对比 -->
+        <div class="comparison">
+            <div class="compare-box before">
+                <h3>❌ 单线程时代 (Redis 6.0前)</h3>
+                <ul class="feature-list">
+                    <li>
+                        <span class="feature-icon">🔒</span>
+                        <span>所有操作串行执行</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">⚠️</span>
+                        <span>大Value读写阻塞</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">📉</span>
+                        <span>QPS 受限于 CPU</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">🐢</span>
+                        <span>高并发下延迟飙升</span>
+                    </li>
+                </ul>
+            </div>
+            
+            <div class="compare-box after">
+                <h3>✅ 多线程 I/O (Redis 6.0+)</h3>
+                <ul class="feature-list">
+                    <li>
+                        <span class="feature-icon">⚡</span>
+                        <span>I/O 操作并行化</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">🎯</span>
+                        <span>命令执行仍单线程</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">📈</span>
+                        <span>QPS 提升 2-3 倍</span>
+                    </li>
+                    <li>
+                        <span class="feature-icon">🔄</span>
+                        <span>保持线程安全</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        
+        <!-- 配置参数 -->
+        <div class="config-section">
+            <h2>⚙️ 配置参数</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <h4>io-threads 4</h4>
+                    <p>IO 线程数量，建议 4-6。设为 1 则禁用多线程，设为 N 则开启 N-1 个 IO 线程。</p>
+                </div>
+                <div class="config-item">
+                    <h4>io-threads-do-reads yes</h4>
+                    <p>是否在 IO 线程中执行读操作。开启后读操作也会并行化。</p>
+                </div>
+                <div class="config-item">
+                    <h4>线程数计算公式</h4>
+                    <p>实际 IO 线程数 = io-threads - 1（主线程也算一个线程）</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 核心要点 -->
+        <div class="workflow">
+            <h2>🎯 核心要点</h2>
+            <div class="key-points">
+                <div class="key-point">
+                    <div class="key-point-icon">🔑</div>
+                    <h4>关键：原子性保证</h4>
+                    <p>使用 Client 队列 + 互斥锁，确保同一 Client 的命令按序执行，避免数据竞争。</p>
+                </div>
+                
+                <div class="key-point">
+                    <div class="key-point-icon">🧵</div>
+                    <h4>不是全量多线程</h4>
+                    <p>只有网络 I/O 并行化，核心数据操作仍是单线程执行，保持 Redis 简单性。</p>
+                </div>
+                
+                <div class="key-point">
+                    <div class="key-point-icon">⚡</div>
+                    <h4>适用场景</h4>
+                    <p>高并发、短命令、高网络带宽利用的场景。不适合大 Key 重度操作。</p>
+                </div>
+                
+                <div class="key-point">
+                    <div class="key-point-icon">🔧</div>
+                    <h4>性能调优</h4>
+                    <p>通过 redis-benchmark 测试，合理配置 io-threads 数量，找到最佳平衡点。</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 线程协作图 -->
+        <div class="workflow">
+            <h2>🔄 线程协作示意</h2>
+            <div style="display: flex; justify-content: center; margin: 30px 0;">
+                <svg width="800" height="400" viewBox="0 0 800 400">
+                    <!-- 背景 -->
+                    <rect x="0" y="0" width="800" height="400" fill="rgba(30, 58, 95, 0.3)" rx="15"/>
+                    
+                    <!-- 主线程区域 -->
+                    <rect x="300" y="50" width="200" height="300" fill="rgba(233, 69, 96, 0.2)" stroke="#e94560" stroke-width="2" rx="10"/>
+                    <text x="400" y="80" text-anchor="middle" fill="#e94560" font-weight="bold">🎯 主线程</text>
+                    <text x="400" y="105" text-anchor="middle" fill="#94a3b8" font-size="12">命令执行区域</text>
+                    
+                    <!-- 主线程内部 -->
+                    <rect x="320" y="130" width="160" height="40" fill="rgba(255,255,255,0.1)" rx="5"/>
+                    <text x="400" y="155" text-anchor="middle" fill="#fff" font-size="12">命令解析</text>
+                    
+                    <rect x="320" y="180" width="160" height="40" fill="rgba(233, 69, 96, 0.5)" rx="5"/>
+                    <text x="400" y="205" text-anchor="middle" fill="#fff" font-size="12">⚡ 命令执行</text>
+                    
+                    <rect x="320" y="230" width="160" height="40" fill="rgba(255,255,255,0.1)" rx="5"/>
+                    <text x="400" y="255" text-anchor="middle" fill="#fff" font-size="12">结果组装</text>
+                    
+                    <!-- 全局锁 -->
+                    <rect x="320" y="290" width="160" height="40" fill="rgba(245, 158, 11, 0.3)" stroke="#f59e0b" stroke-width="2" rx="5"/>
+                    <text x="400" y="315" text-anchor="middle" fill="#f59e0b" font-size="11">🔒 Client 互斥锁</text>
+                    
+                    <!-- IO线程1 -->
+                    <rect x="50" y="120" width="150" height="80" fill="rgba(74, 222, 128, 0.2)" stroke="#4ade80" stroke-width="2" rx="10"/>
+                    <text x="125" y="150" text-anchor="middle" fill="#4ade80" font-weight="bold">⚡ IO-1</text>
+                    <text x="125" y="175" text-anchor="middle" fill="#94a3b8" font-size="11">Socket 读写</text>
+                    
+                    <!-- IO线程2 -->
+                    <rect x="50" y="220" width="150" height="80" fill="rgba(74, 222, 128, 0.2)" stroke="#4ade80" stroke-width="2" rx="10"/>
+                    <text x="125" y="250" text-anchor="middle" fill="#4ade80" font-weight="bold">⚡ IO-2</text>
+                    <text x="125" y="275" text-anchor="middle" fill="#94a3b8" font-size="11">Socket 读写</text>
+                    
+                    <!-- IO线程3 -->
+                    <rect x="600" y="120" width="150" height="80" fill="rgba(74, 222, 128, 0.2)" stroke="#4ade80" stroke-width="2" rx="10"/>
+                    <text x="675" y="150" text-anchor="middle" fill="#4ade80" font-weight="bold">⚡ IO-3</text>
+                    <text x="675" y="175" text-anchor="middle" fill="#94a3b8" font-size="11">Socket 读写</text>
+                    
+                    <!-- IO线程4 -->
+                    <rect x="600" y="220" width="150" height="80" fill="rgba(74, 222, 128, 0.2)" stroke="#4ade80" stroke-width="2" rx="10"/>
+                    <text x="675" y="250" text-anchor="middle" fill="#4ade80" font-weight="bold">⚡ IO-4</text>
+                    <text x="675" y="275" text-anchor="middle" fill="#94a3b8" font-size="11">Socket 读写</text>
+                    
+                    <!-- 连接箭头 -->
+                    <path d="M200 160 L300 160" stroke="#4ade80" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+                    <path d="M200 260 L300 260" stroke="#4ade80" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+                    <path d="M500 160 L600 160" stroke="#4ade80" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+                    <path d="M500 260 L600 260" stroke="#4ade80" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+                    
+                    <!-- 标签 -->
+                    <text x="250" y="150" fill="#4ade80" font-size="10">读取请求</text>
+                    <text x="250" y="270" fill="#4ade80" font-size="10">读取请求</text>
+                    <text x="530" y="150" fill="#4ade80" font-size="10">返回响应</text>
+                    <text x="530" y="270" fill="#4ade80" font-size="10">返回响应</text>
+                    
+                    <!-- 箭头标记 -->
+                    <defs>
+                        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                            <polygon points="0 0, 10 3.5, 0 7" fill="#4ade80"/>
+                        </marker>
+                    </defs>
+                    
+                    <!-- 图例 -->
+                    <rect x="300" y="370" width="200" height="25" fill="rgba(255,255,255,0.05)" rx="5"/>
+                    <text x="400" y="387" text-anchor="middle" fill="#94a3b8" font-size="11">主线程：命令执行 | IO线程：网络读写</text>
+                </svg>
+            </div>
+        </div>
+        
+        <footer>
+            <p>Redis 多线程 I/O 模型 | Redis 6.0+</p>
+        </footer>
+    </div>
+    
+    <script>
+        // 添加数据流动画
+        document.addEventListener('DOMContentLoaded', function() {
+            // 为步骤添加hover效果
+            const steps = document.querySelectorAll('.step');
+            steps.forEach((step, index) => {
+                step.addEventListener('mouseenter', function() {
+                    this.style.transform = 'scale(1.05)';
+                    this.style.transition = 'transform 0.3s ease';
+                });
+                step.addEventListener('mouseleave', function() {
+                    this.style.transform = 'scale(1)';
+                });
+            });
+            
+            // 为关键点添加hover效果
+            const keyPoints = document.querySelectorAll('.key-point');
+            keyPoints.forEach(point => {
+                point.addEventListener('mouseenter', function() {
+                    this.style.transform = 'translateY(-5px)';
+                    this.style.transition = 'transform 0.3s ease';
+                });
+                point.addEventListener('mouseleave', function() {
+                    this.style.transform = 'translateY(0)';
+                });
+            });
+        });
+    </script>
+</body>
+</html>
