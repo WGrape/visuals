@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kafka Consumer Rebalance 完整流程图解</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card2: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #f85149;
+    --accent4: #d29922;
+    --accent5: #a371f7;
+    --accent6: #f778ba;
+    --code-bg: #0d1117;
+    --glow: rgba(88,166,255,0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  .hero {
+    background: linear-gradient(135deg, #0f1629 0%, #0d1117 40%, #1a0d1f 100%);
+    padding: 60px 20px 44px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -30%; left: -30%;
+    width: 160%; height: 160%;
+    background: radial-gradient(circle at 25% 40%, rgba(88,166,255,0.07) 0%, transparent 45%),
+                radial-gradient(circle at 75% 60%, rgba(163,113,247,0.07) 0%, transparent 45%);
+  }
+  .hero h1 { font-size: 2.3em; margin-bottom: 12px; position: relative;
+    background: linear-gradient(90deg, var(--accent), var(--accent5));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--text2); font-size: 1.05em; position: relative; max-width: 650px; margin: 0 auto; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 36px 20px 70px; }
+
+  /* ======== 触发条件区 ======== */
+  .triggers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 36px; }
+  .trigger-card {
+    background: var(--card); border-radius: 12px; border: 1px solid var(--border);
+    padding: 20px; transition: all 0.3s; cursor: default;
+  }
+  .trigger-card:hover { transform: translateY(-3px); box-shadow: 0 8px 28px rgba(0,0,0,0.35); border-color: var(--accent); }
+  .trigger-card .icon { font-size: 1.8em; margin-bottom: 8px; }
+  .trigger-card h3 { font-size: 1em; margin-bottom: 8px; color: var(--text); }
+  .trigger-card p { font-size: 0.85em; color: var(--text2); margin: 0; }
+
+  /* ======== 主流程时间线 ======== */
+  .timeline-section { margin-bottom: 36px; }
+  .section-title {
+    font-size: 1.4em; margin-bottom: 24px; display: flex; align-items: center; gap: 10px;
+    color: var(--accent);
+  }
+
+  .phase-header {
+    background: linear-gradient(90deg, rgba(88,166,255,0.1), transparent);
+    border-left: 4px solid var(--accent);
+    padding: 12px 20px;
+    border-radius: 0 10px 10px 0;
+    margin: 28px 0 16px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .phase-header h3 { margin: 0; font-size: 1.1em; color: var(--accent); }
+  .phase-badge {
+    font-size: 0.72em; padding: 3px 10px; border-radius: 12px;
+    background: rgba(88,166,255,0.18); color: var(--accent);
+    white-space: nowrap;
+  }
+
+  /* 流程节点 */
+  .flow-row { display: flex; align-items: stretch; gap: 0; margin-bottom: 1px; }
+  .flow-step {
+    flex: 1; min-width: 200px; padding: 20px; position: relative;
+    border: 1px solid var(--border); background: var(--card);
+    transition: all 0.25s;
+  }
+  .flow-step:hover { z-index: 2; box-shadow: 0 4px 20px rgba(0,0,0,0.35); border-color: var(--accent); }
+  .flow-step-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.82em; font-weight: 700; margin-bottom: 10px;
+  }
+  .flow-step h4 { font-size: 0.95em; margin-bottom: 8px; }
+  .flow-step p { font-size: 0.83em; color: var(--text2); margin: 0; line-height: 1.55; }
+  .flow-arrow-cell {
+    display: flex; align-items: center; justify-content: center;
+    width: 52px; flex-shrink: 0; position: relative;
+  }
+  .flow-arrow-cell::after {
+    content: ''; position: absolute; top: 50%; left: 0; right: 0;
+    height: 2px; background: var(--border);
+  }
+  .flow-arrow-cell span {
+    position: relative; z-index: 1; color: var(--accent); font-size: 1.3em;
+    background: var(--bg); padding: 4px 2px;
+  }
+
+  /* 颜色主题 */
+  .c-blue .flow-step-num { background: rgba(88,166,255,0.2); color: var(--accent); }
+  .c-green .flow-step-num { background: rgba(63,185,80,0.2); color: var(--accent2); }
+  .c-purple .flow-step-num { background: rgba(163,113,247,0.2); color: var(--accent5); }
+  .c-yellow .flow-step-num { background: rgba(210,153,34,0.2); color: var(--accent4); }
+  .c-red .flow-step-num { background: rgba(248,81,73,0.2); color: var(--accent3); }
+  .c-pink .flow-step-num { background: rgba(247,120,186,0.2); color: var(--accent6); }
+
+  /* ======== 架构示意图 ======== */
+  .arch-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 32px; margin-bottom: 28px; overflow-x: auto;
+  }
+  .arch-svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  /* ======== 分配策略对比 ======== */
+  .strategy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin: 16px 0; }
+  .strategy-card {
+    background: var(--card2); border-radius: 12px; border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .strategy-card-head {
+    padding: 16px 20px; font-weight: 600; font-size: 1em; display: flex; align-items: center; gap: 10px;
+  }
+  .strategy-card-body { padding: 16px 20px; }
+  .strategy-card-body ul { list-style: none; padding: 0; margin: 0; }
+  .strategy-card-body li {
+    padding: 5px 0; font-size: 0.85em; color: var(--text2);
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+  .strategy-card-body li::before { content: '·'; color: var(--accent); font-weight: bold; flex-shrink: 0; }
+
+  /* ======== 代码块 ======== */
+  pre {
+    background: var(--code-bg); border-radius: 10px; padding: 16px 20px;
+    overflow-x: auto; margin: 12px 0; border: 1px solid var(--border);
+    font-size: 0.85em; line-height: 1.6;
+  }
+  code { font-family: 'SF Mono', Fira Code, Consolas, monospace; color: #79c0ff; }
+  .code-comment { color: #6e7681; }
+
+  /* ======== 警告/提示框 ======== */
+  .warn-box { background: rgba(248,81,73,0.08); border-left: 4px solid var(--accent3); border-radius: 0 8px 8px 0; padding: 13px 17px; margin: 14px 0; }
+  .warn-box p { color: #ffb4b0; margin: 0; font-size: 0.89em; }
+  .tip-box { background: rgba(63,185,80,0.08); border-left: 4px solid var(--accent2); border-radius: 0 8px 8px 0; padding: 13px 17px; margin: 14px 0; }
+  .tip-box p { color: #a5d6a7; margin: 0; font-size: 0.89em; }
+  .info-box { background: rgba(88,166,255,0.08); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 13px 17px; margin: 14px 0; }
+  .info-box p { color: #a5c7ff; margin: 0; font-size: 0.89em; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.88em; }
+  th, td { padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
+  th { background: rgba(88,166,255,0.08); color: var(--accent); font-weight: 600; }
+  td { color: var(--text2); }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+  footer { text-align: center; padding: 28px; color: var(--text2); font-size: 0.84em; border-top: 1px solid var(--border); }
+
+  @media (max-width: 800px) {
+    .flow-row { flex-direction: column; }
+    .flow-arrow-cell { height: 38px; width: 100%; }
+    .flow-arrow-cell::after { width: 2px; height: 100%; left: 50%; top: 0; }
+    .flow-arrow-cell span { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>🔄 Kafka Consumer Rebalance 流程详解</h1>
+  <p>从触发条件到分区分配，完整梳理 Rebalance 的全生命周期、分配策略与最佳实践</p>
+</div>
+
+<div class="container">
+
+<!-- ==================== 一、触发条件 ==================== -->
+<h2 class="section-title">⚡ 一、Rebalance 触发条件</h2>
+
+<div class="triggers">
+  <div class="trigger-card">
+    <div class="icon">👤</div>
+    <h3>Consumer 加入 / 离开</h3>
+    <p>新的 Consumer 加入 Group，或已有的 Consumer 异常退出（心跳超时、主动关闭）</p>
+  </div>
+  <div class="trigger-card">
+    <div class="icon">📋</div>
+    <h3>Consumer 订阅变更</h3>
+    <p>Consumer 使用 subscribe() 动态改变订阅的 Topic 列表</p>
+  </div>
+  <div class="trigger-card">
+    <div class="icon">📦</div>
+    <h3>Topic 分区数变更</h3>
+    <p>Topic 的 Partition 数量增加或减少（如管理员执行了扩分区操作）</p>
+  </div>
+  <div class="trigger-card">
+    <div class="icon">💔</div>
+    <h3>Consumer 心跳超时</h3>
+    <p>Consumer 在 <strong>session.timeout.ms</strong> 内未发送心跳，Coordinator 将其踢出 Group</p>
+  </div>
+  <div class="trigger-card">
+    <div class="icon">🐌</div>
+    <h3>处理时间过长</h3>
+    <p>单次 <strong>poll()</strong> 超过 <strong>max.poll.interval.ms</strong>，被认为"不活跃"</p>
+  </div>
+  <div class="trigger-card">
+    <div class="icon">☠️</div>
+    <h3>Coordinator 故障转移</h3>
+    <p>Group Coordinator 所在 Broker 宕机，新 Coordinator 接管后触发 Rebalance</p>
+  </div>
+</div>
+
+<div class="info-box">
+  <p>📌 <strong>关键点：</strong>Rebalance 是 <strong>Group 级别</strong> 的——一旦某个 Consumer 变动，整个 Consumer Group 内所有 Consumer 都会暂停消费参与 Rebalance！这就是为什么频繁 Rebalance 会严重影响吞吐。</p>
+</div>
+
+
+<!-- ==================== 二、完整流程 ==================== -->
+<h2 class="section-title">🗺️ 二、Rebalance 完整流程（Step by Step）</h2>
+
+
+<!-- Phase 1 -->
+<div class="phase-header">
+  <h3>Phase 1：寻找 Coordinator</h3>
+  <span class="phase-badge">准备阶段</span>
+</div>
+
+<div class="flow-row c-blue">
+  <div class="flow-step">
+    <div class="flow-step-num">1</div>
+    <h4>确定 GroupCoordinator</h4>
+    <p>Consumer 根据 <code style="color:#79c0ff;background:none;font-size:inherit;">__consumer_offsets</code> Topic 的 Partition 分布算法：<br><br><code>hash(group_id) % num_partitions</code></p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">2</div>
+    <h4>连接 Coordinator</h4>
+    <p>找到负责该 Consumer Group 的 GroupCoordinator 节点（某台 Broker），建立 TCP 连接</p>
+  </div>
+</div>
+
+<pre><code>// 消费者端配置
+group.id = "my-order-group"
+// __consumer_offsets 默认 50 个分区
+// hash("my-order-group") % 50 → 决定哪个 Broker 是 Coordinator</code></pre>
+
+
+<!-- Phase 2 -->
+<div class="phase-header">
+  <h3>Phase 2：加入 Group（JoinGroup）</h3>
+  <span class="phase-badge">核心协议 · 同步阻塞</span>
+</div>
+
+<div class="flow-row c-green">
+  <div class="flow-step">
+    <div class="flow-step-num">3</div>
+    <h4>STOP — 停止消费 ⚠️</h4>
+    <p><strong style="color:var(--accent3)">Group 内所有 Consumer 暂停 poll()！</strong><br>正在处理的消息可能被中断，这是 Rebalance 对业务最大的影响</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">4</div>
+    <h4>发送 JoinGroup 请求</h4>
+    <p>每个 Consumer 向 Coordinator 发送 JoinGroup 请求，携带：<br>• group_id<br>• member_id<br>• 协议类型 & 协议列表<br>• 订阅的 Topic 列表</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">5</div>
+    <h4>选举 Leader Consumer</h4>
+    <p>Coordinator 从所有成员中<strong>选举一个 Leader</strong>（通常是第一个发送 JoinGroup 的成员），其余为 Follower</p>
+  </div>
+</div>
+
+
+<!-- Phase 3 -->
+<div class="phase-header">
+  <h3>Phase 3：同步分组状态（SyncGroup）</h3>
+  <span class="phase-badge">Leader 分配 · 全局同步</span>
+</div>
+
+<div class="flow-row c-purple">
+  <div class="flow-step">
+    <div class="flow-step-num">6</div>
+    <h4>Leader 执行分区分配 🎯</h4>
+    <p>Coordinator 向 Leader 发送完整的成员列表 + 可用 Topic/Partition 信息。<br><br><strong>Leader 根据分配策略计算分配方案</strong>，生成 assignment map</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">7</div>
+    <h4>发送 SyncGroup</h4>
+    <p>所有 Consumer 发送 SyncGroup 请求。<br>• <strong>Leader</strong>：携带完整的分配方案<br>• <strong>Follower</strong>：assignment 为空</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">8</div>
+    <h4>Coordinator 下发方案</h4>
+    <p>Coordinator 收集到 Leader 的分配方案后，<strong>将各自的 assignment 返回给每个 Consumer</strong></p>
+  </div>
+</div>
+
+
+<!-- Phase 4 -->
+<div class="phase-header">
+  <h3>Phase 4：恢复消费</h3>
+  <span class="phase-badge">结束</span>
+</div>
+
+<div class="flow-row c-yellow">
+  <div class="flow-step">
+    <div class="flow-step-num">9</div>
+    <h4>接收 Assignment</h4>
+    <p>各 Consumer 收到自己被分配到的 Partition 列表，更新本地状态</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">10</div>
+    <h4>RESET Offset（按需）</h4>
+    <p>根据分配结果重置 Offset：<br>• 新分配的 Partition → 按 <code style="color:#79c0ff;background:none;font-size:inherit;">auto.offset.reset</code> 策略<br>• 已有历史的 Partition → 从上次提交位置继续</p>
+  </div>
+  <div class="flow-arrow-cell"><span>→</span></div>
+  <div class="flow-step">
+    <div class="flow-step-num">11</div>
+    <h4>RESUME — 恢复消费 ✅</h4>
+    <p><strong style="color:var(--accent2)">Consumer 恢复 poll() 循环</strong>，开始从新分配的 Partition 拉取消息并处理</p>
+  </div>
+</div>
+
+
+<!-- ==================== 三、架构示意图 ==================== -->
+<h2 class="section-title">🎨 三、Rebalance 交互架构图</h2>
+
+<div class="arch-box">
+<svg class="arch-svg" viewBox="0 0 1100 600" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif">
+  <defs>
+    <!-- 渐变 -->
+    <linearGradient id="gradBroker" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a2332"/>
+      <stop offset="100%" stop-color="#12181f"/>
+    </linearGradient>
+    <linearGradient id="gradConsumer" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a1f2e"/>
+      <stop offset="100%" stop-color="#12161f"/>
+    </linearGradient>
+    <!-- 阴影 -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.3"/>
+    </filter>
+    <!-- 箭头 -->
+    <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#3fb950"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a371f7"/>
+    </marker>
+    <marker id="arrowYellow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d29922"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f85149"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="1100" height="600" fill="#0d1117" rx="12"/>
+
+  <!-- ========== Broker / Coordinator 区域 ========== -->
+  <rect x="420" y="20" width="260" height="560" rx="12" fill="url(#gradBroker)" stroke="#30363d" stroke-width="1.5"/>
+  <text x="550" y="52" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="700">Kafka Cluster (Broker)</text>
+
+  <!-- Coordinator 节点 -->
+  <rect x="450" y="75" width="200" height="70" rx="10" fill="#161b22" stroke="#58a6ff" stroke-width="2" filter="url(#shadow)"/>
+  <text x="550" y="103" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">🎯 GroupCoordinator</text>
+  <text x="550" y="124" text-anchor="middle" fill="#8b949e" font-size="11">管理 Consumer Group 元数据</text>
+  <text x="550" y="139" text-anchor="middle" fill="#8b949e" font-size="10">触发 &amp; 协调 Rebalance</text>
+
+  <!-- Topic 分区示意 -->
+  <g transform="translate(445, 170)">
+    <text x="105" y="0" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600">Topic Partitions</text>
+    <!-- P0 -->
+    <rect x="0" y="12" width="62" height="42" rx="6" fill="#161b22" stroke="#58a6ff" stroke-width="1"/>
+    <text x="31" y="31" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">P0</text>
+    <text x="31" y="46" text-anchor="middle" fill="#8b949e" font-size="9">C0</text>
+    <!-- P1 -->
+    <rect x="74" y="12" width="62" height="42" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+    <text x="105" y="31" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">P1</text>
+    <text x="105" y="46" text-anchor="middle" fill="#8b949e" font-size="9">C1</text>
+    <!-- P2 -->
+    <rect x="148" y="12" width="62" height="42" rx="6" fill="#161b22" stroke="#a371f7" stroke-width="1"/>
+    <text x="179" y="31" text-anchor="middle" fill="#a371f7" font-size="11" font-weight="600">P2</text>
+    <text x="179" y="46" text-anchor="middle" fill="#8b949e" font-size="9">C0</text>
+    <!-- P3 -->
+    <rect x="0" y="64" width="62" height="42" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+    <text x="31" y="83" text-anchor="middle" fill="#d29922" font-size="11" font-weight="600">P3</text>
+    <text x="31" y="98" text-anchor="middle" fill="#8b949e" font-size="9">C1</text>
+    <!-- P4 -->
+    <rect x="74" y="64" width="62" height="42" rx="6" fill="#161b22" stroke="#f778ba" stroke-width="1"/>
+    <text x="105" y="83" text-anchor="middle" fill="#f778ba" font-size="11" font-weight="600">P4</text>
+    <text x="105" y="98" text-anchor="middle" fill="#8b949e" font-size="9">C2</text>
+    <!-- P5 -->
+    <rect x="148" y="64" width="62" height="42" rx="6" fill="#161b22" stroke="#79c0ff" stroke-width="1"/>
+    <text x="179" y="83" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">P5</text>
+    <text x="179" y="98" text-anchor="middle" fill="#8b949e" font-size="9">C2</text>
+  </g>
+
+  <!-- ========== Consumer 左侧区域 ========== -->
+  <!-- Consumer 0 (Leader) -->
+  <rect x="30" y="80" width="220" height="140" rx="12" fill="url(#gradConsumer)" stroke="#58a6ff" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="30" y="80" width="220" height="30" rx="12" fill="rgba(88,166,255,0.15)"/>
+  <rect x="30" y="98" width="220" height="12" fill="rgba(88,166,255,0.15)"/>
+  <text x="140" y="101" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">👑 Consumer-C0 (Leader)</text>
+  <text x="45" y="132" fill="#8b949e" font-size="11">Assigned: [P0, P2]</text>
+  <text x="45" y="152" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">state: STABLE → JOINING</text>
+  <text x="45" y="172" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">action: 执行分配策略</text>
+  <text x="45" y="196" fill="#3fb950" font-size="10" font-weight="600">✓ 接收全部成员信息</text>
+  <text x="45" y="212" fill="#3fb950" font-size="10" font-weight="600">✓ 计算 assignment map</text>
+
+  <!-- Consumer 1 (Follower) -->
+  <rect x="30" y="240" width="220" height="115" rx="12" fill="url(#gradConsumer)" stroke="#3fb950" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="240" width="220" height="28" rx="12" fill="rgba(63,185,80,0.12)"/>
+  <rect x="30" y="256" width="220" height="12" fill="rgba(63,185,80,0.12)"/>
+  <text x="140" y="259" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Consumer-C1 (Follower)</text>
+  <text x="45" y="290" fill="#8b949e" font-size="11">Assigned: [P1, P3]</text>
+  <text x="45" y="310" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">state: STABLE → JOINING</text>
+  <text x="45" y="330" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">action: 等待分配结果</text>
+  <text x="45" y="348" fill="#d29922" font-size="10">⏳ 空 assignment 上报</text>
+
+  <!-- Consumer 2 (Follower) -->
+  <rect x="30" y="375" width="220" height="115" rx="12" fill="url(#gradConsumer)" stroke="#a371f7" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="375" width="220" height="28" rx="12" fill="rgba(163,113,247,0.12)"/>
+  <rect x="30" y="391" width="220" height="12" fill="rgba(163,113,247,0.12)"/>
+  <text x="140" y="394" text-anchor="middle" fill="#a371f7" font-size="12" font-weight="700">Consumer-C2 (Follower)</text>
+  <text x="45" y="425" fill="#8b949e" font-size="11">Assigned: [P4, P5]</text>
+  <text x="45" y="445" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">state: STABLE → JOINING</text>
+  <text x="45" y="465" fill="#8b949e" font-size="10" font-family="'SF Mono',monospace">action: 等待分配结果</text>
+  <text x="45" y="483" fill="#d29922" font-size="10">⏳ 空 assignment 上报</text>
+
+  <!-- ========== Consumer 右侧区域 (新增/离开示意) ========== -->
+  <rect x="850" y="150" width="210" height="95" rx="12" fill="url(#gradConsumer)" stroke="#f85149" stroke-width="1.5" stroke-dasharray="6,3" filter="url(#shadow)"/>
+  <text x="955" y="175" text-anchor="middle" fill="#f85149" font-size="12" font-weight="700">🆕 New Consumer-C3</text>
+  <text x="865" y="198" fill="#f85149" font-size="10" font-family="'SF Mono',monospace">← 触发 Rebalance!</text>
+  <text x="865" y="218" fill="#8b949e" font-size="10">加入 Group → 重新分配分区</text>
+  <text x="865" y="236" fill="#d29922" font-size="10">⚠️ 所有 Consumer 暂停</text>
+
+  <!-- ========== 连接线 / 消息流 ========== -->
+
+  <!-- 阶段标签 -->
+  <rect x="250" y="512" width="600" height="34" rx="8" fill="rgba(88,166,255,0.06)" stroke="rgba(88,166,255,0.2)"/>
+
+  <!-- Step 1-2: Find Coordinator -->
+  <line x1="140" y1="225" x2="140" y2="280" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.5"/>
+  
+  <path d="M 250 145 Q 350 110 445 110" fill="none" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="340" y="102" fill="#58a6ff" font-size="10" font-weight="600">① FindCoordinator</text>
+
+  <!-- Step 3: Stop & JoinGroup -->
+  <path d="M 250 155 L 445 135" fill="none" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="320" y="140" fill="#3fb950" font-size="10" font-weight="600">② JoinGroup (All)</text>
+
+  <path d="M 250 300 L 445 145" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.6"/>
+  <path d="M 250 430 L 445 152" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.6"/>
+
+  <!-- Step 4: Elect Leader (返回给 C0) -->
+  <path d="M 550 145 Q 400 165 255 165" fill="none" stroke="#a371f7" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <text x="380" y="182" fill="#a371f7" font-size="10" font-weight="600">③ 你是 Leader! 成员列表 ↓</text>
+
+  <!-- Step 5-6: Leader 分配 -->
+  <rect x="65" y="218" width="150" height="22" rx="4" fill="rgba(163,113,247,0.12)" stroke="rgba(163,113,247,0.3)"/>
+  <text x="140" y="233" text-anchor="middle" fill="#a371f7" font-size="9" font-weight="600">Leader 计算分配方案...</text>
+
+  <!-- Step 7: SyncGroup -->
+  <path d="M 250 180 L 445 165" fill="none" stroke="#d29922" stroke-width="2" marker-end="url(#arrowYellow)"/>
+  <text x="330" y="195" fill="#d29922" font-size="10" font-weight="600">④ SyncGroup (含分配方案)</text>
+
+  <path d="M 250 330 L 445 175" fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.6"/>
+  <path d="M 250 460 L 445 183" fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.6"/>
+
+  <!-- Step 8: Coordinator 下发分配 -->
+  <path d="M 550 178 Q 400 205 255 200" fill="none" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="380" y="215" fill="#58a6ff" font-size="10" font-weight="600">⑤ Assignment [P0,P2]</text>
+
+  <path d="M 550 188 Q 380 310 255 305" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="395" y="315" fill="#58a6ff" font-size="9">[P1,P3] → C1</text>
+
+  <path d="M 550 196 Q 370 440 255 435" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="395" y="445" fill="#58a6ff" font-size="9">[P4,P5] → C2</text>
+
+  <!-- 新 Consumer 触发 -->
+  <path d="M 850 197 L 680 197" fill="none" stroke="#f85149" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arrowRed)"/>
+  <text x="745" y="190" fill="#f85149" font-size="10" font-weight="600">JoinGroupRequest</text>
+
+  <!-- 底部流程条 -->
+  <text x="275" y="534" fill="#58a6ff" font-size="10" font-weight="600">FindCoordinator</text>
+  <text x="410" y="534" fill="#3fb950" font-size="10" font-weight="600">JoinGroup</text>
+  <text x="520" y="534" fill="#a371f7" font-size="10" font-weight="600">Elect Leader</text>
+  <text x="630" y="534" fill="#d29922" font-size="10" font-weight="600">SyncGroup</text>
+  <text x="740" y="534" fill="#58a6ff" font-size="10" font-weight="600">下发 Assignment</text>
+  <circle cx="270" cy="526" r="4" fill="#58a6ff"/>
+  <circle cx="405" cy="526" r="4" fill="#3fb950"/>
+  <circle cx="515" cy="526" r="4" fill="#a371f7"/>
+  <circle cx="625" cy="526" r="4" fill="#d29922"/>
+  <circle cx="735" cy="526" r="4" fill="#58a6ff"/>
+  <line x1="274" y1="526" x2="401" y2="526" stroke="#30363d" stroke-width="1.5"/>
+  <line x1="409" y1="526" x2="511" y2="526" stroke="#30363d" stroke-width="1.5"/>
+  <line x1="519" y1="526" x2="621" y2="526" stroke="#30363d" stroke-width="1.5"/>
+  <line x1="629" y1="526" x2="731" y2="526" stroke="#30363d" stroke-width="1.5"/>
+
+  <!-- 时间线标注 -->
+  <text x="550" y="572" text-anchor="middle" fill="#8b949e" font-size="10">↑ Rebalance 全过程（通常持续数秒 ~ 数十秒，期间 Group 所有消费者停止工作）↑</text>
+
+</svg>
+</div>
+
+
+<!-- ==================== 四、分配策略 ==================== -->
+<h2 class="section-title">⚖️ 四、Partition 分配策略</h2>
+
+<p>Kafka 支持多种分区分配策略，通过 <code>partition.assignment.strategy</code> 配置：</p>
+
+<div class="strategy-grid">
+  <div class="strategy-card">
+    <div class="strategy-card-head" style="background:rgba(88,166,255,0.1);color:var(--accent);">
+      Range（默认）
+    </div>
+    <div class="strategy-card-body">
+      <ul>
+        <li><strong>按 Topic 逐个分配</strong></li>
+        <li>P0-P3 分 2 个 Consumer → C0:[P0,P1], C2:[P2,P3]</li>
+        <li><span style="color:var(--accent3)">⚠️ 可能导致不均匀：</span>多 Topic 时某些 Consumer 分到更多分区</li>
+        <li>公式：<code>N = ⌊partitions/consumers⌋</code></li>
+      </ul>
+    </div>
+  </div>
+  <div class="strategy-card">
+    <div class="strategy-card-head" style="background:rgba(63,185,80,0.1);color:var(--accent2);">
+      RoundRobin（轮询）
+    </div>
+    <div class="strategy-card-body">
+      <ul>
+        <li><strong>跨 Topic 所有分区轮询分配</strong></li>
+        <li>P0→C0, P1→C1, P2→C0, P3→C1... 交替分配</li>
+        <li><span style="color:var(--accent2)">✅ 分配更均匀</span>（多 Topic 场景下优势明显）</li>
+        <li>要求所有 Consumer 订阅相同的 Topic 列表</li>
+      </ul>
+    </div>
+  </div>
+  <div class="strategy-card">
+    <div class="strategy-card-head" style="background:rgba(163,113,247,0.1);color:var(--accent5);">
+      Sticky（粘性）
+    </div>
+    <div class="strategy-card-body">
+      <ul>
+        <li><strong>尽量保留上次的分配关系</strong></li>
+        <li>Rebalance 时只移动必要的分区</li>
+        <li><span style="color:var(--accent5)">✅ 减少不必要的分区迁移</span></li>
+        <li>两轮分配：先 Sticky（保序），再均匀化</li>
+      </ul>
+    </div>
+  </div>
+  <div class="strategy-card">
+    <div class="strategy-card-head" style="background:rgba(210,153,34,0.1);color:var(--accent4);">
+      Cooperative（协作式）
+    </div>
+    <div class="strategy-card-body">
+      <ul>
+        <li>Kafka 2.4+ 新增，<strong>渐进式 Rebalance</strong></li>
+        <li>不需要 STOP THE WORLD</li>
+        <li><span style="color:var(--accent4)">✅ 逐步迁移分区</span>，不影响其他 Consumer</li>
+        <li>配合 <code>StickyAssignor</code> 使用效果最好</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<table>
+<tr><th>策略</th><th>均匀性</th><th>Rebalance 影响</th><th>适用场景</th><th>Kafka 版本</th></tr>
+<tr><td><strong>Range</strong></td><td>⭐⭐⭐ 单 Topic OK</td><td>大（全局暂停）</td><td>单 Topic、简单场景</td><td>全版本</td></tr>
+<tr><td><strong>RoundRobin</strong></td><td>⭐⭐⭐⭐ 更均匀</td><td>大（全局暂停）</td><td>多 Topic、需均衡负载</td><td>全版本</td></tr>
+<tr><td><strong>Sticky</strong></td><td>⭐⭐⭐⭐</td><td>中（减少迁移）</td><td>高可用、减少抖动</td><td>0.11+</td></tr>
+<tr><td><strong>Cooperative</strong></td><td>⭐⭐⭐⭐⭐</td><td><strong>小（渐进式！）</strong></td><td>生产环境推荐</td><td>2.4+</td></tr>
+</table>
+
+
+<!-- ==================== 五、关键参数 ==================== -->
+<h2 class="section-title">⚙️ 五、防 Rebalance 关键参数调优</h2>
+
+<table>
+<tr><th>参数</th><th>默认值</th><th>作用</th><th>调优建议</th></tr>
+<tr>
+<td><code>session.timeout.ms</code></td>
+<td>45s</td>
+<td>Consumer 心跳超时阈值</td>
+<td>适当增大（如 20-30s），避免网络波动误判</td>
+</tr>
+<tr>
+<td><code>heartbeat.interval.ms</code></td>
+<td>3s</td>
+<td>心跳发送间隔</td>
+<td>设为 session.timeout 的 1/3，即 6-10s</td>
+</tr>
+<tr>
+<td><code>max.poll.interval.ms</code></td>
+<td>5min</td>
+<td>两次 poll() 最大间隔</td>
+<td><strong>如果业务处理慢，必须调大！</strong>否则会被踢出</td>
+</tr>
+<tr>
+<td><code>max.poll.records</code></td>
+<td>500</td>
+<td>每次 poll 最大消息数</td>
+<td>处理慢时减小此值（如 100-300），缩短单次处理时间</td>
+</tr>
+<tr>
+<td><code>partition.assignment.strategy</code></td>
+<td>Range</td>
+<td>分区分配策略</td>
+<td>多 Topic 推荐 <code>RoundRobin</code> 或 <code>CooperativeStickyAssignor</code></td>
+</tr>
+</table>
+
+<div class="warn-box">
+  <p>⚠️ <strong>经典坑：</strong>你的 Consumer 处理一条消息要 10 秒，max.poll.interval.ms 还是默认 5 分钟。看起来没问题？但如果一次拉了 500 条，500 × 10s = 5000s ≫ 300s，直接超时被踢出！<br>解决方案：<code>max.poll.records=50</code> 或 <code>max.poll.interval.ms=600000</code></p>
+</div>
+
+<div class="tip-box">
+  <p>💡 <strong>减少 Rebalance 的黄金法则：</strong><br>
+  1. 避免在高峰期重启 Consumer / 滚动发布<br>
+  2. 合理设置超时参数（session.timeout ≥ 3 × heartbeat.interval）<br>
+  3. 保证 Consumer 心跳线程和处理线程隔离<br>
+  4. 升级 Kafka ≥ 2.4，使用 CooperativeStickyAssignor 实现渐进式 Rebalance<br>
+  5. 监控 consumer-lag 和 rebalance 频率，设置告警</p>
+</div>
+
+
+<!-- ==================== 六、总结 ==================== -->
+<div style="background:linear-gradient(135deg, rgba(88,166,255,0.07), rgba(163,113,247,0.07));border:1px solid rgba(88,166,255,0.2);border-radius:14px;padding:28px;margin-top:20px;">
+  <h3 style="justify-content:center;color:var(--accent);margin-bottom:16px;text-align:center;">📌 Rebalance 一句话记忆</h3>
+  <p style="text-align:center;font-size:1.03em;color:var(--text);line-height:1.9;">
+    <strong style="color:var(--accent)">找 Coordinator</strong> → 
+    <strong style="color:var(--accent2)">全员 JoinGroup</strong> → 
+    <strong style="color:var(--accent5)">选 Leader 分配</strong> → 
+    <strong style="color:var(--accent4)">SyncGroup 同步</strong> → 
+    <strong style="color:var(--accent)">恢复消费</strong><br>
+    <span style="font-size:0.92em;color:var(--text2)">核心痛点：<strong style="color:var(--accent3)">STW（Stop-The-World）</strong>—— Rebalance 期间整个 Group 停止工作。解决方案：<strong style="color:var(--accent4)">CooperativeSticky + 参数调优</strong></span>
+  </p>
+</div>
+
+</div>
+
+<footer>
+  <p>Kafka Rebalance 流程详解 · Built for Study & Interview ✦ 2026</p>
+</footer>
+
+</body>
+</html>

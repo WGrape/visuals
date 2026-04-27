@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ES 主分片 vs 副本分片职责解析</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    padding: 40px 20px;
+    min-height: 100vh;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    color: #7dd3fc;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #64748b;
+    margin-bottom: 36px;
+  }
+
+  /* ========== 全局流程区 ========== */
+  .overview {
+    max-width: 900px;
+    margin: 0 auto 48px;
+  }
+  .overview-title {
+    font-size: 12px;
+    color: #475569;
+    text-align: center;
+    margin-bottom: 14px;
+  }
+  .overview-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+  .overview-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 90px;
+  }
+  .overview-box {
+    border-radius: 10px;
+    padding: 10px 14px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    border: 2px solid;
+    min-width: 90px;
+  }
+  .overview-box .icon { font-size: 20px; display: block; margin-bottom: 2px; }
+  .overview-box .label { font-size: 10px; font-weight: 400; opacity: 0.8; }
+  .ov-client  { background:#1e293b; border-color:#38bdf8; color:#7dd3fc; }
+  .ov-coord   { background:#1e1b4b; border-color:#818cf8; color:#a5b4fc; }
+  .ov-primary { background:#052e16; border-color:#4ade80; color:#86efac; }
+  .ov-replica { background:#1c1917; border-color:#fb923c; color:#fdba74; }
+
+  .ov-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 44px;
+  }
+  .ov-arrow .line { width: 28px; height: 2px; background: #334155; }
+  .ov-arrow .head { width: 0; height: 0; border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 8px solid #334155; }
+  .ov-arrow .tag { font-size: 10px; color: #475569; margin-top: 2px; }
+
+  /* ========== 核心对比区 ========== */
+  .compare-section { max-width: 900px; margin: 0 auto 40px; }
+  .compare-title {
+    text-align: center;
+    font-size: 13px;
+    color: #64748b;
+    margin-bottom: 20px;
+  }
+  .compare-title::before, .compare-title::after {
+    content: "";
+    display: inline-block;
+    width: 80px;
+    height: 1px;
+    background: #334155;
+    vertical-align: middle;
+    margin: 0 10px;
+  }
+
+  .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 600px) { .compare-grid { grid-template-columns: 1fr; } }
+
+  .shard-card { border-radius: 14px; padding: 22px 20px; border: 2px solid; }
+  .primary-card { background: #052e16; border-color: #4ade80; }
+  .replica-card { background: #1c1917; border-color: #fb923c; }
+
+  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .card-icon {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; flex-shrink: 0;
+  }
+  .primary-card .card-icon { background: #14532d; }
+  .replica-card .card-icon { background: #431407; }
+  .card-title { font-size: 15px; font-weight: 700; }
+  .primary-card .card-title { color: #86efac; }
+  .replica-card .card-title { color: #fdba74; }
+  .card-subtitle { font-size: 11px; color: #64748b; margin-top: 2px; }
+
+  .duty-section { margin-bottom: 12px; }
+  .duty-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .duty-tag {
+    display: inline-block;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 2px;
+  }
+  .primary-card .duty-tag { background: #14532d; color: #86efac; border: 1px solid #4ade8044; }
+  .replica-card .duty-tag { background: #431407; color: #fdba74; border: 1px solid #fb923c44; }
+
+  .duty-list { list-style: none; display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  .duty-list li { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: #cbd5e1; line-height: 1.5; }
+  .duty-bullet { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+  .primary-card .duty-bullet { background: #4ade80; }
+  .replica-card .duty-bullet { background: #fb923c; }
+
+  .mono {
+    background: #1e293b; border-radius: 4px;
+    padding: 1px 6px; font-family: monospace;
+    font-size: 11px; color: #7dd3fc;
+  }
+
+  /* ========== 写入时序图 ========== */
+  .sequence-section { max-width: 900px; margin: 0 auto 40px; }
+  .sequence-title {
+    text-align: center; font-size: 13px; color: #64748b; margin-bottom: 20px;
+  }
+  .sequence-title::before, .sequence-title::after {
+    content: ""; display: inline-block; width: 80px; height: 1px;
+    background: #334155; vertical-align: middle; margin: 0 10px;
+  }
+
+  .sequence-wrap { overflow-x: auto; }
+  .sequence { display: flex; align-items: flex-start; gap: 0; min-width: 700px; padding: 0 10px; }
+
+  .seq-col { display: flex; flex-direction: column; align-items: center; min-width: 110px; }
+  .seq-header {
+    border-radius: 8px 8px 0 0; padding: 10px 12px;
+    text-align: center; font-size: 12px; font-weight: 700;
+    border: 2px solid; border-bottom: none; min-width: 100px; width: 100%;
+  }
+  .seq-col-client .seq-header  { background:#1e293b; border-color:#38bdf8; color:#7dd3fc; }
+  .seq-col-coord .seq-header   { background:#1e1b4b; border-color:#818cf8; color:#a5b4fc; }
+  .seq-col-primary .seq-header { background:#052e16; border-color:#4ade80; color:#86efac; }
+  .seq-col-replica .seq-header { background:#1c1917; border-color:#fb923c; color:#fdba74; }
+
+  .seq-body {
+    border: 2px solid; border-top: 1px dashed;
+    min-width: 100px; width: 100%; min-height: 200px;
+    position: relative; border-radius: 0 0 8px 8px;
+  }
+  .seq-col-client .seq-body  { border-color:#38bdf844; }
+  .seq-col-coord .seq-body   { border-color:#818cf844; }
+  .seq-col-primary .seq-body { border-color:#4ade8044; background:#052e1608; }
+  .seq-col-replica .seq-body  { border-color:#fb923c44; background:#1c191708; }
+
+  .seq-bubble {
+    position: absolute; right: -2px;
+    background: #1e293b; border-radius: 8px;
+    padding: 6px 10px; font-size: 10px; color: #94a3b8;
+    line-height: 1.5; border: 1px solid #334155;
+    max-width: 120px; z-index: 1;
+  }
+  .seq-num {
+    display: inline-block; width: 16px; height: 16px;
+    border-radius: 50%; background: #334155;
+    color: #94a3b8; font-size: 9px;
+    text-align: center; line-height: 16px;
+    margin-right: 4px; flex-shrink: 0;
+  }
+  .seq-num-wrap { display: flex; align-items: center; margin-bottom: 3px; }
+  .accent-primary { border-color:#4ade8055; background:#052e1688; }
+  .accent-replica { border-color:#fb923c55; background:#1c191788; }
+  .success-bubble { border-color:#22c55e44; background:#052e1688; }
+
+  /* ========== 底部总结 ========== */
+  .summary { max-width: 900px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 600px) { .summary { grid-template-columns: 1fr; } }
+  .sum-box { border-radius: 12px; padding: 16px 18px; border: 2px solid; }
+  .sum-p { background:#052e16; border-color:#4ade80; }
+  .sum-r { background:#1c1917; border-color:#fb923c; }
+  .sum-box h3 { font-size: 13px; margin-bottom: 8px; }
+  .sum-p h3 { color:#86efac; }
+  .sum-r h3 { color:#fdba74; }
+  .sum-box ul { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+  .sum-box ul li { font-size: 11px; color: #94a3b8; padding-left: 14px; position: relative; line-height: 1.5; }
+  .sum-box ul li::before { content: "•"; position: absolute; left: 0; }
+  .sum-p ul li::before { color:#4ade80; }
+  .sum-r ul li::before { color:#fb923c; }
+</style>
+</head>
+<body>
+
+<h1>🔍 ES 主分片 vs 副本分片：职责解析</h1>
+<p class="subtitle">写入流程中各自到底在干什么？一张图说清楚</p>
+
+<!-- ========== 全局流程概览 ========== -->
+<div class="overview">
+  <div class="overview-title">写入数据时，分片之间的协作关系</div>
+  <div class="overview-flow">
+    <div class="overview-node">
+      <div class="overview-box ov-client">
+        <span class="icon">💻</span>
+        Client
+        <span class="label">发送请求</span>
+      </div>
+    </div>
+    <div class="ov-arrow"><div class="line"></div><div class="head"></div><div class="tag">写入</div></div>
+    <div class="overview-node">
+      <div class="overview-box ov-coord">
+        <span class="icon">🔀</span>
+        协调节点
+        <span class="label">路由计算</span>
+      </div>
+    </div>
+    <div class="ov-arrow"><div class="line"></div><div class="head"></div><div class="tag">转发</div></div>
+    <div class="overview-node">
+      <div class="overview-box ov-primary">
+        <span class="icon">🟢</span>
+        主分片
+        <span class="label">写 + Translog</span>
+      </div>
+    </div>
+    <div class="ov-arrow"><div class="line"></div><div class="head"></div><div class="tag">同步副本</div></div>
+    <div class="overview-node">
+      <div class="overview-box ov-replica">
+        <span class="icon">🟠</span>
+        副本分片
+        <span class="label">接收备份</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 核心职责对比 ========== -->
+<div class="compare-section">
+  <div class="compare-title">职责对比</div>
+  <div class="compare-grid">
+
+    <!-- 主分片 -->
+    <div class="shard-card primary-card">
+      <div class="card-header">
+        <div class="card-icon">🟢</div>
+        <div>
+          <div class="card-title">Primary Shard</div>
+          <div class="card-subtitle">主分片 · 写入的"唯一真理源"</div>
+        </div>
+      </div>
+      <div class="duty-section">
+        <div class="duty-label">核心职责</div>
+        <span class="duty-tag">接收所有写入</span>
+        <span class="duty-tag">写入 Translog</span>
+        <span class="duty-tag">写入 Buffer</span>
+        <span class="duty-tag">决定成功/失败</span>
+      </div>
+      <ul class="duty-list">
+        <li><span class="duty-bullet"></span><span>写入数据必须先到主分片，是数据变更的<strong style="color:#86efac">唯一入口</strong></span></li>
+        <li><span class="duty-bullet"></span><span>维护 <span class="mono">Translog</span>，记录每一条变更，用于<strong style="color:#86efac">崩溃恢复</strong></span></li>
+        <li><span class="duty-bullet"></span><span>数据先写 Translog 再写 Buffer，Translog 写成功才算成功</span></li>
+        <li><span class="duty-bullet"></span><span>写入完成后，主动<strong style="color:#86efac">推送数据给副本分片</strong>同步</span></li>
+        <li><span class="duty-bullet"></span><span>主分片挂了？集群自动把某个副本提升为新的主分片</span></li>
+      </ul>
+    </div>
+
+    <!-- 副本分片 -->
+    <div class="shard-card replica-card">
+      <div class="card-header">
+        <div class="card-icon">🟠</div>
+        <div>
+          <div class="card-title">Replica Shard</div>
+          <div class="card-subtitle">副本分片 · 数据的安全备份</div>
+        </div>
+      </div>
+      <div class="duty-section">
+        <div class="duty-label">核心职责</div>
+        <span class="duty-tag">接收主分片推送</span>
+        <span class="duty-tag">提供读负载均衡</span>
+        <span class="duty-tag">高可用容灾</span>
+      </div>
+      <ul class="duty-list">
+        <li><span class="duty-bullet"></span><span><strong style="color:#fdba74">不</strong>接收客户端直接写入，只被动接收主分片同步过来的数据</span></li>
+        <li><span class="duty-bullet"></span><span>自己<strong style="color:#fdba74">没有 Translog</strong>，数据是主分片的拷贝，不参与崩溃恢复决策</span></li>
+        <li><span class="duty-bullet"></span><span>提供<strong style="color:#fdba74">读请求分流</strong>：搜索请求可以打到副本，提升并发读能力</span></li>
+        <li><span class="duty-bullet"></span><span>主分片宕机时，副本自动<strong style="color:#fdba74">晋升为主分片</strong>，保证数据不丢</span></li>
+        <li><span class="duty-bullet"></span><span>可配置多个副本（<span class="mono">number_of_replicas = N</span>），副本越多容灾越强，但写入开销越大</span></li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ========== 写入时序图 ========== -->
+<div class="sequence-section">
+  <div class="sequence-title">写入时序：主分片和副本分片的交互步骤</div>
+  <div class="sequence-wrap">
+    <div class="sequence">
+
+      <!-- Client -->
+      <div class="seq-col seq-col-client">
+        <div class="seq-header">💻 Client</div>
+        <div class="seq-body">
+          <div class="seq-bubble" style="top:10px;">
+            <div class="seq-num-wrap"><span class="seq-num">1</span><strong>发送写入请求</strong></div>
+            <span class="mono">POST /index/_doc</span>
+          </div>
+          <div class="seq-bubble success-bubble" style="top:145px;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">5</span><strong>收到 200 OK</strong></div>
+            写入成功
+          </div>
+        </div>
+      </div>
+
+      <!-- 协调节点 -->
+      <div class="seq-col seq-col-coord">
+        <div class="seq-header">🔀 协调节点</div>
+        <div class="seq-body">
+          <div class="seq-bubble" style="top:36px;">
+            <div class="seq-num-wrap"><span class="seq-num">2</span><strong>路由计算</strong></div>
+            <span class="mono">hash(id) % 5</span><br>找到目标主分片
+          </div>
+          <div class="seq-bubble success-bubble" style="top:165px;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">5</span><strong>转发响应给 Client</strong></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 主分片 -->
+      <div class="seq-col seq-col-primary">
+        <div class="seq-header">🟢 Primary Shard</div>
+        <div class="seq-body">
+          <div class="seq-bubble accent-primary" style="top:58px;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">3</span><strong>写入主分片</strong></div>
+            ① 写 Translog ✅<br>
+            ② 写 Buffer<br>
+            <span style="font-size:9px;color:#64748b">两处都成功才算写入成功</span>
+          </div>
+          <div class="seq-bubble accent-primary" style="top:148px;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">4</span><strong>推送数据给副本</strong></div>
+            并行同步数据
+          </div>
+        </div>
+      </div>
+
+      <!-- 副本分片 -->
+      <div class="seq-col seq-col-replica">
+        <div class="seq-header">🟠 Replica Shard</div>
+        <div class="seq-body">
+          <div class="seq-bubble accent-replica" style="top:82px;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#431407;color:#fdba74">4'</span><strong>接收并写入副本</strong></div>
+            写入 Buffer<br>
+            <span style="font-size:9px;color:#64748b">（无 Translog）</span>
+          </div>
+          <div class="seq-bubble accent-replica" style="top:168px; border-color:#22c55e44; background:#1c191788;">
+            <div class="seq-num-wrap"><span class="seq-num" style="background:#431407;color:#fdba74">✓</span><strong>ACK 响应主分片</strong></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ========== 底部总结 ========== -->
+<div class="summary">
+  <div class="sum-box sum-p">
+    <h3>🟢 主分片的三个"唯一"</h3>
+    <ul>
+      <li>写入的<strong style="color:#86efac">唯一入口</strong>（客户端不能直接写副本）</li>
+      <li>Translog 的<strong style="color:#86efac">唯一持有者</strong>（崩溃恢复的核心）</li>
+      <li>写入成功的<strong style="color:#86efac">唯一决策者</strong>（副本 ACK 才返回客户端）</li>
+    </ul>
+  </div>
+  <div class="sum-box sum-r">
+    <h3>🟠 副本分片的核心价值</h3>
+    <ul>
+      <li><strong style="color:#fdba74">读扩展</strong>：分担搜索请求，提升并发能力</li>
+      <li><strong style="color:#fdba74">高可用</strong>：主分片挂了，副本自动顶上去</li>
+      <li><strong style="color:#fdba74">数据安全</strong>：主分片数据丢失时可以从副本恢复</li>
+    </ul>
+  </div>
+</div>
+
+</body>
+</html>
