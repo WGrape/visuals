@@ -1,0 +1,1547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL 数据与索引存储格式详解</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #00d9ff;
+            margin-bottom: 10px;
+            font-size: 2rem;
+            text-shadow: 0 0 20px rgba(0, 217, 255, 0.5);
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+            font-size: 0.9rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* 层次结构导航 */
+        .layer-nav {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .layer-btn {
+            padding: 12px 24px;
+            border: 2px solid #00d9ff;
+            background: transparent;
+            color: #00d9ff;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .layer-btn:hover, .layer-btn.active {
+            background: #00d9ff;
+            color: #1a1a2e;
+            box-shadow: 0 0 20px rgba(0, 217, 255, 0.5);
+        }
+
+        /* 主要可视化区域 */
+        .visualization-area {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        @media (max-width: 1000px) {
+            .visualization-area {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .panel-title {
+            color: #00d9ff;
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .panel-title .icon {
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 217, 255, 0.2);
+            border-radius: 8px;
+        }
+
+        /* 存储层级图 */
+        .storage-layers {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .layer {
+            width: 100%;
+            max-width: 600px;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .layer:hover {
+            transform: scale(1.02);
+        }
+
+        .layer-buffer-pool {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: 2px solid #667eea;
+        }
+
+        .layer-memory {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            border: 2px solid #f093fb;
+        }
+
+        .layer-disk {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            border: 2px solid #4facfe;
+        }
+
+        .layer-label {
+            font-size: 1.1rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .layer-desc {
+            font-size: 0.85rem;
+            opacity: 0.9;
+        }
+
+        .arrow-down {
+            font-size: 2rem;
+            color: #00d9ff;
+            animation: bounce 1s infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(5px); }
+        }
+
+        /* 数据页可视化 */
+        .page-visual {
+            position: relative;
+            margin: 20px 0;
+        }
+
+        .page-header {
+            background: #2d3a4f;
+            border-radius: 8px 8px 0 0;
+            padding: 10px 15px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            border: 1px solid #3d4a5f;
+            border-bottom: none;
+        }
+
+        .page-body {
+            background: #1e2530;
+            border-radius: 0 0 8px 8px;
+            padding: 15px;
+            border: 1px solid #3d4a5f;
+            border-top: none;
+        }
+
+        .page-filename {
+            color: #ffd700;
+        }
+
+        .page-infraction {
+            color: #ff6b6b;
+        }
+
+        .row {
+            background: rgba(0, 217, 255, 0.1);
+            margin: 5px 0;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            align-items: center;
+        }
+
+        .row:hover {
+            background: rgba(0, 217, 255, 0.2);
+        }
+
+        .cell {
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
+
+        .cell-id { background: #ff6b6b; color: #1a1a2e; }
+        .cell-name { background: #4ecdc4; color: #1a1a2e; }
+        .cell-age { background: #ffe66d; color: #1a1a2e; }
+        .cell-addr { background: #a8e6cf; color: #1a1a2e; }
+        .cell-null { background: #888; color: #1a1a2e; }
+
+        /* B+树可视化 */
+        .btree-container {
+            position: relative;
+            width: 100%;
+            height: 400px;
+            margin: 20px 0;
+        }
+
+        .btree-svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .btree-node {
+            fill: #2d3a4f;
+            stroke: #00d9ff;
+            stroke-width: 2;
+            transition: all 0.3s ease;
+        }
+
+        .btree-node:hover {
+            fill: #3d4a5f;
+            cursor: pointer;
+        }
+
+        .btree-node-index {
+            fill: #4a3060;
+            stroke: #9b59b6;
+        }
+
+        .btree-node-leaf {
+            fill: #1a3a3a;
+            stroke: #4ecdc4;
+        }
+
+        .btree-text {
+            fill: #fff;
+            font-size: 12px;
+            text-anchor: middle;
+            dominant-baseline: middle;
+            pointer-events: none;
+        }
+
+        .btree-line {
+            stroke: #555;
+            stroke-width: 2;
+        }
+
+        /* 信息面板 */
+        .info-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .info-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border-left: 4px solid #00d9ff;
+        }
+
+        .info-card.disk { border-left-color: #4facfe; }
+        .info-card.memory { border-left-color: #f093fb; }
+        .info-card.buffer { border-left-color: #667eea; }
+
+        .info-card h3 {
+            color: #00d9ff;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+
+        .info-card ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .info-card li {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.9rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .info-card li:last-child {
+            border-bottom: none;
+        }
+
+        .info-card li::before {
+            content: '▶';
+            color: #00d9ff;
+            font-size: 0.7rem;
+            margin-top: 3px;
+        }
+
+        code {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #ffe66d;
+        }
+
+        /* 动画元素 */
+        .animating {
+            animation: pulse 0.5s ease-in-out;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        /* 流程动画 */
+        .flow-container {
+            position: relative;
+            height: 60px;
+            margin: 20px 0;
+        }
+
+        .flow-item {
+            position: absolute;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            opacity: 0;
+            transition: all 0.5s ease;
+        }
+
+        .flow-item.active {
+            opacity: 1;
+        }
+
+        .flow-disk {
+            left: 10%;
+            background: #4facfe;
+            color: #1a1a2e;
+        }
+
+        .flow-buffer {
+            left: 40%;
+            background: #667eea;
+            color: #fff;
+        }
+
+        .flow-memory {
+            left: 70%;
+            background: #f093fb;
+            color: #1a1a2e;
+        }
+
+        .flow-arrow {
+            position: absolute;
+            color: #00d9ff;
+            font-size: 1.5rem;
+            opacity: 0;
+            transition: all 0.5s ease;
+        }
+
+        .flow-arrow.active {
+            opacity: 1;
+        }
+
+        /* 字节格式展示 */
+        .byte-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 2px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.75rem;
+        }
+
+        .byte {
+            background: #2d3a4f;
+            padding: 5px 2px;
+            text-align: center;
+            border-radius: 3px;
+        }
+
+        .byte-header { background: #4a3060; }
+        .byte-data { background: #1e2530; }
+        .byte-chosen { background: #00d9ff; color: #1a1a2e; }
+
+        /* 表格格式对比 */
+        .format-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 0.85rem;
+        }
+
+        .format-table th {
+            background: rgba(0, 217, 255, 0.2);
+            padding: 12px;
+            text-align: left;
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            color: #00d9ff;
+        }
+
+        .format-table td {
+            padding: 10px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .format-table tr:hover {
+            background: rgba(0, 217, 255, 0.1);
+        }
+
+        /* 交互式说明 */
+        .interactive-area {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .demo-btn {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, #00d9ff 0%, #0099cc 100%);
+            border: none;
+            border-radius: 20px;
+            color: #1a1a2e;
+            cursor: pointer;
+            font-size: 0.9rem;
+            margin: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .demo-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 217, 255, 0.4);
+        }
+
+        /* 状态显示 */
+        .status-panel {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            min-height: 100px;
+        }
+
+        .status-line {
+            margin: 5px 0;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .status-line.visible {
+            opacity: 1;
+        }
+
+        .status-key { color: #00d9ff; }
+        .status-value { color: #ffe66d; }
+        .status-comment { color: #888; font-style: italic; }
+
+        /* 详细结构图 */
+        .structure-diagram {
+            background: #0d1117;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 15px 0;
+            overflow-x: auto;
+        }
+
+        .hex-view {
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+            line-height: 1.6;
+            white-space: pre;
+            color: #8b949e;
+        }
+
+        .hex-highlight {
+            color: #00d9ff;
+            background: rgba(0, 217, 255, 0.1);
+        }
+
+        .hex-comment {
+            color: #6a737d;
+            margin-left: 20px;
+        }
+
+        /* 图例 */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 15px 0;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }
+
+        /* Tab 切换 */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .tab-btn {
+            padding: 10px 20px;
+            background: transparent;
+            border: 1px solid #444;
+            color: #888;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .tab-btn.active, .tab-btn:hover {
+            background: rgba(0, 217, 255, 0.2);
+            border-color: #00d9ff;
+            color: #00d9ff;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* 动画流程 */
+        .animation-sequence {
+            position: relative;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            min-height: 300px;
+        }
+
+        .anim-step {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            margin: 10px 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            opacity: 0;
+            transform: translateX(-20px);
+            transition: all 0.5s ease;
+        }
+
+        .anim-step.visible {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .step-num {
+            width: 35px;
+            height: 35px;
+            background: #00d9ff;
+            color: #1a1a2e;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+
+        .step-content h4 {
+            color: #00d9ff;
+            margin-bottom: 5px;
+        }
+
+        .step-content p {
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        /* 分区可视化 */
+        .partition-visual {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .partition {
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.8rem;
+        }
+
+        .partition-header { background: #4a3060; }
+        .partition-slot { background: #2d3a4f; }
+        .partition-record { background: #1e2530; }
+        .partition-checksum { background: #3d2d1e; }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            h1 { font-size: 1.5rem; }
+            .layer-nav { gap: 10px; }
+            .layer-btn { padding: 10px 15px; font-size: 0.9rem; }
+            .visualization-area { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🗄️ MySQL 数据与索引存储格式详解</h1>
+        <p class="subtitle">InnoDB 引擎 | 缓冲池 → 内存 → 磁盘 全链路解析</p>
+
+        <!-- 层级导航 -->
+        <div class="layer-nav">
+            <button class="layer-btn active" onclick="showSection('overview')">📊 总览</button>
+            <button class="layer-btn" onclick="showSection('disk')">💾 磁盘存储</button>
+            <button class="layer-btn" onclick="showSection('buffer')">🔄 缓冲池</button>
+            <button class="layer-btn" onclick="showSection('btree')">🌳 B+树索引</button>
+            <button class="layer-btn" onclick="showSection('flow')">⚡ 数据流转</button>
+        </div>
+
+        <!-- 总览部分 -->
+        <div id="section-overview" class="tab-content active">
+            <div class="visualization-area">
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">🏗️</span>
+                        三层存储架构
+                    </div>
+                    <div class="storage-layers">
+                        <div class="layer layer-buffer-pool" onclick="showSection('buffer')">
+                            <div class="layer-label">🔵 Buffer Pool（缓冲池）</div>
+                            <div class="layer-desc">内存中的数据页缓存 | 16KB/页 | LRU淘汰</div>
+                        </div>
+                        <div class="arrow-down">↓ 读写操作 ↓</div>
+                        <div class="layer layer-memory" onclick="showSection('memory')">
+                            <div class="layer-label">🟣 Change Buffer（变更缓冲）</div>
+                            <div class="layer-desc">二级索引变更的内存缓冲 | 减少随机IO</div>
+                        </div>
+                        <div class="arrow-down">↓ 刷盘操作 ↓</div>
+                        <div class="layer layer-disk" onclick="showSection('disk')">
+                            <div class="layer-label">🔷 磁盘文件</div>
+                            <div class="layer-desc">.ibd 文件 | 表空间 | B+树存储</div>
+                        </div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #ff6b6b;"></div>
+                            <span>主键 ID</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #4ecdc4;"></div>
+                            <span>VARCHAR</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #ffe66d;"></div>
+                            <span>INT/数字</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #a8e6cf;"></div>
+                            <span>变长字段</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">📋</span>
+                        核心概念速查
+                    </div>
+                    <table class="format-table">
+                        <tr>
+                            <th>概念</th>
+                            <th>大小</th>
+                            <th>说明</th>
+                        </tr>
+                        <tr>
+                            <td>Page（页）</td>
+                            <td><code>16KB</code></td>
+                            <td>磁盘读写的最小单位</td>
+                        </tr>
+                        <tr>
+                            <td>Row（行）</td>
+                            <td><code>~2KB</code></td>
+                            <td>一行数据，最大65535字节</td>
+                        </tr>
+                        <tr>
+                            <td>Extent（区）</td>
+                            <td><code>1MB</code></td>
+                            <td>64个连续页组成</td>
+                        </tr>
+                        <tr>
+                            <td>Segment（段）</td>
+                            <td>可变</td>
+                            <td>索引/数据段的逻辑单位</td>
+                        </tr>
+                        <tr>
+                            <td>Tablespace</td>
+                            <td>可变</td>
+                            <td>表空间，包含多个段</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 流程动画 -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">🎬</span>
+                    交互演示：查询一条数据发生了什么
+                </div>
+                <div class="interactive-area">
+                    <button class="demo-btn" onclick="runQueryAnimation()">▶ 执行 SELECT * FROM users WHERE id = 5</button>
+                    <button class="demo-btn" onclick="runWriteAnimation()">▶ 执行 INSERT</button>
+                    <button class="demo-btn" onclick="resetAnimation()">🔄 重置</button>
+                </div>
+                <div class="status-panel" id="animation-panel">
+                    <div class="status-line" id="step1">
+                        <span class="status-comment">// 点击按钮开始演示...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 磁盘存储部分 -->
+        <div id="section-disk" class="tab-content">
+            <div class="visualization-area">
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">💾</span>
+                        InnoDB Page（数据页）结构
+                    </div>
+                    <p style="color: #888; margin-bottom: 15px; font-size: 0.9rem;">
+                        每个数据页固定 <code>16KB</code>，包含以下区域：
+                    </p>
+
+                    <div class="structure-diagram">
+                        <div class="partition-visual">
+                            <div class="partition partition-header">
+                                <strong>File Header</strong>
+                                <div>38 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">页号/上一页/下一页/Checksum</div>
+                            </div>
+                            <div class="partition partition-header">
+                                <strong>Page Header</strong>
+                                <div>56 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">行数/空闲空间/垃圾指针</div>
+                            </div>
+                            <div class="partition partition-header">
+                                <strong>Infimum</strong>
+                                <div>13 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">伪记录 sentinel</div>
+                            </div>
+                            <div class="partition partition-slot">
+                                <strong>Records...</strong>
+                                <div>~8000 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">用户数据行</div>
+                            </div>
+                        </div>
+                        <div class="partition-visual">
+                            <div class="partition partition-slot">
+                                <strong>Supremum</strong>
+                                <div>13 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">伪记录 sentinel</div>
+                            </div>
+                            <div class="partition partition-slot">
+                                <strong>Free Space</strong>
+                                <div>可变量</div>
+                                <div style="font-size: 0.7rem; color: #888;">空闲区域</div>
+                            </div>
+                            <div class="partition partition-record">
+                                <strong>Slot Array</strong>
+                                <div>可变量</div>
+                                <div style="font-size: 0.7rem; color: #888;">记录偏移数组</div>
+                            </div>
+                            <div class="partition partition-checksum">
+                                <strong>File Trailer</strong>
+                                <div>8 bytes</div>
+                                <div style="font-size: 0.7rem; color: #888;">页尾校验</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">📝</span>
+                        行记录格式（Compact）
+                    </div>
+
+                    <div class="hex-view">
+<span class="hex-highlight">变长列长度1 变长列长度2 ...</span> <span class="hex-comment">// NULL标志位 + 变长列长度列表</span>
+<span class="hex-highlight">NULL标志位 bitmap</span>           <span class="hex-comment">// 允许NULL的列的位图</span>
+<span class="hex-highlight">Row ID (可选) 6字节</span>        <span class="hex-comment">// 如果没有主键</span>
+<span class="hex-highlight">Transaction ID 6字节</span>      <span class="hex-comment">// 事务ID</span>
+<span class="hex-highlight">Roll Pointer 7字节</span>         <span class="hex-comment">// 回滚指针，指向undo日志</span>
+<span class="hex-highlight">列1数据 列2数据 列3数据...</span>   <span class="hex-comment">// 实际列值</span>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <h4 style="color: #00d9ff; margin-bottom: 10px;">实际行数据示例</h4>
+                        <div class="row" style="font-size: 0.75rem;">
+                            <span class="cell cell-id">id=1</span>
+                            <span class="cell cell-name">name=张三</span>
+                            <span class="cell cell-age">age=28</span>
+                            <span class="cell cell-addr">address=北京市朝阳区...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 磁盘文件结构 -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">🗂️</span>
+                    磁盘文件组织结构
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                        <h4 style="color: #4facfe;">Tablespace（表空间）</h4>
+                        <p style="font-size: 0.85rem; color: #aaa; margin-top: 8px;">
+                            逻辑存储容器，可以是系统表空间、独立表空间、或通用表空间
+                        </p>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                        <h4 style="color: #4facfe;">Segment（段）</h4>
+                        <p style="font-size: 0.85rem; color: #aaa; margin-top: 8px;">
+                            B+树的每个层级创建一个段（叶节点段 + 非叶节点段）
+                        </p>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                        <h4 style="color: #4facfe;">Extent（区）</h4>
+                        <p style="font-size: 0.85rem; color: #aaa; margin-top: 8px;">
+                            64个连续的 16KB Page = 1MB 空间，预分配减少碎片
+                        </p>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                        <h4 style="color: #4facfe;">Page（页）</h4>
+                        <p style="font-size: 0.85rem; color: #aaa; margin-top: 8px;">
+                            最小I/O单位，16KB，包含页头、用户记录、页尾等
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 缓冲池部分 -->
+        <div id="section-buffer" class="tab-content">
+            <div class="visualization-area">
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">🔄</span>
+                        Buffer Pool 缓冲池
+                    </div>
+                    <p style="color: #888; margin-bottom: 15px;">
+                        默认大小 <code>128MB</code>（可配置），以 <code>16KB</code> Page 为单位管理
+                    </p>
+
+                    <div class="page-visual">
+                        <div class="page-header">
+                            <span class="page-filename">Buffer Pool #0 (age: 0s)</span>
+                            <span class="page-infraction">LRU List</span>
+                        </div>
+                        <div class="page-body">
+                            <div id="buffer-pages">
+                                <div class="row" id="bp-page-1">
+                                    <span style="color: #667eea;">[Page #1]</span>
+                                    <span class="cell cell-id">id=5</span>
+                                    <span class="cell cell-name">name=王五</span>
+                                    <span class="cell cell-age">age=35</span>
+                                    <span class="cell cell-addr">address=上海浦东...</span>
+                                    <span style="color: #4ecdc4; margin-left: auto;">dirty ✓</span>
+                                </div>
+                                <div class="row" id="bp-page-2">
+                                    <span style="color: #667eea;">[Page #2]</span>
+                                    <span class="cell cell-id">id=3</span>
+                                    <span class="cell cell-name">name=李四</span>
+                                    <span class="cell cell-age">age=30</span>
+                                    <span class="cell cell-addr">address=深圳南山区...</span>
+                                </div>
+                                <div class="row" id="bp-page-3">
+                                    <span style="color: #667eea;">[Page #3]</span>
+                                    <span class="cell cell-id">id=8</span>
+                                    <span class="cell cell-name">name=赵六</span>
+                                    <span class="cell cell-age">age=25</span>
+                                    <span class="cell cell-addr">address=广州天河区...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <button class="demo-btn" onclick="simulateRead()">📖 模拟读取 id=3</button>
+                        <button class="demo-btn" onclick="simulateWrite()">📝 模拟修改</button>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">🔀</span>
+                        LRU 淘汰算法
+                    </div>
+                    <p style="color: #888; margin-bottom: 15px;">
+                        Buffer Pool 使用改进的 LRU（最近最少使用）算法
+                    </p>
+
+                    <div class="structure-diagram">
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                            <div style="flex: 1; min-width: 200px;">
+                                <div style="background: #2d5a3d; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+                                    <strong style="color: #4ecdc4;">Young Sublist (热端)</strong>
+                                    <div style="font-size: 0.8rem; color: #aaa; margin-top: 5px;">
+                                        最近访问的页面<br>
+                                        默认 5/8 的缓冲池
+                                    </div>
+                                </div>
+                                <div style="background: #3d4a5f; padding: 15px; border-radius: 8px; text-align: center;">
+                                    midpoint
+                                </div>
+                                <div style="background: #5a2d3d; padding: 15px; border-radius: 8px; margin-top: 10px;">
+                                    <strong style="color: #ff6b6b;">Old Sublist (冷端)</strong>
+                                    <div style="font-size: 0.8rem; color: #aaa; margin-top: 5px;">
+                                        长时间未访问<br>
+                                        默认 3/8 的缓冲池
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="flex: 1; min-width: 200px;">
+                                <h4 style="color: #00d9ff; margin-bottom: 10px;">访问规则</h4>
+                                <ul style="list-style: none; font-size: 0.9rem;">
+                                    <li style="padding: 8px 0; border-bottom: 1px solid #333;">
+                                        🟢 命中热端 → 移到最前面
+                                    </li>
+                                    <li style="padding: 8px 0; border-bottom: 1px solid #333;">
+                                        🟡 预读页面 → 放冷端头部
+                                    </li>
+                                    <li style="padding: 8px 0; border-bottom: 1px solid #333;">
+                                        🔴 全表扫描 → 冷端末尾淘汰
+                                    </li>
+                                    <li style="padding: 8px 0;">
+                                        🟣 脏页 → 先刷盘再淘汰
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Change Buffer -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">📝</span>
+                    Change Buffer（变更缓冲）
+                </div>
+                <p style="color: #888; margin-bottom: 15px;">
+                    对<strong style="color: #f093fb;">二级索引</strong>的修改先缓存在内存中，减少随机IO
+                </p>
+                <div class="animation-sequence" id="change-buffer-demo">
+                    <div class="anim-step" id="cb-step1">
+                        <div class="step-num">1</div>
+                        <div class="step-content">
+                            <h4>INSERT 触发索引修改</h4>
+                            <p>UPDATE users SET name='新名字' WHERE age=25</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="cb-step2">
+                        <div class="step-num">2</div>
+                        <div class="step-content">
+                            <h4>二级索引不在 Buffer Pool</h4>
+                            <p>age 索引页不在内存中，直接修改会很慢（随机IO）</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="cb-step3">
+                        <div class="step-num">3</div>
+                        <div class="step-content">
+                            <h4>写入 Change Buffer</h4>
+                            <p>将修改记录写入内存中的 Change Buffer</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="cb-step4">
+                        <div class="step-num">4</div>
+                        <div class="step-content">
+                            <h4>后台合并 (Merge)</h4>
+                            <p>当索引页被读入时，合并 Change Buffer 的修改</p>
+                        </div>
+                    </div>
+                </div>
+                <button class="demo-btn" onclick="runChangeBufferDemo()">▶ 播放演示</button>
+            </div>
+        </div>
+
+        <!-- B+树索引部分 -->
+        <div id="section-btree" class="tab-content">
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">🌳</span>
+                    InnoDB B+树索引结构
+                </div>
+                <p style="color: #888; margin-bottom: 20px;">
+                    主键索引（聚簇索引）的 B+树 结构，叶节点包含完整数据
+                </p>
+
+                <div class="btree-container">
+                    <svg class="btree-svg" viewBox="0 0 800 350" id="btree-svg">
+                        <!-- 第一层 -->
+                        <g class="btree-level-0">
+                            <rect class="btree-node" x="325" y="20" width="150" height="50" rx="8"/>
+                            <text class="btree-text" x="400" y="50">主键: 50</text>
+                        </g>
+
+                        <!-- 连接线 -->
+                        <line class="btree-line" x1="350" y1="70" x2="180" y2="120"/>
+                        <line class="btree-line" x1="450" y1="70" x2="620" y2="120"/>
+
+                        <!-- 第二层 -->
+                        <g class="btree-level-1">
+                            <rect class="btree-node btree-node-index" x="105" y="120" width="150" height="50" rx="8"/>
+                            <text class="btree-text" x="180" y="150">主键: 20, 35</text>
+
+                            <rect class="btree-node btree-node-index" x="545" y="120" width="150" height="50" rx="8"/>
+                            <text class="btree-text" x="620" y="150">主键: 70, 90</text>
+                        </g>
+
+                        <!-- 连接线 -->
+                        <line class="btree-line" x1="130" y1="170" x2="55" y2="220"/>
+                        <line class="btree-line" x1="205" y1="170" x2="105" y2="220"/>
+                        <line class="btree-line" x1="570" y1="170" x2="495" y2="220"/>
+                        <line class="btree-line" x1="645" y1="170" x2="695" y2="220"/>
+
+                        <!-- 第三层 - 叶节点 -->
+                        <g class="btree-level-2">
+                            <!-- 左侧叶子 -->
+                            <rect class="btree-node btree-node-leaf" x="10" y="220" width="120" height="100" rx="8"/>
+                            <text class="btree-text" x="70" y="245" style="font-size: 10px;">id=10</text>
+                            <text class="btree-text" x="70" y="265" style="font-size: 10px;">name=张</text>
+                            <text class="btree-text" x="70" y="285" style="font-size: 10px;">age=20</text>
+                            <text class="btree-text" x="70" y="305" style="font-size: 10px;">→</text>
+
+                            <rect class="btree-node btree-node-leaf" x="145" y="220" width="120" height="100" rx="8"/>
+                            <text class="btree-text" x="205" y="245" style="font-size: 10px;">id=20</text>
+                            <text class="btree-text" x="205" y="265" style="font-size: 10px;">name=李</text>
+                            <text class="btree-text" x="205" y="285" style="font-size: 10px;">age=30</text>
+                            <text class="btree-text" x="205" y="305" style="font-size: 10px;">→</text>
+
+                            <rect class="btree-node btree-node-leaf" x="450" y="220" width="120" height="100" rx="8"/>
+                            <text class="btree-text" x="510" y="245" style="font-size: 10px;">id=50</text>
+                            <text class="btree-text" x="510" y="265" style="font-size: 10px;">name=王</text>
+                            <text class="btree-text" x="510" y="285" style="font-size: 10px;">age=40</text>
+                            <text class="btree-text" x="510" y="305" style="font-size: 10px;">→</text>
+
+                            <rect class="btree-node btree-node-leaf" x="585" y="220" width="120" height="100" rx="8"/>
+                            <text class="btree-text" x="645" y="245" style="font-size: 10px;">id=70</text>
+                            <text class="btree-text" x="645" y="265" style="font-size: 10px;">name=刘</text>
+                            <text class="btree-text" x="645" y="285" style="font-size: 10px;">age=50</text>
+                            <text class="btree-text" x="645" y="305" style="font-size: 10px;">→</text>
+
+                            <rect class="btree-node btree-node-leaf" x="720" y="220" width="70" height="100" rx="8"/>
+                            <text class="btree-text" x="755" y="245" style="font-size: 10px;">...</text>
+                            <text class="btree-text" x="755" y="265" style="font-size: 10px;">→∞</text>
+                        </g>
+
+                        <!-- 叶子节点双向链表 -->
+                        <path d="M 130 270 Q 290 340 450 270" fill="none" stroke="#4ecdc4" stroke-width="2" stroke-dasharray="5,5"/>
+                        <path d="M 570 270 Q 650 340 720 270" fill="none" stroke="#4ecdc4" stroke-width="2" stroke-dasharray="5,5"/>
+                    </svg>
+                </div>
+
+                <div class="legend" style="margin-top: 20px;">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #4a3060; border: 2px solid #9b59b6;"></div>
+                        <span>非叶节点（索引目录）</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #1a3a3a; border: 2px solid #4ecdc4;"></div>
+                        <span>叶节点（包含完整数据）</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: transparent; border: 2px dashed #4ecdc4;"></div>
+                        <span>叶子节点链表</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="visualization-area">
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">🔑</span>
+                        聚簇索引 vs 二次索引
+                    </div>
+                    <table class="format-table">
+                        <tr>
+                            <th>对比项</th>
+                            <th>聚簇索引（主键索引）</th>
+                            <th>二次索引（辅助索引）</th>
+                        </tr>
+                        <tr>
+                            <td>存储内容</td>
+                            <td>完整的行数据</td>
+                            <td>索引列 + 主键值</td>
+                        </tr>
+                        <tr>
+                            <td>叶节点</td>
+                            <td>直接是数据行</td>
+                            <td>指向主键的指针</td>
+                        </tr>
+                        <tr>
+                            <td>查找过程</td>
+                            <td>一次定位</td>
+                            <td>二次查找（回表）</td>
+                        </tr>
+                        <tr>
+                            <td>创建数量</td>
+                            <td>每表一个</td>
+                            <td>每列一个（可多个）</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <span class="icon">📊</span>
+                        B+树特性
+                    </div>
+                    <div style="display: grid; gap: 15px;">
+                        <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                            <h4 style="color: #00d9ff;">📏 高度平衡</h4>
+                            <p style="font-size: 0.85rem; color: #aaa; margin-top: 5px;">
+                                所有叶子节点深度相同，查找复杂度 O(log n)
+                            </p>
+                        </div>
+                        <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                            <h4 style="color: #00d9ff;">🔗 有序链表</h4>
+                            <p style="font-size: 0.85rem; color: #aaa; margin-top: 5px;">
+                                叶节点通过双向链表连接，支持范围查询
+                            </p>
+                        </div>
+                        <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px;">
+                            <h4 style="color: #00d9ff;">💾 磁盘友好</h4>
+                            <p style="font-size: 0.85rem; color: #aaa; margin-top: 5px;">
+                                节点大小≈页大小(16KB)，充分利用预读
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据流转部分 -->
+        <div id="section-flow" class="tab-content">
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">⚡</span>
+                    SELECT 查询流程
+                </div>
+                <div class="animation-sequence" id="select-flow">
+                    <div class="anim-step" id="select-step1">
+                        <div class="step-num">1</div>
+                        <div class="step-content">
+                            <h4>SQL 解析</h4>
+                            <p>Parser 解析 SQL，Optimizer 选择执行计划</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="select-step2">
+                        <div class="step-num">2</div>
+                        <div class="step-content">
+                            <h4>检查 Buffer Pool</h4>
+                            <p>在缓冲池中查找数据页是否已缓存</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="select-step3">
+                        <div class="step-num">3</div>
+                        <div class="step-content">
+                            <h4>命中？→ 直接返回</h4>
+                            <p>缓存命中，直接从内存读取，O(1) 复杂度</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="select-step4">
+                        <div class="step-num">4</div>
+                        <div class="step-content">
+                            <h4>未命中？→ 从磁盘加载</h4>
+                            <p>通过 B+树 定位数据页，触发磁盘 I/O</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="select-step5">
+                        <div class="step-num">5</div>
+                        <div class="step-content">
+                            <h4>放入 Buffer Pool</h4>
+                            <p>磁盘读取后放入缓冲池，返回数据</p>
+                        </div>
+                    </div>
+                </div>
+                <button class="demo-btn" onclick="runSelectFlow()">▶ 播放 SELECT 流程</button>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">⚡</span>
+                    INSERT 写入流程
+                </div>
+                <div class="animation-sequence" id="insert-flow">
+                    <div class="anim-step" id="insert-step1">
+                        <div class="step-num">1</div>
+                        <div class="step-content">
+                            <h4>事务开始</h4>
+                            <p>开启事务，获取事务ID</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="insert-step2">
+                        <div class="step-num">2</div>
+                        <div class="step-content">
+                            <h4>定位数据页</h4>
+                            <p>通过 B+树 找到应插入的数据页位置</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="insert-step3">
+                        <div class="step-num">3</div>
+                        <div class="step-content">
+                            <h4>写入 Buffer Pool</h4>
+                            <p>将数据写入缓冲池中的数据页（标记为 dirty）</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="insert-step4">
+                        <div class="step-num">4</div>
+                        <div class="step-content">
+                            <h4>记录 Undo Log</h4>
+                            <p>写入 Undo 日志，用于回滚</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="insert-step5">
+                        <div class="step-num">5</div>
+                        <div class="step-content">
+                            <h4>事务提交</h4>
+                            <p>写入 Redo Log（可选），释放锁</p>
+                        </div>
+                    </div>
+                    <div class="anim-step" id="insert-step6">
+                        <div class="step-num">6</div>
+                        <div class="step-content">
+                            <h4>后台刷盘</h4>
+                            <p>Master Thread 定期将 dirty page 刷到磁盘</p>
+                        </div>
+                    </div>
+                </div>
+                <button class="demo-btn" onclick="runInsertFlow()">▶ 播放 INSERT 流程</button>
+            </div>
+
+            <!-- 完整架构图 -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span class="icon">🏰</span>
+                    MySQL 完整数据流架构
+                </div>
+                <div class="structure-diagram" style="font-size: 0.85rem;">
+                    <div style="display: flex; flex-direction: column; gap: 15px;">
+                        <!-- 客户端 -->
+                        <div style="background: #2d3a4f; padding: 15px; border-radius: 8px; text-align: center;">
+                            <strong>📱 客户端</strong> (JDBC/CLI)
+                            <span style="color: #888; margin-left: 10px;">→ SQL 请求</span>
+                        </div>
+
+                        <!-- Server层 -->
+                        <div style="background: #1e2530; padding: 15px; border-radius: 8px;">
+                            <strong style="color: #00d9ff;">⚙️ Server 层</strong>
+                            <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; font-size: 0.8rem;">
+                                <span style="background: #2d3a4f; padding: 5px 10px; border-radius: 4px;">Parser</span>
+                                <span style="background: #2d3a4f; padding: 5px 10px; border-radius: 4px;">Optimizer</span>
+                                <span style="background: #2d3a4f; padding: 5px 10px; border-radius: 4px;">Cache (MySQL 8.0移除)</span>
+                            </div>
+                        </div>
+
+                        <!-- Storage Engine -->
+                        <div style="background: #1a1a2e; padding: 15px; border-radius: 8px; border: 2px solid #667eea;">
+                            <strong style="color: #667eea;">🔧 InnoDB 引擎</strong>
+
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-top: 15px;">
+                                <!-- Buffer Pool -->
+                                <div style="background: rgba(102,126,234,0.2); padding: 10px; border-radius: 6px;">
+                                    <strong style="color: #667eea; font-size: 0.85rem;">Buffer Pool</strong>
+                                    <div style="font-size: 0.75rem; margin-top: 5px;">
+                                        <div>🔵 数据页缓存</div>
+                                        <div>🟢 索引页缓存</div>
+                                        <div>🟣 Change Buffer</div>
+                                        <div>🔴 自适应哈希</div>
+                                    </div>
+                                </div>
+
+                                <!-- Log Buffer -->
+                                <div style="background: rgba(240,147,251,0.2); padding: 10px; border-radius: 6px;">
+                                    <strong style="color: #f093fb; font-size: 0.85rem;">Log Buffer</strong>
+                                    <div style="font-size: 0.75rem; margin-top: 5px;">
+                                        <div>📝 Redo Log</div>
+                                        <div>↩️ Undo Log</div>
+                                    </div>
+                                </div>
+
+                                <!-- Doublewrite -->
+                                <div style="background: rgba(78,205,196,0.2); padding: 10px; border-radius: 6px;">
+                                    <strong style="color: #4ecdc4; font-size: 0.85rem;">Doublewrite</strong>
+                                    <div style="font-size: 0.75rem; margin-top: 5px;">
+                                        <div>🛡️ 防止 partial write</div>
+                                        <div>📄 120 页备份</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 刷盘箭头 -->
+                            <div style="text-align: center; margin: 15px 0; color: #4facfe;">
+                                ⬇️ ⬇️ ⬇️ 磁盘 I/O ⬇️ ⬇️ ⬇️
+                            </div>
+
+                            <!-- 磁盘 -->
+                            <div style="background: rgba(79,172,254,0.2); padding: 15px; border-radius: 6px;">
+                                <strong style="color: #4facfe;">💾 磁盘文件</strong>
+                                <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; font-size: 0.75rem;">
+                                    <span style="background: #0f3460; padding: 5px 8px; border-radius: 4px;">ibdata1 (系统表空间)</span>
+                                    <span style="background: #0f3460; padding: 5px 8px; border-radius: 4px;">*.ibd (独立表空间)</span>
+                                    <span style="background: #0f3460; padding: 5px 8px; border-radius: 4px;">ib_logfile* (Redo Log)</span>
+                                    <span style="background: #0f3460; padding: 5px 8px; border-radius: 4px;">*.frm (表结构, MySQL 5.7)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 总结卡片 -->
+        <div class="info-cards">
+            <div class="info-card buffer">
+                <h3>🔵 Buffer Pool 中</h3>
+                <ul>
+                    <li>数据格式与磁盘一致（16KB Page）</li>
+                    <li>多状态标记：clean/dirty/new</li>
+                    <li>使用 LRU 链表管理淘汰</li>
+                    <li>支持多实例（innodb_buffer_pool_instances）</li>
+                </ul>
+            </div>
+            <div class="info-card memory">
+                <h3>🟣 内存数据结构</h3>
+                <ul>
+                    <li>Dictionary Cache：表结构缓存</li>
+                    <li>Adaptive Hash：热点数据哈希索引</li>
+                    <li>Lock Info：行锁信息</li>
+                    <li>Change Buffer：二级索引变更缓存</li>
+                </ul>
+            </div>
+            <div class="info-card disk">
+                <h3>🔷 磁盘存储格式</h3>
+                <ul>
+                    <li>Row Format：Compact/Dynamic/Compressed</li>
+                    <li>变长字段：使用长度前缀</li>
+                    <li>NULL 值：位图压缩存储</li>
+                    <li>B+树：非叶节点存索引，叶节点存数据</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 切换章节
+        function showSection(section) {
+            // 隐藏所有内容
+            document.querySelectorAll('.tab-content').forEach(el => {
+                el.classList.remove('active');
+            });
+            // 移除按钮激活状态
+            document.querySelectorAll('.layer-btn').forEach(el => {
+                el.classList.remove('active');
+            });
+
+            // 显示目标内容
+            document.getElementById('section-' + section).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        // 查询动画
+        function runQueryAnimation() {
+            const steps = [
+                { id: 'step1', text: '<span class="status-comment">// 1. 解析 SQL: SELECT * FROM users WHERE id = 5</span>' },
+                { id: 'step1', text: '<span class="status-key">MySQL ></span> <span class="status-value">解析完成</span>' },
+                { id: 'step1', text: '<span class="status-comment">// 2. 检查 Buffer Pool 中是否有 id=5 的数据页</span>' },
+                { id: 'step1', text: '<span class="status-key">Buffer Pool ></span> <span class="status-value">查找 Page... 未命中</span>' },
+                { id: 'step1', text: '<span class="status-comment">// 3. 通过 B+树 定位数据页位置</span>' },
+                { id: 'step1', text: '<span class="status-key">B+Tree ></span> <span class="status-value">定位到 Page#42，触发磁盘 I/O</span>' },
+                { id: 'step1', text: '<span class="status-comment">// 4. 从磁盘读取 16KB 数据页到内存</span>' },
+                { id: 'step1', text: '<span class="status-key">Disk ></span> <span class="status-value">读取完成，耗时 ~10ms</span>' },
+                { id: 'step1', text: '<span class="status-comment">// 5. 放入 Buffer Pool 并返回结果</span>' },
+                { id: 'step1', text: '<span class="status-key">Result ></span> <span class="status-value">{id:5, name:"王五", age:35}</span>' }
+            ];
+
+            let i = 0;
+            const panel = document.getElementById('animation-panel');
+
+            const interval = setInterval(() => {
+                if (i < steps.length) {
+                    const line = document.createElement('div');
+                    line.className = 'status-line visible';
+                    line.innerHTML = steps[i].text;
+                    panel.appendChild(line);
+                    panel.scrollTop = panel.scrollHeight;
+                    i++;
+                } else {
+                    clearInterval(interval);
+                }
+            }, 600);
+        }
+
+        // 写入动画
+        function runWriteAnimation() {
+            const steps = [
+                { text: '<span class="status-comment">// 1. INSERT INTO users VALUES (9, "钱七", 22)</span>' },
+                { text: '<span class="status-key">Transaction ></span> <span class="status-value">开启事务，TXN_ID=10086</span>' },
+                { text: '<span class="status-comment">// 2. 定位插入位置（可能分裂页）</span>' },
+                { text: '<span class="status-key">B+Tree ></span> <span class="status-value">定位 Page#3，需分裂</span>' },
+                { text: '<span class="status-comment">// 3. 写入 Buffer Pool（标记 dirty）</span>' },
+                { text: '<span class="status-key">Buffer Pool ></span> <span class="status-value">写入 Page#3_new，[dirty]</span>' },
+                { text: '<span class="status-comment">// 4. 记录 Undo Log（用于回滚）</span>' },
+                { text: '<span class="status-key">Undo Log ></span> <span class="status-value">写入完成，position=0x1A2B</span>' },
+                { text: '<span class="status-comment">// 5. 事务提交，写入 Redo Log</span>' },
+                { text: '<span class="status-key">Redo Log ></span> <span class="status-value">刷盘完成</span>' }
+            ];
+
+            let i = 0;
+            const panel = document.getElementById('animation-panel');
+
+            const interval = setInterval(() => {
+                if (i < steps.length) {
+                    const line = document.createElement('div');
+                    line.className = 'status-line visible';
+                    line.innerHTML = steps[i].text;
+                    panel.appendChild(line);
+                    panel.scrollTop = panel.scrollHeight;
+                    i++;
+                } else {
+                    clearInterval(interval);
+                }
+            }, 600);
+        }
+
+        function resetAnimation() {
+            const panel = document.getElementById('animation-panel');
+            panel.innerHTML = '<div class="status-line" id="step1"><span class="status-comment">// 点击按钮开始演示...</span></div>';
+        }
+
+        // 模拟读取
+        function simulateRead() {
+            const page = document.getElementById('bp-page-2');
+            page.classList.add('animating');
+            setTimeout(() => page.classList.remove('animating'), 500);
+
+            alert('✅ 命中 Buffer Pool！\n\n数据已在内存中，直接返回：\nid=3, name=李四, age=30, address=深圳南山区');
+        }
+
+        // 模拟写入
+        function simulateWrite() {
+            const page = document.getElementById('bp-page-1');
+            page.innerHTML = page.innerHTML.replace('dirty ✓', 'modified ✨');
+            page.classList.add('animating');
+            setTimeout(() => page.classList.remove('animating'), 500);
+
+            alert('📝 数据已修改并标记为 dirty\n\n稍后会被后台线程刷回磁盘');
+        }
+
+        // Change Buffer 演示
+        function runChangeBufferDemo() {
+            const steps = ['cb-step1', 'cb-step2', 'cb-step3', 'cb-step4'];
+            steps.forEach((id, i) => {
+                setTimeout(() => {
+                    document.getElementById(id).classList.add('visible');
+                }, i * 1200);
+            });
+        }
+
+        // SELECT 流程演示
+        function runSelectFlow() {
+            for (let i = 1; i <= 5; i++) {
+                setTimeout(() => {
+                    document.getElementById('select-step' + i).classList.add('visible');
+                }, (i - 1) * 1200);
+            }
+        }
+
+        // INSERT 流程演示
+        function runInsertFlow() {
+            for (let i = 1; i <= 6; i++) {
+                setTimeout(() => {
+                    document.getElementById('insert-step' + i).classList.add('visible');
+                }, (i - 1) * 1000);
+            }
+        }
+
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            // 可以添加一些初始化逻辑
+        });
+    </script>
+</body>
+</html>
