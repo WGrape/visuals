@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Redis 数据结构 · 底层源码解析</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --bg2: #161b22;
+      --bg3: #21262d;
+      --border: rgba(255,255,255,0.08);
+      --text: #e6edf3;
+      --text2: #8b949e;
+      --text3: #6e7681;
+      --sds: #f97583;
+      --list: #79c0ff;
+      --dict: #7ee787;
+      --set: #d2a8ff;
+      --skiplist: #ffa657;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Pro Display', 'Segoe UI', -apple-system, sans-serif;
+      line-height: 1.6;
+      padding: 24px 16px 80px;
+    }
+
+    .header { max-width: 1200px; margin: 0 auto 40px; text-align: center; }
+    h1 { font-size: 2rem; font-weight: 700; background: linear-gradient(90deg, #f97583, #79c0ff, #7ee787, #d2a8ff, #ffa657); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 8px; }
+    .subtitle { color: var(--text2); font-size: 0.95rem; }
+    .versions { display: flex; justify-content: center; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+    .version-tag { font-size: 0.72rem; padding: 4px 12px; border-radius: 20px; border: 1px solid; font-family: 'Fira Code', monospace; }
+
+    .nav { position: sticky; top: 0; z-index: 100; background: rgba(13,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 12px 16px; margin-bottom: 32px; }
+    .nav-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+    .nav-inner::-webkit-scrollbar { display: none; }
+    .nav-btn { flex-shrink: 0; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text2); font-size: 0.85rem; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+    .nav-btn:hover { border-color: var(--text3); color: var(--text); }
+    .nav-btn.active { background: var(--bg3); border-color: var(--text3); color: var(--text); }
+    .nav-btn.sds.active { border-color: var(--sds); color: var(--sds); }
+    .nav-btn.list.active { border-color: var(--list); color: var(--list); }
+    .nav-btn.dict.active { border-color: var(--dict); color: var(--dict); }
+    .nav-btn.set.active { border-color: var(--set); color: var(--set); }
+    .nav-btn.zset.active { border-color: var(--skiplist); color: var(--skiplist); }
+
+    .container { max-width: 1200px; margin: 0 auto; }
+    .section { display: none; animation: fadeIn 0.3s ease; }
+    .section.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 24px; overflow: hidden; }
+    .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .card-icon { font-size: 1.4rem; }
+    .card-title { font-size: 1.1rem; font-weight: 600; }
+    .card-subtitle { font-size: 0.8rem; color: var(--text2); margin-top: 2px; }
+    .card-body { padding: 20px; }
+
+    .code-block { background: var(--bg); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; overflow: hidden; margin-bottom: 16px; }
+    .code-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: rgba(255,255,255,0.03); border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .code-filename { font-family: 'Fira Code', monospace; font-size: 0.78rem; color: var(--text2); }
+    .code-lang { font-size: 0.65rem; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.08); color: var(--text3); }
+    .code-content { padding: 16px; overflow-x: auto; font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace; font-size: 0.8rem; line-height: 1.7; white-space: pre; }
+
+    .info-box { background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 16px 0; }
+    .info-box h4 { font-size: 0.85rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .info-box ul { list-style: none; padding-left: 0; }
+    .info-box li { font-size: 0.85rem; color: var(--text2); padding: 4px 0; display: flex; align-items: flex-start; gap: 8px; }
+    .info-box li::before { content: '→'; color: var(--text3); flex-shrink: 0; }
+
+    .memory-visual { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin: 20px 0; }
+    .memory-title { font-size: 0.85rem; color: var(--text2); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin: 16px 0; }
+    .grid-item { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .grid-item h4 { font-size: 0.9rem; margin-bottom: 8px; font-family: 'Fira Code', monospace; }
+
+    /* Syntax highlighting */
+    .keyword { color: #ff7b72; }
+    .type { color: #79c0ff; }
+    .string { color: #a5d6ff; }
+    .comment { color: #8b949e; font-style: italic; }
+    .number { color: #79c0ff; }
+    .macro { color: #7ee787; }
+    .function { color: #d2a8ff; }
+    .struct { color: #ffa657; }
+    .member { color: #a5d6ff; }
+
+    footer { text-align: center; color: var(--text3); font-size: 0.78rem; margin-top: 48px; padding-bottom: 24px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Redis 数据结构 · 底层源码解析</h1>
+  <p class="subtitle">基于 Redis 7.0 官方源码，深度剖析五大数据类型的底层实现</p>
+  <div class="versions">
+    <span class="version-tag" style="border-color: var(--sds); color: var(--sds);">SDS · String</span>
+    <span class="version-tag" style="border-color: var(--list); color: var(--list);">QuickList · List</span>
+    <span class="version-tag" style="border-color: var(--dict); color: var(--dict);">Dict · Hash</span>
+    <span class="version-tag" style="border-color: var(--set); color: var(--set);">IntSet · Set</span>
+    <span class="version-tag" style="border-color: var(--skiplist); color: var(--skiplist);">SkipList · ZSet</span>
+  </div>
+</div>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <button class="nav-btn sds active" onclick="showSection('sds')">SDS 字符串</button>
+    <button class="nav-btn list" onclick="showSection('list')">QuickList 列表</button>
+    <button class="nav-btn dict" onclick="showSection('dict')">Dict 哈希</button>
+    <button class="nav-btn set" onclick="showSection('set')">IntSet 集合</button>
+    <button class="nav-btn zset" onclick="showSection('zset')">SkipList 有序集合</button>
+  </div>
+</nav>
+
+<div class="container">
+
+  <!-- ═══ SDS Section ═══ -->
+  <section id="sds" class="section active">
+    <div class="card">
+      <div class="card-header" style="border-left: 4px solid var(--sds);">
+        <span class="card-icon">🔤</span>
+        <div>
+          <div class="card-title">SDS (Simple Dynamic String)</div>
+          <div class="card-subtitle">Redis 自研动态字符串，比 C 字符串更安全高效</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-box">
+          <h4>💡 核心设计思想</h4>
+          <ul>
+            <li><strong>len 字段</strong>：记录已用长度，O(1) 获取字符串长度</li>
+            <li><strong>alloc 字段</strong>：记录已分配空间，支持惰性释放</li>
+            <li><strong>flags 字段</strong>：低 3 位标识类型，高位存储短长度</li>
+            <li><strong>二进制安全</strong>：不依赖 \0 结尾，可存储任意字节</li>
+            <li><strong>空间预分配</strong>：小于 1MB 时翻倍扩容，大于 1MB 时每次 +1MB</li>
+          </ul>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/sds.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* SDS 5 种头部结构，通过 flags 区分类型 */</span>
+
+<span class="comment">/* sdshdr5: 低3位=类型, 高5位=长度(≤31)，未实际使用 */</span>
+<span class="keyword">struct</span> <span class="struct">__attribute__</span> ((<span class="macro">__packed__</span>)) <span class="type">sdshdr5</span> {
+    <span class="type">unsigned char</span> flags;
+    <span class="type">char</span> buf[];
+};
+
+<span class="comment">/* sdshdr8: 1字节存储len和alloc */</span>
+<span class="keyword">struct</span> <span class="struct">__attribute__</span> ((<span class="macro">__packed__</span>)) <span class="type">sdshdr8</span> {
+    <span class="type">uint8_t</span> <span class="member">len</span>;         <span class="comment">/* 已使用的字节数 */</span>
+    <span class="type">uint8_t</span> <span class="member">alloc</span>;       <span class="comment">/* 已分配的字节数(不含头部和\0) */</span>
+    <span class="type">unsigned char</span> flags;  <span class="comment">/* 低3位=SDS_TYPE_8 */</span>
+    <span class="type">char</span> buf[];
+};
+
+<span class="comment">/* sdshdr16: 2字节存储len和alloc */</span>
+<span class="keyword">struct</span> <span class="struct">__attribute__</span> ((<span class="macro">__packed__</span>)) <span class="type">sdshdr16</span> {
+    <span class="type">uint16_t</span> <span class="member">len</span>;
+    <span class="type">uint16_t</span> <span class="member">alloc</span>;
+    <span class="type">unsigned char</span> flags;
+    <span class="type">char</span> buf[];
+};
+
+<span class="comment">/* sdshdr32: 4字节存储len和alloc */</span>
+<span class="keyword">struct</span> <span class="struct">__attribute__</span> ((<span class="macro">__packed__</span>)) <span class="type">sdshdr32</span> {
+    <span class="type">uint32_t</span> <span class="member">len</span>;
+    <span class="type">uint32_t</span> <span class="member">alloc</span>;
+    <span class="type">unsigned char</span> flags;
+    <span class="type">char</span> buf[];
+};
+
+<span class="comment">/* sdshdr64: 8字节存储len和alloc (超长字符串) */</span>
+<span class="keyword">struct</span> <span class="struct">__attribute__</span> ((<span class="macro">__packed__</span>)) <span class="type">sdshdr64</span> {
+    <span class="type">uint64_t</span> <span class="member">len</span>;
+    <span class="type">uint64_t</span> <span class="member">alloc</span>;
+    <span class="type">unsigned char</span> flags;
+    <span class="type">char</span> buf[];
+};
+
+<span class="comment">/* 类型枚举常量 */</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_5</span>  <span class="number">0</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_8</span>  <span class="number">1</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_16</span> <span class="number">2</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_32</span> <span class="number">3</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_64</span> <span class="number">4</span>
+<span class="macro">#define</span> <span class="type">SDS_TYPE_MASK</span>  <span class="number">7</span>       <span class="comment">/* flags & 7 获取类型 */</span>
+<span class="macro">#define</span> <span class="type">SDS_MAX_PREALLOC</span> (<span class="number">1024</span>*<span class="number">1024</span>)  <span class="comment">/* 1MB */</span></div>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/sds.h</span><span class="code-lang">Inline Functions</span></div>
+          <div class="code-content"><span class="comment">/* 通过 s[-1] 获取 flags，再根据类型获取头部 */</span>
+<span class="macro">#define</span> <span class="type">SDS_HDR</span>(T, s)  ((<span class="keyword">struct</span> <span class="type">sdshdr##T</span> *)((s)-(sizeof(<span class="keyword">struct</span> <span class="type">sdshdr##T</span>))))
+
+<span class="comment">/* 获取字符串长度 - O(1) */</span>
+<span class="keyword">static inline</span> <span class="type">size_t</span> <span class="function">sdslen</span>(<span class="keyword">const</span> <span class="type">sds</span> s) {
+    <span class="type">unsigned char</span> flags = s[-<span class="number">1</span>];
+    <span class="keyword">switch</span>(flags & <span class="type">SDS_TYPE_MASK</span>) {
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_5</span>: <span class="keyword">return</span> <span class="type">SDS_TYPE_5_LEN</span>(flags);
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_8</span>: <span class="keyword">return</span> <span class="type">SDS_HDR</span>(<span class="number">8</span>,s)-><span class="member">len</span>;
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_16</span>: <span class="keyword">return</span> <span class="type">SDS_HDR</span>(<span class="number">16</span>,s)-><span class="member">len</span>;
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_32</span>: <span class="keyword">return</span> <span class="type">SDS_HDR</span>(<span class="number">32</span>,s)-><span class="member">len</span>;
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_64</span>: <span class="keyword">return</span> <span class="type">SDS_HDR</span>(<span class="number">64</span>,s)-><span class="member">len</span>;
+    }
+    <span class="keyword">return</span> <span class="number">0</span>;
+}
+
+<span class="comment">/* 获取可用空间 = alloc - len */</span>
+<span class="keyword">static inline</span> <span class="type">size_t</span> <span class="function">sdsavail</span>(<span class="keyword">const</span> <span class="type">sds</span> s) {
+    <span class="type">unsigned char</span> flags = s[-<span class="number">1</span>];
+    <span class="keyword">switch</span>(flags & <span class="type">SDS_TYPE_MASK</span>) {
+        <span class="keyword">case</span> <span class="type">SDS_TYPE_8</span>: {
+            <span class="type">SDS_HDR_VAR</span>(<span class="number">8</span>,s);
+            <span class="keyword">return</span> sh-><span class="member">alloc</span> - sh-><span class="member">len</span>;
+        }
+        <span class="comment">/* ... 其他类型类似 ... */</span>
+    }
+    <span class="keyword">return</span> <span class="number">0</span>;
+}</div>
+        </div>
+
+        <div class="memory-visual">
+          <div class="memory-title">📐 sdshdr8 内存布局示例（"Hello"）</div>
+          <div style="display:flex;flex-direction:column;gap:4px;font-family:'Fira Code',monospace;font-size:0.82rem;">
+            <div style="display:flex;gap:0;border-radius:6px;overflow:hidden;border:1px solid rgba(249,117,131,0.3);">
+              <div style="background:rgba(249,117,131,0.15);padding:10px 16px;text-align:center;min-width:80px;"><div style="color:var(--sds);font-size:0.7rem;">len</div><div>5</div></div>
+              <div style="background:rgba(249,117,131,0.1);padding:10px 16px;text-align:center;border-left:1px solid rgba(255,255,255,0.1);min-width:80px;"><div style="color:var(--sds);font-size:0.7rem;">alloc</div><div>8</div></div>
+              <div style="background:rgba(249,117,131,0.1);padding:10px 16px;text-align:center;border-left:1px solid rgba(255,255,255,0.1);min-width:80px;"><div style="color:var(--sds);font-size:0.7rem;">flags</div><div>00000001</div></div>
+              <div style="flex:1;padding:10px 16px;border-left:1px solid rgba(255,255,255,0.1);"><div style="color:var(--sds);font-size:0.7rem;">buf[]</div><div>'H' 'e' 'l' 'l' 'o' '\0'</div></div>
+            </div>
+            <div style="text-align:center;font-size:0.75rem;color:var(--text3);margin-top:8px;">
+              内存地址: ... | 05 | 08 | 01 | 48 | 65 | 6c | 6c | 6f | 00 | .. | ..
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="grid-item" style="border-color: rgba(249,117,131,0.3);">
+            <h4 style="color: var(--sds);">类型选择策略</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• len ≤ 31 → sdshdr5 (未使用)</li>
+              <li>• len ≤ 255 → sdshdr8</li>
+              <li>• len ≤ 65535 → sdshdr16</li>
+              <li>• len ≤ 2³² → sdshdr32</li>
+              <li>• len > 2³² → sdshdr64</li>
+            </ul>
+          </div>
+          <div class="grid-item" style="border-color: rgba(249,117,131,0.3);">
+            <h4 style="color: var(--sds);">空间预分配规则</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• alloc-len &lt; 1MB: 新空间 = len * 2</li>
+              <li>• alloc-len ≥ 1MB: 新空间 = len + 1MB</li>
+              <li>• 最大预分配: 1MB</li>
+              <li>• 惰性释放: 缩短时不立即回收</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ QuickList Section ═══ -->
+  <section id="list" class="section">
+    <div class="card">
+      <div class="card-header" style="border-left: 4px solid var(--list);">
+        <span class="card-icon">📋</span>
+        <div>
+          <div class="card-title">QuickList (List 列表)</div>
+          <div class="card-subtitle">双向链表 + 压缩列表的完美结合，Redis 7.0 起使用 Listpack</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-box">
+          <h4>💡 核心设计思想</h4>
+          <ul>
+            <li><strong>QuickList = 双向链表</strong>：每个节点是一个压缩列表（或 Listpack）</li>
+            <li><strong>结合两者优点</strong>：双端 O(1) 操作 + 内存紧凑存储</li>
+            <li><strong>Redis 7.0+</strong>：用 Listpack 替代 ziplist（消除级联更新问题）</li>
+            <li><strong>节点压缩</strong>：LZF 压缩算法进一步节省内存</li>
+          </ul>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/quicklist.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* QuickList 节点结构 - 每个节点是一个压缩列表 */</span>
+<span class="keyword">typedef struct</span> <span class="type">quicklistNode</span> {
+    <span class="type">quicklistNode</span> *prev;      <span class="comment">/* 前驱节点指针 */</span>
+    <span class="type">quicklistNode</span> *next;      <span class="comment">/* 后继节点指针 */</span>
+    <span class="type">unsigned char</span> *entry;     <span class="comment">/* 指向压缩列表/listpack 的指针 */</span>
+    <span class="type">size_t</span> sz;                 <span class="comment">/* 当前节点的字节数 */</span>
+    <span class="type">unsigned int</span> count : <span class="number">16</span>;   <span class="comment">/* 元素个数 (最多 65535) */</span>
+    <span class="type">unsigned int</span> encoding : <span class="number">2</span>;  <span class="comment">/* RAW=1, LZF=2 */</span>
+    <span class="type">unsigned int</span> container : <span class="number">2</span>; <span class="comment">/* PLAIN=1, PACKED=2 (Redis7用PACKED) */</span>
+    <span class="type">unsigned int</span> recompress : <span class="number">1</span>; <span class="comment">/* 是否需要重新解压 */</span>
+    <span class="type">unsigned int</span> attempted_compress : <span class="number">1</span>; <span class="comment">/* 是否尝试压缩 */</span>
+    <span class="type">unsigned int</span> extra : <span class="number">10</span>;   <span class="comment">/* 预留字段 */</span>
+} <span class="type">quicklistNode</span>;
+
+<span class="comment">/* 位字段详解: count(16) + encoding(2) + container(2) + recompress(1) + attempted(1) + extra(10) = 32bits */</span>
+
+<span class="comment">/* QuickList 主结构 - 整个链表的元信息 */</span>
+<span class="keyword">typedef struct</span> <span class="type">quicklist</span> {
+    <span class="type">quicklistNode</span> *head;      <span class="comment">/* 链表头节点 */</span>
+    <span class="type">quicklistNode</span> *tail;      <span class="comment">/* 链表尾节点 */</span>
+    <span class="type">unsigned long</span> count;       <span class="comment">/* 链表总元素个数 */</span>
+    <span class="type">unsigned long</span> len;        <span class="comment">/* 链表节点个数 */</span>
+    <span class="type">int</span> fill : <span class="number">16</span>;              <span class="comment">/* 每个节点的容量因子 (-1,-2,-4,-5 或 1-48) */</span>
+    <span class="type">unsigned int</span> bookmark_count : <span class="number">4</span>; <span class="comment">/* 书签数量 */</span>
+    <span class="type">quicklistBookmark</span> bookmarks[];
+} <span class="type">quicklist</span>;</div>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/listpack.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* Listpack (LP) 结构 - Redis 7.0 替代 ziplist */</span>
+<span class="comment">/*
+ * +----------+----------+--------+--------+--------+---------+--------+
+ * |total_bytes|  <len>   | entry1 | entry2 |  ...  |  entryN |  end   |
+ * |   (4B)   | (可变长)  |(可变)  |(可变)  |       |  (可变) | (1B)   |
+ * +----------+----------+--------+--------+-------+---------+--------+
+ */</span>
+
+<span class="comment">/* entry 编码格式 (每个元素): */</span>
+<span class="comment">/* +----------+-------------+----------------+ */</span>
+<span class="comment">/* | encoding |   length    |    content     | */</span>
+<span class="comment">/* |  (1-3B) |  (可变长)   |   (字节数组)   | */</span>
+<span class="comment">/* +----------+-------------+----------------+ */</span>
+<span class="comment">/*
+ * encoding 规则:
+ * |00xxxxxx|          -> 长度 ≤ 63 的小整数
+ * |01xxxxxx|xxxxxxxx|  -> 长度 ≤ 16383 的短字符串
+ * |10000000|xxxxxxxx|... -> 14位以上长度的字符串
+ * |11000000|          -> int16
+ * |11010000|          -> int32
+ * |11100000|          -> int64
+ * |11110000|          -> 24位有符号整数
+ * |11111110|          -> int8
+ * |11111111|          -> end of listpack (LP_END)
+ */</span>
+
+<span class="comment">/* fill 参数说明: */</span>
+<span class="comment">/*   -1: 每个节点最大 4KB  */</span>
+<span class="comment">/*   -2: 每个节点最大 8KB  (默认) */</span>
+<span class="comment">/*   -4: 每个节点最大 16KB */</span>
+<span class="comment">/*   -5: 每个节点最大 32KB */</span>
+<span class="comment">/*   正数: 最多存储的元素个数 (1-48) */</span></div>
+        </div>
+
+        <div class="memory-visual">
+          <div class="memory-title">📐 QuickList 内存结构图</div>
+          <div style="display:flex;flex-direction:column;gap:16px;">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:rgba(0,0,0,0.2);">
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+                <div style="background:rgba(121,192,255,0.1);padding:8px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--list);font-size:0.7rem;">head</div><div>0x1000</div>
+                </div>
+                <div style="background:rgba(121,192,255,0.1);padding:8px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--list);font-size:0.7rem;">tail</div><div>0x2000</div>
+                </div>
+                <div style="background:rgba(121,192,255,0.1);padding:8px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--list);font-size:0.7rem;">count</div><div>1000</div>
+                </div>
+                <div style="background:rgba(121,192,255,0.1);padding:8px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--list);font-size:0.7rem;">len</div><div>10</div>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;overflow-x:auto;">
+              <div style="flex-shrink:0;border:1px solid rgba(121,192,255,0.3);border-radius:8px;padding:12px;min-width:120px;font-size:0.78rem;">
+                <div style="text-align:center;color:var(--list);margin-bottom:6px;">Node 1</div>
+                <div style="color:var(--text3);">prev: NULL</div>
+                <div style="color:var(--text3);">next: →</div>
+                <div style="color:var(--list);">count: 127</div>
+                <div style="color:var(--text3);">sz: 4096</div>
+              </div>
+              <div style="color:var(--text3);font-size:1.3rem;">⇆</div>
+              <div style="flex-shrink:0;border:1px solid rgba(121,192,255,0.3);border-radius:8px;padding:12px;min-width:120px;font-size:0.78rem;">
+                <div style="text-align:center;color:var(--list);margin-bottom:6px;">Node 2</div>
+                <div style="color:var(--list);">count: 100</div>
+                <div style="color:var(--text3);">encoding: LZF</div>
+              </div>
+              <div style="color:var(--text3);font-size:1.3rem;">⇆</div>
+              <div style="flex-shrink:0;border:1px dashed rgba(121,192,255,0.2);border-radius:8px;padding:20px 16px;color:var(--text3);">... more nodes ...</div>
+              <div style="color:var(--text3);font-size:1.3rem;">⇆</div>
+              <div style="flex-shrink:0;border:1px solid rgba(121,192,255,0.3);border-radius:8px;padding:12px;min-width:120px;font-size:0.78rem;">
+                <div style="text-align:center;color:var(--list);margin-bottom:6px;">Node N</div>
+                <div style="color:var(--text3);">next: NULL</div>
+                <div style="color:var(--list);">count: 50</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="grid-item" style="border-color: rgba(121,192,255,0.3);">
+            <h4 style="color: var(--list);">ziplist vs listpack</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• ziplist: 存在级联更新问题</li>
+              <li>• listpack: 消除 backrawl 指针</li>
+              <li>• 每个 entry 只记录自己的长度</li>
+              <li>• 尾部有一个 end 标记 (0xFF)</li>
+            </ul>
+          </div>
+          <div class="grid-item" style="border-color: rgba(121,192,255,0.3);">
+            <h4 style="color: var(--list);">QuickList 优势</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• 两端操作 O(1): LPUSH/RPOP</li>
+              <li>• 中间存储紧凑省内存</li>
+              <li>• 可配置 fill 参数平衡取舍</li>
+              <li>• LZF 压缩进一步省空间</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Dict Section ═══ -->
+  <section id="dict" class="section">
+    <div class="card">
+      <div class="card-header" style="border-left: 4px solid var(--dict);">
+        <span class="card-icon">🗂️</span>
+        <div>
+          <div class="card-title">Dict (Hash 哈希)</div>
+          <div class="card-subtitle">渐进式 rehash 的哈希表实现，支持 O(1) 查找</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-box">
+          <h4>💡 核心设计思想</h4>
+          <ul>
+            <li><strong>两个哈希表</strong>：ht[0] 正常用，ht[1] 用于 rehash</li>
+            <li><strong>渐进式 rehash</strong>：分批迁移，避免一次性扩容卡顿</li>
+            <li><strong>链地址法</strong>：解决哈希冲突，插入表头</li>
+            <li><strong>负载因子</strong>：扩容 > 0.75，缩容 < 0.1</li>
+          </ul>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/dict.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* 哈希表节点 - 键值对 */</span>
+<span class="keyword">typedef struct</span> <span class="type">dictEntry</span> {
+    <span class="type">void</span> *key;              <span class="comment">/* 键 (void* 支持任意类型) */</span>
+    <span class="keyword">union</span> {
+        <span class="type">void</span> *val;           <span class="comment">/* 值 (void*) */</span>
+        <span class="type">uint64_t</span> u64;        <span class="comment">/* 或 64 位无符号整数 */</span>
+        <span class="type">int64_t</span> s64;         <span class="comment">• 或 64 位有符号整数 */</span>
+        <span class="type">double</span> d;           <span class="comment">/* 或 double */</span>
+    } <span class="member">v</span>;
+    <span class="keyword">struct</span> <span class="type">dictEntry</span> *next; <span class="comment">/* 下一个节点 (链地址法) */</span>
+    <span class="type">void</span> *metadata[];        <span class="comment">/* 外部字典使用的元数据 */</span>
+} <span class="type">dictEntry</span>;
+
+<span class="comment">/* 哈希表结构 - 桶数组 */</span>
+<span class="keyword">typedef struct</span> <span class="type">dictht</span> {
+    <span class="type">dictEntry</span> **table;      <span class="comment">/* 哈希桶数组 (二级指针) */</span>
+    <span class="type">unsigned long</span> size;      <span class="comment">/* 桶的数量 (必须是 2^n) */</span>
+    <span class="type">unsigned long</span> sizemask;  <span class="comment">/* size - 1, 用于 & 运算取模 */</span>
+    <span class="type">unsigned long</span> used;      <span class="comment">/* 已使用的节点数 */</span>
+} <span class="type">dictht</span>;</div>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/dict.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* 字典主结构 - 包含两个哈希表实现渐进式 rehash */</span>
+<span class="keyword">typedef struct</span> <span class="type">dict</span> {
+    <span class="type">dictType</span> *type;        <span class="comment">/* 类型特定函数 (hash/cmp/dup/free) */</span>
+    <span class="type">void</span> *privdata;       <span class="comment">/* 私有数据 (传给 type 的函数) */</span>
+    <span class="type">dictht</span> ht[<span class="number">2</span>];          <span class="comment">/* 两个哈希表: ht[0]=主表, ht[1]=rehash表 */</span>
+    <span class="type">long</span> rehashidx;       <span class="comment">/* rehash 进度: -1=未开始, >=0=正在迁移的桶索引 */</span>
+    <span class="type">int16_t</span> pauserehash;   <span class="comment">/* rehash 暂停标志: >0 暂停 */</span>
+    <span class="type">long</span> size;             <span class="comment">/* 哈希表总大小 */</span>
+    <span class="type">long</span> used;             <span class="comment">/* 已使用的节点总数 */</span>
+} <span class="type">dict</span>;
+
+<span class="comment">/* 类型特定操作 - 可自定义 hash 函数等 */</span>
+<span class="keyword">typedef struct</span> <span class="type">dictType</span> {
+    <span class="type">uint64_t</span> (*hashFunction)(<span class="keyword">const void</span> *key);           <span class="comment">/* 哈希函数 */</span>
+    <span class="type">void</span> *(*keyDup)(<span class="keyword">void</span> *privdata, <span class="keyword">const void</span> *key);  <span class="comment">/* 键复制 */</span>
+    <span class="type">void</span> *(*valDup)(<span class="keyword">void</span> *privdata, <span class="keyword">const void</span> *obj);   <span class="comment">/* 值复制 */</span>
+    <span class="type">int</span> (*keyCompare)(<span class="keyword">void</span> *privdata, <span class="keyword">const void</span> *key1, <span class="keyword">const void</span> *key2); <span class="comment">/* 键比较 */</span>
+    <span class="type">void</span> (*keyDestructor)(<span class="keyword">void</span> *privdata, <span class="keyword">void</span> *key);     <span class="comment">/* 键析构 */</span>
+    <span class="type">void</span> (*valDestructor)(<span class="keyword">void</span> *privdata, <span class="keyword">void</span> *obj);      <span class="comment">/* 值析构 */</span>
+} <span class="type">dictType</span>;</div>
+        </div>
+
+        <div class="memory-visual">
+          <div class="memory-title">📐 Dict 渐进式 Rehash 内存结构图</div>
+          <div style="display:flex;flex-direction:column;gap:16px;">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:rgba(0,0,0,0.2);">
+              <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+                <div style="background:rgba(126,231,135,0.1);padding:8px 12px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--dict);font-size:0.7rem;">rehashidx</div><div>3</div>
+                </div>
+                <div style="background:rgba(126,231,135,0.1);padding:8px 12px;border-radius:4px;text-align:center;">
+                  <div style="color:var(--dict);font-size:0.7rem;">pauserehash</div><div>0</div>
+                </div>
+                <div style="color:var(--text3);font-size:0.8rem;">→ 正在迁移第 3 个桶</div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+              <div style="border:1px solid rgba(126,231,135,0.3);border-radius:8px;padding:12px;">
+                <div style="text-align:center;color:var(--dict);margin-bottom:10px;font-size:0.8rem;">ht[0] (主表)</div>
+                <div style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;">
+                  <div style="background:rgba(126,231,135,0.15);padding:6px 10px;border-radius:4px;">[0] ✓ 已迁移</div>
+                  <div style="background:rgba(126,231,135,0.15);padding:6px 10px;border-radius:4px;">[1] ✓ 已迁移</div>
+                  <div style="background:rgba(126,231,135,0.15);padding:6px 10px;border-radius:4px;">[2] ✓ 已迁移</div>
+                  <div style="border:1px dashed rgba(255,165,0,0.4);padding:6px 10px;border-radius:4px;color:#ffa657;">[3] 迁移中...</div>
+                  <div style="padding:6px 10px;color:var(--text3);">[4] 未迁移</div>
+                </div>
+              </div>
+              <div style="border:1px solid rgba(126,231,135,0.3);border-radius:8px;padding:12px;">
+                <div style="text-align:center;color:var(--dict);margin-bottom:10px;font-size:0.8rem;">ht[1] (rehash表)</div>
+                <div style="display:flex;flex-direction:column;gap:4px;font-size:0.8rem;">
+                  <div style="padding:6px 10px;color:var(--text3);">[0] 空</div>
+                  <div style="padding:6px 10px;color:var(--text3);">[1] 空</div>
+                  <div style="padding:6px 10px;color:var(--text3);">[2] 空</div>
+                  <div style="background:rgba(126,231,135,0.2);padding:6px 10px;border-radius:4px;color:var(--dict);">[3] 接收中</div>
+                  <div style="background:rgba(126,231,135,0.1);padding:6px 10px;border-radius:4px;">[4] new capacity</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="grid-item" style="border-color: rgba(126,231,135,0.3);">
+            <h4 style="color: var(--dict);">扩容与缩容</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• 扩容因子: used/size > 0.75</li>
+              <li>• 缩容因子: used/size < 0.1</li>
+              <li>• 新容量: 第一个 ≥ used*2 的 2^n</li>
+              <li>• 缩容: 第一个 ≥ used 的 2^n</li>
+            </ul>
+          </div>
+          <div class="grid-item" style="border-color: rgba(126,231,135,0.3);">
+            <h4 style="color: var(--dict);">Rehash 过程</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>1. rehashidx = 0 开始</li>
+              <li>2. 每次操作迁移一个桶</li>
+              <li>3. rehashidx++</li>
+              <li>4. 完成时 ht[0] = ht[1]，重置</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ IntSet Section ═══ -->
+  <section id="set" class="section">
+    <div class="card">
+      <div class="card-header" style="border-left: 4px solid var(--set);">
+        <span class="card-icon">🎯</span>
+        <div>
+          <div class="card-title">IntSet (Set 集合)</div>
+          <div class="card-subtitle">整数集合优化，小规模纯整数场景的内存高效存储</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-box">
+          <h4>💡 核心设计思想</h4>
+          <ul>
+            <li><strong>纯整数优化</strong>：只存储整数时使用紧凑二进制表示</li>
+            <li><strong>升级机制</strong>：当需要更大的整数编码时，自动升级</li>
+            <li><strong>降级不支持</strong>：一旦升级，只能升级，不会降级</li>
+            <li><strong>二分查找</strong>：内容有序，支持 O(log N) 查找</li>
+          </ul>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/intset.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* 整数集合结构 */</span>
+<span class="keyword">typedef struct</span> <span class="type">intset</span> {
+    <span class="type">uint32_t</span> encoding;    <span class="comment">/* INTSET_ENC_INT16/INT32/INT64 */</span>
+    <span class="type">uint32_t</span> length;      <span class="comment">/* 元素个数 */</span>
+    <span class="type">int8_t</span> contents[];    <span class="comment">/* 实际存储柔性数组, 类型由 encoding 决定 */</span>
+} <span class="type">intset</span>;
+
+<span class="comment">/* 编码方式 */</span>
+<span class="macro">#define</span> <span class="type">INTSET_ENC_INT16</span> (<span class="keyword">sizeof</span>(<span class="type">int16_t</span>))   <span class="comment">/* 2 字节, 范围: -32768~32767 */</span>
+<span class="macro">#define</span> <span class="type">INTSET_ENC_INT32</span> (<span class="keyword">sizeof</span>(<span class="type">int32_t</span>))   <span class="comment">/* 4 字节, 范围: -2^31~2^31-1 */</span>
+<span class="macro">#define</span> <span class="type">INTSET_ENC_INT64</span> (<span class="keyword">sizeof</span>(<span class="type">int64_t</span>))   <span class="comment">/* 8 字节, 范围: -2^63~2^63-1 */</span>
+
+<span class="comment">/* contents 实际类型由 encoding 决定, 不是 int8_t! */</span>
+<span class="comment">/* 这只是内存对齐的占位符, 实际存储可能为 int16_t/int32_t/int64_t */</span></div>
+        </div>
+
+        <div class="memory-visual">
+          <div class="memory-title">📐 IntSet 内存布局（[1, 256, 65535]）</div>
+          <div style="font-family:'Fira Code',monospace;font-size:0.82rem;">
+            <div style="background:rgba(0,0,0,0.3);padding:16px;border-radius:8px;margin-bottom:12px;">
+              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;text-align:center;">
+                <div style="background:rgba(210,168,255,0.1);padding:8px;border-radius:4px;">
+                  <div style="color:var(--set);font-size:0.7rem;">encoding</div><div>4 (INT32)</div>
+                </div>
+                <div style="background:rgba(210,168,255,0.1);padding:8px;border-radius:4px;">
+                  <div style="color:var(--set);font-size:0.7rem;">length</div><div>3</div>
+                </div>
+                <div style="background:rgba(210,168,255,0.1);padding:8px;border-radius:4px;">
+                  <div style="color:var(--set);font-size:0.7rem;">[0]</div><div>1</div>
+                </div>
+                <div style="background:rgba(210,168,255,0.1);padding:8px;border-radius:4px;">
+                  <div style="color:var(--set);font-size:0.7rem;">[1]</div><div>256</div>
+                </div>
+                <div style="background:rgba(210,168,255,0.1);padding:8px;border-radius:4px;">
+                  <div style="color:var(--set);font-size:0.7rem;">[2]</div><div>65535</div>
+                </div>
+              </div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:6px;padding:12px;word-break:break-all;">
+              <div style="color:var(--text3);font-size:0.75rem;margin-bottom:8px;">十六进制视图:</div>
+              <span style="color:#ffa657;">04 00 00 00</span>  <span style="color:#79c0ff;">03 00 00 00</span>  <span style="color:#7ee787;">01 00 00 00</span>  <span style="color:#7ee787;">00 01 00 00</span>  <span style="color:#7ee787;">FF FF 00 00</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-box" style="border-color: rgba(210,168,255,0.3);">
+          <h4 style="color: var(--set);">🔄 升级过程示例</h4>
+          <div style="background:rgba(0,0,0,0.2);padding:12px;border-radius:6px;font-family:'Fira Code',monospace;font-size:0.82rem;margin-top:8px;">
+            <div style="color:var(--text3);">初始: [1, 200] → encoding=INT16 (2字节/元素)</div>
+            <div style="color:var(--text3);margin-top:4px;">↓ 添加 50000</div>
+            <div style="color:#ffa657;">↑ 50000 > 32767, 需要升级到 INT32!</div>
+            <div style="color:var(--text3);margin-top:4px;">步骤: 分配新内存 → 重新编码所有元素 → 插入新元素</div>
+            <div style="color:var(--dict);margin-top:4px;">结果: [1, 200, 50000] → encoding=INT32 (4字节/元素)</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="grid-item" style="border-color: rgba(210,168,255,0.3);">
+            <h4 style="color: var(--set);">编码升级条件</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• 当前编码无法容纳新元素</li>
+              <li>• 新元素超出当前编码范围</li>
+              <li>• 只在添加元素时触发</li>
+              <li>• 删除元素不会触发降级</li>
+            </ul>
+          </div>
+          <div class="grid-item" style="border-color: rgba(210,168,255,0.3);">
+            <h4 style="color: var(--set);">IntSet vs Hashtable</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• IntSet: 全整数, ≤512 个</li>
+              <li>• Hashtable: 超出阈值时转换</li>
+              <li>• IntSet 更节省内存</li>
+              <li>• Hashtable 查找 O(1)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ SkipList Section ═══ -->
+  <section id="zset" class="section">
+    <div class="card">
+      <div class="card-header" style="border-left: 4px solid var(--skiplist);">
+        <span class="card-icon">🏆</span>
+        <div>
+          <div class="card-title">SkipList + Dict (ZSet 有序集合)</div>
+          <div class="card-subtitle">Redis 最精妙的数据结构，同时实现高效排序和 O(1) 查找</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-box">
+          <h4>💡 核心设计思想</h4>
+          <ul>
+            <li><strong>双重索引</strong>：SkipList 保证排序，Dict 保证 O(1) 查找</li>
+            <li><strong>跳表层数</strong>：每层元素以 p=0.25 概率晋升，默认最大 32 层</li>
+            <li><strong>score 是 double</strong>：64 位浮点数，支持相等时的字典序比较</li>
+            <li><strong>Dict 和 SkipList 共享节点</strong>：不浪费内存</li>
+          </ul>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/server.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* 跳表节点结构 */</span>
+<span class="keyword">typedef struct</span> <span class="type">zskiplistNode</span> {
+    <span class="type">sds</span> ele;                <span class="comment">/* 成员 (SDS 字符串) */</span>
+    <span class="type">double</span> score;           <span class="comment">/* 分值 (用于排序) */</span>
+    <span class="keyword">struct</span> <span class="type">zskiplistNode</span> *backward; <span class="comment">/* 反向指针, 只有 L1 有 */</span>
+    <span class="keyword">struct</span> <span class="type">zskiplistLevel</span> {
+        <span class="type">zskiplistNode</span> *forward; <span class="comment">/* 前向指针 */</span>
+        <span class="type">uint32_t</span> span;        <span class="comment">/* 到下一个节点的跨度 (用于 ZRANK) */</span>
+    } <span class="member">level</span>[];                <span class="comment">/* 柔性数组, 层信息 (动态长度) */</span>
+} <span class="type">zskiplistNode</span>;
+
+<span class="comment">/* 跳表最大层数: 32 (足够索引 2^32 个元素) */</span>
+<span class="macro">#define</span> <span class="type">ZSKIPLIST_MAXLEVEL</span> <span class="number">32</span>
+
+<span class="comment">/* 晋升概率: 1/4, 即每 4 个元素有 1 个晋升到上一层 */</span>
+<span class="macro">#define</span> <span class="type">ZSKIPLIST_P</span> <span class="number">0.25</span></div>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span class="code-filename">📄 src/server.h</span><span class="code-lang">C Header</span></div>
+          <div class="code-content"><span class="comment">/* 跳表主结构 */</span>
+<span class="keyword">typedef struct</span> <span class="type">zskiplist</span> {
+    <span class="type">zskiplistNode</span> *header; <span class="comment">/* 头节点 (不存储数据, 所有层从头开始) */</span>
+    <span class="type">zskiplistNode</span> *tail;   <span class="comment">/* 尾节点 */</span>
+    <span class="type">unsigned long</span> length;  <span class="comment">/* 节点个数 (不含头节点) */</span>
+    <span class="type">int</span> level;             <span class="comment">/* 当前最大层数 (不含头节点) */</span>
+} <span class="type">zskiplist</span>;
+
+<span class="comment">/* ZSet 主结构 - 同时维护跳表和字典 */</span>
+<span class="keyword">typedef struct</span> <span class="type">zset</span> {
+    <span class="type">dict</span> *dict;            <span class="comment">/* 字典: member → score, O(1) 查找 */</span>
+    <span class="type">zskiplist</span> *zsl;       <span class="comment">/* 跳表: 按 score 排序, 范围查询 */</span>
+} <span class="type">zset</span>;</div>
+        </div>
+
+        <div class="memory-visual">
+          <div class="memory-title">📐 SkipList 结构图</div>
+          <div style="font-family:'Fira Code',monospace;font-size:0.8rem;overflow-x:auto;">
+            <div style="min-width:400px;padding:8px;">
+              <!-- Header row -->
+              <div style="display:flex;gap:0;margin-bottom:8px;">
+                <div style="width:60px;color:var(--text3);font-size:0.7rem;text-align:right;padding-right:8px;">层</div>
+                <div style="display:flex;gap:4px;flex:1;">
+                  <div style="width:50px;text-align:center;color:var(--skiplist);">HEAD</div>
+                  <div style="width:50px;text-align:center;color:var(--text3);">→</div>
+                  <div style="width:50px;text-align:center;color:var(--skiplist);">L4</div>
+                  <div style="width:50px;text-align:center;color:var(--text3);">→</div>
+                  <div style="width:50px;text-align:center;color:var(--skiplist);">L3</div>
+                  <div style="width:50px;text-align:center;color:var(--text3);">→</div>
+                  <div style="width:50px;text-align:center;color:var(--skiplist);">...</div>
+                  <div style="width:50px;text-align:center;color:var(--text3);">→</div>
+                  <div style="width:50px;text-align:center;color:var(--text3);">NIL</div>
+                </div>
+              </div>
+              <!-- Level 3 -->
+              <div style="display:flex;gap:0;margin-bottom:6px;">
+                <div style="width:60px;color:var(--text3);font-size:0.7rem;text-align:right;padding-right:8px;">L3</div>
+                <div style="display:flex;gap:4px;flex:1;">
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);">HEAD</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=100</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;border:1px dashed rgba(255,166,87,0.2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text3);">nil</div>
+                </div>
+              </div>
+              <!-- Level 2 -->
+              <div style="display:flex;gap:0;margin-bottom:6px;">
+                <div style="width:60px;color:var(--text3);font-size:0.7rem;text-align:right;padding-right:8px;">L2</div>
+                <div style="display:flex;gap:4px;flex:1;">
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);">HEAD</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=50</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=100</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;border:1px dashed rgba(255,166,87,0.2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text3);">nil</div>
+                </div>
+              </div>
+              <!-- Level 1 -->
+              <div style="display:flex;gap:0;">
+                <div style="width:60px;color:var(--text3);font-size:0.7rem;text-align:right;padding-right:8px;">L1</div>
+                <div style="display:flex;gap:4px;flex:1;">
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);">HEAD</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=10</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=50</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;background:rgba(255,166,87,0.15);border:1px solid rgba(255,166,87,0.3);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--skiplist);font-size:0.75rem;">score=80</div>
+                  <div style="width:50px;display:flex;align-items:center;justify-content:center;color:var(--text3);">→</div>
+                  <div style="width:50px;height:30px;border:1px dashed rgba(255,166,87,0.2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text3);">nil</div>
+                </div>
+              </div>
+              <div style="margin-top:12px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;color:var(--text3);font-size:0.78rem;line-height:1.8;">
+                查找 score=80: <strong style="color:var(--skiplist);">L3</strong> HEAD → 跳过 → L3 nil → <strong style="color:var(--skiplist);">L2</strong> HEAD → 跳过50 → L2 100 → <strong style="color:var(--skiplist);">L1</strong> HEAD → 10 → 50 → <span style="color:var(--dict);">找到80!</span><br>
+                期望复杂度 <strong style="color:var(--dict);">O(log N)</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="grid-item" style="border-color: rgba(255,166,87,0.3);">
+            <h4 style="color: var(--skiplist);">为什么用跳表？</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• 比平衡树实现简单</li>
+              <li>• 范围查询更高效 (ZRANGEBYSCORE)</li>
+              <li>• 插入/删除只需修改局部指针</li>
+              <li>• 内存占用可接受 (约 1.33 层/节点)</li>
+            </ul>
+          </div>
+          <div class="grid-item" style="border-color: rgba(255,166,87,0.3);">
+            <h4 style="color: var(--skiplist);">Dict + SkipList 双索引</h4>
+            <ul style="list-style:none;padding:0;font-size:0.82rem;color:var(--text2);">
+              <li>• Dict: ZSCORE 查找 O(1)</li>
+              <li>• SkipList: 排序/范围 O(log N)</li>
+              <li>• 共享 member 指针，节省内存</li>
+              <li>• score 只在 SkipList 中</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  function showSection(id) {
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    document.querySelector('.nav-btn.' + id).classList.add('active');
+  }
+</script>
+
+</body>
+</html>
