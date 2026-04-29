@@ -1,0 +1,1052 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>消息队列消息积压问题详解</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 40px;
+            font-size: 1.1rem;
+        }
+
+        .section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            color: #00d9ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: linear-gradient(180deg, #00d9ff, #00ff88);
+            border-radius: 2px;
+        }
+
+        /* 积压模拟区域 */
+        .simulation-area {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .queue-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 20px;
+            min-height: 300px;
+        }
+
+        .queue-label {
+            font-size: 0.9rem;
+            color: #888;
+            margin-bottom: 10px;
+        }
+
+        .queue-visual {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            min-height: 60px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+
+        .message {
+            width: 30px;
+            height: 30px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            animation: pulse 2s infinite;
+        }
+
+        .message.normal {
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
+            color: #000;
+        }
+
+        .message.warning {
+            background: linear-gradient(135deg, #ffaa00, #ff8800);
+            color: #000;
+        }
+
+        .message.danger {
+            background: linear-gradient(135deg, #ff4757, #ff3344);
+            color: #fff;
+            animation: shake 0.5s infinite;
+        }
+
+        .message.new {
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            75% { transform: translateX(2px); }
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(-20px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .stat-box {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+
+        .stat-value.warning { color: #ffaa00; }
+        .stat-value.danger { color: #ff4757; }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        /* 控制面板 */
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 20px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 15px;
+        }
+
+        .control-btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .control-btn.primary {
+            background: linear-gradient(135deg, #00d9ff, #0099cc);
+            color: #000;
+        }
+
+        .control-btn.danger {
+            background: linear-gradient(135deg, #ff4757, #ff3344);
+            color: #fff;
+        }
+
+        .control-btn.success {
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
+            color: #000;
+        }
+
+        .control-btn.warning {
+            background: linear-gradient(135deg, #ffaa00, #ff8800);
+            color: #000;
+        }
+
+        .control-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 217, 255, 0.3);
+        }
+
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* 原因卡片 */
+        .causes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .cause-card {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 25px;
+            border-left: 4px solid;
+            transition: all 0.3s ease;
+        }
+
+        .cause-card:hover {
+            transform: translateX(5px);
+        }
+
+        .cause-card.producer { border-color: #ff4757; }
+        .cause-card.consumer { border-color: #ffaa00; }
+        .cause-card.system { border-color: #00d9ff; }
+
+        .cause-icon {
+            font-size: 2.5rem;
+            margin-bottom: 15px;
+        }
+
+        .cause-title {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .cause-desc {
+            color: #aaa;
+            font-size: 0.95rem;
+            margin-bottom: 15px;
+        }
+
+        .cause-solutions {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .cause-solutions h4 {
+            font-size: 0.9rem;
+            color: #00ff88;
+            margin-bottom: 10px;
+        }
+
+        .cause-solutions ul {
+            list-style: none;
+            font-size: 0.85rem;
+            color: #ccc;
+        }
+
+        .cause-solutions li {
+            padding: 5px 0;
+            padding-left: 15px;
+            position: relative;
+        }
+
+        .cause-solutions li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: #00d9ff;
+        }
+
+        /* 解决方案 */
+        .solutions-timeline {
+            margin-top: 20px;
+        }
+
+        .timeline-item {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 25px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 15px;
+            position: relative;
+        }
+
+        .timeline-number {
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(135deg, #00d9ff, #00ff88);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #000;
+            flex-shrink: 0;
+        }
+
+        .timeline-content {
+            flex: 1;
+        }
+
+        .timeline-title {
+            font-size: 1.2rem;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .timeline-desc {
+            color: #aaa;
+            margin-bottom: 12px;
+        }
+
+        .timeline-code {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px;
+            border-radius: 10px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .code-keyword { color: #ff79c6; }
+        .code-string { color: #f1fa8c; }
+        .code-comment { color: #6272a4; }
+        .code-function { color: #50fa7b; }
+
+        /* 监控指标 */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .metric-card {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+        }
+
+        .metric-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+
+        .metric-name {
+            font-size: 1.1rem;
+            color: #fff;
+            margin-bottom: 10px;
+        }
+
+        .metric-formula {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 8px;
+            font-family: monospace;
+            color: #00d9ff;
+            margin-bottom: 10px;
+        }
+
+        .metric-desc {
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        .metric-status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            margin-top: 10px;
+        }
+
+        .metric-status.healthy { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .metric-status.warning { background: rgba(255, 170, 0, 0.2); color: #ffaa00; }
+        .metric-status.danger { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+
+        /* 流程图 */
+        .flow-diagram {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 30px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 15px;
+            margin-top: 20px;
+        }
+
+        .flow-box {
+            padding: 15px 25px;
+            border-radius: 10px;
+            font-weight: 500;
+            text-align: center;
+            min-width: 120px;
+        }
+
+        .flow-producer { background: linear-gradient(135deg, #ff4757, #ff3344); }
+        .flow-queue { background: linear-gradient(135deg, #00d9ff, #0099cc); color: #000; }
+        .flow-consumer { background: linear-gradient(135deg, #ffaa00, #ff8800); color: #000; }
+        .flow-problem { background: linear-gradient(135deg, #9b59b6, #8e44ad); }
+        .flow-arrow {
+            font-size: 1.5rem;
+            color: #888;
+        }
+
+        /* 最佳实践 */
+        .practices-list {
+            margin-top: 20px;
+        }
+
+        .practice-item {
+            display: flex;
+            gap: 15px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            margin-bottom: 15px;
+        }
+
+        .practice-check {
+            width: 30px;
+            height: 30px;
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            color: #000;
+            font-weight: bold;
+        }
+
+        .practice-content h4 {
+            color: #fff;
+            margin-bottom: 5px;
+        }
+
+        .practice-content p {
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .simulation-area {
+                grid-template-columns: 1fr;
+            }
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            h1 {
+                font-size: 1.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>消息队列消息积压问题详解</h1>
+        <p class="subtitle">交互式可视化 · RabbitMQ / Kafka / Redis Stream</p>
+
+        <!-- 什么是消息积压 -->
+        <div class="section">
+            <h2 class="section-title">什么是消息积压？</h2>
+            
+            <div class="flow-diagram">
+                <div class="flow-box flow-producer">生产者<br><small>高速发送</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box flow-queue">消息队列<br><small>缓冲区</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box flow-consumer">消费者<br><small>处理速度</small></div>
+                <span class="flow-arrow">=</span>
+                <div class="flow-box flow-problem">积压！<br><small>生产 > 消费</small></div>
+            </div>
+
+            <p style="margin-top: 20px; color: #ccc; text-align: center;">
+                <strong style="color: #ff4757;">消息积压</strong> 是指消息在队列中等待处理的数量持续增长，
+                超过系统的正常处理能力，导致消息堆积、延迟增加、服务响应变慢。
+            </p>
+        </div>
+
+        <!-- 实时模拟 -->
+        <div class="section">
+            <h2 class="section-title">实时模拟</h2>
+            <p style="color: #888; margin-bottom: 15px;">调整生产速度和消费速度，观察消息积压的变化：</p>
+            
+            <div class="simulation-area">
+                <div class="queue-container">
+                    <div class="queue-label">消息队列积压状态</div>
+                    <div class="queue-visual" id="queueVisual"></div>
+                    <div class="stats">
+                        <div class="stat-box">
+                            <div class="stat-value" id="queueCount">0</div>
+                            <div class="stat-label">队列消息数</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="produceRate">10</div>
+                            <div class="stat-label">生产速度/s</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="consumeRate">10</div>
+                            <div class="stat-label">消费速度/s</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="lagRatio">0%</div>
+                            <div class="stat-label">积压率</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="queue-container">
+                    <div class="queue-label">健康度指标</div>
+                    <div id="healthMetrics" style="padding: 20px;">
+                        <div style="margin-bottom: 20px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                <span>队列健康度</span>
+                                <span id="healthPercent">100%</span>
+                            </div>
+                            <div style="background: rgba(0,0,0,0.3); border-radius: 10px; height: 20px; overflow: hidden;">
+                                <div id="healthBar" style="height: 100%; width: 100%; background: linear-gradient(90deg, #00ff88, #00cc6a); transition: all 0.3s;"></div>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 20px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                <span>消费延迟</span>
+                                <span id="latencyValue">0ms</span>
+                            </div>
+                            <div style="background: rgba(0,0,0,0.3); border-radius: 10px; height: 20px; overflow: hidden;">
+                                <div id="latencyBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #00d9ff, #0099cc); transition: all 0.3s;"></div>
+                            </div>
+                        </div>
+                        <div>
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                <span>CPU 使用率</span>
+                                <span id="cpuValue">0%</span>
+                            </div>
+                            <div style="background: rgba(0,0,0,0.3); border-radius: 10px; height: 20px; overflow: hidden;">
+                                <div id="cpuBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #ffaa00, #ff8800); transition: all 0.3s;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div style="flex: 1; min-width: 200px;">
+                    <label style="display: block; margin-bottom: 5px; color: #888;">生产速度: <span id="produceSliderVal">10</span>/s</label>
+                    <input type="range" id="produceSlider" min="1" max="50" value="10" style="width: 100%;" oninput="updateProduceRate(this.value)">
+                </div>
+                <div style="flex: 1; min-width: 200px;">
+                    <label style="display: block; margin-bottom: 5px; color: #888;">消费速度: <span id="consumeSliderVal">10</span>/s</label>
+                    <input type="range" id="consumeSlider" min="1" max="50" value="10" style="width: 100%;" oninput="updateConsumeRate(this.value)">
+                </div>
+                <button class="control-btn danger" onclick="injectBurst()">💥 模拟突发流量</button>
+                <button class="control-btn success" onclick="addConsumer()">➕ 增加消费者</button>
+                <button class="control-btn warning" onclick="reset()">🔄 重置</button>
+            </div>
+        </div>
+
+        <!-- 积压原因 -->
+        <div class="section">
+            <h2 class="section-title">消息积压的三大原因</h2>
+            
+            <div class="causes-grid">
+                <div class="cause-card producer">
+                    <div class="cause-icon">📤</div>
+                    <h3 class="cause-title">生产者过快</h3>
+                    <p class="cause-desc">生产者发送消息的速度远超消费者处理能力</p>
+                    <div class="cause-solutions">
+                        <h4>解决方案</h4>
+                        <ul>
+                            <li>启用生产者限流</li>
+                            <li>批量发送消息</li>
+                            <li>消息压缩传输</li>
+                            <li>异步发送 + 确认机制</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="cause-card consumer">
+                    <div class="cause-icon">📥</div>
+                    <h3 class="cause-title">消费者过慢</h3>
+                    <p class="cause-desc">消费者处理能力不足，无法及时消费积压消息</p>
+                    <div class="cause-solutions">
+                        <h4>解决方案</h4>
+                        <ul>
+                            <li>增加消费者实例</li>
+                            <li>优化消费逻辑</li>
+                            <li>多线程/并发消费</li>
+                            <li>预取+批量处理</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="cause-card system">
+                    <div class="cause-icon">⚙️</div>
+                    <h3 class="cause-title">系统瓶颈</h3>
+                    <p class="cause-desc">网络、磁盘、数据库等基础设施限制</p>
+                    <div class="cause-solutions">
+                        <h4>解决方案</h4>
+                        <ul>
+                            <li>水平扩展集群</li>
+                            <li>优化存储引擎</li>
+                            <li>使用高性能磁盘</li>
+                            <li>数据库读写分离</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 核心处理策略 -->
+        <div class="section">
+            <h2 class="section-title">核心处理策略</h2>
+            
+            <div class="solutions-timeline">
+                <div class="timeline-item">
+                    <div class="timeline-number">1</div>
+                    <div class="timeline-content">
+                        <h3 class="timeline-title">紧急扩容消费者</h3>
+                        <p class="timeline-desc">立即增加消费者实例数量，加快消息处理速度</p>
+                        <div class="timeline-code">
+<span class="code-comment">// RabbitMQ - 增加消费者</span>
+<span class="code-keyword">channel</span>.basicQos(<span class="code-string">10</span>); <span class="code-comment">// 每次预取10条</span>
+channel.basicConsume(queue, <span class="code-keyword">false</span>, 
+    <span class="code-keyword">new</span> <span class="code-function">DefaultConsumer</span>(channel) {
+    <span class="code-keyword">public void</span> <span class="code-function">handleDelivery</span>(...) {
+        <span class="code-comment">// 处理消息</span>
+        process(msg);
+        channel.basicAck(deliveryTag, <span class="code-keyword">false</span>);
+    }
+});
+
+<span class="code-comment">// Kafka - 增加分区和消费者</span>
+<span class="code-comment">// 消费者组自动 rebalance</span>
+properties.setProperty(<span class="code-string">"group.id"</span>, <span class="code-string">"fast-consumer-group"</span>);
+</div>
+                    </div>
+                </div>
+
+                <div class="timeline-item">
+                    <div class="timeline-number">2</div>
+                    <div class="timeline-content">
+                        <h3 class="timeline-title">消息分级处理</h3>
+                        <p class="timeline-desc">将消息分为紧急/普通/批量三级，优先处理重要消息</p>
+                        <div class="timeline-code">
+<span class="code-comment">// 消息优先级实现</span>
+<span class="code-keyword">public class</span> <span class="code-function">PriorityMessage</span> {
+    <span class="code-keyword">int</span> priority;  <span class="code-comment">// 1=紧急 2=普通 3=批量</span>
+    <span class="code-keyword">long</span> timestamp;
+    <span class="code-keyword">byte[]</span> body;
+}
+
+<span class="code-comment">// 紧急消息走快车道</span>
+<span class="code-keyword">if</span> (msg.priority == <span class="code-string">1</span>) {
+    executor.submit(() -> processUrgent(msg));
+} <span class="code-keyword">else</span> {
+    batchQueue.add(msg);
+}
+</div>
+                    </div>
+                </div>
+
+                <div class="timeline-item">
+                    <div class="timeline-number">3</div>
+                    <div class="timeline-content">
+                        <h3 class="timeline-title">消息超时与丢弃策略</h3>
+                        <p class="timeline-desc">设置消息 TTL，过期消息自动删除或转入死信队列</p>
+                        <div class="timeline-code">
+<span class="code-comment">// RabbitMQ - 设置消息 TTL</span>
+AMQP.BasicProperties props = <span class="code-keyword">new</span> AMQP.BasicProperties.Builder()
+    .expiration(<span class="code-string">"60000"</span>)  <span class="code-comment">// 60秒过期</span>
+    .build();
+
+<span class="code-comment">// Kafka - 消息过期清理</span>
+<span class="code-comment">// broker 端配置</span>
+retention.ms=604800000  <span class="code-comment">// 7天</span>
+log.cleanup.policy=delete
+
+<span class="code-comment">// 死信队列收集无法处理的消息</span>
+x-dead-letter-exchange=<span class="code-string">"dlx.exchange"</span>
+x-dead-letter-routing-key=<span class="code-string">"dead.messages"</span>
+</div>
+                    </div>
+                </div>
+
+                <div class="timeline-item">
+                    <div class="timeline-number">4</div>
+                    <div class="timeline-content">
+                        <h3 class="timeline-title">消费者熔断降级</h3>
+                        <p class="timeline-desc">当系统过载时自动降级，保护下游服务</p>
+                        <div class="timeline-code">
+<span class="code-keyword">public class</span> <span class="code-function">CircuitBreaker</span> {
+    <span class="code-keyword">private int</span> failureThreshold = <span class="code-string">5</span>;
+    <span class="code-keyword">private long</span> recoveryTimeout = <span class="code-string">30000</span>;
+    
+    <span class="code-keyword">public</span> Result <span class="code-function">execute</span>(Message msg) {
+        <span class="code-keyword">if</span> (isOpen()) {
+            <span class="code-comment">// 熔断开启，消息入队等待</span>
+            fallbackQueue.add(msg);
+            <span class="code-keyword">return</span> Result.CIRCUIT_OPEN;
+        }
+        <span class="code-keyword">try</span> {
+            <span class="code-keyword">return</span> process(msg);
+        } <span class="code-keyword">catch</span> (Exception e) {
+            recordFailure();
+            <span class="code-keyword">throw</span> e;
+        }
+    }
+}
+</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 监控指标 -->
+        <div class="section">
+            <h2 class="section-title">关键监控指标</h2>
+            
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-icon">📊</div>
+                    <h3 class="metric-name">队列深度 (Queue Depth)</h3>
+                    <div class="metric-formula">待消费消息数</div>
+                    <p class="metric-desc">队列中等待处理的消息总数，反映当前积压程度</p>
+                    <span class="metric-status warning">> 1000 需关注</span>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-icon">⚡</div>
+                    <h3 class="metric-name">消费延迟 (Lag)</h3>
+                    <div class="metric-formula">最新消息时间 - 当前时间</div>
+                    <p class="metric-desc">消息从入队到被消费的时间差，越大表示积压越严重</p>
+                    <span class="metric-status danger">> 5分钟 危险</span>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-icon">🔄</div>
+                    <h3 class="metric-name">消费吞吐量</h3>
+                    <div class="metric-formula">消息/s</div>
+                    <p class="metric-desc">消费者每秒处理的消息数量，低于生产速度会持续积压</p>
+                    <span class="metric-status healthy">需 > 生产速度</span>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-icon">💾</div>
+                    <h3 class="metric-name">内存/磁盘使用</h3>
+                    <div class="metric-formula">Broker 资源占用</div>
+                    <p class="metric-desc">消息队列 Broker 的资源消耗，高负载影响性能</p>
+                    <span class="metric-status warning">> 80% 警告</span>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-icon">❌</div>
+                    <h3 class="metric-name">消费失败率</h3>
+                    <div class="metric-formula">失败数 / 总消费数</div>
+                    <p class="metric-desc">处理失败的消息比例，频繁失败会加剧积压</p>
+                    <span class="metric-status danger">> 1% 异常</span>
+                </div>
+                
+                <div class="metric-card">
+                    <div class="metric-icon">⏱️</div>
+                    <h3 class="metric-name">消息重试次数</h3>
+                    <div class="metric-formula">平均重试次数</div>
+                    <p class="metric-desc">消息被重新消费的次数，过多重试会形成死循环</p>
+                    <span class="metric-status warning">> 3次 需检查</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 最佳实践 -->
+        <div class="section">
+            <h2 class="section-title">最佳实践 Checklist</h2>
+            
+            <div class="practices-list">
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>容量规划</h4>
+                        <p>根据峰值流量预留 3-5 倍的队列容量，设置合理的消息 TTL 和存储策略</p>
+                    </div>
+                </div>
+                
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>监控告警</h4>
+                        <p>设置队列深度、延迟、消费失败率等核心指标的多级告警阈值</p>
+                    </div>
+                </div>
+                
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>幂等设计</h4>
+                        <p>消费者必须支持幂等操作，避免消息重复消费导致的数据问题</p>
+                    </div>
+                </div>
+                
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>优雅关闭</h4>
+                        <p>消费者关闭前必须处理完当前批次消息，避免消息丢失</p>
+                    </div>
+                </div>
+                
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>消息去重</h4>
+                        <p>引入唯一消息 ID + Redis 布隆过滤器，识别并丢弃重复消息</p>
+                    </div>
+                </div>
+                
+                <div class="practice-item">
+                    <div class="practice-check">✓</div>
+                    <div class="practice-content">
+                        <h4>分批处理</h4>
+                        <p>批量消费 + 批量 ACK，显著提升消费吞吐量</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 常见 MQ 对比 -->
+        <div class="section">
+            <h2 class="section-title">各 MQ 积压处理对比</h2>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+                <thead>
+                    <tr style="border-bottom: 2px solid rgba(255,255,255,0.1);">
+                        <th style="padding: 15px; text-align: left;">特性</th>
+                        <th style="padding: 15px; text-align: center;">RabbitMQ</th>
+                        <th style="padding: 15px; text-align: center;">Kafka</th>
+                        <th style="padding: 15px; text-align: center;">Redis Stream</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="padding: 15px;">最大积压</td>
+                        <td style="padding: 15px; text-align: center; color: #ffaa00;">内存限制</td>
+                        <td style="padding: 15px; text-align: center; color: #00ff88;">TB 级别</td>
+                        <td style="padding: 15px; text-align: center; color: #ffaa00;">内存 + AOF</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="padding: 15px;">消费模式</td>
+                        <td style="padding: 15px; text-align: center;">推 (Push)</td>
+                        <td style="padding: 15px; text-align: center;">拉 (Pull)</td>
+                        <td style="padding: 15px; text-align: center;">拉 (XREAD)</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="padding: 15px;">扩容速度</td>
+                        <td style="padding: 15px; text-align: center; color: #ffaa00;">中等</td>
+                        <td style="padding: 15px; text-align: center; color: #00ff88;">快速</td>
+                        <td style="padding: 15px; text-align: center; color: #00d9ff;">最快</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="padding: 15px;">消息顺序</td>
+                        <td style="padding: 15px; text-align: center;">单队列有序</td>
+                        <td style="padding: 15px; text-align: center;">分区有序</td>
+                        <td style="padding: 15px; text-align: center;">ID 有序</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 15px;">积压处理建议</td>
+                        <td style="padding: 15px; text-align: center;">增加消费者<br>惰性队列</td>
+                        <td style="padding: 15px; text-align: center;">增加分区<br>消费者扩容</td>
+                        <td style="padding: 15px; text-align: center;">增加消费者组<br>快读读取</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // 模拟状态
+        let queue = [];
+        let produceRate = 10;
+        let consumeRate = 10;
+        let consumerCount = 1;
+        let isRunning = false;
+        let messageId = 0;
+
+        // DOM 元素
+        const queueVisual = document.getElementById('queueVisual');
+        const queueCount = document.getElementById('queueCount');
+        const produceRateEl = document.getElementById('produceRate');
+        const consumeRateEl = document.getElementById('consumeRate');
+        const lagRatio = document.getElementById('lagRatio');
+
+        function updateProduceRate(val) {
+            produceRate = parseInt(val);
+            document.getElementById('produceSliderVal').textContent = val;
+            produceRateEl.textContent = val;
+        }
+
+        function updateConsumeRate(val) {
+            consumeRate = parseInt(val);
+            document.getElementById('consumeSliderVal').textContent = val;
+            consumeRateEl.textContent = val;
+        }
+
+        function addMessage() {
+            messageId++;
+            const msg = { id: messageId, time: Date.now() };
+            queue.push(msg);
+            
+            // 更新可视化
+            const msgEl = document.createElement('div');
+            msgEl.className = 'message new ' + getMessageClass(queue.length);
+            msgEl.textContent = msg.id;
+            queueVisual.appendChild(msgEl);
+            
+            // 限制显示数量
+            if (queueVisual.children.length > 50) {
+                queueVisual.removeChild(queueVisual.firstChild);
+            }
+        }
+
+        function consumeMessage() {
+            if (queue.length > 0) {
+                queue.shift();
+                if (queueVisual.children.length > 0) {
+                    queueVisual.removeChild(queueVisual.firstChild);
+                }
+            }
+        }
+
+        function getMessageClass(count) {
+            if (count < 20) return 'normal';
+            if (count < 50) return 'warning';
+            return 'danger';
+        }
+
+        function updateStats() {
+            const count = queue.length;
+            queueCount.textContent = count;
+            
+            // 更新积压率
+            const maxCapacity = 100;
+            const ratio = Math.min(100, Math.round((count / maxCapacity) * 100));
+            lagRatio.textContent = ratio + '%';
+            
+            // 更新队列消息样式
+            document.querySelectorAll('.message').forEach(el => {
+                el.className = el.className.replace(/normal|warning|danger/, getMessageClass(count));
+            });
+            
+            // 更新健康度
+            const health = Math.max(0, 100 - ratio);
+            document.getElementById('healthPercent').textContent = health + '%';
+            document.getElementById('healthBar').style.width = health + '%';
+            document.getElementById('healthBar').style.background = 
+                health > 70 ? 'linear-gradient(90deg, #00ff88, #00cc6a)' :
+                health > 40 ? 'linear-gradient(90deg, #ffaa00, #ff8800)' :
+                'linear-gradient(90deg, #ff4757, #ff3344)';
+            
+            // 更新延迟
+            const latency = Math.min(100, count * 2);
+            document.getElementById('latencyValue').textContent = (latency * 100) + 'ms';
+            document.getElementById('latencyBar').style.width = latency + '%';
+            
+            // 更新 CPU
+            const cpu = Math.min(100, ratio * 0.8);
+            document.getElementById('cpuValue').textContent = Math.round(cpu) + '%';
+            document.getElementById('cpuBar').style.width = cpu + '%';
+        }
+
+        function simulate() {
+            if (!isRunning) return;
+            
+            // 生产消息
+            const produceCount = Math.ceil(produceRate / 10);
+            for (let i = 0; i < produceCount; i++) {
+                addMessage();
+            }
+            
+            // 消费消息 (根据消费者数量)
+            const consumeCount = Math.ceil((consumeRate * consumerCount) / 10);
+            for (let i = 0; i < consumeCount && queue.length > 0; i++) {
+                consumeMessage();
+            }
+            
+            updateStats();
+        }
+
+        function injectBurst() {
+            // 模拟突发流量 - 快速添加大量消息
+            const burstCount = 100;
+            for (let i = 0; i < burstCount; i++) {
+                setTimeout(() => addMessage(), i * 10);
+            }
+        }
+
+        function addConsumer() {
+            consumerCount++;
+            alert('已增加消费者！当前消费者数: ' + consumerCount + 
+                  '\n消费速度提升至: ' + (consumeRate * consumerCount) + '/s');
+        }
+
+        function reset() {
+            queue = [];
+            consumerCount = 1;
+            messageId = 0;
+            queueVisual.innerHTML = '';
+            updateStats();
+        }
+
+        // 启动模拟
+        isRunning = true;
+        setInterval(simulate, 100);
+    </script>
+</body>
+</html>
