@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 内存淘汰策略详解</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+            overflow-x: hidden;
+        }
+
+        .header {
+            text-align: center;
+            padding: 30px 20px 15px;
+        }
+
+        .header h1 {
+            font-size: 2em;
+            background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: #a0a0a0;
+            font-size: 1em;
+        }
+
+        .container {
+            display: flex;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 15px;
+            gap: 20px;
+        }
+
+        .flowchart-section {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .flowchart-container {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 20px;
+            position: relative;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        .flowchart-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3);
+        }
+
+        #flowchart {
+            min-width: 1100px;
+            height: 700px;
+        }
+
+        .detail-section {
+            width: 380px;
+            flex-shrink: 0;
+        }
+
+        .detail-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 14px;
+            padding: 20px;
+            position: sticky;
+            top: 15px;
+        }
+
+        .detail-card h2 {
+            color: #48dbfb;
+            font-size: 1.3em;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .detail-card .strategy-badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+
+        .detail-card .description {
+            color: #d0d0d0;
+            line-height: 1.7;
+            margin-bottom: 15px;
+            font-size: 0.95em;
+        }
+
+        .detail-card .code-block {
+            background: #0d1117;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Fira Code', 'JetBrains Mono', monospace;
+            font-size: 0.85em;
+            color: #7ee787;
+            margin-bottom: 15px;
+            overflow-x: auto;
+        }
+
+        .detail-card .pros-cons {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 15px;
+        }
+
+        .detail-card .pros, .detail-card .cons {
+            flex: 1;
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .detail-card .pros {
+            background: rgba(46, 160, 67, 0.15);
+            border: 1px solid rgba(46, 160, 67, 0.3);
+        }
+
+        .detail-card .cons {
+            background: rgba(248, 81, 73, 0.15);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+        }
+
+        .detail-card .pros h4, .detail-card .cons h4 {
+            font-size: 0.85em;
+            margin-bottom: 8px;
+        }
+
+        .detail-card .pros h4 {
+            color: #3fb950;
+        }
+
+        .detail-card .cons h4 {
+            color: #f85149;
+        }
+
+        .detail-card .pros ul, .detail-card .cons ul {
+            list-style: none;
+            font-size: 0.85em;
+        }
+
+        .detail-card .pros li, .detail-card .cons li {
+            padding: 4px 0;
+            color: #c0c0c0;
+        }
+
+        .detail-card .pros li::before {
+            content: '✓ ';
+            color: #3fb950;
+        }
+
+        .detail-card .cons li::before {
+            content: '✗ ';
+            color: #f85149;
+        }
+
+        .detail-card .scenario {
+            background: rgba(72, 219, 251, 0.1);
+            border: 1px solid rgba(72, 219, 251, 0.2);
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .detail-card .scenario h4 {
+            color: #48dbfb;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+
+        .detail-card .scenario p {
+            font-size: 0.85em;
+            color: #b0b0b0;
+            line-height: 1.5;
+        }
+
+        .hint-text {
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+            margin-top: 12px;
+        }
+
+        /* SVG Styles */
+        .node rect {
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .node:hover rect {
+            filter: brightness(1.2);
+        }
+
+        .node text {
+            pointer-events: none;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        .link {
+            fill: none;
+            stroke-width: 2;
+            transition: all 0.3s ease;
+        }
+
+        .link-label {
+            font-size: 11px;
+            fill: #888;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        .group-label {
+            font-size: 12px;
+            fill: #aaa;
+            font-style: italic;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            justify-content: center;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8em;
+            color: #a0a0a0;
+        }
+
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 0.85em;
+        }
+
+        /* Responsive */
+        @media (max-width: 1100px) {
+            .container {
+                flex-direction: column;
+            }
+            .detail-section {
+                width: 100%;
+            }
+            .detail-card {
+                position: static;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔄 Redis 内存淘汰策略全景图</h1>
+        <p>8种策略 · 决策流程 · 适用场景</p>
+    </div>
+
+    <div class="container">
+        <div class="flowchart-section">
+            <div class="flowchart-container">
+                <svg id="flowchart"></svg>
+            </div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #e74c3c;"></div>
+                    <span>触发条件</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #c0392b;"></div>
+                    <span>不淘汰</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #9b59b6;"></div>
+                    <span>volatile分组</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #8e44ad;"></div>
+                    <span>allkeys分组</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #3498db;"></div>
+                    <span>LRU策略</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #00bcd4;"></div>
+                    <span>LFU策略</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #f39c12;"></div>
+                    <span>Random策略</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #e91e63;"></div>
+                    <span>TTL策略</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #27ae60;"></div>
+                    <span>淘汰执行</span>
+                </div>
+            </div>
+            <p class="hint-text">💡 点击任意节点查看详细说明 | 可横向滚动查看更多</p>
+        </div>
+
+        <div class="detail-section">
+            <div class="detail-card" id="detailCard">
+                <h2>👈 选择一个节点</h2>
+                <p class="description">点击左侧流程图中的任意节点，这里将显示详细说明。</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>基于 Redis 官方文档 · Redis 7.x</p>
+    </div>
+
+    <script>
+        // 数据定义
+        const strategyData = {
+            'trigger': {
+                title: '内存不足触发',
+                color: '#e74c3c',
+                description: '当 Redis 内存使用量达到 <code>maxmemory</code> 限制时，触发内存淘汰机制。此时 Redis 必须选择一些key进行删除以释放空间。',
+                config: 'maxmemory 100mb\nmaxmemory-policy allkeys-lru',
+                pros: ['保护Redis不被OOM', '维持服务可用性'],
+                cons: ['可能误删重要数据', '需要合理配置阈值'],
+                scenario: '适用于生产环境，防止内存无限增长导致服务崩溃。'
+            },
+            'noeviction': {
+                title: 'noeviction',
+                color: '#c0392b',
+                description: '不淘汰任何数据。当内存达到上限时，所有写操作（SET、LPUSH等）都会返回错误，但读操作（GET等）正常执行。',
+                config: 'maxmemory-policy noeviction',
+                pros: ['数据绝对安全', '最简单直接'],
+                cons: ['写操作会失败', '不适合高写入场景'],
+                scenario: '适合只读缓存或写压力极小的场景，如配置中心、只读报表缓存。'
+            },
+            'group-volatile': {
+                title: 'volatile-* 分组',
+                color: '#9b59b6',
+                description: '只在设置了过期时间(TTL)的key中进行淘汰。如果没有任何key设置了过期时间，则退化为 noeviction。',
+                config: '# 必须确保有带TTL的key\nEXPIRE key 3600',
+                pros: ['保留永久数据', '灵活控制缓存时间'],
+                cons: ['无TTL时失效', '需配合过期时间使用'],
+                scenario: '适合需要区分"临时缓存"和"永久数据"的场景，如会话管理、验证码缓存。'
+            },
+            'group-allkeys': {
+                title: 'allkeys-* 分组',
+                color: '#8e44ad',
+                description: '在所有key中进行淘汰，不考虑是否设置了过期时间。淘汰范围更广，可能删除永久数据。',
+                config: 'maxmemory-policy allkeys-lru',
+                pros: ['淘汰范围最大', '内存压力下更有效'],
+                cons: ['可能删除永久数据', '需要做好数据回源'],
+                scenario: '适合纯缓存场景，所有数据都应该能被淘汰，如页面缓存、接口结果缓存。'
+            },
+            'volatile-lru': {
+                title: 'volatile-lru',
+                color: '#3498db',
+                description: '从设置了过期时间的key中，使用 LRU(Least Recently Used) 算法淘汰最近最少使用的key。',
+                config: 'maxmemory-policy volatile-lru\nmaxmemory-samples 5',
+                pros: ['保留热点数据', '淘汰策略较合理'],
+                cons: ['需要维护访问顺序', '采样开销'],
+                scenario: '适合需要保留高频访问数据的场景，如热点商品缓存、热门文章列表。'
+            },
+            'volatile-lfu': {
+                title: 'volatile-lfu',
+                color: '#00bcd4',
+                description: '从设置了过期时间的key中，使用 LFU(Least Frequently Used) 算法淘汰访问频率最低的key。',
+                config: 'maxmemory-policy volatile-lfu\nlfu-log-factor 10',
+                pros: ['精准保留热点', '抗扫描攻击'],
+                cons: ['需要维护访问计数', '配置较复杂'],
+                scenario: '适合存在明显访问频率差异的场景，如排行榜、搜索结果缓存。'
+            },
+            'volatile-random': {
+                title: 'volatile-random',
+                color: '#f39c12',
+                description: '从设置了过期时间的key中，随机淘汰一个key。不考虑访问频率和最近访问时间。',
+                config: 'maxmemory-policy volatile-random',
+                pros: ['实现简单', 'CPU开销低'],
+                cons: ['可能误删热点数据', '淘汰效果不稳定'],
+                scenario: '仅作为备选策略，或在对数据保留无要求的测试环境使用。'
+            },
+            'volatile-ttl': {
+                title: 'volatile-ttl',
+                color: '#e91e63',
+                description: '从设置了过期时间的key中，优先淘汰 TTL 剩余时间最短的key（即最接近过期的数据）。',
+                config: 'maxmemory-policy volatile-ttl',
+                pros: ['符合自然过期', '减少人工干预'],
+                cons: ['可能删除高频访问的短期数据', '不适合长期缓存'],
+                scenario: '适合有过期时间的任务队列、临时计算结果等场景。'
+            },
+            'allkeys-lru': {
+                title: 'allkeys-lru',
+                color: '#2980b9',
+                description: '在所有key中使用 LRU 算法淘汰。最近最少使用的key，无论是否设置过期时间，都可能被淘汰。',
+                config: 'maxmemory-policy allkeys-lru\nmaxmemory-samples 5',
+                pros: ['全局最优淘汰', '内存效率最高'],
+                cons: ['永久数据也可能被删', '需要数据回源机制'],
+                scenario: '最常用的策略，适合作为通用缓存。确保所有数据都能从数据库或其他源重新获取。'
+            },
+            'allkeys-lfu': {
+                title: 'allkeys-lfu',
+                color: '#0097a7',
+                description: '在所有key中使用 LFU 算法淘汰访问频率最低的key。综合考虑访问频率和最近访问时间。',
+                config: 'maxmemory-policy allkeys-lfu',
+                pros: ['最精确的热点保留', '长期热点保护'],
+                cons: ['可能删除刚写入的热门数据', '开销相对较高'],
+                scenario: '适合访问模式稳定的场景，如热门视频列表、长期运营的活动数据。'
+            },
+            'allkeys-random': {
+                title: 'allkeys-random',
+                color: '#e67e22',
+                description: '在所有key中随机淘汰一个key。完全随机，不考虑任何访问模式。',
+                config: 'maxmemory-policy allkeys-random',
+                pros: ['性能最好', '无额外开销'],
+                cons: ['淘汰不可预测', '缓存命中率低'],
+                scenario: '作为兜底策略，或者数据重要性较低、对命中率无要求的场景。'
+            },
+            'result': {
+                title: '淘汰执行',
+                color: '#27ae60',
+                description: '选中的key被删除，释放内存空间。写命令可以继续执行。淘汰过程对客户端透明。',
+                config: '# 淘汰后内存状态\nINFO memory\n# used_memory: XX MB\n# maxmemory: XX MB',
+                pros: ['内存得到释放', '服务继续可用'],
+                cons: ['被淘汰数据丢失', '需要回源机制'],
+                scenario: '淘汰是正常操作，配合合理的策略和监控，确保业务不受影响。'
+            }
+        };
+
+        // 创建流程图
+        function createFlowchart() {
+            const svg = d3.select('#flowchart');
+            const width = 1100;
+            const height = 700;
+
+            svg.attr('width', width).attr('height', height);
+
+            // 定义渐变和箭头
+            const defs = svg.append('defs');
+
+            defs.append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 10)
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 8)
+                .attr('markerHeight', 8)
+                .append('path')
+                .attr('d', 'M 0,-5 L 10,0 L 0,5')
+                .attr('fill', '#666');
+
+            // 节点尺寸
+            const nodeWidth = 140;
+            const nodeHeight = 50;
+
+            // 定义节点位置 - 采用更分散的树形结构
+            const nodePositions = {
+                // 第0层 - 触发
+                'trigger': { x: width / 2 - nodeWidth / 2, y: 30 },
+                
+                // 第1层 - 三个主要分支
+                'noeviction': { x: 80, y: 160 },
+                'group-volatile': { x: 350, y: 160 },
+                'group-allkeys': { x: 750, y: 160 },
+                
+                // 第2层 - volatile策略（左侧）
+                'volatile-lru': { x: 150, y: 320 },
+                'volatile-lfu': { x: 310, y: 320 },
+                'volatile-random': { x: 470, y: 320 },
+                'volatile-ttl': { x: 310, y: 420 },
+                
+                // 第2层 - allkeys策略（右侧）
+                'allkeys-lru': { x: 650, y: 320 },
+                'allkeys-lfu': { x: 810, y: 320 },
+                'allkeys-random': { x: 970, y: 320 },
+                
+                // 第3层 - 结果
+                'result': { x: width / 2 - nodeWidth / 2, y: 580 }
+            };
+
+            // 定义连接关系
+            const links = [
+                // 触发层到分组层
+                { source: 'trigger', target: 'noeviction', label: '不淘汰' },
+                { source: 'trigger', target: 'group-volatile', label: '仅TTL' },
+                { source: 'trigger', target: 'group-allkeys', label: '全部Key' },
+                
+                // volatile分组到策略
+                { source: 'group-volatile', target: 'volatile-lru', label: 'LRU' },
+                { source: 'group-volatile', target: 'volatile-lfu', label: 'LFU' },
+                { source: 'group-volatile', target: 'volatile-random', label: 'Random' },
+                { source: 'group-volatile', target: 'volatile-ttl', label: 'TTL' },
+                
+                // allkeys分组到策略
+                { source: 'group-allkeys', target: 'allkeys-lru', label: 'LRU' },
+                { source: 'group-allkeys', target: 'allkeys-lfu', label: 'LFU' },
+                { source: 'group-allkeys', target: 'allkeys-random', label: 'Random' },
+                
+                // 所有策略到结果
+                { source: 'noeviction', target: 'result', label: '' },
+                { source: 'volatile-lru', target: 'result', label: '' },
+                { source: 'volatile-lfu', target: 'result', label: '' },
+                { source: 'volatile-random', target: 'result', label: '' },
+                { source: 'volatile-ttl', target: 'result', label: '' },
+                { source: 'allkeys-lru', target: 'result', label: '' },
+                { source: 'allkeys-lfu', target: 'result', label: '' },
+                { source: 'allkeys-random', target: 'result', label: '' }
+            ];
+
+            // 绘制连接线
+            const linkGroup = svg.append('g').attr('class', 'links');
+            
+            links.forEach(link => {
+                const source = nodePositions[link.source];
+                const target = nodePositions[link.target];
+                
+                const sourceX = source.x + nodeWidth / 2;
+                const sourceY = source.y + nodeHeight;
+                const targetX = target.x + nodeWidth / 2;
+                const targetY = target.y;
+                
+                // 创建曲线路径
+                let path;
+                const midY = (sourceY + targetY) / 2;
+                
+                if (link.label === '') {
+                    // 结果连接线 - 使用曲线
+                    const controlY = sourceY + (targetY - sourceY) * 0.5;
+                    path = `M ${sourceX} ${sourceY} Q ${sourceX} ${controlY} ${(sourceX + targetX) / 2} ${midY} Q ${targetX} ${controlY} ${targetX} ${targetY}`;
+                } else {
+                    // 普通连接线 - 使用折线
+                    path = `M ${sourceX} ${sourceY} L ${sourceX} ${midY} L ${targetX} ${midY} L ${targetX} ${targetY}`;
+                }
+                
+                linkGroup.append('path')
+                    .attr('class', 'link')
+                    .attr('d', path)
+                    .attr('stroke', '#555')
+                    .attr('marker-end', 'url(#arrowhead)');
+                
+                // 添加标签
+                if (link.label) {
+                    const labelX = (sourceX + targetX) / 2;
+                    const labelY = midY - 5;
+                    
+                    // 标签背景
+                    const textWidth = link.label.length * 12;
+                    linkGroup.append('rect')
+                        .attr('x', labelX - textWidth / 2)
+                        .attr('y', labelY - 10)
+                        .attr('width', textWidth)
+                        .attr('height', 16)
+                        .attr('fill', '#1a1a2e')
+                        .attr('rx', 3);
+                    
+                    linkGroup.append('text')
+                        .attr('class', 'link-label')
+                        .attr('x', labelX)
+                        .attr('y', labelY + 3)
+                        .attr('text-anchor', 'middle')
+                        .text(link.label);
+                }
+            });
+
+            // 绘制节点
+            const nodeGroup = svg.append('g').attr('class', 'nodes');
+
+            Object.entries(nodePositions).forEach(([id, pos]) => {
+                const data = strategyData[id];
+                const group = nodeGroup.append('g')
+                    .attr('class', 'node')
+                    .attr('transform', `translate(${pos.x}, ${pos.y})`)
+                    .on('click', () => showDetail(id))
+                    .on('mouseenter', function() {
+                        d3.select(this).select('rect')
+                            .transition()
+                            .duration(200)
+                            .attr('filter', 'brightness(1.3)');
+                    })
+                    .on('mouseleave', function() {
+                        d3.select(this).select('rect')
+                            .transition()
+                            .duration(200)
+                            .attr('filter', 'none');
+                    });
+
+                // 圆角矩形
+                group.append('rect')
+                    .attr('width', nodeWidth)
+                    .attr('height', nodeHeight)
+                    .attr('rx', 8)
+                    .attr('ry', 8)
+                    .attr('fill', data.color)
+                    .attr('stroke', '#fff')
+                    .attr('stroke-width', 1)
+                    .attr('stroke-opacity', 0.3);
+
+                // 标题
+                group.append('text')
+                    .attr('x', nodeWidth / 2)
+                    .attr('y', nodeHeight / 2 + 1)
+                    .attr('text-anchor', 'middle')
+                    .attr('dominant-baseline', 'middle')
+                    .attr('fill', '#fff')
+                    .attr('font-weight', 'bold')
+                    .attr('font-size', data.title.length > 12 ? '11px' : '13px')
+                    .text(data.title);
+            });
+
+            // 添加分组标签
+            const groupLabels = [
+                { x: 150, y: 270, text: '只淘汰带TTL的Key' },
+                { x: 810, y: 270, text: '淘汰所有Key' }
+            ];
+
+            groupLabels.forEach(label => {
+                svg.append('text')
+                    .attr('class', 'group-label')
+                    .attr('x', label.x)
+                    .attr('y', label.y)
+                    .attr('text-anchor', 'middle')
+                    .text(label.text);
+            });
+        }
+
+        // 显示详情
+        function showDetail(id) {
+            const data = strategyData[id];
+            const card = document.getElementById('detailCard');
+            
+            card.innerHTML = `
+                <h2>
+                    <span class="strategy-badge" style="background: ${data.color}; color: #fff;">${data.title}</span>
+                </h2>
+                <p class="description">${data.description}</p>
+                <div class="code-block">${data.config}</div>
+                <div class="pros-cons">
+                    <div class="pros">
+                        <h4>✓ 优点</h4>
+                        <ul>${data.pros.map(p => `<li>${p}</li>`).join('')}</ul>
+                    </div>
+                    <div class="cons">
+                        <h4>✗ 缺点</h4>
+                        <ul>${data.cons.map(c => `<li>${c}</li>`).join('')}</ul>
+                    </div>
+                </div>
+                <div class="scenario">
+                    <h4>💡 适用场景</h4>
+                    <p>${data.scenario}</p>
+                </div>
+            `;
+        }
+
+        // 初始化
+        window.addEventListener('load', () => {
+            createFlowchart();
+            showDetail('trigger');
+        });
+    </script>
+</body>
+</html>
