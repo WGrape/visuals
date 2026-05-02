@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL .ibd 文件结构 - 动态可视化</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --cyan: #39d2c0;
+    --orange: #f0883e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header h1 span { color: var(--accent); }
+  .header p { font-size: 13px; color: var(--text2); margin-top: 6px; line-height: 1.6; }
+
+  .main { display: flex; height: calc(100vh - 90px); }
+
+  /* Left: File Structure Visualization */
+  .viz-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 32px;
+  }
+
+  /* Right: Info Panel */
+  .info-panel {
+    width: 380px;
+    background: var(--bg2);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px;
+    flex-shrink: 0;
+  }
+
+  /* File Structure Diagram */
+  .file-section {
+    margin-bottom: 20px;
+    cursor: pointer;
+    transition: transform 0.15s;
+  }
+  .file-section:hover { transform: translateX(4px); }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .section-icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .section-title { font-size: 15px; font-weight: 600; }
+  .section-subtitle { font-size: 12px; color: var(--text2); }
+
+  /* Tablespace */
+  .tablespace-box {
+    border: 2px solid var(--accent);
+    border-radius: 12px;
+    padding: 16px;
+    background: rgba(88, 166, 255, 0.05);
+    position: relative;
+  }
+  .tablespace-label {
+    position: absolute;
+    top: -12px; left: 20px;
+    background: var(--bg);
+    padding: 0 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.5px;
+  }
+
+  /* Segment */
+  .segment-box {
+    border: 2px solid var(--purple);
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: rgba(188, 140, 255, 0.05);
+    position: relative;
+  }
+  .segment-label {
+    position: absolute;
+    top: -11px; left: 16px;
+    background: var(--bg);
+    padding: 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--purple);
+  }
+
+  /* Extent */
+  .extent-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .extent-label {
+    font-size: 11px;
+    color: var(--text2);
+    width: 70px;
+    flex-shrink: 0;
+    text-align: right;
+  }
+  .extent-box {
+    flex: 1;
+    border: 1.5px solid var(--orange);
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: rgba(240, 136, 62, 0.05);
+    display: flex;
+    gap: 3px;
+    flex-wrap: wrap;
+  }
+  .extent-label-text {
+    width: 100%;
+    font-size: 10px;
+    color: var(--orange);
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+
+  /* Page */
+  .page-cell {
+    width: 28px; height: 24px;
+    border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+  .page-cell:hover { transform: scale(1.3); z-index: 10; }
+  .page-type-FIL_PAGE_TYPE_ALLOCATED { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+  .page-type-FIL_PAGE_UNDO_LOG { background: #1a1a3a; color: #bc8cff; border: 1px solid #3a3a5a; }
+  .page-type-FIL_PAGE_INODE { background: #1a2a2a; color: #39d2c0; border: 1px solid #2a4a4a; }
+  .page-type-FIL_PAGE_IBUF_FREE_LIST { background: #2a1a1a; color: #f85149; border: 1px solid #4a2a2a; }
+  .page-type-FIL_PAGE_INDEX { background: #1a2a1a; color: #3fb950; border: 1px solid #2a4a2a; }
+  .page-type-FIL_PAGE_RTREE { background: #2a2a1a; color: #d29922; border: 1px solid #4a4a2a; }
+  .page-type-FIL_PAGE_SDI { background: #1a1a2a; color: #58a6ff; border: 1px solid #2a2a4a; }
+  .page-type-FIL_PAGE_LOB_DATA { background: #2a1a2a; color: #f0883e; border: 1px solid #4a2a4a; }
+  .page-type-FIL_PAGE_LOB_FIRST { background: #2a1a1a; color: #f85149; border: 1px solid #4a2a2a; }
+  .page-type-FIL_PAGE_LOB_INDEX { background: #1a2a2a; color: #39d2c0; border: 1px solid #2a4a4a; }
+
+  /* Tooltip */
+  .tooltip {
+    display: none;
+    position: fixed;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    z-index: 1000;
+    min-width: 200px;
+    line-height: 1.6;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    pointer-events: none;
+  }
+  .tooltip.show { display: block; }
+  .tooltip h4 { font-size: 14px; margin-bottom: 6px; color: var(--accent); }
+  .tooltip .tip-row { display: flex; gap: 8px; }
+  .tooltip .tip-label { color: var(--text2); white-space: nowrap; }
+  .tooltip .tip-value { color: var(--text); }
+
+  /* Page Detail Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 2000;
+    justify-content: center;
+    align-items: center;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-content {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 650px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .modal-content h2 { font-size: 18px; color: var(--accent); margin-bottom: 16px; }
+  .modal-close {
+    float: right;
+    background: none; border: none;
+    color: var(--text2); font-size: 22px; cursor: pointer;
+  }
+  .modal-close:hover { color: var(--text); }
+
+  /* Page internal structure */
+  .page-internal {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 12px 0;
+  }
+  .page-internal-row {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .page-hex {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 10px;
+    color: var(--text2);
+    margin-left: auto;
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text2);
+  }
+  .legend-color {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  /* Info cards in right panel */
+  .info-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .info-card h3 { font-size: 14px; margin-bottom: 8px; color: var(--accent); }
+  .info-card p, .info-card li {
+    font-size: 13px; line-height: 1.6; color: var(--text2);
+  }
+  .info-card ul { padding-left: 18px; }
+  .info-card code {
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--yellow);
+  }
+
+  /* Size chain */
+  .size-chain {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin: 12px 0;
+  }
+  .size-box {
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .size-arrow { color: var(--text2); font-size: 16px; }
+
+  /* Animation */
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-in { animation: fadeIn 0.4s ease-out forwards; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>💿 MySQL <span>.ibd 文件</span> 结构可视化</h1>
+  <p>.ibd 文件是 MySQL <strong>InnoDB 存储引擎</strong> 的表空间文件，存储表的数据和索引。以 <strong>16KB 页面</strong> 为基本单位，多个页面组成 <strong>区（Extent，1MB）</strong>，多个区组成 <strong>段（Segment）</strong>。</p>
+</div>
+
+<div class="main">
+  <div class="viz-area" id="vizArea">
+
+    <!-- Size Chain -->
+    <div class="size-chain animate-in">
+      <div class="size-box" style="background:#1a3a5c; color:#58a6ff; border:1px solid #2a5a8c;">.ibd 文件<br><span style="font-size:10px;font-weight:400;">大小可变</span></div>
+      <div class="size-arrow">→</div>
+      <div class="size-box" style="background:#2a1a3a; color:#bc8cff; border:1px solid #4a2a5a;">表空间 Tablespace<br><span style="font-size:10px;font-weight:400;">Space ID</span></div>
+      <div class="size-arrow">→</div>
+      <div class="size-box" style="background:#2a1a2a; color:#f0883e; border:1px solid #4a2a3a;">段 Segment<br><span style="font-size:10px;font-weight:400;">1MB × N</span></div>
+      <div class="size-arrow">→</div>
+      <div class="size-box" style="background:#2a2a1a; color:#d29922; border:1px solid #4a4a2a;">区 Extent<br><span style="font-size:10px;font-weight:400;">1MB = 64页</span></div>
+      <div class="size-arrow">→</div>
+      <div class="size-box" style="background:#1a2a1a; color:#3fb950; border:1px solid #2a4a2a;">页面 Page<br><span style="font-size:10px;font-weight:400;">16KB</span></div>
+    </div>
+
+    <!-- Tablespace Diagram -->
+    <div id="tablespaceViz"></div>
+
+    <!-- Page Type Legend -->
+    <div class="legend animate-in">
+      <div class="legend-item"><div class="legend-color" style="background:#1a2a1a; border:1px solid #2a4a2a;"></div>INDEX 索引页</div>
+      <div class="legend-item"><div class="legend-color" style="background:#1a1a3a; border:1px solid #3a3a5a;"></div>INODE 索引节点</div>
+      <div class="legend-item"><div class="legend-color" style="background:#1a1a2a; border:1px solid #2a2a4a;"></div>SDI 数据字典</div>
+      <div class="legend-item"><div class="legend-color" style="background:#2a1a2a; border:1px solid #4a2a4a;"></div>LOB_DATA 大对象</div>
+      <div class="legend-item"><div class="legend-color" style="background:#21262d; border:1px solid #30363d;"></div>ALLOCATED 空闲页</div>
+    </div>
+  </div>
+
+  <div class="info-panel">
+    <div class="info-card">
+      <h3>🗂️ .ibd 文件是什么？</h3>
+      <p><strong>.ibd</strong>（InnoDB Data File）是 MySQL <strong>InnoDB 引擎</strong> 特有的表空间文件。</p>
+      <ul style="margin-top:8px;">
+        <li>每个表一个 .ibd 文件（默认开启 <code>innodb_file_per_table</code>）</li>
+        <li>存储表的<strong>数据</strong>和<strong>索引</strong></li>
+        <li>文件大小随数据量动态增长</li>
+        <li>路径：<code>datadir/database/table.ibd</code></li>
+      </ul>
+    </div>
+
+    <div class="info-card">
+      <h3>🏗️ 文件内部结构</h3>
+      <ul>
+        <li><strong>表空间（Tablespace）</strong>：最高层，有唯一 Space ID</li>
+        <li><strong>段（Segment）</strong>：分叶子段、非叶子段、Undo段</li>
+        <li><strong>区（Extent）</strong>：64个连续页面 = 1MB</li>
+        <li><strong>页面（Page）</strong>：最小IO单位 = 16KB</li>
+      </ul>
+    </div>
+
+    <div class="info-card">
+      <h3>📄 页面（Page）类型</h3>
+      <ul>
+        <li><strong>FIL_PAGE_INDEX (17855)</strong>：B+树节点页</li>
+        <li><strong>FIL_PAGE_INODE (17817)</strong>：段索引节点</li>
+        <li><strong>FIL_PAGE_SDI (17882)</strong>：序列化字典信息</li>
+        <li><strong>FIL_PAGE_LOB_DATA</strong>：大对象数据页</li>
+        <li><strong>FIL_PAGE_TYPE_ALLOCATED (0)</strong>：未分配空闲页</li>
+        <li><strong>FIL_PAGE_UNDO_LOG</strong>：Undo 日志页</li>
+      </ul>
+    </div>
+
+    <div class="info-card">
+      <h3>⚙️ 相关 MySQL 参数</h3>
+      <ul>
+        <li><code>innodb_page_size</code>：页面大小，默认 16KB</li>
+        <li><code>innodb_file_per_table</code>：每表独立 .ibd</li>
+        <li><code>innodb_buffer_pool_size</code>：Buffer Pool 大小</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip"></div>
+
+<!-- Page Detail Modal -->
+<div class="modal-overlay" id="pageModal">
+  <div class="modal-content">
+    <button class="modal-close" onclick="closePageModal()">&times;</button>
+    <h2 id="pageModalTitle">页面详情</h2>
+    <div id="pageModalBody"></div>
+  </div>
+</div>
+
+<script>
+// ========== Data Model: .ibd File Structure ==========
+// A typical .ibd file structure for a table with indexes
+
+const PAGE_SIZE = 16384; // 16KB
+const EXTENT_SIZE = 64;   // pages per extent
+const EXTENT_BYTES = PAGE_SIZE * EXTENT_SIZE; // 1MB
+
+// Page types
+const PAGE_TYPES = {
+  0:     { name: 'ALLOCATED',  label: '空闲',  color: '#21262d', border: '#30363d', desc: '未分配的空闲页面' },
+  17855: { name: 'INDEX',       label: '索引',  color: '#1a2a1a', border: '#2a4a2a', desc: 'B+树索引节点页面（数据页）' },
+  17817: { name: 'INODE',       label: 'INode', color: '#1a1a3a', border: '#3a3a5a', desc: '段索引节点，管理Segment内的Extent' },
+  17882: { name: 'SDI',         label: 'SDI',   color: '#1a1a2a', border: '#2a2a4a', desc: 'Serialized Dictionary Information，表结构元数据' },
+  17853: { name: 'RTREE',       label: 'RTree', color: '#2a2a1a', border: '#4a4a2a', desc: 'R树索引页面（空间索引）' },
+  17854: { name: 'LOB_FIRST',   label: 'LHead', color: '#2a1a1a', border: '#4a2a2a', desc: '大对象（LOB）首页面' },
+  17856: { name: 'LOB_DATA',    label: 'LData', color: '#2a1a2a', border: '#4a2a4a', desc: '大对象数据页面' },
+  17857: { name: 'LOB_INDEX',   label: 'LIdx',  color: '#1a2a2a', border: '#2a4a4a', desc: '大对象索引页面' },
+  2:     { name: 'UNDO_LOG',    label: 'Undo',  color: '#1a1a3a', border: '#3a3a5a', desc: 'Undo 日志页面' },
+  3:     { name: 'IBUF_FREE_LIST', label: 'IBuf', color: '#2a1a1a', border: '#4a2a2a', desc: 'Insert Buffer 空闲列表' },
+};
+
+// Build a realistic .ibd file layout
+// A new table's .ibd typically has:
+// Page 0:    FSP_HDR (tablespace header)
+// Page 1:    IBUF_BITMAP
+// Page 2:    INODE
+// Page 3:    SDI (table metadata)
+// Page 4-6:  INDEX (clustered index root, etc.)
+// Page 7-63: EXTENT descriptor pages + allocated pages
+// Extent 1+:  Data extents
+
+function buildIbdLayout() {
+  const pages = [];
+
+  // Page 0: FSP_HDR (File Space Header)
+  pages.push({ pageNo: 0, type: 17855, typeName: 'FSP_HDR', segment: 'system', desc: '表空间头页，包含 Space ID、页面总数、空闲Extent链表等元数据' });
+
+  // Page 1: IBUF_BITMAP
+  pages.push({ pageNo: 1, type: 17855, typeName: 'IBUF_BITMAP', segment: 'system', desc: 'Insert Buffer 位图页，记录Change Buffer状态' });
+
+  // Page 2: INODE
+  pages.push({ pageNo: 2, type: 17817, typeName: 'INODE', segment: 'system', desc: 'INODE页，管理Segment（段）内的Extent分配信息' });
+
+  // Page 3: SDI (Serialized Dictionary Information)
+  pages.push({ pageNo: 3, type: 17882, typeName: 'SDI', segment: 'system', desc: 'SDI页，存储表的序列化字典信息（表结构、列定义等）' });
+
+  // Page 4: Clustered Index Root (Page 7 in our B+ tree viz)
+  pages.push({ pageNo: 4, type: 17855, typeName: 'INDEX', segment: 'leaf', desc: '聚簇索引根页面（B+树根节点），存储键值范围和子页面指针' });
+
+  // Page 5-6: Secondary Index Roots
+  pages.push({ pageNo: 5, type: 17855, typeName: 'INDEX', segment: 'internal', desc: '二级索引根页面' });
+  pages.push({ pageNo: 6, type: 17855, typeName: 'INDEX', segment: 'internal', desc: '二级索引内部节点' });
+
+  // Extent 0 (pages 0-63): system extent
+  // Fill remaining with ALLOCATED
+  for (let i = 7; i < 64; i++) {
+    pages.push({ pageNo: i, type: 0, typeName: 'ALLOCATED', segment: 'free', desc: '空闲页面，尚未分配给任何段' });
+  }
+
+  // Extent 1 (pages 64-127): leaf segment data
+  pages.push({ pageNo: 64, type: 17855, typeName: 'INDEX', segment: 'leaf', desc: '叶子节点页面（Extent描述页）' });
+  for (let i = 65; i < 127; i++) {
+    pages.push({ pageNo: i, type: 17855, typeName: 'INDEX', segment: 'leaf', desc: `叶子节点页面 P${i}，存储实际的行数据` });
+  }
+
+  // Extent 2 (pages 128-191): internal segment
+  pages.push({ pageNo: 128, type: 17855, typeName: 'INDEX', segment: 'internal', desc: '内部节点页面（Extent描述页）' });
+  for (let i = 129; i < 191; i++) {
+    pages.push({ pageNo: i, type: 17855, typeName: 'INDEX', segment: 'internal', desc: `内部节点页面 P${i}，存储键值和子页面指针` });
+  }
+
+  // Extent 3 (pages 192-255): more leaf data + some free
+  for (let i = 192; i < 220; i++) {
+    pages.push({ pageNo: i, type: 17855, typeName: 'INDEX', segment: 'leaf', desc: `叶子节点页面 P${i}` });
+  }
+  for (let i = 220; i < 256; i++) {
+    pages.push({ pageNo: i, type: 0, typeName: 'ALLOCATED', segment: 'free', desc: '空闲页面' });
+  }
+
+  return pages;
+}
+
+const ibdPages = buildIbdLayout();
+
+// ========== Render Tablespace ==========
+function renderTablespace() {
+  const container = document.getElementById('tablespaceViz');
+  container.innerHTML = '';
+
+  // Build segments
+  const segments = {
+    system:  { label: '系统段 (System Segment)', pages: [] },
+    leaf:    { label: '叶子段 (Leaf Segment)', pages: [] },
+    internal:{ label: '非叶子段 (Internal Segment)', pages: [] },
+    free:    { label: '空闲页面 (Free Pages)', pages: [] },
+  };
+
+  ibdPages.forEach(p => {
+    if (segments[p.segment]) segments[p.segment].pages.push(p);
+  });
+
+  // Calculate extents
+  const allExtents = [];
+  for (let i = 0; i < ibdPages.length; i += EXTENT_SIZE) {
+    const extentPages = ibdPages.slice(i, i + EXTENT_SIZE);
+    allExtents.push({
+      extentNo: i / EXTENT_SIZE,
+      startPage: i,
+      pages: extentPages
+    });
+  }
+
+  // Tablespace box
+  const tsBox = document.createElement('div');
+  tsBox.className = 'tablespace-box animate-in';
+  tsBox.style.animationDelay = '0.1s';
+
+  const tsLabel = document.createElement('div');
+  tsLabel.className = 'tablespace-label';
+  tsLabel.textContent = '.ibd 文件 → 表空间 (Tablespace)  Space ID: 42';
+  tsBox.appendChild(tsLabel);
+
+  // Render extents
+  allExtents.forEach((extent, ei) => {
+    const segKey = extent.pages[0].segment;
+    const seg = segments[segKey];
+
+    const extentRow = document.createElement('div');
+    extentRow.className = 'extent-row';
+    extentRow.style.animationDelay = `${0.15 + ei * 0.05}s`;
+
+    const extentLabel = document.createElement('div');
+    extentLabel.className = 'extent-label';
+    extentLabel.textContent = `区 ${extent.extentNo}`;
+    extentRow.appendChild(extentLabel);
+
+    const extentBox = document.createElement('div');
+    extentBox.className = 'extent-box';
+
+    const extentLabelText = document.createElement('div');
+    extentLabelText.className = 'extent-label-text';
+    extentLabelText.textContent = `Extent ${extent.extentNo}  (Page ${extent.startPage}~${extent.startPage + EXTENT_SIZE - 1})  1MB`;
+    extentBox.appendChild(extentLabelText);
+
+    extent.pages.forEach((page, pi) => {
+      const cell = document.createElement('div');
+      cell.className = `page-cell page-type-${(PAGE_TYPES[page.type] || PAGE_TYPES[0]).name}`;
+      cell.textContent = page.pageNo;
+      cell.setAttribute('data-page', page.pageNo);
+      cell.addEventListener('mouseenter', (e) => showTooltip(e, page));
+      cell.addEventListener('mouseleave', hideTooltip);
+      cell.addEventListener('click', () => showPageDetail(page));
+      extentBox.appendChild(cell);
+    });
+
+    extentRow.appendChild(extentBox);
+    tsBox.appendChild(extentRow);
+  });
+
+  container.appendChild(tsBox);
+}
+
+// ========== Tooltip ==========
+function showTooltip(e, page) {
+  const tip = document.getElementById('tooltip');
+  const pt = PAGE_TYPES[page.type] || PAGE_TYPES[0];
+
+  tip.innerHTML = `
+    <h4>Page ${page.pageNo}</h4>
+    <div class="tip-row"><span class="tip-label">类型：</span><span class="tip-value">${pt.name} (${page.type})</span></div>
+    <div class="tip-row"><span class="tip-label">别名：</span><span class="tip-value">${page.typeName}</span></div>
+    <div class="tip-row"><span class="tip-label">偏移：</span><span class="tip-value">${page.pageNo * 16}KB</span></div>
+    <div class="tip-row"><span class="tip-label">段：</span><span class="tip-value">${page.segment}</span></div>
+    <div style="margin-top:6px; font-size:12px; color:var(--text2);">${pt.desc}</div>
+  `;
+  tip.classList.add('show');
+
+  const x = e.clientX + 12;
+  const y = e.clientY + 12;
+  tip.style.left = Math.min(x, window.innerWidth - 280) + 'px';
+  tip.style.top = Math.min(y, window.innerHeight - 200) + 'px';
+}
+
+function hideTooltip() {
+  document.getElementById('tooltip').classList.remove('show');
+}
+
+// ========== Page Detail Modal ==========
+function showPageDetail(page) {
+  const pt = PAGE_TYPES[page.type] || PAGE_TYPES[0];
+  const modal = document.getElementById('pageModal');
+  const title = document.getElementById('pageModalTitle');
+  const body = document.getElementById('pageModalBody');
+
+  title.textContent = `📄 Page ${page.pageNo} 详情 - ${pt.name}`;
+
+  const offset = page.pageNo * PAGE_SIZE;
+  const offsetKB = page.pageNo * 16;
+
+  body.innerHTML = `
+    <div class="info-card" style="margin-top:0;">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:13px;">
+        <div><span style="color:var(--text2);">页面号：</span><strong>${page.pageNo}</strong></div>
+        <div><span style="color:var(--text2);">类型：</span><strong>${pt.name}</strong></div>
+        <div><span style="color:var(--text2);">类型代号：</span><strong>${page.type}</strong></div>
+        <div><span style="color:var(--text2);">文件偏移：</span><strong>${offsetKB}KB (0x${offset.toString(16).toUpperCase()})</strong></div>
+        <div><span style="color:var(--text2);">大小：</span><strong>16KB (16384 B)</strong></div>
+        <div><span style="color:var(--text2);">所属段：</span><strong>${page.segment}</strong></div>
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>📋 页面内部结构（16KB = 16384 字节）</h3>
+      <div class="page-internal">
+        <div class="page-internal-row" style="background:#1a3a5c; color:var(--accent);">
+          <span>📋 File Header（文件头）</span><span class="page-hex">0x0000 ~ 0x0025  (38 B)</span>
+        </div>
+        <div class="page-internal-row" style="background:#1a1a3a; color:#bc8cff; font-size:11px;">
+          <span>包含：页号(Page No)、Space ID、前后页指针(Prev/Next Page)、Page Type、LSN等</span>
+        </div>
+
+        <div class="page-internal-row" style="background:#2e1a3a; color:#d299ff;">
+          <span>∞ Infimum + Supremum（边界记录）</span><span class="page-hex">变长  (26 B)</span>
+        </div>
+
+        <div class="page-internal-row" style="background:#1a2e1a; color:#3fb950;">
+          <span>📝 User Records（用户记录区）</span><span class="page-hex">变长</span>
+        </div>
+        <div class="page-internal-row" style="background:#1a3a1a; color:#5ab95a; font-size:11px;">
+          <span>实际行数据，按主键顺序存储。每个记录含：记录头(5B) + NULL位图 + 变长字段长度 + 数据</span>
+        </div>
+
+        <div class="page-internal-row" style="background:#2e2e1a; color:#d29922;">
+          <span>🟡 Free Space（空闲空间）</span><span class="page-hex">变长</span>
+        </div>
+
+        <div class="page-internal-row" style="background:#2e1a2e; color:#d299ff;">
+          <span>📑 Page Directory（页目录/槽位）</span><span class="page-hex">变长</span>
+        </div>
+        <div class="page-internal-row" style="background:#3a1a3a; color:#e599ff; font-size:11px;">
+          <span>每 4~8 条记录一个 Slot，用于二分查找加速页内记录定位</span>
+        </div>
+
+        <div class="page-internal-row" style="background:#3a1a1a; color:#f85149;">
+          <span>🔒 File Trailer（文件尾）</span><span class="page-hex">0x4000~0x4007  (8 B)</span>
+        </div>
+        <div class="page-internal-row" style="background:#4a1a1a; color:#ff6666; font-size:11px;">
+          <span>Checksum (4B) + Old LSN (4B)，用于检测页面是否损坏</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>💡 ${pt.name} 页面说明</h3>
+      <p>${pt.desc}</p>
+      <p style="margin-top:8px;">${page.desc}</p>
+    </div>
+  `;
+
+  modal.classList.add('show');
+}
+
+function closePageModal() {
+  document.getElementById('pageModal').classList.remove('show');
+}
+
+// Close modal on background click
+document.getElementById('pageModal').addEventListener('click', function(e) {
+  if (e.target === this) closePageModal();
+});
+
+// ========== Init ==========
+renderTablespace();
+</script>
+</body>
+</html>

@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CPU中断工作机制 - 动态可视化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0e17;
+  color: #e0e6f0;
+  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+header { text-align: center; padding: 24px 20px 8px; }
+header h1 {
+  font-size: 26px;
+  background: linear-gradient(90deg, #00d4ff, #7b61ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+header p { color: #6b7b8d; margin-top: 6px; font-size: 13px; }
+
+.main-container {
+  display: flex; gap: 16px; padding: 16px 20px; max-width: 1440px; margin: 0 auto;
+}
+
+/* 左侧动画 */
+.animation-area { flex: 1; min-width: 0; }
+#mainCanvas {
+  background: #0d1117; border: 1px solid #1e293b; border-radius: 14px;
+  width: 100%; display: block;
+}
+
+/* 右侧面板 */
+.explanation-panel { width: 300px; flex-shrink: 0; }
+.panel-card {
+  background: #111827; border: 1px solid #1e293b;
+  border-radius: 10px; padding: 16px; margin-bottom: 12px;
+}
+.panel-card h3 { font-size: 14px; color: #00d4ff; margin-bottom: 10px; }
+.panel-card p, .panel-card li { font-size: 12.5px; line-height: 1.9; color: #94a3b8; }
+.panel-card ul { padding-left: 16px; }
+.hl { color: #f59e0b; font-weight: 600; }
+
+/* 控制栏 */
+.controls {
+  display: flex; justify-content: center; gap: 10px;
+  margin-top: 14px; flex-wrap: wrap;
+}
+.btn {
+  padding: 8px 20px; border-radius: 7px; border: 1px solid #334155;
+  background: #1e293b; color: #e2e8f0; cursor: pointer; font-size: 13px; transition: all 0.2s;
+}
+.btn:hover { background: #334155; }
+.btn.active { background: #00d4ff18; border-color: #00d4ff; color: #00d4ff; }
+.btn.danger { border-color: #ef4444; color: #ef4444; }
+
+.status-bar { text-align: center; margin-top: 10px; font-size: 13px; color: #94a3b8; }
+.status-text {
+  display: inline-block; padding: 5px 16px; background: #111827;
+  border-radius: 16px; border: 1px solid #1e293b; transition: all 0.3s;
+}
+
+/* 中断类型选择 */
+.type-bar {
+  display: flex; gap: 8px; justify-content: center; margin-top: 10px; flex-wrap: wrap;
+}
+.type-tag {
+  padding: 4px 12px; border-radius: 14px; font-size: 12px;
+  border: 1px solid #334155; cursor: pointer; transition: all 0.2s;
+}
+.type-tag:hover { border-color: #00d4ff; color: #00d4ff; }
+.type-tag.selected { background: #00d4ff15; border-color: #00d4ff; color: #00d4ff; }
+
+/* 步骤指示器 */
+.step-indicator {
+  display: flex; justify-content: center; gap: 6px; margin-top: 12px;
+}
+.step-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #1e293b; border: 1.5px solid #334155; transition: all 0.3s;
+}
+.step-dot.active { background: #00d4ff; border-color: #00d4ff; box-shadow: 0 0 8px #00d4ff88; }
+.step-dot.done { background: #10b981; border-color: #10b981; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ CPU 中断（Interrupt）工作机制</h1>
+  <p>交互式动态可视化 — 点击「自动播放」观看完整中断处理流程</p>
+</header>
+
+<div class="main-container">
+  <!-- 左侧动画 -->
+  <div class="animation-area">
+    <canvas id="mainCanvas" width="900" height="640"></canvas>
+    <div class="step-indicator" id="stepIndicator"></div>
+    <div class="controls">
+      <button class="btn" id="btnPrev" onclick="prevStep()">⏮ 上一步</button>
+      <button class="btn primary active" id="btnPlay" onclick="togglePlay()">▶ 自动播放</button>
+      <button class="btn" id="btnNext" onclick="nextStep()">下一步 ⏭</button>
+      <button class="btn danger" onclick="resetAll()">↺ 重置</button>
+    </div>
+    <div class="type-bar">
+      <span class="type-tag selected" onclick="switchType('hardware',this)">🔧 硬件中断</span>
+      <span class="type-tag" onclick="switchType('software',this)">💻 软件中断</span>
+      <span class="type-tag" onclick="switchType('exception',this)">⚠️ 异常</span>
+    </div>
+    <div class="status-bar">
+      <span class="status-text" id="statusText">点击「自动播放」开始</span>
+    </div>
+  </div>
+
+  <!-- 右侧说明 -->
+  <div class="explanation-panel">
+    <div class="panel-card">
+      <h3>🧠 什么是中断？</h3>
+      <p>中断是硬件或软件发出的<span class="hl">异步信号</span>，强迫 CPU 暂停当前任务，转去执行对应的<span class="hl">中断处理程序（ISR）</span>，处理完再恢复原任务。</p>
+    </div>
+    <div class="panel-card">
+      <h3>📋 完整工作流程</h3>
+      <ul>
+        <li><b>1. 中断请求</b>：外设发出 IRQ 信号</li>
+        <li><b>2. 中断判优</b>：中断控制器仲裁优先级</li>
+        <li><b>3. 响应中断</b>：CPU 完成当前指令，发出 INTAR</li>
+        <li><b>4. 保存现场</b>：FLAGS/CS/IP 压栈</li>
+        <li><b>5. 执行 ISR</b>：跳转到中断处理程序</li>
+        <li><b>6. 恢复现场</b>：IRET 弹出寄存器</li>
+        <li><b>7. 继续原任务</b>：恢复原程序执行</li>
+      </ul>
+    </div>
+    <div class="panel-card">
+      <h3>🔑 关键概念</h3>
+      <ul>
+        <li><b>IRQ</b>：中断请求信号线</li>
+        <li><b>ISR</b>：Interrupt Service Routine</li>
+        <li><b>中断向量表</b>：存放 ISR 入口地址</li>
+        <li><b>上下文切换</b>：保存/恢复寄存器现场</li>
+        <li><b>中断屏蔽</b>：IF 标志位控制可屏蔽中断</li>
+        <li><b>NMI</b>：不可屏蔽中断（硬件故障）</li>
+      </ul>
+    </div>
+    <div class="panel-card">
+      <h3>📊 中断分类</h3>
+      <ul>
+        <li><b>硬件中断</b>：外设 → IRQ → CPU（键盘、磁盘、网卡）</li>
+        <li><b>软件中断</b>：INT 指令主动触发（系统调用）</li>
+        <li><b>异常</b>：CPU 执行指令时检测到错误（除零、缺页）</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========== 配置 ==========
+const C = document.getElementById('mainCanvas');
+const ctx = C.getContext('2d');
+const DPR = window.devicePixelRatio || 1;
+
+// 高DPI
+function resizeCanvas() {
+  const rect = C.getBoundingClientRect();
+  C.width = rect.width * DPR;
+  C.height = rect.height * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resizeCanvas();
+window.addEventListener('resize', () => { resizeCanvas(); draw(); });
+
+const W = () => C.getBoundingClientRect().width;
+const H = () => C.getBoundingClientRect().height;
+
+// ========== 状态 ==========
+let currentStep = 0;
+let isPlaying = false;
+let playTimer = null;
+let interruptType = 'hardware'; // hardware | software | exception
+const TOTAL_STEPS = 7;
+
+const steps = [
+  { label: '① 中断请求（IRQ）',              color: '#f59e0b' },
+  { label: '② 中断判优（PIC/APIC）',         color: '#8b5cf6' },
+  { label: '③ CPU响应中断（发INTA）',        color: '#00d4ff' },
+  { label: '④ 保存现场（FLAGS/CS/IP压栈）',  color: '#f97316' },
+  { label: '⑤ 执行ISR（中断处理程序）',      color: '#10b981' },
+  { label: '⑥ 恢复现场（IRET弹栈）',         color: '#06b6d4' },
+  { label: '⑦ 恢复原程序执行',                color: '#6366f1' },
+];
+
+// 动画进度 (0~1) 每个步骤内
+let stepProgress = 0;
+let animStartTime = 0;
+const STEP_DURATION = 1200; // ms per step animation
+
+// ========== 颜色 ==========
+const COL = {
+  bg:        '#0d1117',
+  card:      '#111827',
+  border:    '#1e293b',
+  text:      '#e2e8f0',
+  textDim:   '#64748b',
+  cpu:       '#00d4ff',
+  cpuGlow:   '#00d4ff88',
+  device:    '#f59e0b',
+  device2:   '#f97316',
+  isr:       '#10b981',
+  isrGlow:   '#10b98188',
+  stack:     '#7c3aed',
+  arrow:     '#f59e0b',
+  irqLine:   '#ef4444',
+  mem:       '#1e293b',
+  highlight: '#f59e0b',
+};
+
+// ========== 绘制主函数 ==========
+function draw() {
+  const w = W(), h = H();
+  ctx.clearRect(0, 0, w, h);
+
+  // 背景网格
+  drawGrid(w, h);
+
+  // 根据当前步骤绘制
+  drawScene(w, h, currentStep, stepProgress);
+}
+
+function drawGrid(w, h) {
+  ctx.strokeStyle = '#ffffff06';
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x < w; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+  for (let y = 0; y < h; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+}
+
+// ========== 场景绘制 ==========
+function drawScene(w, h, step, progress) {
+  // 布局参数
+  const cpuX = w * 0.5, cpuY = h * 0.38;
+  const devY = h * 0.72;
+  const memX = w * 0.82, memY = h * 0.18;
+  const stackX = w * 0.82, stackY = h * 0.52;
+
+  // 总是绘制基础架构
+  drawCPU(cpuX, cpuY, w, h, step, progress);
+  drawDevices(devY, w, h, step, progress);
+  drawMemory(memX, memY, w, h, step, progress);
+  drawStack(stackX, stackY, w, h, step, progress);
+  drawIRQLines(w, h, step, progress);
+  drawDataFlow(w, h, step, progress);
+  drawStepLabel(w, h, step, progress);
+
+  // 步骤特殊效果
+  if (step >= 3) drawRegistersOverlay(w, h, step, progress);
+  if (step === 4) drawISRCode(w, h, progress);
+  if (step === 6) drawResumeEffect(w, h, progress);
+}
+
+// ---------- CPU ----------
+function drawCPU(cx, cy, w, h, step, progress) {
+  const r = Math.min(w, h) * 0.13;
+  const pulse = step >= 3 ? 0.5 + 0.5 * Math.sin(Date.now() / 200) : 0;
+
+  // 发光
+  if (step >= 1) {
+    const glowR = r * (1.4 + pulse * 0.3);
+    const grd = ctx.createRadialGradient(cx, cy, r * 0.3, cx, cy, glowR);
+    grd.addColorStop(0, step === 4 ? '#10b98144' : '#00d4ff44');
+    grd.addColorStop(1, 'transparent');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(cx, cy, glowR, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 主体
+  const grd = ctx.createLinearGradient(cx - r, cy - r, cx + r, cy + r);
+  grd.addColorStop(0, '#00d4ff');
+  grd.addColorStop(1, '#7b61ff');
+  ctx.fillStyle = grd;
+  roundRect(cx - r, cy - r, r * 2, r * 2, 14);
+  ctx.fill();
+
+  // 停止/运行指示
+  if (step === 3 || step === 4) {
+    // ISR 执行时 CPU 显示 "ISR"
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${r * 0.45}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('ISR', cx, cy);
+  } else {
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${r * 0.38}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('CPU', cx, cy);
+  }
+
+  // CPU 标签
+  ctx.fillStyle = COL.textDim;
+  ctx.font = `12px sans-serif`;
+  ctx.fillText('中央处理器', cx, cy + r + 18);
+
+  // 执行动画：正常执行时显示取指-译码-执行循环
+  if (step === 0) {
+    drawCPUExecuting(cx, cy, r, progress);
+  }
+}
+
+function drawCPUExecuting(cx, cy, r, progress) {
+  // 模拟 CPU 正常执行时的微动画
+  const angles = [0, Math.PI * 0.66, Math.PI * 1.33];
+  angles.forEach((a, i) => {
+    const px = cx + Math.cos(a + progress * Math.PI * 2) * (r * 0.7);
+    const py = cy + Math.sin(a + progress * Math.PI * 2) * (r * 0.7);
+    ctx.beginPath();
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff88';
+    ctx.fill();
+  });
+}
+
+// ---------- 外设 ----------
+function drawDevices(devY, w, h, step, progress) {
+  const devices = [
+    { name: '键盘', icon: '⌨', x: w * 0.12 },
+    { name: '磁盘', icon: '💾', x: w * 0.28 },
+    { name: '网卡', icon: '🌐', x: w * 0.44 },
+    { name: '定时器', icon: '⏱', x: w * 0.60 },
+  ];
+
+  devices.forEach((dev, i) => {
+    const isActive = (step === 0 && interruptType === 'hardware' && progress > i * 0.2);
+    const isRequesting = (step === 1 && i === 0);
+    const dx = dev.x, dy = devY;
+    const bw = 62, bh = 44;
+
+    // 外设盒子
+    ctx.fillStyle = isRequesting ? '#f59e0b' : (isActive ? '#f59e0bcc' : COL.card);
+    ctx.strokeStyle = isRequesting ? '#f59e0b' : COL.border;
+    ctx.lineWidth = isRequesting ? 2 : 1;
+    roundRect(dx - bw/2, dy - bh/2, bw, bh, 8);
+    ctx.fill(); ctx.stroke();
+
+    // 图标 & 名称
+    ctx.fillStyle = '#fff';
+    ctx.font = `11px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(dev.icon + ' ' + dev.name, dx, dy);
+
+    // 请求信号灯
+    if (step >= 1 && step <= 2) {
+      const glow = 0.5 + 0.5 * Math.sin(Date.now() / 150 + i);
+      ctx.beginPath();
+      ctx.arc(dx + bw/2 - 6, dy - bh/2 + 6, 4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(239,68,68,${0.4 + glow * 0.6})`;
+      ctx.fill();
+    }
+  });
+}
+
+// ---------- 中断控制器 (PIC/APIC) ----------
+function drawIRQLines(w, h, step, progress) {
+  if (interruptType !== 'hardware' && step < 2) return;
+
+  const picX = w * 0.38, picY = h * 0.56;
+
+  // PIC 芯片
+  if (step >= 1) {
+    const pw = 70, ph = 36;
+    ctx.fillStyle = step >= 2 ? '#8b5cf6' : '#334155';
+    roundRect(picX - pw/2, picY - ph/2, pw, ph, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold 11px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('PIC/APIC', picX, picY);
+    ctx.fillStyle = COL.textDim;
+    ctx.font = `10px sans-serif`;
+    ctx.fillText('中断控制器', picX, picY + 16);
+  }
+
+  // IRQ 连线（外设 → PIC → CPU）
+  if (step >= 1) {
+    const devices = [w*0.12, w*0.28, w*0.44, w*0.60];
+    const devY = h * 0.72;
+    devices.forEach((dx, i) => {
+      ctx.beginPath();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = step === 1 ? '#f59e0b88' : '#10b98188';
+      ctx.lineWidth = 1.5;
+      ctx.moveTo(dx, devY - 22);
+      ctx.lineTo(picX, picY + 18);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // IRQ 编号
+      ctx.fillStyle = COL.textDim;
+      ctx.font = `9px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText(`IRQ${i}`, (dx + picX) / 2, (devY - 22 + picY + 18) / 2 - 6);
+    });
+
+    // PIC → CPU
+    const cpuX = w * 0.5, cpuY = h * 0.38;
+    ctx.beginPath();
+    ctx.strokeStyle = step >= 2 ? '#00d4ff' : '#f59e0b';
+    ctx.lineWidth = 2;
+    ctx.moveTo(picX, picY - 18);
+    ctx.lineTo(cpuX, cpuY + 30);
+    ctx.stroke();
+
+    // INTA 箭头
+    if (step >= 2) {
+      drawArrow(picX, picY - 18, cpuX, cpuY + 30, '#00d4ff', 'INTA');
+    }
+  }
+}
+
+// ---------- 内存 / 中断向量表 ----------
+function drawMemory(mx, my, w, h, step, progress) {
+  const mw = 110, mh = 160;
+  // 内存框
+  ctx.fillStyle = COL.mem;
+  ctx.strokeStyle = COL.border;
+  ctx.lineWidth = 1;
+  roundRect(mx - mw/2, my, mw, mh, 8);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = COL.textDim;
+  ctx.font = `bold 11px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText('内存', mx, my + 16);
+
+  // 中断向量表
+  const ivtY = my + 30;
+  ctx.fillStyle = step >= 3 ? '#00d4ff22' : '#ffffff08';
+  roundRect(mx - mw/2 + 6, ivtY, mw - 12, 40, 4);
+  ctx.fill();
+  ctx.fillStyle = COL.cpu;
+  ctx.font = `9px sans-serif`;
+  ctx.fillText('中断向量表', mx, ivtY + 14);
+  ctx.fillStyle = COL.textDim;
+  ctx.font = `8px sans-serif`;
+  ctx.fillText('ISR 入口地址', mx, ivtY + 28);
+
+  // ISR 代码区域
+  const isrY = ivtY + 50;
+  ctx.fillStyle = step >= 4 ? '#10b98122' : '#ffffff08';
+  roundRect(mx - mw/2 + 6, isrY, mw - 12, 50, 4);
+  ctx.fill();
+  ctx.fillStyle = step >= 4 ? COL.isr : COL.textDim;
+  ctx.font = `9px sans-serif`;
+  ctx.fillText('ISR 代码', mx, isrY + 14);
+  if (step >= 4) {
+    ctx.fillStyle = COL.textDim;
+    ctx.font = `8px monospace`;
+    ctx.fillText('pushax', mx, isrY + 28);
+    ctx.fillText('...处理...', mx, isrY + 40);
+    ctx.fillText('pop ax', mx, isrY + 52);
+  }
+
+  // 原程序
+  const progY = isrY + 60;
+  ctx.fillStyle = step === 0 || step === 6 ? '#6366f122' : '#ffffff08';
+  roundRect(mx - mw/2 + 6, progY, mw - 12, 30, 4);
+  ctx.fill();
+  ctx.fillStyle = step === 0 || step === 6 ? '#6366f1' : COL.textDim;
+  ctx.font = `9px sans-serif`;
+  ctx.fillText('原程序 (User)', mx, progY + 18);
+}
+
+// ---------- 栈 ----------
+function drawStack(sx, sy, w, h, step, progress) {
+  const sw = 100, sh = 140;
+  ctx.fillStyle = COL.mem;
+  ctx.strokeStyle = COL.border;
+  ctx.lineWidth = 1;
+  roundRect(sx - sw/2, sy, sw, sh, 8);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = COL.textDim;
+  ctx.font = `bold 11px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText('栈 (Stack)', sx, sy + 16);
+
+  // 栈内容
+  const items = [
+    { label: 'FLAGS',  show: step >= 4 },
+    { label: 'CS',     show: step >= 4 },
+    { label: 'IP',     show: step >= 4 },
+    { label: 'AX',     show: step >= 5 },
+    { label: '...',    show: step >= 5 },
+  ];
+
+  items.forEach((item, i) => {
+    const iy = sy + 32 + i * 18;
+    if (item.show) {
+      ctx.fillStyle = '#7c3aed22';
+      ctx.strokeStyle = '#7c3aed';
+      ctx.lineWidth = 0.8;
+      roundRect(sx - sw/2 + 8, iy - 7, sw - 16, 16, 3);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#c4b5fd';
+      ctx.font = `8px monospace`;
+      ctx.fillText(item.label, sx, iy + 3);
+    } else if (step === 6 && i < 3) {
+      // 恢复时弹出
+      ctx.fillStyle = '#10b98122';
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 0.8;
+      roundRect(sx - sw/2 + 8, iy - 7, sw - 16, 16, 3);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#10b981';
+      ctx.font = `8px monospace`;
+      ctx.fillText(item.label + ' ← IRET', sx, iy + 3);
+    } else {
+      ctx.fillStyle = '#ffffff08';
+      roundRect(sx - sw/2 + 8, iy - 7, sw - 16, 16, 3);
+      ctx.fill();
+    }
+  });
+
+  // 栈指针 SP
+  if (step >= 4) {
+    const spY = sy + 32 + (step >= 6 ? 1 : 3) * 18 + 12;
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = `9px monospace`;
+    ctx.fillText('▲ SP', sx + 30, spY);
+  }
+}
+
+// ---------- 数据流 / 箭头动画 ----------
+function drawDataFlow(w, h, step, progress) {
+  const cx = w * 0.5, cy = h * 0.38;
+  const picX = w * 0.38, picY = h * 0.56;
+
+  if (step === 0) {
+    // 正常执行：取指-执行循环动画
+    drawFlowParticles(cx, cy, w * 0.82, h * 0.18, progress, '#6366f1');
+  }
+
+  if (step === 1) {
+    // 外设发 IRQ（闪烁红线）
+    const devices = [w*0.12, w*0.28, w*0.44, w*0.60];
+    const devY = h * 0.72;
+    devices.forEach((dx, i) => {
+      if (progress > i * 0.15) {
+        drawBlinkLine(dx, devY - 22, picX, picY + 18, '#ef4444', progress);
+      }
+    });
+  }
+
+  if (step === 2) {
+    // PIC 发 INT 给 CPU
+    drawFlowParticles(picX, picY - 18, cx, cy + 30, progress, '#00d4ff');
+    // 标签
+    ctx.fillStyle = '#00d4ff';
+    ctx.font = `bold 11px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('INT', (picX + cx) / 2, (picY - 18 + cy + 30) / 2 - 8);
+  }
+
+  if (step === 3) {
+    // CPU 读中断向量表 → 跳转
+    drawFlowParticles(cx, cy, w * 0.82, h * 0.18 + 40, progress, '#f59e0b');
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = `bold 10px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('取 ISR 地址', (cx + w * 0.82) / 2, (cy + h * 0.18 + 40) / 2 - 6);
+  }
+
+  if (step === 4) {
+    // ISR 执行中：CPU ↔ 栈 数据交换
+    drawFlowParticles(cx, cy, w * 0.82, h * 0.52 + 40, progress * 0.5, '#10b981');
+  }
+
+  if (step === 5) {
+    // IRET：栈 → CPU
+    drawFlowParticles(w * 0.82, h * 0.52 + 30, cx, cy, progress, '#06b6d4');
+    ctx.fillStyle = '#06b6d4';
+    ctx.font = `bold 10px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('IRET', (w * 0.82 + cx) / 2, (h * 0.52 + 30 + cy) / 2 - 6);
+  }
+
+  if (step === 6) {
+    // 返回原程序
+    drawFlowParticles(w * 0.82, h * 0.18 + 70, cx, cy, progress, '#6366f1');
+    ctx.fillStyle = '#6366f1';
+    ctx.font = `bold 10px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText('恢复原程序', (w * 0.82 + cx) / 2, (h * 0.18 + 70 + cy) / 2 - 6);
+  }
+}
+
+// 流动粒子效果
+function drawFlowParticles(x1, y1, x2, y2, progress, color) {
+  const numParticles = 4;
+  for (let i = 0; i < numParticles; i++) {
+    const t = (progress + i * 0.25) % 1;
+    const px = x1 + (x2 - x1) * t;
+    const py = y1 + (y2 - y1) * t;
+    ctx.beginPath();
+    ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t * Math.PI);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 闪烁线
+function drawBlinkLine(x1, y1, x2, y2, color, progress) {
+  const blink = 0.5 + 0.5 * Math.sin(Date.now() / 100);
+  ctx.beginPath();
+  ctx.strokeStyle = `rgba(239,68,68,${blink})`;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 3]);
+  ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// 箭头
+function drawArrow(x1, y1, x2, y2, color, label) {
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+
+  // 箭头头部
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  const headLen = 10;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - headLen * Math.cos(angle - 0.4), y2 - headLen * Math.sin(angle - 0.4));
+  ctx.lineTo(x2 - headLen * Math.cos(angle + 0.4), y2 - headLen * Math.sin(angle + 0.4));
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  // 标签
+  if (label) {
+    ctx.fillStyle = color;
+    ctx.font = `bold 10px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(label, (x1 + x2) / 2, (y1 + y2) / 2 - 8);
+  }
+}
+
+// ---------- 寄存器浮层 ----------
+function drawRegistersOverlay(w, h, step, progress) {
+  const rx = w * 0.06, ry = h * 0.08;
+  const regs = ['CS', 'IP', 'FLAGS', 'AX', 'BX', 'SP'];
+
+  ctx.fillStyle = '#00000088';
+  roundRect(rx - 4, ry - 4, 110, regs.length * 18 + 12, 6);
+  ctx.fill();
+
+  regs.forEach((r, i) => {
+    const ry2 = ry + i * 18;
+    const isSaved = step >= 4 && ['CS','IP','FLAGS'].includes(r);
+    const isRestored = step >= 6 && ['CS','IP','FLAGS'].includes(r);
+
+    ctx.fillStyle = isSaved ? '#f59e0b88' : (isRestored ? '#10b98188' : '#1e293b');
+    roundRect(rx, ry2, 102, 16, 3);
+    ctx.fill();
+
+    ctx.fillStyle = isSaved ? '#f59e0b' : (isRestored ? '#10b981' : COL.textDim);
+    ctx.font = `9px monospace`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`${r}: ${isSaved ? '↓栈' : (isRestored ? '栈↑' : '0x1234')}`, rx + 5, ry2 + 12);
+  });
+
+  // 标签
+  ctx.fillStyle = COL.cpu;
+  ctx.font = `bold 10px sans-serif`;
+  ctx.fillText('寄存器', rx + 5, ry - 6);
+}
+
+// ---------- ISR 代码浮层 ----------
+function drawISRCode(w, h, progress) {
+  const cx = w * 0.5, cy = h * 0.38;
+  const codeLines = [
+    '; --- ISR 入口 ---',
+    'push ax      ; 保存寄存器',
+    'push bx',
+    'push cx',
+    '...           ; 处理中断',
+    'mov al, 0x20 ; EOI 信号',
+    'out 0x20, al',
+    'pop cx       ; 恢复寄存器',
+    'pop bx',
+    'pop ax',
+    'iret         ; 返回原程序',
+  ];
+
+  const bw = 220, bh = codeLines.length * 16 + 20;
+  const bx = cx - bw/2, by = cy + 50;
+
+  ctx.fillStyle = '#000000cc';
+  roundRect(bx, by, bw, bh, 8);
+  ctx.fill();
+  ctx.strokeStyle = COL.isr;
+  ctx.lineWidth = 1;
+  roundRect(bx, by, bw, bh, 8);
+  ctx.stroke();
+
+  ctx.fillStyle = COL.isr;
+  ctx.font = `bold 10px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.fillText('ISR (Interrupt Service Routine)', bx + 8, by + 16);
+
+  codeLines.forEach((line, i) => {
+    const alpha = Math.min(1, progress * 2 - i * 0.08);
+    ctx.fillStyle = `rgba(16, 185, 129, ${Math.max(0.3, alpha)})`;
+    ctx.font = `9px monospace`;
+    ctx.fillText(line, bx + 10, by + 32 + i * 15);
+  });
+}
+
+// ---------- 恢复效果 ----------
+function drawResumeEffect(w, h, progress) {
+  const cx = w * 0.5, cy = h * 0.38;
+  // 绿光扩散
+  const glowR = 30 + progress * 80;
+  const grd = ctx.createRadialGradient(cx, cy, 10, cx, cy, glowR);
+  grd.addColorStop(0, `rgba(16,185,129,${0.3 * (1 - progress)})`);
+  grd.addColorStop(1, 'transparent');
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.arc(cx, cy, glowR, 0, Math.PI * 2); ctx.fill();
+}
+
+// ---------- 步骤标签 ----------
+function drawStepLabel(w, h, step, progress) {
+  if (step < 0 || step >= steps.length) return;
+  const s = steps[step];
+
+  // 底部标签
+  ctx.fillStyle = '#111827ee';
+  roundRect(w/2 - 160, h - 38, 320, 30, 15);
+  ctx.fill();
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = 1;
+  roundRect(w/2 - 160, h - 38, 320, 30, 15);
+  ctx.stroke();
+
+  ctx.fillStyle = s.color;
+  ctx.font = `bold 13px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText(s.label, w/2, h - 18);
+}
+
+// ========== 工具函数 ==========
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ========== 步骤指示器 ==========
+function updateStepIndicator() {
+  const el = document.getElementById('stepIndicator');
+  el.innerHTML = '';
+  steps.forEach((s, i) => {
+    const dot = document.createElement('div');
+    dot.className = 'step-dot' + (i === currentStep ? ' active' : (i < currentStep ? ' done' : ''));
+    dot.title = s.label;
+    el.appendChild(dot);
+  });
+}
+
+function updateStatusText() {
+  const el = document.getElementById('statusText');
+  if (currentStep < steps.length) {
+    el.textContent = steps[currentStep].label;
+    el.style.borderColor = steps[currentStep].color;
+    el.style.color = steps[currentStep].color;
+  }
+}
+
+// ========== 播放控制 ==========
+function nextStep() {
+  if (currentStep < TOTAL_STEPS - 1) {
+    currentStep++;
+    stepProgress = 0;
+    animStartTime = performance.now();
+    updateStepIndicator();
+    updateStatusText();
+  } else {
+    stopPlay();
+  }
+}
+
+function prevStep() {
+  if (currentStep > 0) {
+    currentStep--;
+    stepProgress = 0;
+    animStartTime = performance.now();
+    updateStepIndicator();
+    updateStatusText();
+  }
+}
+
+function togglePlay() {
+  if (isPlaying) {
+    stopPlay();
+  } else {
+    startPlay();
+  }
+}
+
+function startPlay() {
+  isPlaying = true;
+  document.getElementById('btnPlay').textContent = '⏸ 暂停';
+  document.getElementById('btnPlay').classList.add('active');
+  animStartTime = performance.now();
+  tick();
+}
+
+function stopPlay() {
+  isPlaying = false;
+  document.getElementById('btnPlay').textContent = '▶ 自动播放';
+  document.getElementById('btnPlay').classList.remove('active');
+  if (playTimer) cancelAnimationFrame(playTimer);
+}
+
+function tick() {
+  if (!isPlaying) return;
+  const now = performance.now();
+  stepProgress = Math.min(1, (now - animStartTime) / STEP_DURATION);
+  draw();
+
+  if (stepProgress >= 1) {
+    if (currentStep < TOTAL_STEPS - 1) {
+      currentStep++;
+      animStartTime = now;
+      updateStepIndicator();
+      updateStatusText();
+    } else {
+      stopPlay();
+      return;
+    }
+  }
+  playTimer = requestAnimationFrame(tick);
+}
+
+function resetAll() {
+  stopPlay();
+  currentStep = 0;
+  stepProgress = 0;
+  updateStepIndicator();
+  updateStatusText();
+  draw();
+}
+
+// 切换中断类型
+function switchType(type, el) {
+  interruptType = type;
+  document.querySelectorAll('.type-tag').forEach(t => t.classList.remove('selected'));
+  el.classList.add('selected');
+  resetAll();
+}
+
+// ========== 主循环 ==========
+function mainLoop() {
+  // 如果不在播放中，用轻量循环刷新动画（发光、闪烁效果）
+  if (!isPlaying) {
+    stepProgress = (performance.now() % 2000) / 2000;
+  }
+  draw();
+  requestAnimationFrame(mainLoop);
+}
+
+// 初始化
+updateStepIndicator();
+updateStatusText();
+mainLoop();
+</script>
+</body>
+</html>

@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL B+树查询与页面IO - 动态可视化</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f0883e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Header */
+  .header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 600;
+  }
+  .header h1 span { color: var(--accent); }
+
+  /* Controls */
+  .controls {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .controls label { font-size: 14px; color: var(--text2); }
+  .controls input {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    width: 80px;
+  }
+  .btn {
+    padding: 6px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+  .btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { background: #4a9aef; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Main Layout */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    grid-template-rows: auto auto;
+    gap: 0;
+    height: calc(100vh - 110px);
+  }
+
+  /* SVG Area */
+  .viz-area {
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .viz-area svg { width: 100%; height: 100%; }
+
+  /* Right Panel */
+  .right-panel {
+    background: var(--bg2);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-tab {
+    flex: 1;
+    padding: 10px;
+    text-align: center;
+    font-size: 13px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    color: var(--text2);
+    transition: all 0.2s;
+  }
+  .panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel-content { flex: 1; overflow-y: auto; padding: 16px; }
+
+  /* Log */
+  .log-entry {
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    background: var(--bg3);
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    border-left: 3px solid var(--border);
+  }
+  .log-entry.io { border-left-color: var(--yellow); }
+  .log-entry.hit { border-left-color: var(--green); }
+  .log-entry.done { border-left-color: var(--accent); }
+  .log-entry .time { color: var(--text2); font-size: 11px; }
+  .log-entry .msg { color: var(--text); }
+  .log-entry .highlight { color: var(--yellow); font-weight: 600; }
+
+  /* Info Cards */
+  .info-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .info-card h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  .info-card p, .info-card li {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text2);
+  }
+  .info-card ul { padding-left: 18px; }
+
+  /* Page Structure Modal */
+  .page-modal {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .page-modal.show { display: flex; }
+  .page-modal-content {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 700px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .page-modal-content h2 {
+    font-size: 18px;
+    margin-bottom: 16px;
+    color: var(--accent);
+  }
+
+  /* Page Structure Diagram */
+  .page-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 16px 0;
+  }
+  .page-row {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .page-row.header { background: #1a3a5c; color: var(--accent); }
+  .page-row.inflated { background: var(--bg3); color: var(--purple); }
+  .page-row.records { background: #1a2e1a; color: var(--green); }
+  .page-row.freespace { background: #2e2e1a; color: var(--yellow); }
+  .page-row.directory { background: #2e1a2e; color: var(--purple); }
+  .page-row.trailer { background: #3a1a1a; color: var(--red); }
+  .page-row .size { margin-left: auto; font-size: 11px; color: var(--text2); }
+
+  /* Disk-Memory Diagram */
+  .dm-container {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    margin: 16px 0;
+  }
+  .dm-box {
+    flex: 1;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    min-height: 200px;
+  }
+  .dm-box.disk { border-color: var(--red); }
+  .dm-box.memory { border-color: var(--green); }
+  .dm-box h4 {
+    text-align: center;
+    margin-bottom: 10px;
+    font-size: 14px;
+  }
+  .dm-box.disk h4 { color: var(--red); }
+  .dm-box.memory h4 { color: var(--green); }
+  .dm-page {
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+    font-size: 12px;
+    text-align: center;
+  }
+  .dm-page.on-disk { background: #2e1a1a; color: var(--red); border: 1px solid #5a2020; }
+  .dm-page.in-memory { background: #1a2e1a; color: var(--green); border: 1px solid #205a20; }
+  .dm-page.being-loaded { animation: pulse 0.8s infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Arrow animation */
+  .arrow-path {
+    stroke-dasharray: 8 4;
+    animation: flow 1s linear infinite;
+  }
+  @keyframes flow {
+    to { stroke-dashoffset: -12; }
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 50;
+    max-width: 250px;
+    line-height: 1.5;
+  }
+
+  /* Step indicator */
+  .step-indicator {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: var(--bg2);
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+  }
+  .step-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: all 0.3s;
+  }
+  .step-dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .step-label { font-size: 13px; color: var(--text2); margin-left: 8px; }
+
+  /* Close button */
+  .close-btn {
+    float: right;
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  .close-btn:hover { color: var(--text); }
+
+  /* Speed control */
+  .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text2);
+  }
+  .speed-control input[type="range"] {
+    width: 80px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🔍 MySQL <span>B+树查询</span> 与 <span>页面IO</span> 动态可视化</h1>
+  <div class="speed-control">
+    <span>动画速度:</span>
+    <input type="range" id="speedSlider" min="200" max="2000" value="800" step="100">
+    <span id="speedLabel">1x</span>
+  </div>
+</div>
+
+<div class="controls">
+  <label>查询主键值:</label>
+  <input type="number" id="queryInput" value="101" min="1" max="999">
+  <button class="btn primary" id="btnStart">▶ 开始动画</button>
+  <button class="btn" id="btnPause" disabled>⏸ 暂停</button>
+  <button class="btn" id="btnReset">↺ 重置</button>
+  <button class="btn" id="btnPageStruct">📄 页面结构</button>
+  <button class="btn" id="btnDiskMem">💾 磁盘/内存交互</button>
+</div>
+
+<div class="main">
+  <div class="viz-area" id="vizArea">
+    <svg id="mainSvg"></svg>
+    <div class="step-indicator" id="stepIndicator">
+      <div class="step-dot active" data-step="0"></div>
+      <div class="step-dot" data-step="1"></div>
+      <div class="step-dot" data-step="2"></div>
+      <div class="step-dot" data-step="3"></div>
+      <div class="step-dot" data-step="4"></div>
+      <div class="step-label" id="stepLabel">准备开始</div>
+    </div>
+  </div>
+  <div class="right-panel">
+    <div class="panel-tabs">
+      <div class="panel-tab active" data-tab="log">📋 执行日志</div>
+      <div class="panel-tab" data-tab="info">📖 知识说明</div>
+    </div>
+    <div class="panel-content" id="panelContent">
+      <div id="logTab">
+        <div class="log-entry" style="border-left-color:var(--accent);">
+          <div class="msg">👆 输入主键值，点击"开始动画"查看 B+ 树查询全过程</div>
+        </div>
+      </div>
+      <div id="infoTab" style="display:none;">
+        <div class="info-card">
+          <h3>📄 什么是页面（Page）？</h3>
+          <p>InnoDB 存储数据的最小单位，默认大小 <strong>16KB</strong>。所有数据（表数据、索引）都存储在页面中。页面是磁盘与内存之间交换数据的基本单位。</p>
+        </div>
+        <div class="info-card">
+          <h3>🌲 B+ 树结构</h3>
+          <ul>
+            <li><strong>根节点</strong>：查询的入口，常驻内存</li>
+            <li><strong>内节点</strong>：只存储键值和子页面指针</li>
+            <li><strong>叶子节点</strong>：存储完整行数据，通过双向链表连接</li>
+            <li><strong>树高度</strong>：通常 2-3 层，一次查询只需 2-3 次 IO</li>
+          </ul>
+        </div>
+        <div class="info-card">
+          <h3>💾 Buffer Pool（缓冲池）</h3>
+          <p>内存中的页面缓存区。查询时先检查页面是否已在 Buffer Pool 中：</p>
+          <ul>
+            <li><strong>命中（Hit）</strong>：直接从内存读取，无磁盘 IO</li>
+            <li><strong>未命中（Miss）</strong>：从磁盘加载页面到 Buffer Pool，触发磁盘 IO</li>
+            <li><strong>脏页（Dirty Page）</strong>：内存中修改过的页面，需要刷回磁盘</li>
+          </ul>
+        </div>
+        <div class="info-card">
+          <h3>⚡ 一次查询的 IO 过程</h3>
+          <ul>
+            <li>① 访问根页面（通常在内存）</li>
+            <li>② 根据键值找到子页面指针</li>
+            <li>③ 加载子页面（可能触发磁盘 IO）</li>
+            <li>④ 在叶子页面中查找记录</li>
+            <li>⑤ 返回结果</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Page Structure Modal -->
+<div class="page-modal" id="pageModal">
+  <div class="page-modal-content">
+    <button class="close-btn" onclick="closePageModal()">&times;</button>
+    <h2>📄 InnoDB 页面（Page）结构</h2>
+    <p style="color:var(--text2); font-size:13px; margin-bottom:16px;">页面是 InnoDB 存储数据的最小单位，默认大小 16KB（16384 字节）</p>
+    <div class="page-diagram">
+      <div class="page-row header">
+        <span>📋 Page Header（页面头部）</span>
+        <span class="size">38 字节</span>
+      </div>
+      <div class="page-row header" style="background:#1a3a4a; font-size:12px; color:#8bdcff;">
+        <span>包含：页号、上下页指针、页类型、LSN 等元数据</span>
+      </div>
+
+      <div class="page-row inflated">
+        <span>∞ Infimum + Supremum（边界记录）</span>
+        <span class="size">26 字节</span>
+      </div>
+      <div class="page-row inflated" style="background:#2e1a3a; font-size:12px; color:#d299ff;">
+        <span>虚拟的最小和最大记录，作为页内记录的边界</span>
+      </div>
+
+      <div class="page-row records">
+        <span>📝 User Records（用户记录区）</span>
+        <span class="size">变长</span>
+      </div>
+      <div class="page-row records" style="background:#1a3a1a; font-size:12px; color:#6fcf6f;">
+        <span>实际存储的行数据，按主键顺序线性存放</span>
+      </div>
+      <div class="page-row records" style="background:#1a2e1a; font-size:11px; color:#5ab95a; flex-direction:column; align-items:flex-start;">
+        <span>示例：[id=1, name=Alice] [id=2, name=Bob] ... [id=99, name=Zoe]</span>
+        <span style="margin-top:4px; color:#3fb950;">每个记录包含：记录头(5B) + 变长字段长度 + NULL标志 + 数据</span>
+      </div>
+
+      <div class="page-row freespace">
+        <span>🟡 Free Space（空闲空间）</span>
+        <span class="size">变长</span>
+      </div>
+      <div class="page-row freespace" style="background:#2e2e1a; font-size:12px; color:#d2b822;">
+        <span>尚未使用的空间，插入新记录时从这里分配</span>
+      </div>
+
+      <div class="page-row directory">
+        <span>📑 Page Directory（页目录）</span>
+        <span class="size">变长</span>
+      </div>
+      <div class="page-row directory" style="background:#2e1a2e; font-size:12px; color:#d299ff;">
+        <span>槽位（Slot）目录，每 4-8 条记录一个槽，用于二分查找加速</span>
+      </div>
+
+      <div class="page-row trailer">
+        <span>🔒 File Trailer（文件尾部）</span>
+        <span class="size">8 字节</span>
+      </div>
+      <div class="page-row trailer" style="background:#3a1a1a; font-size:12px; color:#f85149;">
+        <span>校验位（Checksum），用于检测页面是否损坏</span>
+      </div>
+    </div>
+
+    <div class="info-card" style="margin-top:16px;">
+      <h3>📌 页内记录查找过程</h3>
+      <p>当页面加载到内存后，查找一条记录的过程：</p>
+      <ul style="margin-top:8px;">
+        <li><strong>第1步</strong>：通过 Page Directory 二分查找，定位到记录可能所在的槽位</li>
+        <li><strong>第2步</strong>：在槽位指定的范围内，线性扫描找到目标记录</li>
+        <li><strong>第3步</strong>：返回记录数据</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Disk-Memory Modal -->
+<div class="page-modal" id="dmModal">
+  <div class="page-modal-content" style="max-width:800px;">
+    <button class="close-btn" onclick="closeDmModal()">&times;</button>
+    <h2>💾 磁盘与内存（Buffer Pool）交互过程</h2>
+    <p style="color:var(--text2); font-size:13px; margin-bottom:16px;">页面是磁盘与内存之间交换数据的基本单位（16KB/页）</p>
+
+    <div class="dm-container" id="dmContainer">
+      <div class="dm-box disk">
+        <h4>💿 磁盘 (.ibd 文件)</h4>
+        <div id="diskPages"></div>
+      </div>
+      <div class="dm-box memory">
+        <h4>🧠 Buffer Pool (内存)</h4>
+        <div id="memoryPages"></div>
+      </div>
+    </div>
+
+    <div id="dmLog" style="margin-top:16px; max-height:200px; overflow-y:auto;"></div>
+
+    <div class="info-card" style="margin-top:16px;">
+      <h3>🔄 页面加载过程（Page Fault → Buffer Pool）</h3>
+      <ul>
+        <li><strong>1. 查询需要页面 P</strong> → 检查 Buffer Pool</li>
+        <li><strong>2. 页面不在内存（Miss）</strong> → 触发页面 IO</li>
+        <li><strong>3. 检查 Buffer Pool 是否有空闲空间</strong>：
+          <ul style="margin-top:4px;">
+            <li>有空闲 → 直接加载</li>
+            <li>无空闲 → 从 LRU 尾部淘汰页面（如果是脏页，先刷盘）</li>
+          </ul>
+        </li>
+        <li><strong>4. 从磁盘读取页面 P</strong>：offset = page_no × 16KB</li>
+        <li><strong>5. 页面 P 加载到 Buffer Pool</strong> → 后续访问零 IO</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip" style="display:none;"></div>
+
+<script>
+// ========== Data Model ==========
+// B+ Tree structure for visualization
+// Each node: { id, type: 'root'|'internal'|'leaf', keys: [], children: [], records: [], pageNo, x, y, w, h }
+
+const TREE = {
+  root: {
+    id: 'root',
+    type: 'root',
+    pageNo: 7,
+    keys: [100, 200, 300],
+    children: ['internal1', 'internal2', 'internal3', 'internal4'],
+    x: 0, y: 0, w: 0, h: 0
+  },
+  internal1: {
+    id: 'internal1',
+    type: 'internal',
+    pageNo: 3,
+    keys: [50],
+    children: ['leaf1', 'leaf2'],
+    x: 0, y: 0, w: 0, h: 0
+  },
+  internal2: {
+    id: 'internal2',
+    type: 'internal',
+    pageNo: 5,
+    keys: [150],
+    children: ['leaf3', 'leaf4'],
+    x: 0, y: 0, w: 0, h: 0
+  },
+  internal3: {
+    id: 'internal3',
+    type: 'internal',
+    pageNo: 8,
+    keys: [250],
+    children: ['leaf5', 'leaf6'],
+    x: 0, y: 0, w: 0, h: 0
+  },
+  internal4: {
+    id: 'internal4',
+    type: 'internal',
+    pageNo: 9,
+    keys: [350],
+    children: ['leaf7', 'leaf8'],
+    x: 0, y: 0, w: 0, h: 0
+  },
+  leaf1: { id: 'leaf1', type: 'leaf', pageNo: 10, records: [1,2,3,4,5], next: 'leaf2', x: 0, y: 0, w: 0, h: 0 },
+  leaf2: { id: 'leaf2', type: 'leaf', pageNo: 11, records: [50,51,52,53,54], next: 'leaf3', x: 0, y: 0, w: 0, h: 0 },
+  leaf3: { id: 'leaf3', type: 'leaf', pageNo: 12, records: [100,101,102,103,104], next: 'leaf4', x: 0, y: 0, w: 0, h: 0 },
+  leaf4: { id: 'leaf4', type: 'leaf', pageNo: 13, records: [150,151,152,153,154], next: 'leaf5', x: 0, y: 0, w: 0, h: 0 },
+  leaf5: { id: 'leaf5', type: 'leaf', pageNo: 14, records: [200,201,202,203,204], next: 'leaf6', x: 0, y: 0, w: 0, h: 0 },
+  leaf6: { id: 'leaf6', type: 'leaf', pageNo: 15, records: [250,251,252,253,254], next: 'leaf7', x: 0, y: 0, w: 0, h: 0 },
+  leaf7: { id: 'leaf7', type: 'leaf', pageNo: 16, records: [300,301,302,303,304], next: 'leaf8', x: 0, y: 0, w: 0, h: 0 },
+  leaf8: { id: 'leaf8', type: 'leaf', pageNo: 17, records: [350,351,352,353,354], next: null, x: 0, y: 0, w: 0, h: 0 },
+};
+
+// Simulated Buffer Pool state
+let bufferPool = [7, 3]; // root page and internal1 are initially in memory
+let diskPages = [3, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+
+// Animation state
+let animState = {
+  running: false,
+  paused: false,
+  step: 0,
+  steps: [],
+  currentTimeout: null,
+  visitedNodes: [],
+  foundLeaf: null,
+  foundRecord: null,
+};
+
+// ========== SVG Setup ==========
+const svg = document.getElementById('mainSvg');
+const NS = 'http://www.w3.org/2000/svg';
+
+function resizeSvg() {
+  const area = document.getElementById('vizArea');
+  svg.setAttribute('width', area.clientWidth);
+  svg.setAttribute('height', area.clientHeight);
+}
+window.addEventListener('resize', resizeSvg);
+resizeSvg();
+
+// ========== Drawing Functions ==========
+const NODE_W = 120;
+const NODE_H = 44;
+const LEAF_W = 100;
+const LEAF_H = 38;
+const LEVEL_GAP = 110;
+const NODE_GAP = 30;
+
+function layoutTree() {
+  const area = document.getElementById('vizArea');
+  const W = area.clientWidth;
+  const H = area.clientHeight;
+
+  // Root
+  TREE.root.x = W / 2 - NODE_W / 2;
+  TREE.root.y = 40;
+  TREE.root.w = NODE_W;
+  TREE.root.h = NODE_H;
+
+  // Level 1 (internal nodes)
+  const level1Nodes = TREE.root.children.map(id => TREE[id]);
+  const level1TotalW = level1Nodes.length * NODE_W + (level1Nodes.length - 1) * NODE_GAP;
+  const level1StartX = (W - level1TotalW) / 2;
+  level1Nodes.forEach((node, i) => {
+    node.x = level1StartX + i * (NODE_W + NODE_GAP);
+    node.y = TREE.root.y + LEVEL_GAP;
+    node.w = NODE_W;
+    node.h = NODE_H;
+  });
+
+  // Level 2 (leaf nodes)
+  const allLeaves = [];
+  level1Nodes.forEach(node => {
+    node.children.forEach(childId => {
+      allLeaves.push(TREE[childId]);
+    });
+  });
+  const leafTotalW = allLeaves.length * LEAF_W + (allLeaves.length - 1) * NODE_GAP;
+  const leafStartX = (W - leafTotalW) / 2;
+  allLeaves.forEach((node, i) => {
+    node.x = leafStartX + i * (LEAF_W + NODE_GAP);
+    node.y = TREE.root.y + LEVEL_GAP * 2;
+    node.w = LEAF_W;
+    node.h = LEAF_H;
+  });
+}
+layoutTree();
+
+function getNodeColor(node, isVisited, isCurrent, inMemory) {
+  if (isCurrent) return '#58a6ff';
+  if (isVisited) return '#3fb950';
+  if (inMemory) return '#bc8cff';
+  return '#30363d';
+}
+
+function getNodeStroke(node, isVisited, isCurrent, inMemory) {
+  if (isCurrent) return '#58a6ff';
+  if (isVisited) return '#3fb950';
+  if (inMemory) return '#bc8cff';
+  return '#30363d';
+}
+
+function drawTree() {
+  // Clear SVG
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const visitedSet = new Set(animState.visitedNodes);
+  const currentNode = animState.steps[animState.step]?.nodeId;
+
+  // Draw links (from parent to children)
+  function drawLinks(node) {
+    if (!node.children) return;
+    node.children.forEach((childId, i) => {
+      const child = TREE[childId];
+      if (!child) return;
+
+      // Link line
+      const line = document.createElementNS(NS, 'line');
+      const startX = node.x + node.w / 2;
+      const startY = node.y + node.h;
+      const endX = child.x + child.w / 2;
+      const endY = child.y;
+      line.setAttribute('x1', startX);
+      line.setAttribute('y1', startY);
+      line.setAttribute('x2', endX);
+      line.setAttribute('y2', endY);
+      line.setAttribute('stroke', visitedSet.has(node.id) && visitedSet.has(childId) ? '#3fb950' : '#30363d');
+      line.setAttribute('stroke-width', '2');
+      if (animState.steps[animState.step]?.from === node.id && animState.steps[animState.step]?.to === childId) {
+        line.setAttribute('stroke', '#58a6ff');
+        line.setAttribute('stroke-width', '3');
+        line.classList.add('arrow-path');
+      }
+      svg.appendChild(line);
+
+      // Key label on link
+      if (node.keys && node.keys[i]) {
+        const label = document.createElementNS(NS, 'text');
+        label.setAttribute('x', (startX + endX) / 2);
+        label.setAttribute('y', (startY + endY) / 2 - 8);
+        label.setAttribute('fill', '#8b949e');
+        label.setAttribute('font-size', '12');
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = `≤${node.keys[i]}`;
+        svg.appendChild(label);
+      }
+
+      drawLinks(child);
+    });
+  }
+  drawLinks(TREE.root);
+
+  // Draw leaf linked list
+  const leaves = [];
+  TREE.root.children.forEach(id => {
+    const internal = TREE[id];
+    internal.children.forEach(cid => leaves.push(TREE[cid]));
+  });
+  for (let i = 0; i < leaves.length - 1; i++) {
+    const a = leaves[i];
+    const b = leaves[i + 1];
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', a.x + a.w);
+    line.setAttribute('y1', a.y + a.h / 2);
+    line.setAttribute('x2', b.x);
+    line.setAttribute('y2', b.y + b.h / 2);
+    line.setAttribute('stroke', '#30363d');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('stroke-dasharray', '4 3');
+    line.setAttribute('opacity', '0.5');
+    svg.appendChild(line);
+
+    // Arrow
+    const arrow = document.createElementNS(NS, 'polygon');
+    arrow.setAttribute('points', `${b.x},${b.y + b.h / 2 - 5} ${b.x - 8},${b.y + b.h / 2} ${b.x},${b.y + b.h / 2 + 5}`);
+    arrow.setAttribute('fill', '#30363d');
+    arrow.setAttribute('opacity', '0.5');
+    svg.appendChild(arrow);
+  }
+
+  // Draw nodes
+  function drawNode(node) {
+    const inMemory = bufferPool.includes(node.pageNo);
+    const isVisited = visitedSet.has(node.id);
+    const isCurrent = currentNode === node.id;
+    const fill = getNodeColor(node, isVisited, isCurrent, inMemory);
+    const stroke = getNodeStroke(node, isVisited, isCurrent, inMemory);
+
+    // Node rect
+    const rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('x', node.x);
+    rect.setAttribute('y', node.y);
+    rect.setAttribute('width', node.w);
+    rect.setAttribute('height', node.h);
+    rect.setAttribute('rx', '8');
+    rect.setAttribute('fill', fill + (isCurrent ? '33' : '22'));
+    rect.setAttribute('stroke', stroke);
+    rect.setAttribute('stroke-width', isCurrent ? '3' : '2');
+    rect.setAttribute('data-node', node.id);
+    rect.style.cursor = 'pointer';
+    svg.appendChild(rect);
+
+    // Node label
+    const label = document.createElementNS(NS, 'text');
+    label.setAttribute('x', node.x + node.w / 2);
+    label.setAttribute('y', node.y + node.h / 2 - 6);
+    label.setAttribute('fill', '#e6edf3');
+    label.setAttribute('font-size', '12');
+    label.setAttribute('font-weight', '600');
+    label.setAttribute('text-anchor', 'middle');
+    label.textContent = node.type === 'leaf' ? `Leaf P${node.pageNo}` : `P${node.pageNo}`;
+    svg.appendChild(label);
+
+    // Keys
+    const keysText = document.createElementNS(NS, 'text');
+    keysText.setAttribute('x', node.x + node.w / 2);
+    keysText.setAttribute('y', node.y + node.h / 2 + 10);
+    keysText.setAttribute('fill', '#8b949e');
+    keysText.setAttribute('font-size', '11');
+    keysText.setAttribute('text-anchor', 'middle');
+    if (node.type === 'leaf') {
+      keysText.textContent = `${node.records[0]}~${node.records[node.records.length - 1]}`;
+    } else {
+      keysText.textContent = node.keys.join(',');
+    }
+    svg.appendChild(keysText);
+
+    // Memory badge
+    if (inMemory) {
+      const badge = document.createElementNS(NS, 'circle');
+      badge.setAttribute('cx', node.x + node.w - 8);
+      badge.setAttribute('cy', node.y + 8);
+      badge.setAttribute('r', '6');
+      badge.setAttribute('fill', '#3fb950');
+      svg.appendChild(badge);
+      const badgeText = document.createElementNS(NS, 'text');
+      badgeText.setAttribute('x', node.x + node.w - 8);
+      badgeText.setAttribute('y', node.y + 11);
+      badgeText.setAttribute('fill', '#fff');
+      badgeText.setAttribute('font-size', '9');
+      badgeText.setAttribute('text-anchor', 'middle');
+      badgeText.textContent = 'M';
+      svg.appendChild(badgeText);
+    }
+
+    // Children
+    if (node.children) {
+      node.children.forEach(childId => drawNode(TREE[childId]));
+    }
+  }
+  drawNode(TREE.root);
+
+  // Draw highlight for found record
+  if (animState.foundLeaf && animState.foundRecord) {
+    const leaf = TREE[animState.foundLeaf];
+    const foundRect = document.createElementNS(NS, 'rect');
+    foundRect.setAttribute('x', leaf.x - 4);
+    foundRect.setAttribute('y', leaf.y - 4);
+    foundRect.setAttribute('width', leaf.w + 8);
+    foundRect.setAttribute('height', leaf.h + 8);
+    foundRect.setAttribute('rx', '12');
+    foundRect.setAttribute('fill', 'none');
+    foundRect.setAttribute('stroke', '#3fb950');
+    foundRect.setAttribute('stroke-width', '3');
+    foundRect.setAttribute('stroke-dasharray', '8 4');
+    svg.appendChild(foundRect);
+
+    // Found label
+    const foundLabel = document.createElementNS(NS, 'text');
+    foundLabel.setAttribute('x', leaf.x + leaf.w / 2);
+    foundLabel.setAttribute('y', leaf.y + leaf.h + 28);
+    foundLabel.setAttribute('fill', '#3fb950');
+    foundLabel.setAttribute('font-size', '14');
+    foundLabel.setAttribute('font-weight', '700');
+    foundLabel.setAttribute('text-anchor', 'middle');
+    foundLabel.textContent = `✓ 找到记录 id=${animState.foundRecord}`;
+    svg.appendChild(foundLabel);
+  }
+}
+
+// ========== Animation Logic ==========
+function getQuerySteps(queryVal) {
+  const steps = [];
+  steps.push({
+    nodeId: 'root',
+    action: 'start',
+    msg: `开始查询：SELECT * FROM table WHERE id = ${queryVal}`
+  });
+  steps.push({
+    nodeId: 'root',
+    action: 'access',
+    msg: `访问根页面 P${TREE.root.pageNo}（在内存中）`,
+    detail: `根页面内容：keys=[${TREE.root.keys.join(',')}]，根据 ${queryVal} 确定子页面`
+  });
+
+  // Determine path
+  let node = TREE.root;
+  let path = [node.id];
+  while (node.type !== 'leaf') {
+    let nextIdx = node.keys.length;
+    for (let i = 0; i < node.keys.length; i++) {
+      if (queryVal <= node.keys[i]) {
+        nextIdx = i;
+        break;
+      }
+    }
+    const nextId = node.children[nextIdx];
+    path.push(nextId);
+    node = TREE[nextId];
+  }
+  const leafNode = node;
+
+  // Build steps for each hop
+  for (let i = 0; i < path.length - 1; i++) {
+    const fromId = path[i];
+    const toId = path[i + 1];
+    const toNode = TREE[toId];
+    const inMemory = bufferPool.includes(toNode.pageNo);
+
+    steps.push({
+      from: fromId,
+      to: toId,
+      nodeId: toId,
+      action: 'traverse',
+      msg: `从 P${TREE[fromId].pageNo} 找到指针 → P${toNode.pageNo}`,
+      detail: `${fromId === 'root' ? '根页面' : fromId} 指示：需要访问 P${toNode.pageNo}`
+    });
+
+    if (inMemory) {
+      steps.push({
+        nodeId: toId,
+        action: 'memory_hit',
+        msg: `P${toNode.pageNo} 已在 Buffer Pool 中（内存命中！）`,
+        detail: '无需磁盘 IO，直接从内存读取页面内容'
+      });
+    } else {
+      steps.push({
+        nodeId: toId,
+        action: 'io_start',
+        msg: `P${toNode.pageNo} 不在内存，触发页面 IO！`,
+        detail: `从磁盘 .ibd 文件读取页面 ${toNode.pageNo}（offset=${toNode.pageNo * 16}KB）`
+      });
+      steps.push({
+        nodeId: toId,
+        action: 'io_done',
+        msg: `页面 P${toNode.pageNo} 已加载到 Buffer Pool`,
+        detail: '页面现在在内存中，后续访问零 IO'
+      });
+    }
+
+    if (toNode.type !== 'leaf') {
+      steps.push({
+        nodeId: toId,
+        action: 'access',
+        msg: `访问 P${toNode.pageNo}，查找下一层指针`,
+        detail: `页面内容：keys=[${(toNode.keys || []).join(',')}]`
+      });
+    }
+  }
+
+  // Find record in leaf
+  const rec = leafNode.records.find(r => r == queryVal);
+  if (rec) {
+    steps.push({
+      nodeId: leafNode.id,
+      action: 'search_leaf',
+      msg: `在 Leaf P${leafNode.pageNo} 中查找记录...`,
+      detail: `通过 Page Directory 二分查找，然后在记录区间线性扫描`
+    });
+    steps.push({
+      nodeId: leafNode.id,
+      action: 'found',
+      msg: `✓ 找到记录：id = ${rec}`,
+      detail: `记录内容：[id=${rec}, name=...]`
+    });
+  } else {
+    steps.push({
+      nodeId: leafNode.id,
+      action: 'not_found',
+      msg: `在 Leaf P${leafNode.pageNo} 中未找到 id=${queryVal} 的记录`,
+      detail: '记录不存在'
+    });
+  }
+
+  return steps;
+}
+
+function updateStepIndicator() {
+  const dots = document.querySelectorAll('.step-dot');
+  const labels = [
+    '准备开始',
+    '访问根页面',
+    '查找子指针',
+    '加载子页面',
+    '访问子页面',
+    '在叶子节点查找'
+  ];
+  dots.forEach((dot, i) => {
+    dot.classList.toggle('active', i <= animState.step && animState.step > 0);
+  });
+  const label = document.getElementById('stepLabel');
+  if (animState.step === 0 && !animState.running) {
+    label.textContent = '准备开始';
+  } else {
+    const step = animState.steps[animState.step];
+    if (step) {
+      label.textContent = step.action === 'found' ? '查询完成！' :
+                        step.action === 'io_start' ? '触发磁盘IO...' :
+                        step.action === 'memory_hit' ? '内存命中' :
+                        `步骤 ${animState.step + 1}/${animState.steps.length}`;
+    }
+  }
+}
+
+function addLog(msg, type = '') {
+  const logTab = document.getElementById('logTab');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  entry.innerHTML = `<div class="time">${time}</div><div class="msg">${msg}</div>`;
+  logTab.insertBefore(entry, logTab.firstChild);
+  // Keep max 20 entries
+  while (logTab.children.length > 20) logTab.removeChild(logTab.lastChild);
+}
+
+function executeStep() {
+  if (!animState.running || animState.paused) return;
+  if (animState.step >= animState.steps.length) {
+    animState.running = false;
+    document.getElementById('btnPause').disabled = true;
+    updateStepIndicator();
+    return;
+  }
+
+  const step = animState.steps[animState.step];
+  addLog(step.msg, step.action === 'found' ? 'done' : step.action === 'io_start' ? 'io' : step.action === 'memory_hit' ? 'hit' : '');
+
+  // Update buffer pool state
+  if (step.action === 'io_done') {
+    const node = TREE[step.nodeId];
+    if (!bufferPool.includes(node.pageNo)) {
+      bufferPool.push(node.pageNo);
+    }
+  }
+
+  // Track visited nodes
+  if (!animState.visitedNodes.includes(step.nodeId)) {
+    animState.visitedNodes.push(step.nodeId);
+  }
+
+  // Check if found
+  if (step.action === 'found') {
+    animState.foundLeaf = step.nodeId;
+    animState.foundRecord = parseInt(document.getElementById('queryInput').value);
+  }
+
+  drawTree();
+  updateStepIndicator();
+
+  animState.step++;
+  if (animState.step < animState.steps.length) {
+    const speed = parseInt(document.getElementById('speedSlider').value);
+    animState.currentTimeout = setTimeout(executeStep, speed);
+  } else {
+    animState.running = false;
+    document.getElementById('btnPause').disabled = true;
+    updateStepIndicator();
+  }
+}
+
+function startAnimation() {
+  const queryVal = parseInt(document.getElementById('queryInput').value);
+  if (isNaN(queryVal)) return;
+
+  // Reset state
+  resetAnimation();
+  bufferPool = [7, 3]; // root and internal1 in memory
+
+  const steps = getQuerySteps(queryVal);
+  animState = {
+    running: true,
+    paused: false,
+    step: 0,
+    steps: steps,
+    currentTimeout: null,
+    visitedNodes: [],
+    foundLeaf: null,
+    foundRecord: null,
+  };
+
+  document.getElementById('btnPause').disabled = false;
+  document.getElementById('btnPause').textContent = '⏸ 暂停';
+
+  drawTree();
+  executeStep();
+}
+
+function pauseAnimation() {
+  if (animState.paused) {
+    animState.paused = false;
+    document.getElementById('btnPause').textContent = '⏸ 暂停';
+    executeStep();
+  } else {
+    animState.paused = true;
+    clearTimeout(animState.currentTimeout);
+    document.getElementById('btnPause').textContent = '▶ 继续';
+  }
+}
+
+function resetAnimation() {
+  clearTimeout(animState.currentTimeout);
+  animState = {
+    running: false,
+    paused: false,
+    step: 0,
+    steps: [],
+    currentTimeout: null,
+    visitedNodes: [],
+    foundLeaf: null,
+    foundRecord: null,
+  };
+  bufferPool = [7, 3];
+  document.getElementById('btnPause').disabled = true;
+  document.getElementById('btnPause').textContent = '⏸ 暂停';
+
+  // Clear log
+  const logTab = document.getElementById('logTab');
+  logTab.innerHTML = '<div class="log-entry" style="border-left-color:var(--accent);"><div class="msg">👆 输入主键值，点击"开始动画"查看 B+ 树查询全过程</div></div>';
+
+  drawTree();
+  updateStepIndicator();
+}
+
+// ========== Modal Controls ==========
+function openPageModal() {
+  document.getElementById('pageModal').classList.add('show');
+}
+function closePageModal() {
+  document.getElementById('pageModal').classList.remove('show');
+}
+function openDmModal() {
+  document.getElementById('dmModal').classList.add('show');
+  updateDmModal();
+}
+function closeDmModal() {
+  document.getElementById('dmModal').classList.remove('show');
+}
+
+function updateDmModal() {
+  const diskDiv = document.getElementById('diskPages');
+  const memoryDiv = document.getElementById('memoryPages');
+  const logDiv = document.getElementById('dmLog');
+  diskDiv.innerHTML = '';
+  memoryDiv.innerHTML = '';
+
+  // Show all pages
+  const allPages = [7, 3, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+  allPages.forEach(p => {
+    const inMem = bufferPool.includes(p);
+    if (!inMem) {
+      const el = document.createElement('div');
+      el.className = 'dm-page on-disk';
+      el.textContent = `P${p}`;
+      diskDiv.appendChild(el);
+    }
+  });
+
+  bufferPool.forEach(p => {
+    const el = document.createElement('div');
+    el.className = 'dm-page in-memory';
+    el.textContent = `P${p}`;
+    memoryDiv.appendChild(el);
+  });
+
+  logDiv.innerHTML = `<div class="log-entry hit"><div class="msg">当前 Buffer Pool 中的页面：P${bufferPool.join(', P')}</div></div>` +
+    `<div class="log-entry"><div class="msg">页面是磁盘与内存交换的基本单位（16KB/页）。查询时先检查页面是否在 Buffer Pool 中。</div></div>`;
+}
+
+// ========== Event Listeners ==========
+document.getElementById('btnStart').addEventListener('click', startAnimation);
+document.getElementById('btnPause').addEventListener('click', pauseAnimation);
+document.getElementById('btnReset').addEventListener('click', resetAnimation);
+document.getElementById('btnPageStruct').addEventListener('click', openPageModal);
+document.getElementById('btnDiskMem').addEventListener('click', openDmModal);
+
+document.getElementById('speedSlider').addEventListener('input', function() {
+  const val = parseInt(this.value);
+  const label = document.getElementById('speedLabel');
+  label.textContent = val <= 400 ? '2x' : val <= 800 ? '1x' : '0.5x';
+});
+
+// Tab switching
+document.querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+    this.classList.add('active');
+    const tabName = this.getAttribute('data-tab');
+    document.getElementById('logTab').style.display = tabName === 'log' ? 'block' : 'none';
+    document.getElementById('infoTab').style.display = tabName === 'info' ? 'block' : 'none';
+  });
+});
+
+// Keyboard shortcut
+document.getElementById('queryInput').addEventListener('keyup', function(e) {
+  if (e.key === 'Enter') startAnimation();
+});
+
+// Close modal on background click
+document.getElementById('pageModal').addEventListener('click', function(e) {
+  if (e.target === this) closePageModal();
+});
+document.getElementById('dmModal').addEventListener('click', function(e) {
+  if (e.target === this) closeDmModal();
+});
+
+// Initial draw
+drawTree();
+</script>
+</body>
+</html>
