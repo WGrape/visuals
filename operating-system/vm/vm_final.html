@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>虚拟内存核心原理 - 交互式教程</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0d1117; color: #e6edf3; font-family: sans-serif; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        h1 { color: #58a6ff; text-align: center; margin-bottom: 30px; }
+        .tabs { text-align: center; margin-bottom: 20px; }
+        .tab { padding: 10px 20px; margin: 5px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; cursor: pointer; display: inline-block; border-radius: 4px; }
+        .tab.active { border-color: #58a6ff; color: #58a6ff; }
+        .section { display: none; background: #161b22; border: 1px solid #30363d; padding: 20px; margin: 20px 0; border-radius: 6px; }
+        .section.active { display: block; }
+        .box { padding: 15px; margin: 10px 0; border-radius: 6px; border: 2px solid; }
+        .box-blue { background: rgba(88,166,255,0.1); border-color: #58a6ff; }
+        .box-green { background: rgba(63,185,80,0.1); border-color: #3fb950; }
+        .box-orange { background: rgba(240,136,62,0.1); border-color: #f0883e; }
+        .box-red { background: rgba(248,81,73,0.1); border-color: #f85149; }
+        button { padding: 8px 16px; background: #1a1f2e; border: 1px solid #30363d; color: #e6edf3; cursor: pointer; margin: 5px; border-radius: 4px; }
+        button:hover { border-color: #58a6ff; }
+        code { background: #0d1117; padding: 2px 6px; color: #f0883e; border-radius: 3px; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #30363d; }
+        th { color: #58a6ff; }
+        td { color: #8b949e; }
+        .step-box { padding: 15px; margin: 10px 0; border-left: 3px solid #30363d; display: none; }
+        .step-box.active { display: block; border-left-color: #58a6ff; background: rgba(88,166,255,0.05); }
+        .note { border-left: 4px solid #58a6ff; padding: 12px; margin: 12px 0; background: #0d1117; }
+        .note.warn { border-left-color: #f0883e; }
+        .note.error { border-left-color: #f85149; }
+        .note.ok { border-left-color: #3fb950; }
+        .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 15px 0; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>虚拟内存核心原理</h1>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="showSec(1,this)">基础概念</div>
+        <div class="tab" onclick="showSec(2,this)">地址翻译</div>
+        <div class="tab" onclick="showSec(3,this)">页表结构</div>
+        <div class="tab" onclick="showSec(4,this)">多级页表</div>
+        <div class="tab" onclick="showSec(5,this)">缺页中断</div>
+    </div>
+    
+    <!-- 第1节 -->
+    <div id="sec1" class="section active">
+        <h2 style="color:#58a6ff;">什么是虚拟内存？</h2>
+        <div class="note">
+            <strong>核心概念：</strong>虚拟内存是操作系统提供的一种内存管理技术，它为每个进程提供一个连续、独立且看似无限的地址空间，而实际上物理内存可能有限且分散。
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">为什么需要虚拟内存？</h3>
+        <div class="grid2">
+            <div class="box box-blue"><strong>内存隔离</strong><br>每个进程都有独立的地址空间，防止相互干扰</div>
+            <div class="box box-green"><strong>内存扩展</strong><br>使用磁盘作为交换空间，提供比物理内存更大的地址空间</div>
+            <div class="box box-orange"><strong>内存共享</strong><br>多个进程可以共享同一物理内存页（如共享库）</div>
+            <div class="box box-red"><strong>简化编程</strong><br>程序员无需关心物理内存布局，使用连续虚拟地址</div>
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">物理内存 vs 虚拟内存</h3>
+        <table>
+            <tr><th>特性</th><th>物理内存</th><th>虚拟内存</th></tr>
+            <tr><td>可见性</td><td>操作系统管理，进程不可见</td><td>进程直接访问的地址空间</td></tr>
+            <tr><td>大小</td><td>受硬件限制（如16GB RAM）</td><td>受CPU位数限制（32位→4GB，64位→16EB）</td></tr>
+            <tr><td>连续性</td><td>可能分散、碎片化</td><td>对每个进程看似连续</td></tr>
+            <tr><td>分配</td><td>以页为单位分配给进程</td><td>进程看到完整的地址空间</td></tr>
+        </table>
+    </div>
+    
+    <!-- 第2节 -->
+    <div id="sec2" class="section">
+        <h2 style="color:#58a6ff;">地址翻译过程</h2>
+        <div class="note">
+            <strong>核心机制：</strong>CPU生成的地址是虚拟地址，需要通过页表翻译成物理地址，才能访问实际的物理内存。
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">地址结构</h3>
+        <div class="box box-blue">
+            <strong>虚拟地址（VA）= 虚拟页号（VPN） + 页内偏移（Offset）</strong><br>
+            例如：32位系统，页大小4KB（2^12），则低12位是Offset，高20位是VPN
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">地址翻译流程（点击下一步查看）</h3>
+        <div id="steps2">
+            <div class="step-box" id="s2-1">
+                <strong style="color:#58a6ff;">步骤1：CPU生成虚拟地址</strong><br>
+                虚拟地址：<code>0x12345678</code><br>
+                VPN = <code>0x12345</code>，Offset = <code>0x678</code>
+                <div class="note" style="margin-top:10px;">
+                    CPU执行内存访问指令时，生成虚拟地址。假设32位系统，页大小4KB（2^12），则低12位为页内偏移，高20位为虚拟页号（VPN）。
+                </div>
+            </div>
+            <div class="step-box" id="s2-2">
+                <strong style="color:#f0883e;">步骤2：查询页表</strong><br>
+                MMU使用VPN（<code>0x12345</code>）查找页表<br>
+                页表基址寄存器（CR3）指向页表起始位置<br>
+                页表项地址 = CR3 + VPN × PTE大小
+                <div class="note" style="margin-top:10px;">
+                    内存管理单元（MMU）自动完成这个查询。页表存储在物理内存中，由操作系统维护。每个页表项（PTE）通常占4字节或8字节。
+                </div>
+            </div>
+            <div class="step-box" id="s2-3">
+                <strong style="color:#3fb950;">步骤3：获取物理页号（PPN）</strong><br>
+                页表项内容：有效位=1，PPN=<code>0x6789</code><br>
+                物理地址 = PPN &lt;&lt; 12 | Offset = <code>0x6789678</code>
+                <div class="note ok" style="margin-top:10px;">
+                    如果有效位为1，表示该页在物理内存中，可以直接获取对应的物理页号（PPN）。然后将PPN和偏移量组合成完整的物理地址。
+                </div>
+            </div>
+            <div class="step-box" id="s2-4">
+                <strong style="color:#f85149;">步骤4：访问物理内存</strong><br>
+                MMU使用物理地址<code>0x6789678</code>访问物理内存<br>
+                读取或写入数据
+                <div class="note ok" style="margin-top:10px;">
+                    <strong>✓ 地址翻译完成！</strong><br>
+                    虚拟地址 <code>0x12345678</code> → 物理地址 <code>0x6789678</code><br>
+                    整个过程由MMU硬件自动完成，对程序透明。
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button onclick="nextStep2()">下一步</button>
+            <button onclick="reset2()">重置</button>
+        </div>
+    </div>
+    
+    <!-- 第3节 -->
+    <div id="sec3" class="section">
+        <h2 style="color:#58a6ff;">页表原理</h2>
+        <div class="note">
+            <strong>页表（Page Table）：</strong>存储虚拟页到物理页映射关系的数据结构，每个进程都有自己的页表。
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">页表项（PTE）的关键字段</h3>
+        <table>
+            <tr><th>字段</th><th>作用</th></tr>
+            <tr><td>有效位（Valid Bit）</td><td>该页是否在物理内存中（1=在内存，0=不在）</td></tr>
+            <tr><td>物理页号（PPN）</td><td>对应的物理页框号</td></tr>
+            <tr><td>访问位（Accessed Bit）</td><td>该页是否被访问过（用于页面置换算法）</td></tr>
+            <tr><td>修改位（Dirty Bit）</td><td>该页是否被修改过（换出时是否需要写回磁盘）</td></tr>
+            <tr><td>保护位（Protection Bits）</td><td>读/写/执行权限</td></tr>
+        </table>
+        
+        <div class="note warn" style="margin-top:20px;">
+            <strong>重要：</strong>当有效位为0时，访问该页会触发<strong>缺页中断</strong>，操作系统需要将页面从磁盘加载到物理内存。
+        </div>
+    </div>
+    
+    <!-- 第4节 -->
+    <div id="sec4" class="section">
+        <h2 style="color:#58a6ff;">多级页表设计</h2>
+        <div class="note">
+            <strong>为什么需要多级页表？</strong>如果虚拟地址空间很大（如64位系统的16EB），单级页表会占用巨大空间。多级页表只存储实际使用的部分，大幅节省内存。
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">单级页表的问题</h3>
+        <div class="box box-red">
+            <strong>问题：</strong>32位系统，4KB页 → 需要2^20个页表项，每个4字节 → 每个进程需要4MB连续内存存储页表！<br>
+            64位系统更夸张，理论上需要数EB的内存来存储页表！
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">多级页表的优势</h3>
+        <div class="grid2">
+            <div class="box box-green"><strong>节省空间</strong><br>只为使用的虚拟地址分配页表</div>
+            <div class="box box-green"><strong>灵活性</strong><br>支持大地址空间和稀疏地址分配</div>
+            <div class="box box-green"><strong>连续性要求低</strong><br>各级页表可以分散在物理内存中</div>
+            <div class="box box-green"><strong>按需分配</strong><br>只有实际使用的部分才分配页表</div>
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">两级页表示例（32位系统）</h3>
+        <div class="box box-orange">
+            <strong>地址划分：</strong><br>
+            - 高10位：一级页表索引（页目录）<br>
+            - 中10位：二级页表索引<br>
+            - 低12位：页内偏移（4KB页）<br><br>
+            <strong>优点：</strong>如果某个区域未使用，对应的二级页表根本不需要分配！
+        </div>
+    </div>
+    
+    <!-- 第5节 -->
+    <div id="sec5" class="section">
+        <h2 style="color:#58a6ff;">缺页中断（Page Fault）</h2>
+        <div class="note">
+            <strong>缺页中断：</strong>当进程访问的页面不在物理内存中时，会触发缺页中断，操作系统需要将所需页面从磁盘加载到物理内存。
+        </div>
+        
+        <h3 style="color:#3fb950;margin-top:20px;">缺页中断处理流程（点击下一步查看）</h3>
+        <div id="steps5">
+            <div class="step-box" id="s5-1">
+                <strong style="color:#58a6ff;">步骤1：进程访问虚拟页面</strong><br>
+                进程访问虚拟地址，该地址所在的页面不在物理内存中（有效位=0）
+                <div class="note" style="margin-top:10px;">
+                    进程正常执行内存访问指令，但访问的页面尚未加载到物理内存。
+                </div>
+            </div>
+            <div class="step-box" id="s5-2">
+                <strong style="color:#f0883e;">步骤2：触发缺页中断</strong><br>
+                MMU发现页表项有效位为0<br>
+                CPU切换到内核态，触发缺页中断异常
+                <div class="note warn" style="margin-top:10px;">
+                    缺页中断是一种异常（Exception），会暂停当前进程的执行，切换到操作系统内核的缺页中断处理程序。
+                </div>
+            </div>
+            <div class="step-box" id="s5-3">
+                <strong style="color:#f85149;">步骤3：操作系统处理缺页</strong><br>
+                1. 检查虚拟地址合法性（是否在进程地址空间内）<br>
+                2. 从磁盘读取所需页面到物理内存<br>
+                3. 分配物理页框，更新页表（设置有效位=1，填入PPN）<br>
+                4. 如果物理内存已满，需要置换页面（选择牺牲页换出到磁盘）
+                <div class="note error" style="margin-top:10px;">
+                    这是最耗时的步骤，需要磁盘I/O。如果牺牲页被修改过，还需要先写回磁盘。
+                </div>
+            </div>
+            <div class="step-box" id="s5-4">
+                <strong style="color:#3fb950;">步骤4：重新执行指令</strong><br>
+                缺页中断处理完成<br>
+                CPU切换回用户态，重新执行导致缺页的指令
+                <div class="note ok" style="margin-top:10px;">
+                    <strong>✓ 缺页中断处理完成！</strong><br>
+                    由于页表已经更新，这次内存访问可以正常完成。对用户进程来说，这一切是透明的。
+                </div>
+            </div>
+            <div class="step-box" id="s5-5">
+                <strong style="color:#58a6ff;">性能影响与优化</strong><br>
+                <div class="note warn" style="margin-top:10px;">
+                    <strong>⚠️ 性能警告：</strong>缺页中断需要磁盘I/O，代价很高！<br>
+                    内存访问：~100纳秒<br>
+                    磁盘访问：~10毫秒<br>
+                    相差 <strong>100,000倍</strong>！
+                </div>
+                <div class="note ok" style="margin-top:10px;">
+                    <strong>优化方向：</strong><br>
+                    1. 减少缺页次数：预取、工作集模型<br>
+                    2. 减少单次缺页代价：使用SSD、减少页面换入换出<br>
+                    3. 好的页面置换算法：LRU、Clock等
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <button onclick="nextStep5()">下一步</button>
+            <button onclick="reset5()">重置</button>
+        </div>
+    </div>
+</div>
+
+<script>
+var step2 = 0;
+var step5 = 0;
+
+function showSec(n, el) {
+    var sections = document.querySelectorAll('.section');
+    for (var i = 0; i < sections.length; i++) {
+        sections[i].classList.remove('active');
+    }
+    var tabs = document.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.remove('active');
+    }
+    document.getElementById('sec' + n).classList.add('active');
+    el.classList.add('active');
+}
+
+function nextStep2() {
+    if (step2 > 0) {
+        document.getElementById('s2-' + step2).classList.remove('active');
+    }
+    step2++;
+    if (step2 > 4) {
+        step2 = 1;
+    }
+    document.getElementById('s2-' + step2).classList.add('active');
+}
+
+function reset2() {
+    if (step2 > 0) {
+        document.getElementById('s2-' + step2).classList.remove('active');
+    }
+    step2 = 0;
+}
+
+function nextStep5() {
+    if (step5 > 0) {
+        document.getElementById('s5-' + step5).classList.remove('active');
+    }
+    step5++;
+    if (step5 > 5) {
+        step5 = 1;
+    }
+    document.getElementById('s5-' + step5).classList.add('active');
+}
+
+function reset5() {
+    if (step5 > 0) {
+        document.getElementById('s5-' + step5).classList.remove('active');
+    }
+    step5 = 0;
+}
+</script>
+</body>
+</html>
