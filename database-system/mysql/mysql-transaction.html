@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 事务原理 · 交互式可视化</title>
+<style>
+  :root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-card: #1c2128;
+    --border-color: #30363d;
+    --border-active: #58a6ff;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-yellow: #d29922;
+    --accent-purple: #bc8cff;
+    --accent-orange: #f0883e;
+    --accent-teal: #39d5d0;
+    --radius: 8px;
+    --radius-lg: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg-primary); }
+  ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+
+  /* Sidebar Nav */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    padding: 20px 0;
+    z-index: 100;
+    overflow-y: auto;
+  }
+  .sidebar-title {
+    padding: 0 20px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 8px;
+  }
+  .nav-item {
+    display: block;
+    padding: 8px 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    cursor: pointer;
+    transition: all 0.15s;
+    border-left: 2px solid transparent;
+  }
+  .nav-item:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+  .nav-item.active { color: var(--accent-blue); border-left-color: var(--accent-blue); background: rgba(88,166,255,0.05); }
+
+  /* Main content */
+  .main { margin-left: 220px; padding: 40px 48px; max-width: 1100px; }
+  .section { margin-bottom: 64px; }
+  .section-title {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+  }
+  .section-desc {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 28px;
+    max-width: 720px;
+  }
+  .section-anchor { display: block; visibility: hidden; height: 0; }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  /* ACID Grid */
+  .acid-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .acid-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 18px 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+  .acid-card:hover { transform: translateY(-2px); border-color: var(--border-active); }
+  .acid-card.active { border-color: var(--accent-blue); }
+  .acid-card .acid-letter {
+    display: inline-block;
+    width: 32px; height: 32px;
+    border-radius: 6px;
+    text-align: center;
+    line-height: 32px;
+    font-weight: 700;
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+  .acid-card .acid-name { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .acid-card .acid-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+
+  /* Interactive SVG areas */
+  .viz-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 20px;
+    position: relative;
+  }
+  .viz-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: var(--text-primary);
+  }
+  .viz-svg { width: 100%; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { border-color: var(--accent-blue); background: rgba(88,166,255,0.1); }
+  .btn-primary { background: rgba(88,166,255,0.15); border-color: var(--accent-blue); color: var(--accent-blue); }
+  .btn-primary:hover { background: rgba(88,166,255,0.25); }
+  .btn-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 28px; }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 7px; top: 4px; bottom: 4px;
+    width: 2px;
+    background: var(--border-color);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 20px;
+    padding: 14px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .timeline-item:hover { border-color: var(--accent-blue); }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -25px;
+    top: 18px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--accent-blue);
+    border: 2px solid var(--bg-primary);
+  }
+  .timeline-time { font-size: 11px; color: var(--accent-blue); font-weight: 500; margin-bottom: 4px; }
+  .timeline-content { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+
+  /* Code block */
+  .code-block {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 12px;
+    color: var(--text-primary);
+    line-height: 1.7;
+    overflow-x: auto;
+    margin: 10px 0;
+  }
+  .code-block .kw { color: var(--accent-purple); }
+  .code-block .str { color: var(--accent-green); }
+  .code-block .cm { color: var(--text-muted); }
+  .code-block .num { color: var(--accent-orange); }
+
+  /* Comparison table */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 12px 0;
+  }
+  .compare-table th {
+    background: var(--bg-tertiary);
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+  }
+  .compare-table td {
+    padding: 10px 14px;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    vertical-align: top;
+  }
+  .compare-table tr:hover td { background: rgba(88,166,255,0.03); }
+
+  /* Badge */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+  .badge-yellow { background: rgba(210,153,34,0.15); color: var(--accent-yellow); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); }
+
+  /* Progress indicator */
+  .step-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 16px;
+  }
+  .step-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--border-color);
+    transition: all 0.3s;
+  }
+  .step-dot.active { background: var(--accent-blue); }
+  .step-line {
+    width: 24px; height: 2px;
+    background: var(--border-color);
+  }
+  .step-line.active { background: var(--accent-blue); }
+
+  /* Animation helpers */
+  .fade-in { animation: fadeIn 0.4s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: translateX(0); } }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 24px 16px; }
+    .acid-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sidebar Navigation -->
+<nav class="sidebar">
+  <div class="sidebar-title">MySQL 事务原理</div>
+  <a class="nav-item active" onclick="scrollToSection('s1')">① 什么是事务</a>
+  <a class="nav-item" onclick="scrollToSection('s2')">② 为什么需要事务</a>
+  <a class="nav-item" onclick="scrollToSection('s3')">③ ACID 特性</a>
+  <a class="nav-item" onclick="scrollToSection('s4')">④ 事务状态流转</a>
+  <a class="nav-item" onclick="scrollToSection('s5')">⑤ MVCC 并发控制</a>
+  <a class="nav-item" onclick="scrollToSection('s6')">⑥ Undo & Redo Log</a>
+  <a class="nav-item" onclick="scrollToSection('s7')">⑦ 两阶段提交</a>
+  <a class="nav-item" onclick="scrollToSection('s8')">⑧ 隔离级别</a>
+  <a class="nav-item" onclick="scrollToSection('s9')">⑨ 总结</a>
+</nav>
+
+<!-- Main Content -->
+<div class="main">
+
+  <!-- Section 1: 什么是事务 -->
+  <div class="section" id="s1">
+    <span class="section-anchor" id="anchor-s1"></span>
+    <h1 class="section-title">① 什么是事务</h1>
+    <p class="section-desc">事务（Transaction）是数据库操作的<strong style="color:var(--accent-blue)">最小工作单元</strong>，包含一条或多条SQL语句，这些语句要么全部成功，要么全部失败回滚。</p>
+
+    <div class="viz-container">
+      <div class="viz-title">事务概念示意</div>
+      <svg class="viz-svg" viewBox="0 0 900 280" id="txConcept"></svg>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🔍 事务的典型场景</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.8;">
+        最常见的例子是<strong style="color:var(--accent-blue)">银行转账</strong>：A账户扣钱 + B账户加钱，这两步必须作为一个整体——
+        要么都成功（A扣了B加了），要么都失败（A没扣B也没加），不能出现A扣了但B没加的中间状态。
+      </p>
+      <div class="code-block" style="margin-top:14px;">
+<span class="cm">-- 转账事务：A向B转账500元</span>
+<span class="kw">START TRANSACTION</span>;
+  <span class="kw">UPDATE</span> accounts <span class="kw">SET</span> balance = balance - <span class="num">500</span> <span class="kw">WHERE</span> id = <span class="str">'A'</span>;
+  <span class="kw">UPDATE</span> accounts <span class="kw">SET</span> balance = balance + <span class="num">500</span> <span class="kw">WHERE</span> id = <span class="str">'B'</span>;
+<span class="kw">COMMIT</span>;  <span class="cm">-- 两步都成功，提交</span>
+<span class="cm">-- 如果任何一步出错：ROLLBACK; （全部回滚）</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 2: 为什么需要事务 -->
+  <div class="section" id="s2">
+    <span class="section-anchor" id="anchor-s2"></span>
+    <h1 class="section-title">② 为什么需要事务</h1>
+    <p class="section-desc">没有事务保护，并发操作会导致<strong style="color:var(--accent-red)">脏读、不可重复读、幻读</strong>等严重数据一致性问题。</p>
+
+    <div class="viz-container">
+      <div class="viz-title">无事务 vs 有事务 对比</div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="showNoTx()">❌ 无事务（问题演示）</button>
+        <button class="btn" onclick="showWithTx()">✅ 有事务（问题解决）</button>
+      </div>
+      <svg class="viz-svg" viewBox="0 0 900 360" id="txCompare" style="margin-top:16px;"></svg>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⚠️ 并发事务的三大问题</div>
+      <table class="compare-table">
+        <tr>
+          <th>问题</th>
+          <th>描述</th>
+          <th>后果</th>
+        </tr>
+        <tr>
+          <td><span class="badge badge-red">脏读</span></td>
+          <td>事务A读到了事务B<strong>未提交</strong>的数据</td>
+          <td>事务B回滚后，A读到的数据是"脏"的</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-yellow">不可重复读</span></td>
+          <td>事务A内两次读取同一数据，结果<strong>不一致</strong></td>
+          <td>事务B在A两次读取之间修改并提交了数据</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">幻读</span></td>
+          <td>事务A两次查询，<strong>行数</strong>不一致</td>
+          <td>事务B在A两次查询之间插入或删除了数据</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section 3: ACID -->
+  <div class="section" id="s3">
+    <span class="section-anchor" id="anchor-s3"></span>
+    <h1 class="section-title">③ ACID 四大特性</h1>
+    <p class="section-desc">ACID 是事务的四大核心特性，缺一不可。点击每个卡片查看详细解释。</p>
+
+    <div class="acid-grid">
+      <div class="acid-card active" id="acid-a" onclick="showAcidDetail('a')">
+        <div class="acid-letter" style="background:rgba(88,166,255,0.15);color:var(--accent-blue);">A</div>
+        <div class="acid-name">Atomicity</div>
+        <div class="acid-desc">原子性：事务是最小执行单元，不可分割，要么全做要么全不做</div>
+      </div>
+      <div class="acid-card" id="acid-c" onclick="showAcidDetail('c')">
+        <div class="acid-letter" style="background:rgba(63,185,80,0.15);color:var(--accent-green);">C</div>
+        <div class="acid-name">Consistency</div>
+        <div class="acid-desc">一致性：事务执行前后，数据库从一个一致状态变到另一个一致状态</div>
+      </div>
+      <div class="acid-card" id="acid-i" onclick="showAcidDetail('i')">
+        <div class="acid-letter" style="background:rgba(188,140,255,0.15);color:var(--accent-purple);">I</div>
+        <div class="acid-name">Isolation</div>
+        <div class="acid-desc">隔离性：并发事务之间相互隔离，不互相干扰</div>
+      </div>
+      <div class="acid-card" id="acid-d" onclick="showAcidDetail('d')">
+        <div class="acid-letter" style="background:rgba(210,153,34,0.15);color:var(--accent-yellow);">D</div>
+        <div class="acid-name">Durability</div>
+        <div class="acid-desc">持久性：事务提交后，其结果永久保存，即使系统崩溃也不丢失</div>
+      </div>
+    </div>
+
+    <div class="viz-container">
+      <div class="viz-title" id="acid-detail-title">🔷 A — Atomicity 原子性详解</div>
+      <svg class="viz-svg" viewBox="0 0 900 300" id="acidDetailViz"></svg>
+      <div id="acid-detail-text" style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-top:14px;">
+        <p><strong style="color:var(--accent-blue)">原子性</strong>由 <strong style="color:var(--accent-red)">Undo Log</strong> 保证。</p>
+        <p style="margin-top:8px;">事务对数据的每次修改，都会在 Undo Log 中记录<strong>修改前的值</strong>。如果事务需要回滚，引擎会沿着 Undo Log 逆向执行，将数据恢复到事务开始前的状态。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 4: 事务状态流转 -->
+  <div class="section" id="s4">
+    <span class="section-anchor" id="anchor-s4"></span>
+    <h1 class="section-title">④ 事务状态流转</h1>
+    <p class="section-desc">事务从 BEGIN 到 COMMIT/ROLLBACK 经历多个状态，理解状态流转是掌握事务的基础。</p>
+
+    <div class="viz-container">
+      <svg class="viz-svg" viewBox="0 0 900 400" id="stateMachine"></svg>
+      <div class="btn-group" style="margin-top:16px;">
+        <button class="btn" onclick="animateState('begin')">▶ 模拟 BEGIN</button>
+        <button class="btn" onclick="animateState('running')">▶ 执行SQL</button>
+        <button class="btn btn-primary" onclick="animateState('commit')">▶ COMMIT</button>
+        <button class="btn" style="color:var(--accent-red);border-color:var(--accent-red);" onclick="animateState('rollback')">▶ ROLLBACK</button>
+        <button class="btn" onclick="resetStateAnim()">↺ 重置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 5: MVCC -->
+  <div class="section" id="s5">
+    <span class="section-anchor" id="anchor-s5"></span>
+    <h1 class="section-title">⑤ MVCC 多版本并发控制</h1>
+    <p class="section-desc">MVCC（Multi-Version Concurrency Control）是 InnoDB 实现高并发的核心机制，让<strong style="color:var(--accent-green)">读写不阻塞</strong>。</p>
+
+    <div class="viz-container">
+      <div class="viz-title">MVCC 版本链原理</div>
+      <svg class="viz-svg" viewBox="0 0 900 380" id="mvccViz"></svg>
+      <div class="btn-group" style="margin-top:12px;">
+        <button class="btn" onclick="mvccStep(0)">① 初始数据</button>
+        <button class="btn" onclick="mvccStep(1)">② 事务B修改</button>
+        <button class="btn" onclick="mvccStep(2)">③ 事务A读取</button>
+        <button class="btn btn-primary" onclick="mvccStep(3)">④ B提交后A再读</button>
+        <button class="btn" onclick="mvccReset()">↺ 重置</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <div class="card-title">📌 MVCC 核心概念</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:var(--accent-blue);margin-bottom:8px;">隐藏列</div>
+          <div class="code-block" style="font-size:12px;">
+<span class="cm">-- 每行记录都有隐藏列：</span>
+trx_id:   <span class="cm">-- 最后修改该行的事务ID</span>
+roll_ptr: <span class="cm">-- 指向Undo Log中旧版本的指针</span>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:600;color:var(--accent-purple);margin-bottom:8px;">ReadView</div>
+          <div class="code-block" style="font-size:12px;">
+<span class="cm">-- ReadView 包含：</span>
+m_ids:    <span class="cm">-- 当前活跃事务ID列表</span>
+min_trx_id: <span class="cm">-- 最小活跃事务ID</span>
+max_trx_id: <span class="cm">-- 下一个将分配的事务ID</span>
+creator_trx_id: <span class="cm">-- 创建该ReadView的事务ID</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 6: Undo & Redo Log -->
+  <div class="section" id="s6">
+    <span class="section-anchor" id="anchor-s6"></span>
+    <h1 class="section-title">⑥ Undo Log & Redo Log</h1>
+    <p class="section-desc">Undo Log 保证原子性（回滚），Redo Log 保证持久性（崩溃恢复），两者配合实现事务的可靠性。</p>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+      <div class="viz-container">
+        <div class="viz-title" style="color:var(--accent-red);">↩️ Undo Log（回滚日志）</div>
+        <svg viewBox="0 0 420 280" id="undoLogViz" style="width:100%;"></svg>
+        <p style="font-size:12px;color:var(--text-secondary);margin-top:10px;line-height:1.6;">
+          记录数据<strong>修改前</strong>的版本。事务回滚时，根据 Undo Log 逆向恢复数据。多个版本的 Undo 记录通过 <code style="color:var(--accent-purple)">roll_ptr</code> 形成<strong>版本链</strong>。
+        </p>
+      </div>
+      <div class="viz-container">
+        <div class="viz-title" style="color:var(--accent-yellow);">💾 Redo Log（重做日志）</div>
+        <svg viewBox="0 0 420 280" id="redoLogViz" style="width:100%;"></svg>
+        <p style="font-size:12px;color:var(--text-secondary);margin-top:10px;line-height:1.6;">
+          记录数据<strong>修改后</strong>的版本。先写 Redo Log（Write-Ahead Logging），再修改内存中的数据页。崩溃后可通过 Redo Log <strong>重做</strong>已提交事务的修改。
+        </p>
+      </div>
+    </div>
+
+    <div class="viz-container">
+      <div class="viz-title">WAL（Write-Ahead Logging）原理</div>
+      <svg viewBox="0 0 900 200" id="walViz" style="width:100%;"></svg>
+    </div>
+  </div>
+
+  <!-- Section 7: 两阶段提交 -->
+  <div class="section" id="s7">
+    <span class="section-anchor" id="anchor-s7"></span>
+    <h1 class="section-title">⑦ 两阶段提交（2PC）</h1>
+    <p class="section-desc">MySQL 使用两阶段提交协议，保证 <strong style="color:var(--accent-blue)">Redo Log</strong> 和 <strong style="color:var(--accent-purple)">Binlog</strong> 两份日志的一致性，是实现崩溃恢复的关键。</p>
+
+    <div class="viz-container">
+      <svg class="viz-svg" viewBox="0 0 900 500" id="twoPhaseViz"></svg>
+      <div class="btn-group" style="margin-top:16px;">
+        <button class="btn" onclick="twoPhaseStep(0)">① Prepare 阶段</button>
+        <button class="btn" onclick="twoPhaseStep(1)">② 写 Binlog</button>
+        <button class="btn btn-primary" onclick="twoPhaseStep(2)">③ Commit 阶段</button>
+        <button class="btn" onclick="twoPhaseStep(3)">④ 崩溃恢复</button>
+        <button class="btn" onclick="twoPhaseReset()">↺ 重置</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <div class="card-title">🔧 崩溃恢复规则</div>
+      <table class="compare-table">
+        <tr>
+          <th>Redo Log 状态</th>
+          <th>Binlog 状态</th>
+          <th>恢复操作</th>
+        </tr>
+        <tr>
+          <td><span class="badge badge-blue">Prepare</span></td>
+          <td><span class="badge badge-red">无记录</span></td>
+          <td style="color:var(--accent-red);">回滚事务（Undo）</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-blue">Prepare</span></td>
+          <td><span class="badge badge-green">有完整记录</span></td>
+          <td style="color:var(--accent-green);">提交事务（Redo commit）</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-green">Commit</span></td>
+          <td><span class="badge badge-green">有完整记录</span></td>
+          <td style="color:var(--accent-green);">无需处理（已提交）</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section 8: 隔离级别 -->
+  <div class="section" id="s8">
+    <span class="section-anchor" id="anchor-s8"></span>
+    <h1 class="section-title">⑧ 事务隔离级别</h1>
+    <p class="section-desc">SQL 标准定义了四种隔离级别，级别越高数据一致性越强，但并发性能越低。MySQL 默认隔离级别是 <strong style="color:var(--accent-green)">REPEATABLE READ</strong>。</p>
+
+    <div class="viz-container">
+      <svg class="viz-svg" viewBox="0 0 900 380" id="isolationViz"></svg>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📊 四种隔离级别对比</div>
+      <table class="compare-table">
+        <tr>
+          <th>隔离级别</th>
+          <th>脏读</th>
+          <th>不可重复读</th>
+          <th>幻读</th>
+          <th>MVCC ReadView</th>
+        </tr>
+        <tr>
+          <td><span class="badge badge-red">READ UNCOMMITTED</span></td>
+          <td>❌ 可能</td>
+          <td>❌ 可能</td>
+          <td>❌ 可能</td>
+          <td>无MVCC，直接读最新数据</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-yellow">READ COMMITTED</span></td>
+          <td>✅ 解决</td>
+          <td>❌ 可能</td>
+          <td>❌ 可能</td>
+          <td>每次查询都生成新的 ReadView</td>
+        </tr>
+        <tr style="background:rgba(63,185,80,0.05);">
+          <td><span class="badge badge-green">REPEATABLE READ（默认）</span></td>
+          <td>✅ 解决</td>
+          <td>✅ 解决</td>
+          <td>⚠️ 部分解决</td>
+          <td>事务开始时生成一次 ReadView</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">SERIALIZABLE</span></td>
+          <td>✅ 解决</td>
+          <td>✅ 解决</td>
+          <td>✅ 解决</td>
+          <td>完全串行执行，性能最低</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section 9: 总结 -->
+  <div class="section" id="s9">
+    <span class="section-anchor" id="anchor-s9"></span>
+    <h1 class="section-title">⑨ 知识总结</h1>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+      <div class="card">
+        <div class="card-title" style="color:var(--accent-blue);">核心机制对应关系</div>
+        <div style="font-size:13px;line-height:2.2;">
+          <div>🔷 <strong>原子性</strong> → <span style="color:var(--accent-red);">Undo Log</span></div>
+          <div>🔷 <strong>持久性</strong> → <span style="color:var(--accent-yellow);">Redo Log + WAL</span></div>
+          <div>🔷 <strong>隔离性</strong> → <span style="color:var(--accent-purple);">锁 + MVCC</span></div>
+          <div>🔷 <strong>一致性</strong> → <span style="color:var(--accent-green);">ACID 协同保证</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="color:var(--accent-green);">事务执行流程</div>
+        <div class="timeline" style="padding-left:20px;">
+          <div class="timeline-item" style="padding:10px 14px;margin-bottom:12px;">
+            <div class="timeline-time">1</div>
+            <div class="timeline-content">BEGIN（记录事务ID）</div>
+          </div>
+          <div class="timeline-item" style="padding:10px 14px;margin-bottom:12px;">
+            <div class="timeline-time">2</div>
+            <div class="timeline-content">执行SQL（写Undo + 改数据页 + 写Redo）</div>
+          </div>
+          <div class="timeline-item" style="padding:10px 14px;margin-bottom:12px;">
+            <div class="timeline-time">3</div>
+            <div class="timeline-content">COMMIT（两阶段提交）</div>
+          </div>
+          <div class="timeline-item" style="padding:10px 14px;">
+            <div class="timeline-time">4</div>
+            <div class="timeline-content">数据落盘（异步刷脏页）</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="viz-container">
+      <div class="viz-title">🗺️ MySQL 事务体系全景图</div>
+      <svg viewBox="0 0 900 360" id="fullOverview" style="width:100%;"></svg>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<script>
+// ============ Utility ============
+const $ = id => document.getElementById(id);
+const svgNS = "http://www.w3.org/2000/svg";
+
+function createSVGEl(tag, attrs) {
+  const el = document.createElementNS(svgNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+function scrollToSection(id) {
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+// Nav scroll spy
+window.addEventListener('scroll', () => {
+  const sections = document.querySelectorAll('.section');
+  let current = '';
+  sections.forEach(s => {
+    const top = s.offsetTop - 80;
+    if (window.scrollY >= top) current = s.id;
+  });
+  document.querySelectorAll('.nav-item').forEach(n => {
+    n.classList.toggle('active', n.getAttribute('onclick') === `scrollToSection('${current}')`);
+  });
+});
+
+// ============ Section 1: Transaction Concept ============
+(function drawConcept() {
+  const svg = $('txConcept');
+  const W = 900, H = 280;
+
+  // Definitions
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `
+    <marker id="arrB" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#f85149" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  `;
+  svg.appendChild(defs);
+
+  // Title
+  svg.appendChild(createSVGEl('text', { x: W/2, y: 24, 'text-anchor': 'middle', fill: '#e6edf3', 'font-size': 14, 'font-weight': 600 }));
+  svg.lastChild.textContent = '事务 = 一组不可分割的SQL操作';
+
+  // Box: Transaction
+  const txBox = createSVGEl('g', {});
+  txBox.innerHTML = `
+    <rect x="300" y="50" width="300" height="60" rx="10" fill="#1c2128" stroke="#58a6ff" stroke-width="1.5"/>
+    <text x="450" y="80" text-anchor="middle" fill="#58a6ff" font-size="15" font-weight="600">START TRANSACTION</text>
+    <text x="450" y="100" text-anchor="middle" fill="#8b949e" font-size="11">事务开始</text>
+  `;
+  svg.appendChild(txBox);
+
+  // SQL statements
+  const sqls = [
+    { text: 'SQL 1: UPDATE accounts SET balance = balance - 500', y: 140 },
+    { text: 'SQL 2: UPDATE accounts SET balance = balance + 500', y: 175 },
+    { text: 'SQL 3: INSERT INTO logs ...', y: 210 },
+  ];
+  sqls.forEach((s, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `
+      <rect x="200" y="${s.y}" width="500" height="30" rx="6" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+      <text x="220" y="${s.y + 19}" fill="#e6edf3" font-size="12" font-family="monospace">${s.text}</text>
+    `;
+    svg.appendChild(g);
+    // arrow from previous
+    if (i === 0) {
+      const line = createSVGEl('line', { x1: 450, y1: 110, x2: 450, y2: 140, stroke: '#58a6ff', 'stroke-width': 1.5, 'marker-end': 'url(#arrB)' });
+      svg.appendChild(line);
+    } else {
+      const prevY = sqls[i-1].y + 30;
+      const line = createSVGEl('line', { x1: 450, y1: prevY, x2: 450, y2: s.y, stroke: '#30363d', 'stroke-width': 1, 'stroke-dasharray': '3,3' });
+      svg.appendChild(line);
+    }
+  });
+
+  // Outcome: Commit / Rollback
+  const commitG = createSVGEl('g', {});
+  commitG.innerHTML = `
+    <rect x="200" y="240" width="220" height="36" rx="8" fill="rgba(63,185,80,0.1)" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="310" y="263" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="600">✓ COMMIT（全部成功）</text>
+  `;
+  svg.appendChild(commitG);
+
+  const rbG = createSVGEl('g', {});
+  rbG.innerHTML = `
+    <rect x="480" y="240" width="220" height="36" rx="8" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1.5"/>
+    <text x="590" y="263" text-anchor="middle" fill="#f85149" font-size="13" font-weight="600">✗ ROLLBACK（全部回滚）</text>
+  `;
+  svg.appendChild(rbG);
+
+  // arrows to outcomes
+  const l1 = createSVGEl('line', { x1: 340, y1: 240, x2: 310, y2: 240, stroke: '#3fb950', 'stroke-width': 1.5, 'marker-end': 'url(#arrG)' });
+  svg.appendChild(l1);
+  const l2 = createSVGEl('line', { x1: 560, y1: 240, x2: 590, y2: 240, stroke: '#f85149', 'stroke-width': 1.5, 'marker-end': 'url(#arrR)' });
+  svg.appendChild(l2);
+
+  // Arrow from last SQL to outcomes
+  const connLine = createSVGEl('line', { x1: 450, y1: 240, x2: 450, y2: 240, stroke: '#30363d', 'stroke-width': 1, 'stroke-dasharray': '3,3' });
+  // Actually connect from last SQL
+  const connLine2 = createSVGEl('line', { x1: 450, y1: 240, x2: 450, y2: 240, stroke: '#58a6ff', 'stroke-width': 1, 'stroke-dasharray': '4,4' });
+  connLine2.setAttribute('y1', sqls[sqls.length-1].y + 30);
+  svg.appendChild(connLine2);
+})();
+
+// ============ Section 2: No Tx vs With Tx ============
+function drawNoTx() {
+  const svg = $('txCompare');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `
+    <marker id="aR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#f85149" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  `;
+  svg.appendChild(defs);
+
+  // No Tx scenario
+  svg.appendChild(createSVGEl('text', { x: 450, y: 20, 'text-anchor': 'middle', fill: '#f85149', 'font-size': 14, 'font-weight': 600 }));
+  svg.lastChild.textContent = '❌ 无事务保护的问题场景';
+
+  const steps = [
+    { t: '时刻 T1: 事务A 读取 balance = 1000', y: 50, color: '#e6edf3' },
+    { t: '时刻 T2: 事务B 修改 balance = 500（未提交）', y: 85, color: '#f85149' },
+    { t: '时刻 T3: 事务A 再次读取 → 读到 500（脏读！）', y: 120, color: '#f85149' },
+    { t: '时刻 T4: 事务B ROLLBACK → balance 恢复 1000', y: 155, color: '#d29922' },
+    { t: '❌ 问题：事务A 读到了不存在的数据！', y: 200, color: '#f85149', fw: 600 },
+  ];
+  steps.forEach(s => {
+    const el = createSVGEl('text', { x: 20, y: s.y, fill: s.color, 'font-size': 13 });
+    if (s.fw) el.setAttribute('font-weight', s.fw);
+    el.textContent = s.t;
+    svg.appendChild(el);
+  });
+
+  // Red highlight box
+  const rect = createSVGEl('rect', { x: 15, y: 110, width: 870, height: 50, rx: 6, fill: 'none', stroke: '#f85149', 'stroke-width': 1, 'stroke-dasharray': '5,3', opacity: 0.7 });
+  svg.insertBefore(rect, svg.children[1]);
+}
+
+function drawWithTx() {
+  const svg = $('txCompare');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `
+    <marker id="aG2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  `;
+  svg.appendChild(defs);
+
+  svg.appendChild(createSVGEl('text', { x: 450, y: 20, 'text-anchor': 'middle', fill: '#3fb950', 'font-size': 14, 'font-weight': 600 }));
+  svg.lastChild.textContent = '✅ 有事务保护的正确场景';
+
+  const steps = [
+    { t: '时刻 T1: 事务A BEGIN → 生成 ReadView', y: 50, color: '#58a6ff' },
+    { t: '时刻 T2: 事务A 读取 balance = 1000（快照读）', y: 85, color: '#e6edf3' },
+    { t: '时刻 T3: 事务B 修改 balance = 500（未提交）', y: 120, color: '#d29922' },
+    { t: '时刻 T4: 事务A 再次读取 → 仍读到 1000（MVCC保护）', y: 155, color: '#3fb950' },
+    { t: '时刻 T5: 事务B COMMIT', y: 190, color: '#8b949e' },
+    { t: '✅ 事务A 在整个过程中看到的数据始终一致！', y: 235, color: '#3fb950', fw: 600 },
+  ];
+  steps.forEach(s => {
+    const el = createSVGEl('text', { x: 20, y: s.y, fill: s.color, 'font-size': 13 });
+    if (s.fw) el.setAttribute('font-weight', s.fw);
+    el.textContent = s.t;
+    svg.appendChild(el);
+  });
+
+  const rect = createSVGEl('rect', { x: 15, y: 140, width: 870, height: 50, rx: 6, fill: 'none', stroke: '#3fb950', 'stroke-width': 1, 'stroke-dasharray': '5,3', opacity: 0.7 });
+  svg.insertBefore(rect, svg.children[1]);
+}
+
+function showNoTx() {
+  drawNoTx();
+  event.target.classList.add('btn-primary');
+  event.target.nextElementSibling?.classList.remove('btn-primary');
+}
+function showWithTx() {
+  drawWithTx();
+  event.target.classList.add('btn-primary');
+  event.target.previousElementSibling?.classList.remove('btn-primary');
+}
+// Init
+drawNoTx();
+
+// ============ Section 3: ACID ============
+const acidDetails = {
+  a: {
+    title: '🔷 A — Atomicity 原子性详解',
+    text: `<p><strong style="color:var(--accent-blue)">原子性</strong>由 <strong style="color:var(--accent-red)">Undo Log</strong> 保证。</p>
+            <p style="margin-top:8px;">事务对数据的每次修改，都会在 Undo Log 中记录<strong>修改前的值</strong>。如果事务需要回滚，引擎会沿着 Undo Log 逆向执行，将数据恢复到事务开始前的状态。</p>
+            <div class="code-block" style="margin-top:12px;font-size:12px;">
+<span class="cm">-- 原子性演示：转账事务</span>
+<span class="kw">BEGIN</span>;
+  <span class="cm">-- Undo Log 记录：A.balance 旧值=1000</span>
+  <span class="kw">UPDATE</span> accounts <span class="kw">SET</span> balance = balance - <span class="num">500</span> <span class="kw">WHERE</span> id=<span class="str">'A'</span>;
+  <span class="cm">-- Undo Log 记录：B.balance 旧值=2000</span>
+  <span class="kw">UPDATE</span> accounts <span class="kw">SET</span> balance = balance + <span class="num">500</span> <span class="kw">WHERE</span> id=<span class="str">'B'</span>;
+  <span class="cm">-- 若此处出错 → ROLLBACK → Undo Log 恢复数据</span>
+<span class="kw">COMMIT</span>;
+            </div>`,
+    draw: drawAcidA
+  },
+  c: {
+    title: '🔷 C — Consistency 一致性详解',
+    text: `<p><strong style="color:var(--accent-green)">一致性</strong>是事务的<strong>最终目标</strong>，由 A、I、D 三个特性共同保证。</p>
+            <p style="margin-top:8px;">一致性意味着事务执行前后，数据库必须满足所有<strong>约束条件</strong>（主键唯一、外键约束、NOT NULL、自定义CHECK约束等）。</p>
+            <div class="code-block" style="margin-top:12px;font-size:12px;">
+<span class="cm">-- 一致性示例：余额不能为负数</span>
+<span class="kw">BEGIN</span>;
+  <span class="kw">UPDATE</span> accounts <span class="kw">SET</span> balance = balance - <span class="num">500</span>;
+  <span class="cm">-- 若 balance &lt; 0 → 违反一致性约束 → 回滚</span>
+<span class="kw">COMMIT</span>;
+            </div>`,
+    draw: drawAcidC
+  },
+  i: {
+    title: '🔷 I — Isolation 隔离性详解',
+    text: `<p><strong style="color:var(--accent-purple)">隔离性</strong>由 <strong style="color:var(--accent-purple)">锁机制</strong>和 <strong style="color:var(--accent-purple)">MVCC</strong> 共同保证。</p>
+            <p style="margin-top:8px;">InnoDB 使用<strong>行级锁</strong>保护写操作，使用<strong>MVCC 快照读</strong>实现非阻塞读，两者配合在不同隔离级别下提供合适的隔离保证。</p>
+            <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
+              <span class="badge badge-purple" style="font-size:12px;padding:4px 10px;">行锁（Record Lock）</span>
+              <span class="badge badge-purple" style="font-size:12px;padding:4px 10px;">间隙锁（Gap Lock）</span>
+              <span class="badge badge-purple" style="font-size:12px;padding:4px 10px;">临键锁（Next-Key Lock）</span>
+              <span class="badge badge-purple" style="font-size:12px;padding:4px 10px;">MVCC 快照读</span>
+            </div>`,
+    draw: drawAcidI
+  },
+  d: {
+    title: '🔷 D — Durability 持久性详解',
+    text: `<p><strong style="color:var(--accent-yellow)">持久性</strong>由 <strong style="color:var(--accent-yellow)">Redo Log</strong> 和 <strong style="color:var(--accent-yellow)">WAL（Write-Ahead Logging）</strong> 保证。</p>
+            <p style="margin-top:8px;">事务提交时，Redo Log 先<strong>强制刷盘</strong>（fsync），然后才返回成功。即使数据库崩溃，重启后也可以通过 Redo Log 重做已提交事务的修改。</p>
+            <div class="code-block" style="margin-top:12px;font-size:12px;">
+<span class="cm">-- 持久性关键参数</span>
+innodb_flush_log_at_trx_commit = <span class="num">1</span>
+<span class="cm">-- 1: 每次提交都 fsync Redo Log（最安全，默认）</span>
+<span class="cm">-- 2: 每次提交写缓存，每秒 fsync（性能好，有风险）</span>
+<span class="cm">-- 0: 每秒写缓存并 fsync（性能最好，风险最大）</span>
+            </div>`,
+    draw: drawAcidD
+  }
+};
+
+function showAcidDetail(key) {
+  document.querySelectorAll('.acid-card').forEach(c => c.classList.remove('active'));
+  $('acid-' + key).classList.add('active');
+  $('acid-detail-title').textContent = acidDetails[key].title;
+  $('acid-detail-text').innerHTML = acidDetails[key].text;
+  acidDetails[key].draw();
+}
+function drawAcidA() {
+  const svg = $('acidDetailViz');
+  svg.innerHTML = '';
+  // Simple Undo flow
+  const items = [
+    { x: 50, label: '数据原值\nbalance=1000', color: '#3fb950' },
+    { x: 250, label: '执行 UPDATE\ nUndo记录旧值', color: '#d29922' },
+    { x: 450, label: '数据新值\nbalance=500', color: '#58a6ff' },
+    { x: 650, label: 'ROLLBACK\nUndo恢复', color: '#f85149' },
+  ];
+  items.forEach((it, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `
+      <rect x="${it.x}" y="60" width="140" height="50" rx="8" fill="#1c2128" stroke="${it.color}" stroke-width="1.5"/>
+      <text x="${it.x + 70}" y="80" text-anchor="middle" fill="${it.color}" font-size="11" font-weight="600">${it.label.split('\n')[0]}</text>
+      <text x="${it.x + 70}" y="96" text-anchor="middle" fill="${it.color}" font-size="10">${it.label.split('\n')[1] || ''}</text>
+    `;
+    svg.appendChild(g);
+    if (i < items.length - 1) {
+      const line = createSVGEl('line', { x1: it.x + 140, y1: 85, x2: items[i+1].x, y2: 85, stroke: it.color, 'stroke-width': 1.5, 'marker-end': 'url(#arrB)' });
+      svg.appendChild(line);
+    }
+  });
+  // Reset arrow (from last to first)
+  const resetLine = createSVGEl('path', { d: 'M720 110 C800 110, 800 40, 120 40 C60 40, 60 60, 50 60', stroke: '#f85149', 'stroke-width': 1.5, fill: 'none', 'stroke-dasharray': '4,3' });
+  svg.appendChild(resetLine);
+  const resetText = createSVGEl('text', { x: 450, y: 30, 'text-anchor': 'middle', fill: '#f85149', 'font-size': 10 });
+  resetText.textContent = '↺ ROLLBACK 时沿 Undo Log 逆向恢复';
+  svg.appendChild(resetText);
+}
+function drawAcidC() {
+  const svg = $('acidDetailViz');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrC" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+  // Before and After
+  const before = createSVGEl('g', {});
+  before.innerHTML = `<rect x="50" y="40" width="200" height="80" rx="8" fill="#1c2128" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="150" y="65" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">事务前（一致状态）</text>
+    <text x="150" y="90" text-anchor="middle" fill="#e6edf3" font-size="11">A.balance = 1000</text>
+    <text x="150" y="108" text-anchor="middle" fill="#e6edf3" font-size="11">总和 = 3000 ✓</text>`;
+  svg.appendChild(before);
+  const after = createSVGEl('g', {});
+  after.innerHTML = `<rect x="450" y="40" width="200" height="80" rx="8" fill="#1c2128" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="550" y="65" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">事务后（一致状态）</text>
+    <text x="550" y="90" text-anchor="middle" fill="#e6edf3" font-size="11">A=500, B=2500</text>
+    <text x="550" y="108" text-anchor="middle" fill="#e6edf3" font-size="11">总和 = 3000 ✓</text>`;
+  svg.appendChild(after);
+  const arr = createSVGEl('line', { x1: 250, y1: 80, x2: 450, y2: 80, stroke: '#3fb950', 'stroke-width': 1.5, 'marker-end': 'url(#arrC)' });
+  svg.appendChild(arr);
+  const txLabel = createSVGEl('text', { x: 350, y: 70, 'text-anchor': 'middle', fill: '#58a6ff', 'font-size': 11 });
+  txLabel.textContent = '事务执行中';
+  svg.appendChild(txLabel);
+  const constraint = createSVGEl('text', { x: 450, y: 150, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 11 });
+  constraint.textContent = '约束保证：转账前后总金额保持一致';
+  svg.appendChild(constraint);
+}
+function drawAcidI() {
+  const svg = $('acidDetailViz');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrIL" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#bc8cff" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+  // Two transactions
+  const t1 = createSVGEl('g', {});
+  t1.innerHTML = `<rect x="50" y="30" width="280" height="100" rx="8" fill="rgba(188,140,255,0.05)" stroke="#bc8cff" stroke-width="1"/>
+    <text x="70" y="55" fill="#bc8cff" font-size="12" font-weight="600">事务A（快照读）</text>
+    <text x="70" y="78" fill="#8b949e" font-size="11">T1: SELECT → balance=1000</text>
+    <text x="70" y="98" fill="#8b949e" font-size="11">T3: SELECT → balance=1000 ✓</text>
+    <text x="70" y="118" fill="#3fb950" font-size="10">（不受B的修改影响）</text>`;
+  svg.appendChild(t1);
+  const t2 = createSVGEl('g', {});
+  t2.innerHTML = `<rect x="370" y="30" width="280" height="100" rx="8" fill="rgba(248,81,73,0.05)" stroke="#f85149" stroke-width="1"/>
+    <text x="390" y="55" fill="#f85149" font-size="12" font-weight="600">事务B（修改数据）</text>
+    <text x="390" y="78" fill="#8b949e" font-size="11">T2: UPDATE → balance=500</text>
+    <text x="390" y="98" fill="#8b949e" font-size="11">T4: COMMIT</text>
+    <text x="390" y="118" fill="#d29922" font-size="10">（提交后A才能看到新值）</text>`;
+  svg.appendChild(t2);
+  // MVCC label
+  const mvcc = createSVGEl('text', { x: 450, y: 160, 'text-anchor': 'middle', fill: '#bc8cff', 'font-size': 12, 'font-weight': 600 });
+  mvcc.textContent = 'MVCC 通过版本链 + ReadView 实现非阻塞读';
+  svg.appendChild(mvcc);
+}
+function drawAcidD() {
+  const svg = $('acidDetailViz');
+  svg.innerHTML = '';
+  const steps = [
+    { label: '1. 修改\nBuffer Pool', y: 40, color: '#58a6ff' },
+    { label: '2. 写 Redo Log\n(prepare)', y: 40, color: '#d29922' },
+    { label: '3. Redo Log\nfsync 落盘', y: 40, color: '#3fb950' },
+    { label: '4. 返回\nCOMMIT 成功', y: 40, color: '#bc8cff' },
+  ];
+  const xPos = [60, 260, 460, 660];
+  xPos.forEach((x, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `
+      <rect x="${x}" y="40" width="150" height="60" rx="8" fill="#1c2128" stroke="${steps[i].color}" stroke-width="1.5"/>
+      <text x="${x+75}" y="65" text-anchor="middle" fill="${steps[i].color}" font-size="11" font-weight="600">${steps[i].label.split('\n')[0]}</text>
+      <text x="${x+75}" y="82" text-anchor="middle" fill="${steps[i].color}" font-size="10">${steps[i].label.split('\n')[1]||''}</text>
+    `;
+    svg.appendChild(g);
+    if (i < xPos.length - 1) {
+      const line = createSVGEl('line', { x1: x+150, y1: 70, x2: xPos[i+1], y2: 70, stroke: steps[i].color, 'stroke-width': 1.5, 'marker-end': 'url(#arrB)' });
+      svg.appendChild(line);
+    }
+  });
+  const note = createSVGEl('text', { x: 450, y: 130, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 11 });
+  note.textContent = '即使此时数据库崩溃，Redo Log 已落盘，重启后可恢复';
+  svg.appendChild(note);
+}
+// Init ACID A
+drawAcidA();
+
+// ============ Section 4: State Machine ============
+let stateAnimStep = 0;
+function drawStateMachine(step) {
+  const svg = $('stateMachine');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `
+    <marker id="arrS" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrSR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#f85149" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  `;
+  svg.appendChild(defs);
+
+  const states = [
+    { id: 'active', label: '活动中\nActive', x: 50, y: 120, color: '#58a6ff', rx: 30 },
+    { id: 'partial', label: '部分提交\nPartially Committed', x: 270, y: 120, color: '#d29922', rx: 30 },
+    { id: 'committed', label: '已提交\nCommitted', x: 520, y: 120, color: '#3fb950', rx: 30 },
+    { id: 'failed', label: '失败\nFailed', x: 160, y: 280, color: '#f85149', rx: 30 },
+    { id: 'aborted', label: '已中止\nAborted', x: 700, y: 120, color: '#f85149', rx: 30 },
+  ];
+
+  // Draw states
+  states.forEach(s => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `
+      <ellipse cx="${s.x}" cy="${s.y}" rx="${s.rx}" ry="30" fill="#1c2128" stroke="${s.color}" stroke-width="1.5" opacity="${step === 0 ? 1 : 0.4}"/>
+      <text x="${s.x}" y="${s.y - 7}" text-anchor="middle" fill="${s.color}" font-size="12" font-weight="600">${s.label.split('\n')[0]}</text>
+      <text x="${s.x}" y="${s.y + 9}" text-anchor="middle" fill="${s.color}" font-size="10">${s.label.split('\n')[1]}</text>
+    `;
+    if (step > 0) {
+      // Highlight active path
+      const activeStates = getActiveStates(step);
+      if (activeStates.includes(s.id)) {
+        g.querySelector('ellipse').setAttribute('opacity', 1);
+        g.querySelector('ellipse').setAttribute('stroke-width', '2.5');
+      }
+    }
+    svg.appendChild(g);
+  });
+
+  // Draw transitions
+  const trans = [
+    { x1: 80, y1: 120, x2: 240, y2: 120, label: '最后一条SQL执行完毕', color: '#58a6ff', show: step >= 1 },
+    { x1: 300, y1: 120, x2: 490, y2: 120, label: 'COMMIT', color: '#d29922', show: step >= 2 },
+    { x1: 548, y1: 120, x2: 670, y2: 120, label: '释放锁/清理', color: '#3fb950', show: step >= 3 },
+    { x1: 180, y1: 148, x2: 170, y2: 250, label: 'ROLLBACK/异常', color: '#f85149', show: step === 4 },
+    { x1: 720, y1: 88, x2: 720, y2: 60, label: '可重启', color: '#f85149', show: step >= 3 },
+  ];
+  trans.forEach(t => {
+    if (!t.show) return;
+    const line = createSVGEl('line', { x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, stroke: t.color, 'stroke-width': 1.5, 'marker-end': 'url(#arrS)' });
+    if (t.color === '#f85149') line.setAttribute('marker-end', 'url(#arrSR)');
+    if (t.x1 === t.x2 || t.y1 === t.y2) {
+      // vertical or horizontal
+    }
+    svg.appendChild(line);
+    const txt = createSVGEl('text', { x: (t.x1+t.x2)/2 + 10, y: (t.y1+t.y2)/2, fill: t.color, 'font-size': 9 });
+    txt.textContent = t.label;
+    svg.appendChild(txt);
+  });
+
+  // Start dot
+  const start = createSVGEl('circle', { cx: 20, cy: 120, r: 6, fill: '#58a6ff' });
+  svg.appendChild(start);
+  const startTxt = createSVGEl('text', { x: 20, y: 105, 'text-anchor': 'middle', fill: '#58a6ff', 'font-size': 10 });
+  startTxt.textContent = 'BEGIN';
+  svg.appendChild(startTxt);
+  if (step >= 1) {
+    const l = createSVGEl('line', { x1: 26, y1: 120, x2: 44, y2: 120, stroke: '#58a6ff', 'stroke-width': 1.5, 'marker-end': 'url(#arrS)' });
+    svg.appendChild(l);
+  }
+}
+
+function getActiveStates(step) {
+  if (step === 1) return ['active', 'partial'];
+  if (step === 2) return ['active', 'partial', 'committed'];
+  if (step === 3) return ['committed', 'aborted'];
+  if (step === 4) return ['active', 'failed', 'aborted'];
+  return [];
+}
+
+function animateState(action) {
+  const map = { begin: 1, running: 1, commit: 3, rollback: 4 };
+  stateAnimStep = map[action] || 0;
+  drawStateMachine(stateAnimStep);
+}
+function resetStateAnim() {
+  stateAnimStep = 0;
+  drawStateMachine(0);
+}
+drawStateMachine(0);
+
+// ============ Section 5: MVCC ============
+let mvccStepN = -1;
+function mvccStep(n) {
+  mvccStepN = n;
+  const svg = $('mvccViz');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrM" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#bc8cff" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+
+  // Always show the version chain
+  const chainX = 80;
+  // Current row
+  const cur = createSVGEl('g', {});
+  const curColor = n >= 1 ? '#3fb950' : '#8b949e';
+  cur.innerHTML = `<rect x="${chainX}" y="40" width="180" height="50" rx="8" fill="#1c2128" stroke="${curColor}" stroke-width="1.5"/>
+    <text x="${chainX+90}" y="58" text-anchor="middle" fill="${curColor}" font-size="11" font-weight="600">当前数据行</text>
+    <text x="${chainX+90}" y="76" text-anchor="middle" fill="${curColor}" font-size="10">balance = ${n >= 1 ? 500 : 1000} | trx_id=${n >= 1 ? 20 : 10}</text>`;
+  svg.appendChild(cur);
+
+  // Undo entries
+  if (n >= 1) {
+    const undo1 = createSVGEl('g', {});
+    undo1.innerHTML = `<rect x="${chainX}" y="110" width="180" height="50" rx="8" fill="rgba(248,81,73,0.08)" stroke="#f85149" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="${chainX+90}" y="128" text-anchor="middle" fill="#f85149" font-size="11" font-weight="600">Undo Log #1</text>
+      <text x="${chainX+90}" y="146" text-anchor="middle" fill="#f85149" font-size="10">旧值: balance=1000 | trx_id=10</text>`;
+    svg.appendChild(undo1);
+    const ptr1 = createSVGEl('line', { x1: chainX+90, y1: 90, x2: chainX+90, y2: 110, stroke: '#bc8cff', 'stroke-width': 1.5, 'marker-end': 'url(#arrM)' });
+    svg.appendChild(ptr1);
+    const ptrLabel = createSVGEl('text', { x: chainX+100, y: 102, fill: '#bc8cff', 'font-size': 9 });
+    ptrLabel.textContent = 'roll_ptr';
+    svg.appendChild(ptrLabel);
+  }
+
+  if (n >= 2) {
+    // Transaction A reading
+    const readA = createSVGEl('g', {});
+    readA.innerHTML = `<rect x="520" y="40" width="200" height="80" rx="8" fill="rgba(88,166,255,0.08)" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="620" y="62" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">事务A 快照读</text>
+      <text x="620" y="82" text-anchor="middle" fill="#8b949e" font-size="10">ReadView [活跃事务: 20]</text>
+      <text x="620" y="100" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">结果: balance = 1000 ✓</text>
+      <text x="620" y="115" text-anchor="middle" fill="#8b949e" font-size="9">(trx_id=20 未提交，不可见)</text>`;
+    svg.appendChild(readA);
+    const readArrow = createSVGEl('line', { x1: 260, y1: 65, x2: 520, y2: 65, stroke: '#58a6ff', 'stroke-width': 1, 'stroke-dasharray': '4,3', 'marker-end': 'url(#arrM)' });
+    svg.appendChild(readArrow);
+  }
+
+  if (n >= 3) {
+    // After B commits
+    const after = createSVGEl('g', {});
+    after.innerHTML = `<rect x="520" y="150" width="200" height="70" rx="8" fill="rgba(210,153,34,0.08)" stroke="#d29922" stroke-width="1.5"/>
+      <text x="620" y="172" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">事务B 已提交</text>
+      <text x="620" y="192" text-anchor="middle" fill="#8b949e" font-size="10">但事务A的ReadView未更新</text>
+      <text x="620" y="210" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">A再读仍是 1000 ✓</text>`;
+    svg.appendChild(after);
+  }
+
+  if (n === 0) {
+    const hint = createSVGEl('text', { x: 450, y: 200, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 12 });
+    hint.textContent = '👆 点击按钮逐步演示 MVCC 版本链工作原理';
+    svg.appendChild(hint);
+  }
+
+  // Step description
+  const desc = ['初始状态：balance=1000，trx_id=10', '事务B（trx_id=20）执行UPDATE，balance=500，Undo记录旧值', '事务A发起快照读，ReadView判断trx_id=20不可见，沿版本链找到trx_id=10', '事务B提交后，事务A（RR隔离级别）ReadView不变，仍读快照'][n] || '';
+  if (n >= 0) {
+    const descEl = createSVGEl('text', { x: 450, y: n >= 2 ? 260 : 190, 'text-anchor': 'middle', fill: '#e6edf3', 'font-size': 12, 'font-weight': 500 });
+    descEl.textContent = '📌 ' + desc;
+    svg.appendChild(descEl);
+  }
+}
+mvccStep(-1);
+function mvccReset() { mvccStepN = -1; mvccStep(-1); }
+
+// ============ Section 6: Undo & Redo ============
+(function drawUndoRedo() {
+  // Undo Log Viz
+  const svgU = $('undoLogViz');
+  const items = [
+    { label: '数据页\nbalance=1000', y: 20 },
+    { label: 'Undo Log #1\n旧值: 1000', y: 80 },
+    { label: 'Undo Log #2\n旧值: 旧值2', y: 140 },
+    { label: 'ROLLBACK\n沿链表恢复', y: 200 },
+  ];
+  items.forEach((it, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `<rect x="30" y="${it.y}" width="140" height="40" rx="6" fill="#1c2128" stroke="${i===3?'#f85149':'#8b949e'}" stroke-width="${i===3?2:1}"/>
+      <text x="100" y="${it.y+18}" text-anchor="middle" fill="${i===3?'#f85149':'#e6edf3'}" font-size="10">${it.label.split('\n')[0]}</text>
+      <text x="100" y="${it.y+32}" text-anchor="middle" fill="${i===3?'#f85149':'#8b949e'}" font-size="9">${it.label.split('\n')[1]||''}</text>`;
+    svgU.appendChild(g);
+    if (i > 0 && i < 3) {
+      const line = createSVGEl('line', { x1: 100, y1: it.y - 10, x2: 100, y2: items[i-1].y + 40, stroke: '#bc8cff', 'stroke-width': 1, 'stroke-dasharray': '3,2' });
+      svgU.insertBefore(line, g);
+    }
+  });
+  const chainLabel = createSVGEl('text', { x: 190, y: 100, fill: '#bc8cff', 'font-size': 10 });
+  chainLabel.textContent = '← roll_ptr';
+  svgU.appendChild(chainLabel);
+
+  // Redo Log Viz
+  const svgR = $('redoLogViz');
+  const itemsR = [
+    { label: '① 修改 Buffer Pool\n（内存）', y: 20 },
+    { label: '② 写 Redo Log\n(prepare)', y: 80 },
+    { label: '③ fsync 落盘', y: 140 },
+    { label: '④ 返回 COMMIT\n成功', y: 200 },
+  ];
+  itemsR.forEach((it, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `<rect x="30" y="${it.y}" width="140" height="45" rx="6" fill="#1c2128" stroke="#d29922" stroke-width="1"/>
+      <text x="100" y="${it.y+18}" text-anchor="middle" fill="#d29922" font-size="10">${it.label.split('\n')[0]}</text>
+      <text x="100" y="${it.y+32}" text-anchor="middle" fill="#8b949e" font-size="9">${it.label.split('\n')[1]||''}</text>`;
+    svgR.appendChild(g);
+    if (i < 3) {
+      const line = createSVGEl('line', { x1: 100, y1: it.y + 45, x2: 100, y2: itemsR[i+1].y, stroke: '#d29922', 'stroke-width': 1, 'marker-end': 'url(#arrB)' });
+      svgR.appendChild(line);
+    }
+  });
+})();
+
+(function drawWAL() {
+  const svg = $('walViz');
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrW" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+
+  const layers = [
+    { label: '应用层\n(事务SQL)', y: 20, color: '#58a6ff' },
+    { label: 'Buffer Pool\n(内存数据页)', y: 70, color: '#bc8cff' },
+    { label: 'Redo Log Buffer\n(日志缓存)', y: 120, color: '#d29922' },
+    { label: 'Redo Log File\n(磁盘持久化)', y: 170, color: '#3fb950' },
+  ];
+  layers.forEach((l, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `<rect x="100" y="${l.y}" width="200" height="40" rx="6" fill="#1c2128" stroke="${l.color}" stroke-width="1.5"/>
+      <text x="200" y="${l.y+18}" text-anchor="middle" fill="${l.color}" font-size="11" font-weight="600">${l.label.split('\n')[0]}</text>
+      <text x="200" y="${l.y+33}" text-anchor="middle" fill="${l.color}" font-size="9">${l.label.split('\n')[1]||''}</text>`;
+    svg.appendChild(g);
+    if (i > 0) {
+      const line = createSVGEl('line', { x1: 200, y1: l.y - 10, x2: 200, y2: layers[i-1].y + 40, stroke: l.color, 'stroke-width': 1.5, 'marker-end': 'url(#arrW)' });
+      svg.appendChild(line);
+    }
+  });
+  const walNote = createSVGEl('text', { x: 450, y: 100, fill: '#e6edf3', 'font-size': 12, 'font-weight': 600 });
+  walNote.textContent = 'WAL 核心原则';
+  svg.appendChild(walNote);
+  const walDesc = createSVGEl('text', { x: 450, y: 125, fill: '#8b949e', 'font-size': 11 });
+  walDesc.textContent = '先写日志，再写数据页';
+  svg.appendChild(walDesc);
+  const walDesc2 = createSVGEl('text', { x: 450, y: 145, fill: '#8b949e', 'font-size': 11 });
+  walDesc2.textContent = '（Write-Ahead Logging）';
+  svg.appendChild(walDesc2);
+  const order = createSVGEl('text', { x: 450, y: 175, fill: '#3fb950', 'font-size': 11 });
+  order.textContent = '提交时 Redo Log 必须先 fsync 到磁盘';
+  svg.appendChild(order);
+})();
+
+// ============ Section 7: Two Phase Commit ============
+let tpStep = -1;
+function twoPhaseStep(n) {
+  tpStep = n;
+  const svg = $('twoPhaseViz');
+  svg.innerHTML = '';
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `
+    <marker id="arr2P" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  `;
+  svg.appendChild(defs);
+
+  // Three columns: Client, Redo Log, Binlog
+  const cols = [
+    { x: 60, label: '客户端', color: '#58a6ff' },
+    { x: 330, label: 'Redo Log\n(InnoDB)', color: '#d29922' },
+    { x: 600, label: 'Binlog\n(MySQL Server)', color: '#bc8cff' },
+  ];
+  cols.forEach(c => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `<rect x="${c.x}" y="30" width="120" height="360" rx="8" fill="#1c2128" stroke="${c.color}" stroke-width="1"/>
+      <text x="${c.x+60}" y="55" text-anchor="middle" fill="${c.color}" font-size="12" font-weight="600">${c.label.split('\n')[0]}</text>
+      ${c.label.split('\n')[1] ? `<text x="${c.x+60}" y="72" text-anchor="middle" fill="${c.color}" font-size="10">${c.label.split('\n')[1]}</text>` : ''}`;
+    svg.appendChild(g);
+  });
+
+  const steps = [
+    { desc: '① COMMIT 请求到达', client: '发送COMMIT', redo: '...', binlog: '...', show: n >= 0 },
+    { desc: '② Prepare 阶段：写Redo Log (prepare)', client: '等待...', redo: '写入 prepare 标记', binlog: '...', show: n >= 0 },
+    { desc: '③ 写 Binlog (fsync)', client: '等待...', redo: 'prepare ✓', binlog: '写入 Binlog', show: n >= 1 },
+    { desc: '④ Commit 阶段：Redo Log 标记 commit', client: '返回成功!', redo: '写入 commit 标记', binlog: 'Binlog ✓', show: n >= 2 },
+    { desc: '⑤ 崩溃恢复演示', client: '崩溃!', redo: 'prepare + Binlog有?', binlog: '检查完整性', show: n >= 3 },
+  ];
+
+  let yPos = 100;
+  steps.forEach((s, i) => {
+    if (!s.show) return;
+    const alpha = i <= n ? 1 : 0.3;
+    // Client column
+    const cEl = createSVGEl('text', { x: 120, y: yPos, fill: '#58a6ff', 'font-size': 10, opacity: alpha });
+    cEl.textContent = s.client;
+    svg.appendChild(cEl);
+    // Redo column
+    const rEl = createSVGEl('text', { x: 390, y: yPos, fill: '#d29922', 'font-size': 10, opacity: alpha });
+    rEl.textContent = s.redo;
+    svg.appendChild(rEl);
+    // Binlog column
+    const bEl = createSVGEl('text', { x: 660, y: yPos, fill: '#bc8cff', 'font-size': 10, opacity: alpha });
+    bEl.textContent = s.binlog;
+    svg.appendChild(bEl);
+
+    // Arrow between columns
+    if (i === 1 || i === 2) {
+      const fromX = i === 1 ? 120 : 390;
+      const toX = i === 1 ? 390 : 660;
+      const line = createSVGEl('line', { x1: fromX + 60, y1: yPos - 12, x2: toX, y2: yPos - 12, stroke: '#58a6ff', 'stroke-width': 1, 'marker-end': 'url(#arr2P)', opacity: alpha });
+      svg.appendChild(line);
+    }
+
+    yPos += (i === 4 ? 50 : 60);
+  });
+
+  if (n >= 0) {
+    const title = createSVGEl('text', { x: 450, y: 20, 'text-anchor': 'middle', fill: '#e6edf3', 'font-size': 13, 'font-weight': 600 });
+    title.textContent = steps[n+1] ? `▶ 步骤 ${n+1}: ${steps[n+1].desc}` : '两阶段提交完成!';
+    svg.insertBefore(title, svg.firstChild.nextSibling);
+  }
+  if (n === 3) {
+    const recovery = createSVGEl('text', { x: 450, y: 380, 'text-anchor': 'middle', fill: '#3fb950', 'font-size': 12, 'font-weight': 600 });
+    recovery.textContent = '恢复规则：Binlog 完整 → 提交；不完整 → 回滚';
+    svg.appendChild(recovery);
+  }
+}
+function twoPhaseReset() { tpStep = -1; twoPhaseStep(-1); }
+
+// ============ Section 8: Isolation Levels ============
+(function drawIsolation() {
+  const svg = $('isolationViz');
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrIso" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+
+  const levels = [
+    { name: 'READ UNCOMMITTED', dirty: '❌', nonrepeat: '❌', phantom: '❌', color: '#f85149', y: 40 },
+    { name: 'READ COMMITTED', dirty: '✅', nonrepeat: '❌', phantom: '❌', color: '#d29922', y: 120 },
+    { name: 'REPEATABLE READ (默认)', dirty: '✅', nonrepeat: '✅', phantom: '⚠️', color: '#3fb950', y: 200 },
+    { name: 'SERIALIZABLE', dirty: '✅', nonrepeat: '✅', phantom: '✅', color: '#bc8cff', y: 280 },
+  ];
+
+  levels.forEach((l, i) => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `
+      <rect x="40" y="${l.y}" width="820" height="65" rx="8" fill="#1c2128" stroke="${l.color}" stroke-width="1" opacity="0.9"/>
+      <text x="60" y="${l.y+24}" fill="${l.color}" font-size="13" font-weight="600">${l.name}</text>
+      <text x="350" y="${l.y+24}" text-anchor="middle" fill="${l.dirty==='✅'?'#3fb950':l.dirty==='❌'?'#f85149':'#d29922'}" font-size="18">${l.dirty}</text>
+      <text x="500" y="${l.y+24}" text-anchor="middle" fill="${l.nonrepeat==='✅'?'#3fb950':l.nonrepeat==='❌'?'#f85149':'#d29922'}" font-size="18">${l.nonrepeat}</text>
+      <text x="650" y="${l.y+24}" text-anchor="middle" fill="${l.phantom==='✅'?'#3fb950':l.phantom==='❌'?'#f85149':'#d29922'}" font-size="18">${l.phantom}</text>
+      <text x="60" y="${l.y+44}" fill="#8b949e" font-size="10">${i===0?'最低隔离级别，性能最好但问题最多':i===1?'每次查询生成新ReadView':i===2?'MySQL默认，通过Next-Key Lock解决部分幻读': '完全串行，性能最低'}</text>
+    `;
+    svg.appendChild(g);
+  });
+
+  // Header
+  const hdr = createSVGEl('g', {});
+  hdr.innerHTML = `
+    <text x="60" y="24" fill="#8b949e" font-size="11" font-weight="600">隔离级别</text>
+    <text x="350" y="24" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600">脏读</text>
+    <text x="500" y="24" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600">不可重复读</text>
+    <text x="650" y="24" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600">幻读</text>
+  `;
+  svg.insertBefore(hdr, svg.firstChild);
+})();
+
+// ============ Section 9: Full Overview ============
+(function drawOverview() {
+  const svg = $('fullOverview');
+  const defs = createSVGEl('defs', {});
+  defs.innerHTML = `<marker id="arrO" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+  svg.appendChild(defs);
+
+  // Central Engine
+  const center = createSVGEl('g', {});
+  center.innerHTML = `<rect x="300" y="120" width="300" height="60" rx="12" fill="rgba(88,166,255,0.1)" stroke="#58a6ff" stroke-width="2"/>
+    <text x="450" y="148" text-anchor="middle" fill="#58a6ff" font-size="15" font-weight="600">InnoDB 存储引擎</text>
+    <text x="450" y="168" text-anchor="middle" fill="#8b949e" font-size="10">事务引擎核心</text>`;
+  svg.appendChild(center);
+
+  // Top: SQL Interface
+  const top = createSVGEl('g', {});
+  top.innerHTML = `<rect x="300" y="30" width="300" height="45" rx="8" fill="#1c2128" stroke="#8b949e" stroke-width="1"/>
+    <text x="450" y="55" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">SQL 接口 / 客户端连接</text>
+    <text x="450" y="72" text-anchor="middle" fill="#8b949e" font-size="10">BEGIN / COMMIT / ROLLBACK</text>`;
+  svg.appendChild(top);
+  const l1 = createSVGEl('line', { x1: 450, y1: 75, x2: 450, y2: 120, stroke: '#58a6ff', 'stroke-width': 1.5, 'marker-end': 'url(#arrO)' });
+  svg.appendChild(l1);
+
+  // Bottom: Disk
+  const bot = createSVGEl('g', {});
+  bot.innerHTML = `<rect x="300" y="200" width="300" height="45" rx="8" fill="#1c2128" stroke="#8b949e" stroke-width="1"/>
+    <text x="450" y="225" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">磁盘数据文件</text>
+    <text x="450" y="242" text-anchor="middle" fill="#8b949e" font-size="10">.ibd 表空间文件</text>`;
+  svg.appendChild(bot);
+  const l2 = createSVGEl('line', { x1: 450, y1: 180, x2: 450, y2: 200, stroke: '#3fb950', 'stroke-width': 1.5, 'marker-end': 'url(#arrO)' });
+  svg.appendChild(l2);
+
+  // Left: Mechanisms
+  const mechs = [
+    { label: 'Undo Log\n(原子性)', color: '#f85149', x: 30, y: 60 },
+    { label: 'Redo Log\n(持久性)', color: '#d29922', x: 30, y: 150 },
+    { label: 'MVCC\n(隔离性)', color: '#bc8cff', x: 30, y: 240 },
+  ];
+  mechs.forEach(m => {
+    const g = createSVGEl('g', {});
+    g.innerHTML = `<rect x="${m.x}" y="${m.y}" width="130" height="50" rx="8" fill="#1c2128" stroke="${m.color}" stroke-width="1.5"/>
+      <text x="${m.x+65}" y="${m.y+20}" text-anchor="middle" fill="${m.color}" font-size="11" font-weight="600">${m.label.split('\n')[0]}</text>
+      <text x="${m.x+65}" y="${m.y+36}" text-anchor="middle" fill="${m.color}" font-size="9">${m.label.split('\n')[1]}</text>`;
+    svg.appendChild(g);
+    const line = createSVGEl('line', { x1: m.x+130, y1: m.y+25, x2: 300, y2: m.y+25, stroke: m.color, 'stroke-width': 1, 'stroke-dasharray': '3,2' });
+    svg.appendChild(line);
+  });
+
+  // Right: Lock
+  const lock = createSVGEl('g', {});
+  lock.innerHTML = `<rect x="640" y="150" width="130" height="50" rx="8" fill="#1c2128" stroke="#58a6ff" stroke-width="1.5"/>
+    <text x="705" y="170" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">锁机制</text>
+    <text x="705" y="188" text-anchor="middle" fill="#58a6ff" font-size="9">行锁 / 间隙锁</text>`;
+  svg.appendChild(lock);
+  const l3 = createSVGEl('line', { x1: 600, y1: 175, x2: 640, y2: 175, stroke: '#58a6ff', 'stroke-width': 1, 'stroke-dasharray': '3,2' });
+  svg.appendChild(l3);
+
+  // Bottom note
+  const note = createSVGEl('text', { x: 450, y: 290, 'text-anchor': 'middle', fill: '#8b949e', 'font-size': 11 });
+  note.textContent = 'ACID 四大特性由 Undo Log + Redo Log + MVCC + 锁 四大机制协同保证';
+  svg.appendChild(note);
+})();
+
+console.log('[MySQL Transaction Viz] Loaded successfully');
+</script>
+</body>
+</html>

@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL · Redo/Undo Log & 两阶段提交 · 交互式原理讲解</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+:root {
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;
+  --text:#e6edf3;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;
+  --red:#f85149;--yellow:#d29922;--purple:#bc8cff;--cyan:#39d5d0;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC',sans-serif;line-height:1.7;min-height:100vh;}
+
+.header{text-align:center;padding:44px 20px 28px;background:linear-gradient(180deg,#0d1117,#161b22);border-bottom:1px solid var(--border);}
+.header h1{font-size:2rem;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:inline-block;}
+.header p{color:var(--text2);margin-top:8px;font-size:1rem;}
+
+.nav{display:flex;justify-content:center;gap:10px;padding:18px 20px;flex-wrap:wrap;}
+.nav-btn{padding:9px 26px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);color:var(--text2);cursor:pointer;font-size:.92rem;transition:all .2s;}
+.nav-btn:hover,.nav-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+
+.section{max-width:1080px;margin:0 auto;padding:36px 24px;display:none;}
+.section.active{display:block;}
+.section h2{font-size:1.5rem;margin-bottom:6px;color:var(--accent);}
+.section .subtitle{color:var(--text2);margin-bottom:24px;font-size:.93rem;}
+
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px;}
+.card h3{font-size:1.1rem;margin-bottom:10px;color:var(--text);}
+.card p,.card li{color:var(--text2);font-size:.9rem;line-height:1.8;}
+.card ul{padding-left:20px;}
+.hl{color:var(--accent);font-weight:600;}
+
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0 8px;}
+.btn{padding:7px 18px;border:none;border-radius:6px;cursor:pointer;font-size:.86rem;font-weight:500;transition:all .15s;}
+.btn-primary{background:var(--accent);color:#fff;}.btn-primary:hover{background:#4a9aef;}
+.btn-danger{background:var(--red);color:#fff;}.btn-danger:hover{background:#e04040;}
+.btn-secondary{background:var(--bg3);color:var(--text);border:1px solid var(--border);}
+.btn-secondary:hover{background:var(--border);}
+.btn-green{background:var(--green);color:#000;}.btn-green:hover{opacity:.85;}
+
+.status-bar{padding:9px 14px;background:var(--bg3);border-radius:8px;font-size:.86rem;color:var(--text2);margin:10px 0;border-left:3px solid var(--accent);min-height:40px;display:flex;align-items:center;}
+.step-num{display:inline-block;background:var(--accent);color:#fff;border-radius:50%;width:20px;height:20px;text-align:center;line-height:20px;font-size:.72rem;margin-right:8px;flex-shrink:0;}
+
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0;font-size:.8rem;color:var(--text2);}
+.legend span{display:flex;align-items:center;gap:5px;}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;}
+
+.compare{width:100%;border-collapse:collapse;margin:14px 0;font-size:.87rem;}
+.compare th{background:var(--bg3);padding:9px 12px;text-align:left;border:1px solid var(--border);color:var(--text);font-weight:600;}
+.compare td{padding:9px 12px;border:1px solid var(--border);color:var(--text2);vertical-align:top;}
+.compare tr:hover td{background:rgba(88,166,255,.04);}
+
+.svg-box{background:var(--bg);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:16px 0;position:relative;}
+.svg-box svg{display:block;}
+
+.steps{display:flex;gap:0;margin:16px 0;overflow-x:auto;}
+.step{flex:1;text-align:center;padding:8px 6px;background:var(--bg3);border:1px solid var(--border);font-size:.78rem;color:var(--text2);position:relative;min-width:80px;transition:all .3s;}
+.step:not(:last-child)::after{content:'';position:absolute;right:-10px;top:50%;transform:translateY(-50%);border:5px solid transparent;border-left:5px solid var(--border);z-index:1;}
+.step.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.step.done{background:var(--green);color:#000;border-color:var(--green);}
+
+pre-code{background:var(--bg3);padding:12px 16px;border-radius:8px;font-family:'Fira Code','Cascadia Code',monospace;font-size:.82rem;color:var(--green);overflow-x:auto;margin:10px 0;display:block;line-height:1.6;}
+
+@media(max-width:700px){.header h1{font-size:1.3rem;}.section{padding:20px 10px;}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>MySQL 日志与事务机制 · 交互式讲解</h1>
+  <p>Redo Log · Undo Log · 两阶段提交 — 点击按钮逐步观察原理</p>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" onclick="showSec('redo')">Redo Log</button>
+  <button class="nav-btn" onclick="showSec('undo')">Undo Log</button>
+  <button class="nav-btn" onclick="showSec('tpc')">两阶段提交</button>
+  <button class="nav-btn" onclick="showSec('cmp')">对比总结</button>
+</div>
+
+<!-- ==================== REDO ==================== -->
+<div class="section active" id="sec-redo">
+  <h2>Redo Log — 重做日志</h2>
+  <p class="subtitle">保证事务的持久性（Durability），核心思想：WAL（Write-Ahead Logging，先写日志再写磁盘）</p>
+
+  <div class="card">
+    <h3>📌 核心概念</h3>
+    <p>Redo Log 记录的是<span class="hl">数据页的物理修改</span>，用于崩溃后将已提交但未刷盘的数据恢复到一致状态。</p>
+    <ul>
+      <li>✅ 采用 <span class="hl">WAL 机制</span>：事务提交时先写 redo log（顺序IO），再异步刷脏页（随机IO），大幅提升性能</li>
+      <li>✅ 崩溃恢复（Crash Recovery）时，重放 redo log 中已提交事务的修改</li>
+      <li>✅ 循环写入，默认两个文件：<code>ib_logfile0</code>、<code>ib_logfile1</code></li>
+      <li>✅ <code>innodb_flush_log_at_trx_commit</code>：0=不保证；1=每次提交 fsync（默认，最安全）；2=写 OS buffer 每秒 fsync</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>🔄 交互演示：UPDATE 语句的写入路径</h3>
+    <p>点击「下一步」观察 SQL 执行时，数据在内存与磁盘之间的完整流转。</p>
+    <div class="steps" id="redoSteps">
+      <div class="step active">①客户端发送SQL</div>
+      <div class="step">②修改Buffer Pool</div>
+      <div class="step">③写Redo Log Buffer</div>
+      <div class="step">④fsync到磁盘</div>
+      <div class="step">⑤返回客户端</div>
+      <div class="step">⑥后台刷脏页</div>
+    </div>
+    <div class="status-bar" id="redoStatus">点击「▶ 下一步」开始</div>
+    <div class="svg-box"><svg id="redoSvg" width="1000" height="400"></svg></div>
+    <div class="controls">
+      <button class="btn btn-primary" onclick="redoNext()">▶ 下一步</button>
+      <button class="btn btn-secondary" onclick="redoReset()">↺ 重置</button>
+      <button class="btn btn-green" onclick="redoAuto()">⏵ 自动播放</button>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i> 客户端</span>
+      <span><i style="background:var(--purple)"></i> MySQL Server</span>
+      <span><i style="background:var(--green)"></i> Buffer Pool</span>
+      <span><i style="background:var(--yellow)"></i> Redo Log</span>
+      <span><i style="background:var(--red)"></i> 数据文件</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🚨 交互演示：崩溃恢复（Crash Recovery）</h3>
+    <p>模拟 MySQL 崩溃重启后，如何利用 redo log 恢复已提交但未刷盘的数据。</p>
+    <div class="status-bar" id="crashStatus">点击「▶ 下一步」开始</div>
+    <div class="svg-box"><svg id="crashSvg" width="1000" height="360"></svg></div>
+    <div class="controls">
+      <button class="btn btn-primary" onclick="crashNext()">▶ 下一步</button>
+      <button class="btn btn-secondary" onclick="crashReset()">↺ 重置</button>
+      <button class="btn btn-green" onclick="crashAuto()">⏵ 自动播放</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== UNDO ==================== -->
+<div class="section" id="sec-undo">
+  <h2>Undo Log — 回滚日志</h2>
+  <p class="subtitle">保证事务的原子性（Atomicity），实现回滚和 MVCC 快照读</p>
+
+  <div class="card">
+    <h3>📌 核心概念</h3>
+    <p>Undo Log 记录的是<span class="hl">数据被修改前的版本</span>，用于事务回滚和 MVCC 的快照读。</p>
+    <ul>
+      <li>✅ 事务修改记录前，先将旧版本写入 undo log</li>
+      <li>✅ 事务回滚时，利用 undo log 恢复数据到修改前状态（原子性）</li>
+      <li>✅ MVCC 中，普通 SELECT（快照读）通过 undo log 链读取历史版本，实现<span class="hl">非锁定读</span></li>
+      <li>✅ <span class="hl">INSERT Undo</span>：事务提交后可立即删除；<span class="hl">UPDATE Undo</span>：需支持 MVCC，等无事务访问后才可 purge</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>🔗 交互演示：Undo Log 版本链</h3>
+    <p>观察同一行记录被多次修改后，如何通过 undo log 形成版本链。</p>
+    <div class="status-bar" id="undoStatus">点击「▶ 下一步」开始</div>
+    <div class="svg-box"><svg id="undoVersionSvg" width="1000" height="520"></svg></div>
+    <div class="controls">
+      <button class="btn btn-primary" onclick="undoNext()">▶ 下一步</button>
+      <button class="btn btn-secondary" onclick="undoReset()">↺ 重置</button>
+      <button class="btn btn-green" onclick="undoAuto()">⏵ 自动播放</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🔍 交互演示：MVCC 快照读</h3>
+    <p>模拟两个事务并发执行，观察快照读如何通过 ReadView + undo log 链找到正确的数据版本。</p>
+    <div class="status-bar" id="mvccStatus">点击「▶ 下一步」开始</div>
+    <div class="svg-box"><svg id="mvccSvg" width="1000" height="480"></svg></div>
+    <div class="controls">
+      <button class="btn btn-primary" onclick="mvccNext()">▶ 下一步</button>
+      <button class="btn btn-secondary" onclick="mvccReset()">↺ 重置</button>
+      <button class="btn btn-green" onclick="mvccAuto()">⏵ 自动播放</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== TWO-PHASE COMMIT ==================== -->
+<div class="section" id="sec-tpc">
+  <h2>两阶段提交（Two-Phase Commit）</h2>
+  <p class="subtitle">保证 Redo Log 与 Binlog 的数据一致性，是 MySQL 主从复制安全性的基石</p>
+
+  <div class="card">
+    <h3>📌 为什么需要两阶段提交？</h3>
+    <p>MySQL 有<span class="hl">两套独立的日志</span>：</p>
+    <ul>
+      <li><span style="color:var(--yellow)">Redo Log</span>：InnoDB 引擎层，用于崩溃恢复</li>
+      <li><span style="color:var(--purple)">Binlog</span>：MySQL Server 层，用于主从复制和按时间点恢复</li>
+    </ul>
+    <p style="margin-top:10px">若先写 redo 再写 binlog（或反过来），<span style="color:var(--red)">崩溃时两套日志可能不一致</span>——主库用 redo 恢复的数据，从库通过 binlog 复制后得到不同结果。</p>
+    <p style="margin-top:8px">两阶段提交通过 <span class="hl">Prepare → Commit</span> 两个步骤保证两者完全一致。</p>
+  </div>
+
+  <div class="card">
+    <h3>🔄 交互演示：两阶段提交流程</h3>
+    <p>观察事务提交时，redo log 和 binlog 如何协同工作。</p>
+    <div class="steps" id="tpcSteps">
+      <div class="step active">①PREPARE</div>
+      <div class="step">②写Binlog</div>
+      <div class="step">③COMMIT</div>
+      <div class="step">④返回客户端</div>
+    </div>
+    <div class="status-bar" id="tpcStatus">点击「▶ 下一步」开始</div>
+    <div class="svg-box"><svg id="tpcSvg" width="1000" height="460"></svg></div>
+    <div class="controls">
+      <button class="btn btn-primary" onclick="tpcNext()">▶ 下一步</button>
+      <button class="btn btn-secondary" onclick="tpcReset()">↺ 重置</button>
+      <button class="btn btn-green" onclick="tpcAuto()">⏵ 自动播放</button>
+      <button class="btn btn-danger" onclick="tpcCrash()">💥 模拟崩溃</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🚨 崩溃恢复判断逻辑</h3>
+    <p>重启后，InnoDB 扫描处于 Prepare 状态的 redo log 事务，对照 binlog 决定如何处理：</p>
+    <table class="compare">
+      <tr><th>Redo Log 状态</th><th>Binlog 状态</th><th>恢复操作</th></tr>
+      <tr><td>PREPARE</td><td>✅ 完整写入</td><td style="color:var(--green)">✅ 提交事务（补写 COMMIT 标记到 redo）</td></tr>
+      <tr><td>PREPARE</td><td>❌ 不完整</td><td style="color:var(--red)">❌ 回滚事务（利用 undo log）</td></tr>
+      <tr><td>COMMIT</td><td>任意</td><td style="color:var(--green)">✅ 已提交，无需处理</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== COMPARE ==================== -->
+<div class="section" id="sec-cmp">
+  <h2>对比总结</h2>
+  <p class="subtitle">Redo Log、Undo Log、Binlog 的核心差异</p>
+
+  <div class="card">
+    <table class="compare">
+      <tr><th>维度</th><th>Redo Log</th><th>Undo Log</th><th>Binlog</th></tr>
+      <tr><td>所属层</td><td>InnoDB 引擎层</td><td>InnoDB 引擎层</td><td>MySQL Server 层</td></tr>
+      <tr><td>日志类型</td><td>物理日志（数据页修改）</td><td>逻辑日志（反操作）</td><td>逻辑日志（SQL/行变更）</td></tr>
+      <tr><td>主要作用</td><td>持久性（Durability）</td><td>原子性 + MVCC</td><td>主从复制 + 点恢复</td></tr>
+      <tr><td>刷盘时机</td><td>事务提交时（取决于配置）</td><td>修改记录前（先写 undo）</td><td>事务提交时</td></tr>
+      <tr><td>写入方式</td><td>循环写（固定大小）</td><td>追加写（undo tablespace）</td><td>追加写</td></tr>
+      <tr><td>崩溃恢复</td><td>重放已提交事务</td><td>回滚未提交事务</td><td>用于主从同步</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>💡 面试高频问题</h3>
+    <ul>
+      <li><span class="hl">Q：为什么有了 binlog 还需要 redo log？</span><br>A：binlog 是 Server 层日志，主要用来做主从复制；redo log 是 InnoDB 特有，用来保证崩溃恢复。两者职责不同，缺一不可。</li>
+      <li style="margin-top:10px"><span class="hl">Q：两阶段提交能否去掉？</span><br>A：不能。没有两阶段提交，redo log 和 binlog 可能不一致，导致主从数据不一致。</li>
+      <li style="margin-top:10px"><span class="hl">Q：undo log 会不会影响性能？</span><br>A：有开销（写 undo、维护版本链），但 MVCC 避免了读写互阻，整体并发性能更好。</li>
+      <li style="margin-top:10px"><span class="hl">Q：redo log buffer 什么时候刷盘？</span><br>A：① 事务提交时（由 innodb_flush_log_at_trx_commit 控制）；② buffer 空间不足；③ 后台线程每秒刷；④ checkpoint 触发。</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+// ========== NAV ==========
+function showSec(name) {
+  var sections = document.querySelectorAll('.section');
+  for (var i = 0; i < sections.length; i++) sections[i].classList.remove('active');
+  document.getElementById('sec-' + name).classList.add('active');
+  var btns = document.querySelectorAll('.nav-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+  var idx = name === 'redo' ? 0 : name === 'undo' ? 1 : name === 'tpc' ? 2 : 3;
+  btns[idx].classList.add('active');
+}
+
+// ========== HELPER: draw label box ==========
+function drawBox(svg, x, y, w, h, bg, border, textLines, fontSize) {
+  var g = svg.append('g');
+  g.append('rect')
+    .attr('x', x).attr('y', y).attr('width', w).attr('height', h)
+    .attr('rx', 8).attr('fill', bg).attr('stroke', border).attr('stroke-width', 1.5);
+  for (var i = 0; i < textLines.length; i++) {
+    g.append('text')
+      .attr('x', x + w / 2).attr('y', y + 20 + i * 16)
+      .attr('text-anchor', 'middle').attr('fill', '#fff')
+      .attr('font-size', fontSize || '12px').attr('font-weight', '600')
+      .text(textLines[i]);
+  }
+  return g;
+}
+
+// ========== REDO LOG ==========
+var redoSvg = null;
+var redoStatus = null;
+var redoStep = -1;
+var redoAutoTimer = null;
+
+function redoReset() {
+  redoStep = -1;
+  if (redoAutoTimer) { clearInterval(redoAutoTimer); redoAutoTimer = null; }
+  drawRedo();
+}
+function redoNext() {
+  if (redoStep < 5) { redoStep++; drawRedo(); }
+}
+function redoAuto() {
+  redoReset();
+  redoAutoTimer = setInterval(function() {
+    redoStep++;
+    drawRedo();
+    if (redoStep >= 5) { clearInterval(redoAutoTimer); redoAutoTimer = null; }
+  }, 2000);
+}
+
+function drawRedo() {
+  // Clear SVG and get fresh reference
+  var svgEl = document.getElementById('redoSvg');
+  if (!svgEl) return;
+  svgEl.innerHTML = '';
+  redoSvg = d3.select('#redoSvg');
+  redoStatus = document.getElementById('redoStatus');
+
+  // Update step indicators
+  var stepEls = document.querySelectorAll('#redoSteps .step');
+  for (var i = 0; i < stepEls.length; i++) {
+    stepEls[i].classList.remove('active', 'done');
+    if (i < redoStep) stepEls[i].classList.add('done');
+    if (i === redoStep) stepEls[i].classList.add('active');
+  }
+
+  if (redoStep < 0) {
+    redoStatus.textContent = '点击「▶ 下一步」开始观察 Redo Log 写入流程';
+    return;
+  }
+
+  var descs = [
+    '① 客户端发送 UPDATE 语句到 MySQL',
+    '② SQL 层解析后，InnoDB 从 Buffer Pool 读取数据页，修改内存中的数据（此时数据变「脏页」）',
+    '③ 将修改的物理日志记录写入 Redo Log Buffer（内存）',
+    '④ 事务提交，Redo Log Buffer 通过 fsync() 刷到磁盘 redo log 文件（顺序写，快！）',
+    '⑤ 返回 commit 成功给客户端（此时数据文件可能还未更新）',
+    '⑥ 后台 IO 线程逐步将 Buffer Pool 中的脏页刷到磁盘数据文件（.ibd）'
+  ];
+  redoStatus.innerHTML = '<span class="step-num">' + (redoStep+1) + '</span>' + descs[redoStep];
+
+  var cx = 480;
+
+  // Arrow markers
+  redoSvg.append('defs').html(
+    '<marker id="arrA" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#58a6ff"/></marker>' +
+    '<marker id="arrG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#3fb950"/></marker>' +
+    '<marker id="arrY" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#d29922"/></marker>' +
+    '<marker id="arrR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#f85149"/></marker>'
+  );
+
+  // Client
+  drawBox(redoSvg, cx-80, 15, 160, 42, '#0d2536', '#58a6ff', ['客户端'], '13px');
+  // Server
+  drawBox(redoSvg, cx-120, 85, 240, 46, '#1a0e2e', '#bc8cff', ['MySQL Server 层', '(SQL 解析/优化)'], '11px');
+  // InnoDB frame
+  redoSvg.append('rect').attr('x', cx-200).attr('y', 160).attr('width', 400).attr('height', 170)
+    .attr('rx', 10).attr('fill', 'none').attr('stroke', '#bc8cff').attr('stroke-width', 1).attr('stroke-dasharray', '5,3');
+  redoSvg.append('text').attr('x', cx-185).attr('y', 180).attr('fill', '#bc8cff').attr('font-size', '10px').text('InnoDB 引擎');
+  // Buffer Pool
+  drawBox(redoSvg, cx-170, 190, 170, 56, '#0d2015', '#3fb950', ['Buffer Pool', '(内存数据页缓存)'], '11px');
+  // Redo Log Buffer
+  drawBox(redoSvg, cx+30, 190, 160, 56, '#1a1500', '#d29922', ['Redo Log Buffer', '(内存日志缓冲)'], '11px');
+  // Redo Log File
+  drawBox(redoSvg, cx-50, 272, 110, 42, '#1a1500', '#d29922', ['Redo Log File', '(磁盘 ib_logfile)'], '10px');
+  // Data File
+  drawBox(redoSvg, cx+100, 272, 100, 42, '#1a0808', '#f85149', ['数据文件 .ibd', '(磁盘)'], '10px');
+
+  // Arrows
+  var arrows = [
+    { x1: cx, y1: 57, x2: cx, y2: 85, color: '#58a6ff', marker: 'arrA', label: 'UPDATE stmt', lx: cx-45, ly: 76 },
+    { x1: cx, y1: 131, x2: cx-85, y2: 190, color: '#3fb950', marker: 'arrG', label: '读取+修改页', lx: cx-175, ly: 162 },
+    { x1: cx-85, y1: 246, x2: cx+110, y2: 246, color: '#d29922', marker: 'arrY', label: '写日志', lx: cx, ly: 240 },
+    { x1: cx+110, y1: 246, x2: cx, y2: 272, color: '#d29922', marker: 'arrY', dashed: true, label: 'fsync()', lx: cx+120, ly: 260 },
+    { x1: cx, y1: 131, x2: cx, y2: 57, color: '#3fb950', marker: 'arrG', label: 'commit 成功', lx: cx+50, ly: 95 },
+    { x1: cx-85, y1: 246, x2: cx+150, y2: 272, color: '#f85149', marker: 'arrR', dashed: true, label: '后台刷脏页', lx: cx-60, ly: 260 }
+  ];
+
+  for (var i = 0; i <= redoStep && i < arrows.length; i++) {
+    var a = arrows[i];
+    var line = redoSvg.append('line')
+      .attr('x1', a.x1).attr('y1', a.y1)
+      .attr('x2', a.x1).attr('y2', a.y1)
+      .attr('stroke', a.color).attr('stroke-width', 2)
+      .attr('marker-end', 'url(#' + a.marker + ')')
+      .attr('opacity', 0.8);
+    if (a.dashed) line.attr('stroke-dasharray', '5,3');
+    line.transition().duration(700).attr('x2', a.x2).attr('y2', a.y2);
+
+    if (a.label) {
+      redoSvg.append('text').attr('x', a.lx).attr('y', a.ly)
+        .attr('fill', a.color).attr('font-size', '10px').text(a.label)
+        .attr('opacity', 0).transition().delay(500).duration(300).attr('opacity', 1);
+    }
+  }
+
+  // Highlight active component
+  var glows = [
+    { x: cx-80, y: 15, w: 160, h: 42, color: '#58a6ff' },
+    { x: cx-85, y: 190, w: 170, h: 56, color: '#3fb950' },
+    { x: cx+30, y: 190, w: 160, h: 56, color: '#d29922' },
+    { x: cx-50, y: 272, w: 110, h: 42, color: '#d29922' },
+    { x: cx-80, y: 15, w: 160, h: 42, color: '#3fb950' },
+    { x: cx+100, y: 272, w: 100, h: 42, color: '#f85149' }
+  ];
+  if (redoStep >= 0 && redoStep <= 5) {
+    var g = glows[redoStep];
+    var hl = redoSvg.append('rect')
+      .attr('x', g.x - 3).attr('y', g.y - 3).attr('width', g.w + 6).attr('height', g.h + 6)
+      .attr('rx', 10).attr('fill', 'none').attr('stroke', g.color).attr('stroke-width', 2)
+      .attr('opacity', 0);
+    hl.transition().duration(400).attr('opacity', 1)
+      .transition().duration(600).attr('opacity', 0.3);
+    (function repeat(el) {
+      el.transition().duration(600).attr('opacity', 1)
+        .transition().duration(600).attr('opacity', 0.3).on('end', function() { repeat(el); });
+    })(hl);
+  }
+
+  // Flying packet
+  if (redoStep >= 1 && redoStep <= 3) {
+    var pkt = redoSvg.append('rect').attr('width', 26).attr('height', 14).attr('rx', 4)
+      .attr('fill', redoStep === 1 ? '#3fb950' : '#d29922').attr('opacity', 0.9);
+    var from = { x: arrows[redoStep].x1, y: arrows[redoStep].y1 };
+    var to = { x: arrows[redoStep].x2, y: arrows[redoStep].y2 };
+    pkt.transition().duration(1200).ease(d3.easeCubicInOut)
+      .attrTween('transform', function() {
+        return function(t) {
+          return 'translate(' + (from.x - 13 + (to.x - from.x) * t) + ',' + (from.y - 7 + (to.y - from.y) * t) + ')';
+        };
+      });
+  }
+}
+
+// ========== CRASH RECOVERY ==========
+var crashStep = -1;
+var crashAutoTimer = null;
+
+function crashReset() {
+  crashStep = -1;
+  if (crashAutoTimer) { clearInterval(crashAutoTimer); crashAutoTimer = null; }
+  drawCrash();
+}
+function crashNext() { if (crashStep < 4) { crashStep++; drawCrash(); } }
+function crashAuto() {
+  crashReset();
+  crashAutoTimer = setInterval(function() {
+    crashStep++;
+    drawCrash();
+    if (crashStep >= 4) { clearInterval(crashAutoTimer); crashAutoTimer = null; }
+  }, 2200);
+}
+
+function drawCrash() {
+  var svgEl = document.getElementById('crashSvg');
+  if (!svgEl) return;
+  svgEl.innerHTML = '';
+  var S = d3.select('#crashSvg');
+  var st = document.getElementById('crashStatus');
+
+  var descs = [
+    '正常运行：事务已提交，redo log 已 fsync 到磁盘，但脏页尚未刷盘',
+    '💥 崩溃！MySQL 进程异常终止，Buffer Pool 中的数据丢失',
+    '重启：InnoDB 进入 Crash Recovery，扫描 redo log',
+    '找到已提交（有 COMMIT 标记）的事务，重放其修改到数据页',
+    '✅ 恢复完成！数据文件与 redo log 一致'
+  ];
+  if (crashStep < 0) {
+    st.textContent = '点击「▶ 下一步」开始';
+    return;
+  }
+  st.innerHTML = '<span class="step-num">' + (crashStep+1) + '</span>' + descs[crashStep];
+
+  // Timeline
+  S.append('line').attr('x1', 60).attr('y1', 50).attr('x2', 60).attr('y2', 340)
+    .attr('stroke', '#30363d').attr('stroke-width', 2);
+
+  var phases = [{ y: 50, label: '正常运行', color: '#3fb950' }, { y: 170, label: '崩溃!', color: '#f85149' }, { y: 290, label: '重启恢复', color: '#58a6ff' }];
+  for (var i = 0; i < phases.length; i++) {
+    S.append('circle').attr('cx', 60).attr('cy', phases[i].y).attr('r', 6).attr('fill', phases[i].color);
+    S.append('text').attr('x', 78).attr('y', phases[i].y + 4).attr('fill', phases[i].color).attr('font-size', '12px').attr('font-weight', '600').text(phases[i].label);
+  }
+
+  // Normal state
+  if (crashStep >= 0) {
+    drawBox(S, 140, 30, 200, 40, '#0d2015', '#3fb950', ['事务已提交'], '11px');
+    drawBox(S, 140, 80, 200, 40, '#1a1500', '#d29922', ['Redo Log ✓ 已刷盘'], '11px');
+    drawBox(S, 140, 130, 200, 40, '#1a0808', '#f85149', ['数据文件 (未更新)'], '11px');
+    S.append('text').attr('x', 240).attr('y', 180).attr('fill', '#8b949e').attr('font-size', '10px').text('脏页在内存 Buffer Pool 中');
+  }
+
+  // Crash
+  if (crashStep >= 1) {
+    S.append('text').attr('x', 520).attr('y', 100).attr('font-size', '42px').text('💥').attr('opacity', 0).transition().duration(400).attr('opacity', 1);
+    S.append('text').attr('x', 460).attr('y', 140).attr('fill', '#f85149').attr('font-size', '13px').attr('font-weight', '600').text('MySQL 崩溃!').attr('opacity', 0).transition().duration(500).attr('opacity', 1);
+    for (var r = 0; r < 3; r++) {
+      var ry = 30 + r * 50;
+      S.append('line').attr('x1', 140).attr('y1', ry).attr('x2', 340).attr('y2', ry + 40).attr('stroke', '#f85149').attr('stroke-width', 2).attr('opacity', 0).transition().duration(600).attr('opacity', 1);
+      S.append('line').attr('x1', 340).attr('y1', ry).attr('x2', 140).attr('y2', ry + 40).attr('stroke', '#f85149').attr('stroke-width', 2).attr('opacity', 0).transition().duration(600).attr('opacity', 1);
+    }
+  }
+
+  // Recovery
+  if (crashStep >= 2) {
+    drawBox(S, 520, 270, 180, 44, '#1a1030', '#58a6ff', ['InnoDB 重启', 'Crash Recovery'], '11px');
+  }
+  if (crashStep >= 3) {
+    S.append('line').attr('x1', 240).attr('y1', 100).attr('x2', 610).attr('y2', 270)
+      .attr('stroke', '#d29922').attr('stroke-width', 2).attr('stroke-dasharray', '5,3')
+      .attr('marker-end', 'url(#arrY)').attr('opacity', 0).transition().duration(500).attr('opacity', 1);
+    S.append('text').attr('x', 380).attr('y', 175).attr('fill', '#d29922').attr('font-size', '10px').text('扫描 redo log').attr('opacity', 0).transition().duration(800).attr('opacity', 1);
+  }
+  if (crashStep >= 4) {
+    S.append('line').attr('x1', 610).attr('y1', 314).attr('x2', 240).attr('y2', 172)
+      .attr('stroke', '#3fb950').attr('stroke-width', 2.5).attr('marker-end', 'url(#arrG)');
+    S.append('text').attr('x', 400).attr('y', 300).attr('fill', '#3fb950').attr('font-size', '12px').attr('font-weight', '600').text('重放 redo → 数据恢复!');
+    S.append('text').attr('x', 240).attr('y', 172).attr('fill', '#3fb950').attr('font-size', '11px').text('✓ 已恢复').attr('opacity', 0).transition().duration(400).attr('opacity', 1);
+  }
+}
+
+// ========== UNDO VERSION CHAIN ==========
+var undoStep = -1;
+var undoAutoTimer = null;
+
+function undoReset() {
+  undoStep = -1;
+  if (undoAutoTimer) { clearInterval(undoAutoTimer); undoAutoTimer = null; }
+  drawUndo();
+}
+function undoNext() { if (undoStep < 5) { undoStep++; drawUndo(); } }
+function undoAuto() {
+  undoReset();
+  undoAutoTimer = setInterval(function() {
+    undoStep++;
+    drawUndo();
+    if (undoStep >= 5) { clearInterval(undoAutoTimer); undoAutoTimer = null; }
+  }, 2200);
+}
+
+function drawUndo() {
+  var svgEl = document.getElementById('undoVersionSvg');
+  if (!svgEl) return;
+  svgEl.innerHTML = '';
+  var S = d3.select('#undoVersionSvg');
+  var st = document.getElementById('undoStatus');
+
+  var descs = [
+    '初始状态：id=1 的行 name="Alice"（无 undo）',
+    '事务 T1 (trx_id=100)：UPDATE 将 name 改为 "Bob"，写 undo log 记录旧值 "Alice"',
+    '事务 T2 (trx_id=101)：UPDATE 将 name 改为 "Carol"，写 undo log 记录 "Bob"',
+    'Undo Log 版本链形成：当前记录 → T2的undo → T1的undo',
+    '行记录中的 roll_ptr（回滚指针）指向最新 undo log 记录',
+    '快照读：根据 ReadView 沿 undo 链找到对当前事务可见的版本'
+  ];
+  if (undoStep < 0) {
+    st.textContent = '点击「▶ 下一步」开始';
+    return;
+  }
+  st.innerHTML = '<span class="step-num">' + (undoStep+1) + '</span>' + descs[undoStep];
+
+  var cx = 480;
+
+  // Current row
+  var nameVal = undoStep >= 2 ? 'Carol' : undoStep >= 1 ? 'Bob' : 'Alice';
+  drawBox(S, cx-100, 20, 200, 44, '#0d2015', '#3fb950', ['id=1, name="' + nameVal + '"', '(当前最新记录)'], '12px');
+
+  if (undoStep >= 1) {
+    S.append('line').attr('x1', cx).attr('y1', 64).attr('x2', cx).attr('y2', 118)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 2).attr('marker-end', 'url(#arrA)');
+    S.append('text').attr('x', cx + 12).attr('y', 92).attr('fill', '#58a6ff').attr('font-size', '10px').text('roll_ptr');
+    drawBox(S, cx-100, 118, 200, 50, '#1a1030', '#bc8cff', ['Undo Log (T1, trx_id=100)', '旧值: name="Alice"'], '11px');
+  }
+
+  if (undoStep >= 2) {
+    S.append('line').attr('x1', cx).attr('y1', 168).attr('x2', cx).attr('y2', 198)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 1.5).attr('stroke-dasharray', '4,2').attr('marker-end', 'url(#arrA)');
+    drawBox(S, cx-100, 198, 200, 50, '#1a1030', '#bc8cff', ['Undo Log (T2, trx_id=101)', '旧值: name="Bob"'], '11px');
+  }
+
+  if (undoStep >= 3) {
+    S.append('rect').attr('x', 40).attr('y', 280).attr('width', 900).attr('height', 56)
+      .attr('rx', 8).attr('fill', '#0d1117').attr('stroke', '#30363d').attr('stroke-width', 1);
+    S.append('text').attr('x', 60).attr('y', 305).attr('fill', '#e6edf3').attr('font-size', '12px').attr('font-weight', '600').text('版本链遍历方向：');
+    S.append('text').attr('x', 60).attr('y', 328).attr('fill', '#8b949e').attr('font-size', '11px')
+      .text('当前记录("' + nameVal + '") → Undo T2("Bob") → Undo T1("Alice") → 空(null)');
+  }
+
+  if (undoStep >= 5) {
+    S.append('rect').attr('x', 40).attr('y', 360).attr('width', 900).attr('height', 140)
+      .attr('rx', 8).attr('fill', '#1a1700').attr('stroke', '#d29922').attr('stroke-width', 1.5);
+    S.append('text').attr('x', 60).attr('y', 388).attr('fill', '#d29922').attr('font-size', '12px').attr('font-weight', '600').text('快照读流程：');
+    S.append('text').attr('x', 60).attr('y', 410).attr('fill', '#e6edf3').attr('font-size', '11px').text('1️⃣ 事务创建 ReadView：记录当前活跃事务列表 [m_ids]');
+    S.append('text').attr('x', 60).attr('y', 432).attr('fill', '#e6edf3').attr('font-size', '11px').text('2️⃣ 读取行记录，获取 trx_id（写入该行的事务ID）');
+    S.append('text').attr('x', 60).attr('y', 454).attr('fill', '#e6edf3').attr('font-size', '11px').text('3️⃣ 判断 trx_id 是否对 ReadView 可见（不在活跃列表则可见）');
+    S.append('text').attr('x', 60).attr('y', 476).attr('fill', '#e6edf3').attr('font-size', '11px').text('4️⃣ 不可见则沿 undo 链找上一个版本，重复判断，直到找到可见版本');
+  }
+}
+
+// ========== MVCC ==========
+var mvccStep = -1;
+var mvccAutoTimer = null;
+
+function mvccReset() {
+  mvccStep = -1;
+  if (mvccAutoTimer) { clearInterval(mvccAutoTimer); mvccAutoTimer = null; }
+  drawMvcc();
+}
+function mvccNext() { if (mvccStep < 4) { mvccStep++; drawMvcc(); } }
+function mvccAuto() {
+  mvccReset();
+  mvccAutoTimer = setInterval(function() {
+    mvccStep++;
+    drawMvcc();
+    if (mvccStep >= 4) { clearInterval(mvccAutoTimer); mvccAutoTimer = null; }
+  }, 2400);
+}
+
+function drawMvcc() {
+  var svgEl = document.getElementById('mvccSvg');
+  if (!svgEl) return;
+  svgEl.innerHTML = '';
+  var S = d3.select('#mvccSvg');
+  var st = document.getElementById('mvccStatus');
+
+  var descs = [
+    'T1 (trx_id=100) 启动，执行快照读，读取 id=1 的行，name="Alice"',
+    'T2 (trx_id=101) 执行 UPDATE 将 name 改为 "Bob"，并提交',
+    'T1 再次执行快照读（RR 隔离级别，沿用首次 ReadView）',
+    'T1 判断最新版本 trx_id=101 在活跃列表中 → 不可见 → 沿 undo 链找到 "Alice"',
+    '✅ T1 两次读取结果一致（可重复读），不受 T2 提交影响'
+  ];
+  if (mvccStep < 0) {
+    st.textContent = '点击「▶ 下一步」开始';
+    return;
+  }
+  st.innerHTML = '<span class="step-num">' + (mvccStep+1) + '</span>' + descs[mvccStep];
+
+  // T1
+  drawBox(S, 60, 20, 140, 42, '#0d2536', '#58a6ff', ['T1 (trx_id=100)', 'RR 隔离级别'], '11px');
+  // T2
+  drawBox(S, 620, 20, 140, 42, '#1a1030', '#bc8cff', ['T2 (trx_id=101)'], '11px');
+
+  if (mvccStep >= 0) {
+    drawBox(S, 340, 100, 200, 42, '#0d2015', '#3fb950', ['id=1, name="Alice"'], '12px');
+    S.append('line').attr('x1', 130).attr('y1', 62).attr('x2', 440).attr('y2', 100)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 2).attr('marker-end', 'url(#arrA)');
+    S.append('text').attr('x', 260).attr('y', 82).attr('fill', '#58a6ff').attr('font-size', '10px').text('① 快照读 → "Alice"');
+  }
+
+  if (mvccStep >= 1) {
+    S.append('line').attr('x1', 690).attr('y1', 62).attr('x2', 540).attr('y2', 100)
+      .attr('stroke', '#bc8cff').attr('stroke-width', 2).attr('marker-end', 'url(#arrA)');
+    S.append('text').attr('x', 620).attr('y', 82).attr('fill', '#bc8cff').attr('font-size', '10px').text('② UPDATE → "Bob"');
+    drawBox(S, 340, 100, 200, 42, '#1a0808', '#f85149', ['id=1, name="Bob"'], '12px');
+    S.append('text').attr('x', 440).attr('y', 155).attr('fill', '#8b949e').attr('font-size', '10px').text('(T2 已提交，trx_id=101)');
+    drawBox(S, 340, 175, 200, 42, '#1a1030', '#bc8cff', ['Undo: 旧值 name="Alice"'], '11px');
+    S.append('line').attr('x1', 440).attr('y1', 142).attr('x2', 440).attr('y2', 175)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 1.5).attr('stroke-dasharray', '3,2');
+  }
+
+  if (mvccStep >= 2) {
+    S.append('line').attr('x1', 130).attr('y1', 62).attr('x2', 440).attr('y2', 100)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 2).attr('stroke-dasharray', '5,3')
+      .attr('marker-end', 'url(#arrA)');
+    S.append('text').attr('x', 240).attr('y', 52).attr('fill', '#58a6ff').attr('font-size', '10px').text('③ 再次快照读');
+  }
+
+  if (mvccStep >= 3) {
+    S.append('line').attr('x1', 440).attr('y1', 142).attr('x2', 440).attr('y2', 175)
+      .attr('stroke', '#3fb950').attr('stroke-width', 2.5).attr('marker-end', 'url(#arrG)');
+    S.append('text').attr('x', 460).attr('y', 162).attr('fill', '#3fb950').attr('font-size', '10px').text('沿undo链查找');
+    S.append('text').attr('x', 440).attr('y', 240).attr('fill', '#3fb950').attr('font-size', '12px').attr('font-weight', '600').attr('text-anchor', 'middle').text('✓ 找到可见版本: name="Alice"');
+  }
+
+  if (mvccStep >= 4) {
+    S.append('rect').attr('x', 40).attr('y', 280).attr('width', 920).attr('height', 170)
+      .attr('rx', 8).attr('fill', '#0d2015').attr('stroke', '#3fb950').attr('stroke-width', 2);
+    S.append('text').attr('x', 60).attr('y', 308).attr('fill', '#3fb950').attr('font-size', '13px').attr('font-weight', '600').text('✅ 可重复读（Repeatable Read）达成！');
+    S.append('text').attr('x', 60).attr('y', 332).attr('fill', '#8b949e').attr('font-size', '11px').text('ReadView 判断规则：');
+    S.append('text').attr('x', 60).attr('y', 354).attr('fill', '#e6edf3').attr('font-size', '11px').text('• 若 trx_id < min_trx_id → 可见（已提交的旧事务）');
+    S.append('text').attr('x', 60).attr('y', 376).attr('fill', '#e6edf3').attr('font-size', '11px').text('• 若 trx_id 在 m_ids 活跃列表中 → 不可见，沿 undo 链继续找');
+    S.append('text').attr('x', 60).attr('y', 398).attr('fill', '#e6edf3').attr('font-size', '11px').text('• 若 trx_id ≥ max_trx_id → 不可见（未来事务）');
+    S.append('text').attr('x', 60).attr('y', 420).attr('fill', '#e6edf3').attr('font-size', '11px').text('• T1 的 ReadView: m_ids={100,101}, min=100, max=102 → T2的修改(trx_id=101)不可见');
+  }
+}
+
+// ========== TWO-PHASE COMMIT ==========
+var tpcStep = -1;
+var tpcCrashed = false;
+var tpcAutoTimer = null;
+
+function tpcReset() {
+  tpcStep = -1;
+  tpcCrashed = false;
+  if (tpcAutoTimer) { clearInterval(tpcAutoTimer); tpcAutoTimer = null; }
+  drawTpc();
+}
+function tpcNext() { if (tpcStep < 3) { tpcStep++; drawTpc(); } }
+function tpcAuto() {
+  tpcReset();
+  tpcAutoTimer = setInterval(function() {
+    tpcStep++;
+    drawTpc();
+    if (tpcStep >= 3) { clearInterval(tpcAutoTimer); tpcAutoTimer = null; }
+  }, 2600);
+}
+function tpcCrash() { tpcCrashed = true; drawTpc(); }
+
+function drawTpc() {
+  var svgEl = document.getElementById('tpcSvg');
+  if (!svgEl) return;
+  svgEl.innerHTML = '';
+  var S = d3.select('#tpcSvg');
+  var st = document.getElementById('tpcStatus');
+
+  S.append('defs').html(
+    '<marker id="arrAb" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#58a6ff"/></marker>' +
+    '<marker id="arrYb" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#d29922"/></marker>' +
+    '<marker id="arrPb" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#bc8cff"/></marker>' +
+    '<marker id="arrGb" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+    '<path d="M0,0 L8,3 L0,6" fill="#3fb950"/></marker>'
+  );
+
+  var descs = [
+    '① PREPARE：InnoDB 将事务修改写入 redo log，打上 PREPARE 标记（还未真正提交）',
+    '② 写 BINLOG：Server 层将事务的 binlog 事件写入 binlog 文件（fsync）',
+    '③ COMMIT：InnoDB 在 redo log 中写入 COMMIT 标记，事务正式提交',
+    '④ 返回客户端：commit 成功'
+  ];
+
+  if (tpcStep < 0 && !tpcCrashed) {
+    st.textContent = '点击「▶ 下一步」开始';
+    return;
+  }
+  if (!tpcCrashed) {
+    st.innerHTML = '<span class="step-num">' + (tpcStep+1) + '</span>' + descs[tpcStep];
+  }
+
+  // Step indicators
+  var stepEls = document.querySelectorAll('#tpcSteps .step');
+  for (var i = 0; i < stepEls.length; i++) {
+    stepEls[i].classList.remove('active', 'done');
+    if (i < tpcStep) stepEls[i].classList.add('done');
+    if (i === tpcStep) stepEls[i].classList.add('active');
+  }
+
+  // Components
+  drawBox(S, 60, 40, 170, 52, '#1a1500', '#d29922', ['InnoDB', 'Redo Log (内存)'], '11px');
+  drawBox(S, 680, 40, 170, 52, '#1a1030', '#bc8cff', ['MySQL Server', 'Binlog (内存)'], '11px');
+  drawBox(S, 60, 200, 170, 44, '#1a1500', '#d29922', ['Redo Log File', '(磁盘)'], '10px');
+  drawBox(S, 680, 200, 170, 44, '#1a1030', '#bc8cff', ['Binlog File', '(磁盘)'], '10px');
+  drawBox(S, 340, 340, 170, 44, '#0d2015', '#3fb950', ['返回客户端', '(commit 成功)'], '11px');
+
+  // Connect InnoDB memory -> disk
+  S.append('line').attr('x1', 145).attr('y1', 92).attr('x2', 145).attr('y2', 200)
+    .attr('stroke', '#d29922').attr('stroke-width', 1).attr('stroke-dasharray', '4,2');
+  // Connect Server -> disk binlog
+  S.append('line').attr('x1', 765).attr('y1', 92).attr('x2', 765).attr('y2', 200)
+    .attr('stroke', '#bc8cff').attr('stroke-width', 1).attr('stroke-dasharray', '4,2');
+
+  // Step 0: Prepare
+  if (tpcStep >= 0 || tpcCrashed) {
+    S.append('line').attr('x1', 425).attr('y1', 20).attr('x2', 145).attr('y2', 40)
+      .attr('stroke', '#58a6ff').attr('stroke-width', 2).attr('marker-end', 'url(#arrAb)');
+    S.append('text').attr('x', 280).attr('y', 38).attr('fill', '#58a6ff').attr('font-size', '11px').text('事务修改');
+
+    var redoText = tpcStep >= 2 ? 'PREPARE ✓ + COMMIT ✓' : 'PREPARE ✓';
+    var redoColor = tpcStep >= 2 ? '#3fb950' : '#d29922';
+    S.append('rect').attr('x', 65).attr('y', 254).attr('width', 160).attr('height', 32)
+      .attr('rx', 6).attr('fill', '#1a1500').attr('stroke', '#d29922').attr('stroke-width', 2);
+    S.append('text').attr('x', 145).attr('y', 275).attr('text-anchor', 'middle')
+      .attr('fill', redoColor).attr('font-size', '12px').attr('font-weight', '600').text(redoText);
+  }
+
+  // Step 1: Write binlog
+  if (tpcStep >= 1) {
+    S.append('line').attr('x1', 145).attr('y1', 286).attr('x2', 765).attr('y2', 92)
+      .attr('stroke', '#bc8cff').attr('stroke-width', 2).attr('marker-end', 'url(#arrPb)');
+    S.append('text').attr('x', 380).attr('y', 200).attr('fill', '#bc8cff').attr('font-size', '11px').text('通知 Server 写 binlog');
+    S.append('rect').attr('x', 685).attr('y', 254).attr('width', 160).attr('height', 32)
+      .attr('rx', 6).attr('fill', '#1a1030').attr('stroke', '#bc8cff').attr('stroke-width', 2);
+    S.append('text').attr('x', 765).attr('y', 275).attr('text-anchor', 'middle')
+      .attr('fill', '#bc8cff').attr('font-size', '12px').attr('font-weight', '600').text('BINLOG ✓');
+  }
+
+  // Step 2: Commit
+  if (tpcStep >= 2) {
+    S.append('line').attr('x1', 765).attr('y1', 286).attr('x2', 145).attr('y2', 286)
+      .attr('stroke', '#3fb950').attr('stroke-width', 2).attr('marker-end', 'url(#arrGb)');
+    S.append('text').attr('x', 400).attr('y', 300).attr('fill', '#3fb950').attr('font-size', '11px').text('写 COMMIT 标记到 redo log');
+  }
+
+  // Step 3: Return
+  if (tpcStep >= 3) {
+    S.append('line').attr('x1', 145).attr('y1', 286).attr('x2', 425).attr('y2', 340)
+      .attr('stroke', '#3fb950').attr('stroke-width', 2.5).attr('marker-end', 'url(#arrGb)');
+    S.append('text').attr('x', 240).attr('y', 310).attr('fill', '#3fb950').attr('font-size', '12px').attr('font-weight', '600').text('返回 commit 成功');
+  }
+
+  // Crash simulation
+  if (tpcCrashed) {
+    S.append('text').attr('x', 500).attr('y', 150).attr('font-size', '36px').text('💥').attr('opacity', 0).transition().duration(300).attr('opacity', 1);
+    S.append('text').attr('x', 430).attr('y', 180).attr('fill', '#f85149').attr('font-size', '14px').attr('font-weight', '600').text('模拟在 Prepare 后崩溃!').attr('opacity', 0).transition().duration(500).attr('opacity', 1);
+    S.append('rect').attr('x', 60).attr('y', 410).attr('width', 880).attr('height', 44)
+      .attr('rx', 8).attr('fill', '#0d1117').attr('stroke', '#30363d').attr('stroke-width', 1);
+    S.append('text').attr('x', 80).attr('y', 438).attr('fill', '#e6edf3').attr('font-size', '12px').text('崩溃恢复：Redo PREPARE + Binlog 不完整 → 回滚事务（利用 undo log）');
+  }
+}
+
+// ========== INIT ==========
+function initAll() {
+  if (typeof d3 === 'undefined') return;
+  drawRedo();
+  drawCrash();
+  drawUndo();
+  drawMvcc();
+  drawTpc();
+}
+
+if (typeof d3 !== 'undefined') {
+  initAll();
+} else {
+  window.addEventListener('load', initAll);
+}
+</script>
+</body>
+</html>
