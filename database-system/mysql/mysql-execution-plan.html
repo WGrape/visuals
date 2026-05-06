@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 执行计划深度解析</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #21262d;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text2: #8b949e;
+    --blue: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #79c0ff;
+    --yellow: #e3b341;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    line-height: 1.6;
+  }
+
+  /* ===== HEADER ===== */
+  header {
+    background: linear-gradient(135deg, #1a2744 0%, #0d2137 50%, #0d1117 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 40px 20px 30px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle at 30% 50%, rgba(88,166,255,0.05) 0%, transparent 60%),
+                radial-gradient(circle at 70% 50%, rgba(188,140,255,0.05) 0%, transparent 60%);
+    pointer-events: none;
+  }
+  header h1 { font-size: 2.2rem; color: #fff; margin-bottom: 8px; position: relative; }
+  header h1 span { color: var(--blue); }
+  header p { color: var(--text2); font-size: 1rem; position: relative; }
+
+  /* ===== NAV ===== */
+  nav {
+    position: sticky;
+    top: 0;
+    background: rgba(22,27,34,0.95);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 20px;
+    z-index: 100;
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+  }
+  nav a {
+    display: block;
+    padding: 14px 18px;
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 0.88rem;
+    white-space: nowrap;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  nav a:hover, nav a.active {
+    color: var(--blue);
+    border-bottom-color: var(--blue);
+  }
+
+  /* ===== LAYOUT ===== */
+  .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+  section { margin-bottom: 70px; }
+  h2 {
+    font-size: 1.6rem;
+    color: #fff;
+    margin-bottom: 24px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h2 .icon { font-size: 1.4rem; }
+  h3 { font-size: 1.15rem; color: var(--cyan); margin: 24px 0 12px; }
+
+  /* ===== CARDS ===== */
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .mini-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .mini-card .title { font-size: 0.85rem; color: var(--text2); margin-bottom: 6px; }
+  .mini-card .value { font-size: 1rem; color: var(--text); font-weight: 600; }
+
+  /* ===== BADGES ===== */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); border: 1px solid rgba(210,153,34,0.3); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--blue); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); border: 1px solid rgba(188,140,255,0.3); }
+  .badge-cyan { background: rgba(121,192,255,0.15); color: var(--cyan); border: 1px solid rgba(121,192,255,0.3); }
+
+  /* ===== SVG DIAGRAMS ===== */
+  .diagram-wrap {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    overflow-x: auto;
+    margin-bottom: 24px;
+  }
+  svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
+
+  /* ===== TABLE ===== */
+  .table-wrap { overflow-x: auto; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th {
+    background: var(--bg3);
+    color: var(--cyan);
+    padding: 10px 14px;
+    text-align: left;
+    border: 1px solid var(--border);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  td {
+    padding: 9px 14px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: top;
+  }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  tr:hover td { background: rgba(88,166,255,0.05); }
+
+  /* ===== CODE ===== */
+  pre, code {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.85rem;
+  }
+  pre {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    line-height: 1.7;
+    margin-bottom: 16px;
+  }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm { color: #8b949e; font-style: italic; }
+  .num { color: #79c0ff; }
+  .op { color: #ff9e64; }
+
+  /* ===== INTERACTIVE TABS ===== */
+  .tab-group { margin-bottom: 24px; }
+  .tab-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .tab-btn {
+    padding: 8px 18px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text2);
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+  }
+  .tab-btn:hover { border-color: var(--blue); color: var(--blue); }
+  .tab-btn.active { background: rgba(88,166,255,0.15); border-color: var(--blue); color: var(--blue); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* ===== EXPLAIN OUTPUT ===== */
+  .explain-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px;
+    align-items: start;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .explain-row:last-child { border-bottom: none; }
+  .field-name { color: var(--cyan); font-weight: 600; min-width: 160px; }
+  .field-val { color: var(--text); }
+
+  /* ===== HIGHLIGHT BOX ===== */
+  .info-box {
+    border-left: 3px solid;
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+  }
+  .info-box.blue { border-color: var(--blue); background: rgba(88,166,255,0.08); }
+  .info-box.orange { border-color: var(--orange); background: rgba(210,153,34,0.08); }
+  .info-box.green { border-color: var(--green); background: rgba(63,185,80,0.08); }
+  .info-box.red { border-color: var(--red); background: rgba(248,81,73,0.08); }
+
+  /* ===== STEP ===== */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex;
+    gap: 16px;
+    padding-bottom: 24px;
+    position: relative;
+  }
+  .step:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 32px;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--blue);
+    color: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    z-index: 1;
+  }
+  .step-body h4 { color: #fff; margin-bottom: 6px; }
+  .step-body p { color: var(--text2); font-size: 0.9rem; }
+
+  /* ===== INTERACTIVE SECTION ===== */
+  .simulator {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .sim-label { font-size: 0.85rem; color: var(--text2); margin-bottom: 8px; }
+  .sim-select, .sim-input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    margin-bottom: 16px;
+  }
+  .sim-btn {
+    background: var(--blue);
+    color: #000;
+    border: none;
+    padding: 10px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: opacity 0.2s;
+  }
+  .sim-btn:hover { opacity: 0.85; }
+  .sim-result {
+    margin-top: 20px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    font-size: 0.85rem;
+    display: none;
+  }
+  .cost-bar-wrap { margin: 6px 0; }
+  .cost-bar-label { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text2); margin-bottom: 4px; }
+  .cost-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+  .cost-bar-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MySQL <span>执行计划</span> 深度解析</h1>
+  <p>从数据结构 · 生成流程 · EXPLAIN字段 · 性能诊断 · 优化实战 — 一图搞懂</p>
+</header>
+
+<nav id="nav">
+  <a href="#s1" class="active">什么是执行计划</a>
+  <a href="#s2">数据结构</a>
+  <a href="#s3">生成流程</a>
+  <a href="#s4">EXPLAIN字段详解</a>
+  <a href="#s5">type类型图谱</a>
+  <a href="#s6">Extra字段</a>
+  <a href="#s7">优化器策略</a>
+  <a href="#s8">实战诊断</a>
+</nav>
+
+<div class="container">
+
+<!-- ===== SECTION 1: 什么是执行计划 ===== -->
+<section id="s1">
+  <h2><span class="icon">🗺️</span> 什么是执行计划</h2>
+
+  <div class="info-box blue">
+    执行计划（Execution Plan）是 MySQL 优化器对一条 SQL 语句制定的<strong>查询执行策略</strong>——它回答了：「<em>我打算怎么找到你想要的数据</em>」，而不是「我到底干了什么」。
+  </div>
+
+  <div class="card-grid">
+    <div class="mini-card">
+      <div class="title">本质</div>
+      <div class="value">优化器输出的"查询执行树"，描述数据访问路径与操作顺序</div>
+    </div>
+    <div class="mini-card">
+      <div class="title">触发方式</div>
+      <div class="value">EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT=JSON</div>
+    </div>
+    <div class="mini-card">
+      <div class="title">核心价值</div>
+      <div class="value">发现全表扫描、索引失效、低效 JOIN 等性能瓶颈</div>
+    </div>
+    <div class="mini-card">
+      <div class="title">生成时机</div>
+      <div class="value">SQL 解析完成后、实际执行前，由 Cost-Based Optimizer 生成</div>
+    </div>
+  </div>
+
+  <!-- 流程概览图 -->
+  <div class="diagram-wrap">
+    <svg width="100%" viewBox="0 0 900 120" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+        </marker>
+      </defs>
+      <!-- boxes -->
+      <rect x="10" y="30" width="130" height="60" rx="8" fill="#1e3a5f" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="75" y="55" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">SQL 语句</text>
+      <text x="75" y="73" text-anchor="middle" fill="#8b949e" font-size="11">SELECT / JOIN / WHERE</text>
+
+      <rect x="180" y="30" width="130" height="60" rx="8" fill="#1e3a5f" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="245" y="55" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Parser 解析器</text>
+      <text x="245" y="73" text-anchor="middle" fill="#8b949e" font-size="11">词法/语法分析 → AST</text>
+
+      <rect x="350" y="30" width="130" height="60" rx="8" fill="#2a1f5f" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="415" y="55" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Optimizer 优化器</text>
+      <text x="415" y="73" text-anchor="middle" fill="#8b949e" font-size="11">代价估算 → 执行计划</text>
+
+      <rect x="520" y="30" width="130" height="60" rx="8" fill="#1a3d2b" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="585" y="55" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">执行计划</text>
+      <text x="585" y="73" text-anchor="middle" fill="#8b949e" font-size="11">访问路径 + 操作顺序</text>
+
+      <rect x="690" y="30" width="130" height="60" rx="8" fill="#3a2a10" stroke="#d29922" stroke-width="1.5"/>
+      <text x="755" y="55" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Executor 执行器</text>
+      <text x="755" y="73" text-anchor="middle" fill="#8b949e" font-size="11">调用存储引擎返回结果</text>
+
+      <!-- arrows -->
+      <line x1="142" y1="60" x2="178" y2="60" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="312" y1="60" x2="348" y2="60" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="482" y1="60" x2="518" y2="60" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="652" y1="60" x2="688" y2="60" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- EXPLAIN label -->
+      <rect x="524" y="8" width="122" height="20" rx="4" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+      <text x="585" y="22" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">EXPLAIN 读取此处</text>
+      <line x1="585" y1="28" x2="585" y2="30" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="3,2"/>
+    </svg>
+  </div>
+</section>
+
+<!-- ===== SECTION 2: 数据结构 ===== -->
+<section id="s2">
+  <h2><span class="icon">🌳</span> 执行计划的数据结构</h2>
+
+  <p style="color:var(--text2);margin-bottom:20px;">执行计划在 MySQL 内部是一棵 <strong style="color:var(--cyan)">查询树（Query Tree）</strong>，每个节点是一个"操作算子"，叶子节点是表/索引访问，父节点是 JOIN/聚合/排序等操作。</p>
+
+  <!-- 树形结构图 -->
+  <div class="diagram-wrap">
+    <svg width="100%" viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="tArr" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#30363d"/>
+        </marker>
+      </defs>
+
+      <!-- root -->
+      <rect x="310" y="20" width="240" height="56" rx="8" fill="#1e2d4f" stroke="#58a6ff" stroke-width="2"/>
+      <text x="430" y="43" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">Result Node</text>
+      <text x="430" y="60" text-anchor="middle" fill="#8b949e" font-size="11">最终结果输出</text>
+
+      <!-- sort node -->
+      <rect x="310" y="120" width="240" height="56" rx="8" fill="#2a1f5f" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="430" y="143" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="600">Sort / Aggregate Node</text>
+      <text x="430" y="160" text-anchor="middle" fill="#8b949e" font-size="11">ORDER BY / GROUP BY / HAVING</text>
+
+      <!-- join node -->
+      <rect x="310" y="220" width="240" height="56" rx="8" fill="#1a3d2b" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="430" y="243" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="600">Join Node</text>
+      <text x="430" y="260" text-anchor="middle" fill="#8b949e" font-size="11">Nested Loop / Hash Join</text>
+
+      <!-- table nodes -->
+      <rect x="100" y="310" width="200" height="42" rx="8" fill="#3a2a10" stroke="#d29922" stroke-width="1.5"/>
+      <text x="200" y="329" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">Table Scan Node</text>
+      <text x="200" y="344" text-anchor="middle" fill="#8b949e" font-size="11">驱动表 orders（全表/索引）</text>
+
+      <rect x="560" y="310" width="200" height="42" rx="8" fill="#3a2a10" stroke="#d29922" stroke-width="1.5"/>
+      <text x="660" y="329" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">Index Scan Node</text>
+      <text x="660" y="344" text-anchor="middle" fill="#8b949e" font-size="11">被驱动表 users（idx_id）</text>
+
+      <!-- lines root -> sort -->
+      <line x1="430" y1="76" x2="430" y2="118" stroke="#30363d" stroke-width="2" marker-end="url(#tArr)"/>
+      <!-- sort -> join -->
+      <line x1="430" y1="176" x2="430" y2="218" stroke="#30363d" stroke-width="2" marker-end="url(#tArr)"/>
+      <!-- join -> tables -->
+      <line x1="380" y1="276" x2="240" y2="308" stroke="#30363d" stroke-width="2" marker-end="url(#tArr)"/>
+      <line x1="480" y1="276" x2="620" y2="308" stroke="#30363d" stroke-width="2" marker-end="url(#tArr)"/>
+
+      <!-- node info callouts -->
+      <!-- LEFT callout -->
+      <rect x="10" y="220" width="170" height="70" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="95" y="240" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="600">节点属性</text>
+      <text x="95" y="256" text-anchor="middle" fill="#8b949e" font-size="10">• table: 表名</text>
+      <text x="95" y="270" text-anchor="middle" fill="#8b949e" font-size="10">• type: 访问类型</text>
+      <text x="95" y="284" text-anchor="middle" fill="#8b949e" font-size="10">• key: 使用的索引</text>
+      <line x1="180" y1="255" x2="310" y2="248" stroke="#e3b341" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- RIGHT callout -->
+      <rect x="680" y="130" width="170" height="70" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="765" y="150" text-anchor="middle" fill="#e3b341" font-size="11" font-weight="600">节点属性</text>
+      <text x="765" y="166" text-anchor="middle" fill="#8b949e" font-size="10">• rows: 估算行数</text>
+      <text x="765" y="180" text-anchor="middle" fill="#8b949e" font-size="10">• filtered: 过滤比</text>
+      <text x="765" y="194" text-anchor="middle" fill="#8b949e" font-size="10">• extra: 附加操作</text>
+      <line x1="680" y1="165" x2="550" y2="155" stroke="#e3b341" stroke-width="1" stroke-dasharray="4,3"/>
+    </svg>
+  </div>
+
+  <div class="card">
+    <h3>QueryBlock 数据结构（源码层面）</h3>
+    <p style="color:var(--text2);margin-bottom:14px;">MySQL 内部用 <code style="color:var(--cyan)">SELECT_LEX</code>（8.0 重命名为 <code style="color:var(--cyan)">Query_block</code>）表示每个查询块，JOIN 操作封装在 <code style="color:var(--cyan)">JOIN</code> 对象里，每张表对应一个 <code style="color:var(--cyan)">JOIN_TAB</code>：</p>
+    <pre><span class="cm">// 简化示意（MySQL 源码 sql/sql_optimizer.h）</span>
+<span class="kw">struct</span> <span class="fn">JOIN_TAB</span> {
+    TABLE        *table;          <span class="cm">// 对应的表对象</span>
+    Key_use      *keyuse;         <span class="cm">// 可用的索引访问方式列表</span>
+    ha_rows      records;         <span class="cm">// 估计返回行数（统计信息）</span>
+    double       read_time;       <span class="cm">// 读取代价估算</span>
+    enum join_type type;          <span class="cm">// ALL / ref / range / eq_ref...</span>
+    Item         *condition;      <span class="cm">// WHERE 过滤条件</span>
+    uint         use_quick;       <span class="cm">// 是否使用 Range 优化</span>
+};
+
+<span class="kw">struct</span> <span class="fn">JOIN</span> {
+    JOIN_TAB     *join_tab;       <span class="cm">// 所有表的 JOIN_TAB 数组</span>
+    uint         tables;          <span class="cm">// 参与 JOIN 的表数量</span>
+    double       best_read;       <span class="cm">// 当前最优计划代价</span>
+    JOIN_TAB    *best_ref[];      <span class="cm">// 最优连接顺序</span>
+    ha_rows      best_rowcount;   <span class="cm">// 预计总行数</span>
+};</pre>
+  </div>
+</section>
+
+<!-- ===== SECTION 3: 生成流程 ===== -->
+<section id="s3">
+  <h2><span class="icon">⚙️</span> 执行计划生成流程</h2>
+
+  <div class="info-box orange">
+    MySQL 使用 <strong>基于代价的优化器（Cost-Based Optimizer, CBO）</strong>，通过枚举可能的执行计划并计算代价，选出代价最小的方案。
+  </div>
+
+  <!-- 主流程图 -->
+  <div class="diagram-wrap">
+    <svg width="100%" viewBox="0 0 860 480" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="fa" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+        </marker>
+        <marker id="fa2" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+        </marker>
+        <marker id="fa3" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#d29922"/>
+        </marker>
+      </defs>
+
+      <!-- Column 1: Parse/Analyze -->
+      <rect x="20" y="20" width="180" height="60" rx="8" fill="#1e2d4f" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="110" y="45" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">① SQL 解析</text>
+      <text x="110" y="63" text-anchor="middle" fill="#8b949e" font-size="10">词法分析 → 语法分析 → AST</text>
+
+      <rect x="20" y="120" width="180" height="60" rx="8" fill="#1e2d4f" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="110" y="145" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">② 语义分析</text>
+      <text x="110" y="163" text-anchor="middle" fill="#8b949e" font-size="10">校验表/列/权限，名称解析</text>
+
+      <!-- arrow down -->
+      <line x1="110" y1="80" x2="110" y2="118" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="110" y1="180" x2="110" y2="218" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#fa)"/>
+
+      <rect x="20" y="220" width="180" height="60" rx="8" fill="#1e2a4f" stroke="#79c0ff" stroke-width="1.5"/>
+      <text x="110" y="245" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">③ 逻辑重写</text>
+      <text x="110" y="263" text-anchor="middle" fill="#8b949e" font-size="10">子查询转 JOIN、谓词下推</text>
+
+      <line x1="110" y1="280" x2="110" y2="318" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#fa)"/>
+
+      <rect x="20" y="320" width="180" height="60" rx="8" fill="#16203a" stroke="#79c0ff" stroke-width="1.5"/>
+      <text x="110" y="345" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">④ 条件化简</text>
+      <text x="110" y="363" text-anchor="middle" fill="#8b949e" font-size="10">常量折叠、等价替换</text>
+
+      <!-- Middle connector -->
+      <line x1="200" y1="350" x2="280" y2="350" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="200" y1="250" x2="240" y2="250" stroke="#58a6ff" stroke-width="1.5"/>
+      <line x1="240" y1="250" x2="240" y2="350" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+      <!-- Column 2: Cost Estimation -->
+      <rect x="280" y="160" width="200" height="80" rx="8" fill="#2a1f5f" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="380" y="188" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">⑤ 访问路径枚举</text>
+      <text x="380" y="205" text-anchor="middle" fill="#8b949e" font-size="10">索引扫描 / 全表扫描</text>
+      <text x="380" y="220" text-anchor="middle" fill="#8b949e" font-size="10">Range / ref / eq_ref...</text>
+
+      <line x1="380" y1="240" x2="380" y2="278" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#fa)"/>
+
+      <rect x="280" y="280" width="200" height="80" rx="8" fill="#2a1f5f" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="380" y="308" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">⑥ JOIN 顺序枚举</text>
+      <text x="380" y="325" text-anchor="middle" fill="#8b949e" font-size="10">Greedy / DP 算法</text>
+      <text x="380" y="340" text-anchor="middle" fill="#8b949e" font-size="10">≤7表穷举，>7表贪心</text>
+
+      <line x1="380" y1="360" x2="380" y2="398" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#fa)"/>
+
+      <rect x="280" y="400" width="200" height="60" rx="8" fill="#1f2a3f" stroke="#79c0ff" stroke-width="1.5"/>
+      <text x="380" y="425" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">⑦ 代价计算</text>
+      <text x="380" y="443" text-anchor="middle" fill="#8b949e" font-size="10">IO代价 + CPU代价 → 最优方案</text>
+
+      <!-- Column 3: Output -->
+      <line x1="482" y1="430" x2="560" y2="430" stroke="#3fb950" stroke-width="1.5" marker-end="url(#fa2)"/>
+
+      <rect x="560" y="200" width="200" height="300" rx="8" fill="#0f2218" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="660" y="230" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="700">⑧ 执行计划</text>
+      <text x="660" y="252" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600">输出字段</text>
+      <text x="660" y="272" text-anchor="middle" fill="#c9d1d9" font-size="10">• id（查询序号）</text>
+      <text x="660" y="290" text-anchor="middle" fill="#c9d1d9" font-size="10">• select_type（查询类型）</text>
+      <text x="660" y="308" text-anchor="middle" fill="#c9d1d9" font-size="10">• table（访问的表）</text>
+      <text x="660" y="326" text-anchor="middle" fill="#c9d1d9" font-size="10">• type（访问方式）⭐</text>
+      <text x="660" y="344" text-anchor="middle" fill="#c9d1d9" font-size="10">• possible_keys（候选索引）</text>
+      <text x="660" y="362" text-anchor="middle" fill="#c9d1d9" font-size="10">• key（实际使用索引）</text>
+      <text x="660" y="380" text-anchor="middle" fill="#c9d1d9" font-size="10">• key_len（索引长度）</text>
+      <text x="660" y="398" text-anchor="middle" fill="#c9d1d9" font-size="10">• rows（估计扫描行数）</text>
+      <text x="660" y="416" text-anchor="middle" fill="#c9d1d9" font-size="10">• filtered（过滤百分比）</text>
+      <text x="660" y="434" text-anchor="middle" fill="#c9d1d9" font-size="10">• Extra（附加信息）⭐</text>
+      <line x1="560" y1="430" x2="560" y2="350" stroke="#3fb950" stroke-width="1.5"/>
+      <line x1="560" y1="350" x2="562" y2="350" stroke="#3fb950" stroke-width="1.5"/>
+
+      <!-- stats box -->
+      <rect x="560" y="30" width="200" height="140" rx="8" fill="#1e1505" stroke="#d29922" stroke-width="1.5"/>
+      <text x="660" y="55" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">统计信息来源</text>
+      <text x="660" y="75" text-anchor="middle" fill="#8b949e" font-size="10">• information_schema.STATISTICS</text>
+      <text x="660" y="93" text-anchor="middle" fill="#8b949e" font-size="10">• mysql.innodb_table_stats</text>
+      <text x="660" y="111" text-anchor="middle" fill="#8b949e" font-size="10">• 索引基数（Cardinality）</text>
+      <text x="660" y="129" text-anchor="middle" fill="#8b949e" font-size="10">• 直方图（MySQL 8.0+）</text>
+      <text x="660" y="147" text-anchor="middle" fill="#8b949e" font-size="10">• 采样页数（innodb_stats_pages）</text>
+      <line x1="660" y1="170" x2="660" y2="198" stroke="#d29922" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#fa3)"/>
+    </svg>
+  </div>
+
+  <h3>代价计算公式</h3>
+  <div class="card">
+    <div class="info-box blue" style="margin-bottom:12px;">
+      MySQL 将总代价分为 <strong>IO 代价</strong> 和 <strong>CPU 代价</strong>，默认权重：IO = 1.0，CPU = 0.2。
+    </div>
+    <pre><span class="cm">-- 全表扫描代价（简化）</span>
+Total_cost = pages × <span class="num">1.0</span>  <span class="cm">/* IO：读取数据页数 */</span>
+           + rows  × <span class="num">0.2</span>  <span class="cm">/* CPU：处理每行代价 */</span>
+
+<span class="cm">-- 索引范围扫描代价</span>
+Total_cost = range_rows / records_per_key × <span class="num">1.0</span>   <span class="cm">/* 索引IO */</span>
+           + range_rows × <span class="num">1.0</span>                      <span class="cm">/* 回表IO（如需） */</span>
+           + range_rows × <span class="num">0.2</span>                      <span class="cm">/* CPU */</span>
+
+<span class="cm">-- 查看 MySQL 内置代价常量</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> mysql.server_cost;
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> mysql.engine_cost;</pre>
+  </div>
+</section>
+
+<!-- ===== SECTION 4: EXPLAIN 字段 ===== -->
+<section id="s4">
+  <h2><span class="icon">📋</span> EXPLAIN 字段详解</h2>
+
+  <pre><span class="kw">EXPLAIN SELECT</span> o.id, u.name
+<span class="kw">FROM</span> orders o
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> o.user_id = u.id
+<span class="kw">WHERE</span> o.status = <span class="str">'paid'</span>
+<span class="kw">AND</span> u.city = <span class="str">'Shanghai'</span>;</pre>
+
+  <div class="card" style="background:#0d1117;border-color:#1f6feb;overflow-x:auto;">
+    <div style="font-size:0.8rem;color:#58a6ff;margin-bottom:10px;font-weight:600;">▶ EXPLAIN 输出（模拟）</div>
+    <table style="font-size:0.78rem;">
+      <tr>
+        <th>id</th><th>select_type</th><th>table</th><th>type</th>
+        <th>possible_keys</th><th>key</th><th>key_len</th>
+        <th>ref</th><th>rows</th><th>filtered</th><th>Extra</th>
+      </tr>
+      <tr>
+        <td>1</td><td>SIMPLE</td><td>o</td>
+        <td><span class="badge badge-orange">range</span></td>
+        <td>idx_status</td><td>idx_status</td><td>4</td>
+        <td>const</td><td>1250</td><td>100.00</td>
+        <td>Using index condition</td>
+      </tr>
+      <tr>
+        <td>1</td><td>SIMPLE</td><td>u</td>
+        <td><span class="badge badge-green">eq_ref</span></td>
+        <td>PRIMARY,idx_city</td><td>PRIMARY</td><td>4</td>
+        <td>o.user_id</td><td>1</td><td>10.00</td>
+        <td>Using where</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <tr>
+        <th>字段</th>
+        <th>含义</th>
+        <th>关键值 / 说明</th>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">id</code></td>
+        <td>查询序号</td>
+        <td>相同 id 表示同一层，id 越大越先执行（子查询）。NULL 表示 UNION 结果合并行</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">select_type</code></td>
+        <td>查询类型</td>
+        <td>SIMPLE / PRIMARY / SUBQUERY / DERIVED / UNION / DEPENDENT SUBQUERY...</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">table</code></td>
+        <td>当前行操作的表</td>
+        <td>&lt;derived N&gt; 表示派生表，&lt;union M,N&gt; 表示 UNION 结果</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">partitions</code></td>
+        <td>匹配的分区</td>
+        <td>仅分区表有效，NULL 表示未分区</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">type</code></td>
+        <td>访问类型（性能关键）</td>
+        <td>system > const > eq_ref > ref > range > index > ALL ↓ 性能递减，见 §5</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">possible_keys</code></td>
+        <td>候选索引列表</td>
+        <td>优化器考虑过的所有索引，不一定实际使用</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">key</code></td>
+        <td>实际选择的索引</td>
+        <td>NULL = 未用索引（警惕！），覆盖索引时 key 可能出现在 possible_keys 之外</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">key_len</code></td>
+        <td>索引使用的字节数</td>
+        <td>可推算出用了几列。INT=4B，VARCHAR(N) UTF8MB4 = N×4+2B</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">ref</code></td>
+        <td>与索引比较的值</td>
+        <td>const（常量）/ 表名.列名（关联列）</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">rows</code></td>
+        <td>预估扫描行数</td>
+        <td>基于统计信息的估算，不是精确值。乘以所有表的 rows ≈ 总工作量</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">filtered</code></td>
+        <td>WHERE 过滤后剩余比例</td>
+        <td>rows × filtered% = 实际传给下一步的行数。越低越好</td>
+      </tr>
+      <tr>
+        <td><code style="color:var(--cyan)">Extra</code></td>
+        <td>附加执行信息</td>
+        <td>Using filesort / Using temporary 是性能警告，见 §6</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<!-- ===== SECTION 5: type 类型 ===== -->
+<section id="s5">
+  <h2><span class="icon">🏎️</span> type 访问类型图谱</h2>
+
+  <p style="color:var(--text2);margin-bottom:20px;">type 字段是判断执行计划质量最关键的指标，从上到下性能递减：</p>
+
+  <div class="diagram-wrap">
+    <svg width="100%" viewBox="0 0 840 520" xmlns="http://www.w3.org/2000/svg">
+      <!-- performance gradient bar -->
+      <defs>
+        <linearGradient id="perfGrad" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="#3fb950"/>
+          <stop offset="50%" stop-color="#d29922"/>
+          <stop offset="100%" stop-color="#f85149"/>
+        </linearGradient>
+      </defs>
+      <rect x="20" y="20" width="12" height="480" rx="6" fill="url(#perfGrad)"/>
+      <text x="10" y="18" fill="#3fb950" font-size="11" font-weight="600">快</text>
+      <text x="10" y="510" fill="#f85149" font-size="11" font-weight="600">慢</text>
+
+      <!-- type rows -->
+      <!-- system -->
+      <rect x="50" y="20" width="760" height="50" rx="6" fill="rgba(63,185,80,0.12)" stroke="#3fb950" stroke-width="1"/>
+      <text x="70" y="42" fill="#3fb950" font-size="14" font-weight="700">system</text>
+      <text x="180" y="42" fill="#c9d1d9" font-size="11">表只有一行（系统表）。const 的特例</text>
+      <text x="70" y="60" fill="#8b949e" font-size="10">SELECT * FROM (SELECT 1) AS t → type=system</text>
+      <text x="740" y="50" fill="#3fb950" font-size="11" font-weight="600" text-anchor="middle">最优</text>
+
+      <!-- const -->
+      <rect x="50" y="80" width="760" height="54" rx="6" fill="rgba(63,185,80,0.10)" stroke="#3fb950" stroke-width="1"/>
+      <text x="70" y="102" fill="#3fb950" font-size="14" font-weight="700">const</text>
+      <text x="180" y="102" fill="#c9d1d9" font-size="11">主键/唯一索引等值查询，最多返回 1 行</text>
+      <text x="70" y="121" fill="#8b949e" font-size="10">WHERE id = 5  → 主键等值，结果确定为 1 行，早期"物化"为常量</text>
+
+      <!-- eq_ref -->
+      <rect x="50" y="144" width="760" height="54" rx="6" fill="rgba(121,192,255,0.10)" stroke="#79c0ff" stroke-width="1"/>
+      <text x="70" y="166" fill="#79c0ff" font-size="14" font-weight="700">eq_ref</text>
+      <text x="180" y="166" fill="#c9d1d9" font-size="11">JOIN 时被驱动表通过主键/唯一索引等值匹配，每行最多对应 1 条</text>
+      <text x="70" y="185" fill="#8b949e" font-size="10">t1 JOIN t2 ON t1.id = t2.id  → t2 type=eq_ref</text>
+
+      <!-- ref -->
+      <rect x="50" y="208" width="760" height="54" rx="6" fill="rgba(88,166,255,0.10)" stroke="#58a6ff" stroke-width="1"/>
+      <text x="70" y="230" fill="#58a6ff" font-size="14" font-weight="700">ref</text>
+      <text x="180" y="230" fill="#c9d1d9" font-size="11">非唯一索引等值查询，可能返回多行</text>
+      <text x="70" y="249" fill="#8b949e" font-size="10">WHERE status = 'paid'  且 status 上有普通索引</text>
+
+      <!-- range -->
+      <rect x="50" y="272" width="760" height="54" rx="6" fill="rgba(210,153,34,0.10)" stroke="#d29922" stroke-width="1"/>
+      <text x="70" y="294" fill="#d29922" font-size="14" font-weight="700">range</text>
+      <text x="180" y="294" fill="#c9d1d9" font-size="11">索引范围扫描，BETWEEN / &gt; / &lt; / IN / LIKE 'xx%'</text>
+      <text x="70" y="313" fill="#8b949e" font-size="10">WHERE age BETWEEN 20 AND 30  → 扫描索引的某段范围</text>
+
+      <!-- index -->
+      <rect x="50" y="336" width="760" height="54" rx="6" fill="rgba(248,81,73,0.08)" stroke="#f85149" stroke-width="0.8"/>
+      <text x="70" y="358" fill="#e3b341" font-size="14" font-weight="700">index</text>
+      <text x="180" y="358" fill="#c9d1d9" font-size="11">全索引扫描（扫描整棵索引树），比 ALL 略好（不回表但仍全扫）</text>
+      <text x="70" y="377" fill="#8b949e" font-size="10">SELECT id FROM orders  → 覆盖索引全扫（Extra: Using index）</text>
+      <rect x="740" y="344" width="60" height="22" rx="4" fill="rgba(248,81,73,0.15)" stroke="#f85149"/>
+      <text x="770" y="359" fill="#f85149" font-size="11" font-weight="600" text-anchor="middle">需优化</text>
+
+      <!-- ALL -->
+      <rect x="50" y="400" width="760" height="58" rx="6" fill="rgba(248,81,73,0.15)" stroke="#f85149" stroke-width="1.5"/>
+      <text x="70" y="424" fill="#f85149" font-size="14" font-weight="700">ALL</text>
+      <text x="180" y="424" fill="#c9d1d9" font-size="11">全表扫描！读取所有数据页，性能最差</text>
+      <text x="70" y="443" fill="#8b949e" font-size="10">无可用索引，或优化器认为全扫比索引+回表更快（小表 or 统计信息偏差）</text>
+      <rect x="740" y="406" width="60" height="22" rx="4" fill="rgba(248,81,73,0.25)" stroke="#f85149"/>
+      <text x="770" y="421" fill="#f85149" font-size="11" font-weight="600" text-anchor="middle">危险！</text>
+      <rect x="670" y="406" width="60" height="22" rx="4" fill="rgba(248,81,73,0.15)" stroke="#f85149"/>
+      <text x="700" y="421" fill="#f85149" font-size="11" font-weight="600" text-anchor="middle">须检查</text>
+    </svg>
+  </div>
+
+  <div class="info-box green">
+    <strong>记忆口诀：</strong> system → const → eq_ref → ref → range → index → ALL，<br>
+    生产环境至少达到 <code>range</code>，核心查询要求 <code>ref</code> 或以上，<code>ALL</code> 必须排查！
+  </div>
+</section>
+
+<!-- ===== SECTION 6: Extra 字段 ===== -->
+<section id="s6">
+  <h2><span class="icon">🔍</span> Extra 字段详解</h2>
+
+  <div class="tab-group">
+    <div class="tab-buttons">
+      <button class="tab-btn active" onclick="switchTab(event,'good')">✅ 好的信号</button>
+      <button class="tab-btn" onclick="switchTab(event,'warn')">⚠️ 需关注</button>
+      <button class="tab-btn" onclick="switchTab(event,'bad')">🚨 性能警告</button>
+    </div>
+
+    <div id="good" class="tab-content active">
+      <div class="table-wrap">
+        <table>
+          <tr><th>Extra 值</th><th>含义</th><th>说明</th></tr>
+          <tr>
+            <td><code style="color:var(--green)">Using index</code></td>
+            <td>覆盖索引</td>
+            <td>查询所需列都在索引中，无需回表访问数据行 ✅ 最佳状态</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--green)">Using index condition</code></td>
+            <td>索引条件下推（ICP）</td>
+            <td>MySQL 5.6+，WHERE 条件在索引层过滤，减少回表次数</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--green)">Using where; Using index</code></td>
+            <td>覆盖索引 + WHERE 过滤</td>
+            <td>有额外 WHERE 过滤，但仍只读索引，无回表</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--green)">const row not found</code></td>
+            <td>const 扫描无结果</td>
+            <td>说明常量查找命中索引但结果为空，不影响性能</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <div id="warn" class="tab-content">
+      <div class="table-wrap">
+        <table>
+          <tr><th>Extra 值</th><th>含义</th><th>建议</th></tr>
+          <tr>
+            <td><code style="color:var(--yellow)">Using where</code></td>
+            <td>Server 层 WHERE 过滤</td>
+            <td>索引扫描后还需在 server 层过滤，可能意味着索引不够精准</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--yellow)">Using join buffer</code></td>
+            <td>使用 Join Buffer</td>
+            <td>被驱动表没有用索引，用内存 buffer 做 BNL join，考虑加索引</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--yellow)">Not exists</code></td>
+            <td>LEFT JOIN 优化</td>
+            <td>LEFT JOIN 被优化为"找到一行即停止"，通常无需处理</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--yellow)">Select tables optimized away</code></td>
+            <td>聚合被优化掉</td>
+            <td>MIN/MAX 直接读索引极值，非常快</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <div id="bad" class="tab-content">
+      <div class="table-wrap">
+        <table>
+          <tr><th>Extra 值</th><th>含义</th><th>危害</th><th>解决方案</th></tr>
+          <tr>
+            <td><code style="color:var(--red)">Using filesort</code></td>
+            <td>文件排序（内存或磁盘）</td>
+            <td>无法通过索引顺序满足 ORDER BY，需额外排序，大数据量慢</td>
+            <td>建复合索引覆盖 WHERE + ORDER BY 列</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--red)">Using temporary</code></td>
+            <td>使用临时表</td>
+            <td>GROUP BY / DISTINCT 无法用索引，建内存/磁盘临时表，极耗资源</td>
+            <td>确保 GROUP BY 列有索引，或调整查询</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--red)">Using filesort + Using temporary</code></td>
+            <td>同时排序 + 临时表</td>
+            <td>双重开销，大表查询极危险</td>
+            <td>重构查询，拆分聚合，加合适索引</td>
+          </tr>
+          <tr>
+            <td><code style="color:var(--red)">Impossible WHERE</code></td>
+            <td>WHERE 矛盾</td>
+            <td>WHERE 1=0 等永假条件，不执行查询，但说明 SQL 有逻辑问题</td>
+            <td>检查查询逻辑</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SECTION 7: 优化器策略 ===== -->
+<section id="s7">
+  <h2><span class="icon">🧠</span> 优化器核心策略</h2>
+
+  <!-- 优化器策略流程图 -->
+  <div class="diagram-wrap">
+    <svg width="100%" viewBox="0 0 820 420" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="oa" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
+        </marker>
+      </defs>
+
+      <!-- 中心 -->
+      <circle cx="410" cy="210" r="62" fill="#1e2d4f" stroke="#58a6ff" stroke-width="2"/>
+      <text x="410" y="205" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">CBO 优化器</text>
+      <text x="410" y="223" text-anchor="middle" fill="#8b949e" font-size="10">Cost-Based Optimizer</text>
+
+      <!-- strategy boxes -->
+      <!-- 1 谓词下推 -->
+      <rect x="20" y="20" width="170" height="60" rx="8" fill="#1a2d1a" stroke="#3fb950"/>
+      <text x="105" y="45" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">谓词下推</text>
+      <text x="105" y="63" text-anchor="middle" fill="#8b949e" font-size="10">WHERE 尽早过滤，减少处理行数</text>
+      <line x1="192" y1="50" x2="350" y2="170" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 2 常量折叠 -->
+      <rect x="20" y="110" width="170" height="60" rx="8" fill="#1a2d1a" stroke="#3fb950"/>
+      <text x="105" y="135" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">常量折叠</text>
+      <text x="105" y="153" text-anchor="middle" fill="#8b949e" font-size="10">WHERE 1+1=2 提前计算，等价替换</text>
+      <line x1="192" y1="140" x2="350" y2="195" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 3 子查询转 JOIN -->
+      <rect x="20" y="200" width="170" height="60" rx="8" fill="#1a2d1a" stroke="#3fb950"/>
+      <text x="105" y="225" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">子查询转 JOIN</text>
+      <text x="105" y="243" text-anchor="middle" fill="#8b949e" font-size="10">IN/EXISTS 子查询半连接优化</text>
+      <line x1="192" y1="230" x2="350" y2="218" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 4 派生表合并 -->
+      <rect x="20" y="290" width="170" height="60" rx="8" fill="#1a2d1a" stroke="#3fb950"/>
+      <text x="105" y="315" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">派生表合并</text>
+      <text x="105" y="333" text-anchor="middle" fill="#8b949e" font-size="10">FROM (SELECT...) 子查询内联化</text>
+      <line x1="192" y1="320" x2="350" y2="250" stroke="#3fb950" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 5 JOIN顺序 -->
+      <rect x="630" y="20" width="170" height="60" rx="8" fill="#2a1a2d" stroke="#bc8cff"/>
+      <text x="715" y="45" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">JOIN 顺序优化</text>
+      <text x="715" y="63" text-anchor="middle" fill="#8b949e" font-size="10">小结果集驱动大表，减少嵌套循环</text>
+      <line x1="630" y1="50" x2="472" y2="170" stroke="#bc8cff" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 6 索引选择 -->
+      <rect x="630" y="110" width="170" height="60" rx="8" fill="#2a1a2d" stroke="#bc8cff"/>
+      <text x="715" y="135" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">索引选择</text>
+      <text x="715" y="153" text-anchor="middle" fill="#8b949e" font-size="10">基数越高索引越优先，回表代价权衡</text>
+      <line x1="630" y1="140" x2="472" y2="195" stroke="#bc8cff" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 7 覆盖索引 -->
+      <rect x="630" y="200" width="170" height="60" rx="8" fill="#2a1a2d" stroke="#bc8cff"/>
+      <text x="715" y="225" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">覆盖索引优化</text>
+      <text x="715" y="243" text-anchor="middle" fill="#8b949e" font-size="10">查询列全在索引中，免回表</text>
+      <line x1="630" y1="230" x2="472" y2="218" stroke="#bc8cff" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- 8 MRR -->
+      <rect x="630" y="290" width="170" height="60" rx="8" fill="#2a1a2d" stroke="#bc8cff"/>
+      <text x="715" y="315" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">MRR 优化</text>
+      <text x="715" y="333" text-anchor="middle" fill="#8b949e" font-size="10">批量排序主键再回表，顺序IO</text>
+      <line x1="630" y1="320" x2="472" y2="250" stroke="#bc8cff" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#oa)"/>
+
+      <!-- bottom -->
+      <rect x="300" y="370" width="220" height="40" rx="8" fill="#1e1505" stroke="#d29922"/>
+      <text x="410" y="395" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">输出最优执行计划</text>
+      <line x1="410" y1="272" x2="410" y2="368" stroke="#d29922" stroke-width="1.5" marker-end="url(#oa)"/>
+    </svg>
+  </div>
+
+  <div class="card">
+    <h3>JOIN 顺序枚举算法</h3>
+    <div class="card-grid">
+      <div class="mini-card">
+        <div class="title">表数量 ≤ optimizer_search_depth（默认7）</div>
+        <div class="value">穷举所有排列组合，计算每种顺序代价，选最小值</div>
+      </div>
+      <div class="mini-card">
+        <div class="title">表数量 &gt; optimizer_search_depth</div>
+        <div class="value">贪心算法（Greedy Search），每步选局部最优，不保证全局最优</div>
+      </div>
+      <div class="mini-card">
+        <div class="title">STRAIGHT_JOIN 提示</div>
+        <div class="value">强制固定 JOIN 顺序，跳过枚举，优化器不调整</div>
+      </div>
+      <div class="mini-card">
+        <div class="title">optimizer_switch 开关</div>
+        <div class="value">控制 ICP / MRR / BNL / Hash Join 等优化开关</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SECTION 8: 实战诊断 ===== -->
+<section id="s8">
+  <h2><span class="icon">🔧</span> 实战诊断 · 交互式模拟器</h2>
+
+  <div class="simulator">
+    <div class="sim-label">选择一个常见的慢查询场景：</div>
+    <select class="sim-select" id="sceneSelect">
+      <option value="">-- 请选择场景 --</option>
+      <option value="fullscan">① 缺少索引 → 全表扫描</option>
+      <option value="filesort">② ORDER BY 导致文件排序</option>
+      <option value="index_invalid">③ 函数操作导致索引失效</option>
+      <option value="covering">④ 覆盖索引优化示例</option>
+      <option value="union_tmp">⑤ GROUP BY 产生临时表</option>
+    </select>
+    <button class="sim-btn" onclick="diagnose()">🔍 分析执行计划</button>
+
+    <div class="sim-result" id="simResult"></div>
+  </div>
+
+  <h3 style="margin-top:32px;">性能诊断 Checklist</h3>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h4>看 type 字段</h4>
+        <p>是否有 ALL（全表扫描）？是否有 index（全索引扫描）？目标：<strong>range 及以上</strong></p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h4>看 key 字段</h4>
+        <p>是否为 NULL？若 possible_keys 非空但 key 是 NULL，优化器认为全扫更快，说明索引基数低或统计信息偏差</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h4>看 rows × filtered</h4>
+        <p>rows 越小越好，filtered 越大越好（意味着 WHERE 更精准）。rows 过大说明索引选择性差</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <h4>看 Extra 字段</h4>
+        <p>发现 <code style="color:var(--red)">Using filesort</code> 或 <code style="color:var(--red)">Using temporary</code>？立即排查 ORDER BY / GROUP BY 的索引覆盖情况</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <h4>用 EXPLAIN ANALYZE 获取真实代价（MySQL 8.0+）</h4>
+        <p>EXPLAIN ANALYZE 会真正执行 SQL 并返回实际执行时间和行数，对比估算值发现统计信息偏差</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>常用诊断 SQL</h3>
+  <pre><span class="cm">-- 1. 基础执行计划</span>
+<span class="kw">EXPLAIN</span> <span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="kw">WHERE</span> status = <span class="str">'paid'</span>;
+
+<span class="cm">-- 2. JSON 格式（包含代价数值，MySQL 5.7+）</span>
+<span class="kw">EXPLAIN</span> FORMAT=JSON <span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="kw">WHERE</span> status = <span class="str">'paid'</span>;
+
+<span class="cm">-- 3. 实际执行分析（MySQL 8.0.18+）</span>
+<span class="kw">EXPLAIN ANALYZE SELECT</span> * <span class="kw">FROM</span> orders <span class="kw">WHERE</span> status = <span class="str">'paid'</span>;
+
+<span class="cm">-- 4. 查看优化器开关</span>
+<span class="kw">SELECT</span> @@optimizer_switch;
+
+<span class="cm">-- 5. 强制使用 / 忽略某个索引</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="op">FORCE INDEX</span> (idx_status) <span class="kw">WHERE</span> status = <span class="str">'paid'</span>;
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="op">IGNORE INDEX</span> (idx_status) <span class="kw">WHERE</span> status = <span class="str">'paid'</span>;
+
+<span class="cm">-- 6. 查看索引统计信息</span>
+<span class="kw">SHOW INDEX FROM</span> orders;
+<span class="kw">ANALYZE TABLE</span> orders;  <span class="cm">-- 重新收集统计信息</span></pre>
+</section>
+
+</div><!-- /container -->
+
+<footer style="text-align:center;padding:30px 20px;color:var(--text2);font-size:0.85rem;border-top:1px solid var(--border);">
+  MySQL 执行计划深度解析 · 暗色主题交互式图解
+</footer>
+
+<script>
+// ===== NAV active =====
+const navLinks = document.querySelectorAll('nav a');
+const sections = document.querySelectorAll('section[id]');
+function updateNav() {
+  let cur = '';
+  sections.forEach(s => {
+    if (window.scrollY >= s.offsetTop - 120) cur = s.id;
+  });
+  navLinks.forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + cur);
+  });
+}
+window.addEventListener('scroll', updateNav);
+navLinks.forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+// ===== TABS =====
+function switchTab(e, id) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  e.target.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+
+// ===== SIMULATOR =====
+const scenarios = {
+  fullscan: {
+    sql: `SELECT * FROM orders WHERE remark LIKE '%refund%';`,
+    explain: [
+      { id: 1, select_type: 'SIMPLE', table: 'orders', type: 'ALL', possible_keys: 'NULL', key: 'NULL', key_len: 'NULL', ref: 'NULL', rows: 1200000, filtered: '11.11', extra: 'Using where' }
+    ],
+    diagnosis: '🚨 <span style="color:#f85149">type = ALL（全表扫描）</span>：remark 列无索引，且 LIKE 前缀为 % 无法使用索引。扫描 <strong>120 万行</strong>！',
+    suggestion: [
+      '1. 若 remark 高频查询，考虑全文索引（FULLTEXT INDEX）',
+      '2. 或将 LIKE 改为 = 等值匹配',
+      '3. 业务允许可考虑引入 Elasticsearch 处理模糊搜索'
+    ],
+    costs: [{ label: 'IO 代价', val: 95 }, { label: 'CPU 代价', val: 80 }, { label: '总体评分（越低越好）', val: 92 }]
+  },
+  filesort: {
+    sql: `SELECT * FROM orders WHERE user_id = 123 ORDER BY create_time DESC LIMIT 10;`,
+    explain: [
+      { id: 1, select_type: 'SIMPLE', table: 'orders', type: 'ref', possible_keys: 'idx_user_id', key: 'idx_user_id', key_len: '4', ref: 'const', rows: 3500, filtered: '100.00', extra: 'Using filesort' }
+    ],
+    diagnosis: '⚠️ <span style="color:#d29922">Using filesort</span>：虽然用了 idx_user_id 过滤行，但 ORDER BY create_time 没有索引支撑，需额外排序 3500 行。',
+    suggestion: [
+      '1. 建复合索引 idx_user_create(user_id, create_time)',
+      '2. 查询变为：user_id 等值过滤 + create_time 有序，filesort 消除',
+      '3. 注意索引列顺序必须与 WHERE + ORDER BY 匹配'
+    ],
+    costs: [{ label: 'IO 代价', val: 35 }, { label: '排序代价', val: 70 }, { label: '总体评分（越低越好）', val: 55 }]
+  },
+  index_invalid: {
+    sql: `SELECT * FROM users WHERE YEAR(birthday) = 1990;`,
+    explain: [
+      { id: 1, select_type: 'SIMPLE', table: 'users', type: 'ALL', possible_keys: 'NULL', key: 'NULL', key_len: 'NULL', ref: 'NULL', rows: 500000, filtered: '100.00', extra: 'Using where' }
+    ],
+    diagnosis: '🚨 <span style="color:#f85149">函数操作导致索引失效</span>：birthday 列上有索引，但 YEAR(birthday) 对列值做了函数变换，B+ 树无法直接定位，退化为全表扫描！',
+    suggestion: [
+      '1. 改写为范围查询：WHERE birthday BETWEEN "1990-01-01" AND "1990-12-31"',
+      '2. MySQL 8.0+ 可用函数索引：CREATE INDEX idx_year ON users((YEAR(birthday)))',
+      '3. 通用原则：索引列不能做函数、运算、隐式类型转换'
+    ],
+    costs: [{ label: 'IO 代价', val: 90 }, { label: 'CPU 代价', val: 85 }, { label: '总体评分（越低越好）', val: 90 }]
+  },
+  covering: {
+    sql: `SELECT id, status, amount FROM orders WHERE user_id = 123 AND status = 'paid';`,
+    explain: [
+      { id: 1, select_type: 'SIMPLE', table: 'orders', type: 'ref', possible_keys: 'idx_user_status', key: 'idx_user_status', key_len: '8', ref: 'const,const', rows: 42, filtered: '100.00', extra: 'Using index' }
+    ],
+    diagnosis: '✅ <span style="color:#3fb950">Using index（覆盖索引）</span>：复合索引 idx_user_status(user_id, status, amount, id) 包含所有查询列，无需回表访问数据行！',
+    suggestion: [
+      '1. 覆盖索引是最高效的索引使用方式，rows 仅 42 行',
+      '2. 设计复合索引时，将 SELECT 列也纳入索引（但不宜过多）',
+      '3. Extra: Using index 是最理想的执行状态'
+    ],
+    costs: [{ label: 'IO 代价', val: 5 }, { label: 'CPU 代价', val: 8 }, { label: '总体评分（越低越好）', val: 6 }]
+  },
+  union_tmp: {
+    sql: `SELECT city, COUNT(*) FROM users GROUP BY city ORDER BY COUNT(*) DESC;`,
+    explain: [
+      { id: 1, select_type: 'SIMPLE', table: 'users', type: 'ALL', possible_keys: 'NULL', key: 'NULL', key_len: 'NULL', ref: 'NULL', rows: 800000, filtered: '100.00', extra: 'Using temporary; Using filesort' }
+    ],
+    diagnosis: '🚨 <span style="color:#f85149">Using temporary + Using filesort</span>：GROUP BY city 无索引，需建内存临时表聚合 80 万行；ORDER BY COUNT(*) 再次排序，双重开销！',
+    suggestion: [
+      '1. 在 city 列建索引：CREATE INDEX idx_city ON users(city)',
+      '2. GROUP BY 有索引后可避免临时表，Extra 变为 Using index',
+      '3. 若数据量极大，考虑在应用层聚合，或使用 Redis 计数器缓存'
+    ],
+    costs: [{ label: 'IO 代价', val: 88 }, { label: '临时表代价', val: 95 }, { label: '排序代价', val: 80 }]
+  }
+};
+
+function diagnose() {
+  const sel = document.getElementById('sceneSelect').value;
+  if (!sel) { alert('请先选择一个场景！'); return; }
+  const s = scenarios[sel];
+  const r = document.getElementById('simResult');
+
+  const row = s.explain[0];
+  const typeBadge = {
+    ALL: 'badge-red', index: 'badge-orange', range: 'badge-orange',
+    ref: 'badge-blue', eq_ref: 'badge-green', const: 'badge-green'
+  }[row.type] || 'badge-blue';
+
+  let costsHtml = s.costs.map(c => `
+    <div class="cost-bar-wrap">
+      <div class="cost-bar-label"><span>${c.label}</span><span>${c.val}/100</span></div>
+      <div class="cost-bar"><div class="cost-bar-fill" style="width:0%;background:${c.val > 70 ? '#f85149' : c.val > 40 ? '#d29922' : '#3fb950'}" data-w="${c.val}%"></div></div>
+    </div>`).join('');
+
+  r.innerHTML = `
+    <div style="font-size:0.8rem;color:#58a6ff;font-weight:600;margin-bottom:10px;">▶ 执行 SQL</div>
+    <pre style="margin-bottom:16px;">${s.sql}</pre>
+
+    <div style="font-size:0.8rem;color:#58a6ff;font-weight:600;margin-bottom:10px;">▶ EXPLAIN 输出</div>
+    <div style="overflow-x:auto;margin-bottom:16px;">
+    <table style="font-size:0.78rem;">
+      <tr><th>id</th><th>select_type</th><th>table</th><th>type</th><th>key</th><th>rows</th><th>filtered</th><th>Extra</th></tr>
+      <tr>
+        <td>${row.id}</td><td>${row.select_type}</td><td>${row.table}</td>
+        <td><span class="badge ${typeBadge}">${row.type}</span></td>
+        <td>${row.key}</td><td style="color:#f85149;font-weight:600">${row.rows.toLocaleString()}</td>
+        <td>${row.filtered}%</td>
+        <td style="color:${row.extra.includes('Using index') && !row.extra.includes('filesort') && !row.extra.includes('temporary') ? '#3fb950' : '#f85149'}">${row.extra}</td>
+      </tr>
+    </table></div>
+
+    <div class="info-box ${s.diagnosis.includes('🚨') ? 'red' : s.diagnosis.includes('⚠️') ? 'orange' : 'green'}" style="margin-bottom:16px;">
+      <strong>诊断结论：</strong><br>${s.diagnosis}
+    </div>
+
+    <div style="font-size:0.85rem;color:#3fb950;font-weight:600;margin-bottom:8px;">✅ 优化建议</div>
+    <ul style="color:var(--text);font-size:0.85rem;padding-left:20px;margin-bottom:16px;">
+      ${s.suggestion.map(t => `<li style="margin-bottom:6px;">${t}</li>`).join('')}
+    </ul>
+
+    <div style="font-size:0.85rem;color:var(--cyan);font-weight:600;margin-bottom:10px;">📊 代价评估</div>
+    ${costsHtml}
+  `;
+  r.style.display = 'block';
+
+  // animate bars
+  setTimeout(() => {
+    r.querySelectorAll('.cost-bar-fill').forEach(el => {
+      el.style.width = el.dataset.w;
+    });
+  }, 100);
+}
+</script>
+</body>
+</html>

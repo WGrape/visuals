@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>四层 vs 七层负载均衡 - 深度解析</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-purple: #a371f7;
+            --l4-color: #00d4aa;
+            --l7-color: #ff6b35;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));
+            padding: 50px 40px;
+            text-align: center;
+            border-bottom: 1px solid var(--border);
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 12px;
+            background: linear-gradient(90deg, var(--l4-color), var(--l7-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header p { color: var(--text-secondary); font-size: 1.1em; }
+        .nav-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            padding: 16px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            flex-wrap: wrap;
+        }
+        .nav-tab {
+            padding: 10px 18px;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s;
+        }
+        .nav-tab:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .nav-tab.active { background: var(--accent-blue); border-color: var(--accent-blue); color: white; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 40px; }
+        .section { display: none; animation: fadeIn 0.4s; }
+        .section.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; } }
+
+        /* OSI Tower */
+        .osi-tower {
+            display: flex;
+            flex-direction: column-reverse;
+            gap: 4px;
+            max-width: 700px;
+            margin: 0 auto 40px;
+        }
+        .osi-layer {
+            display: flex;
+            align-items: center;
+            padding: 14px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        .osi-layer:hover { transform: translateX(8px); box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+        .osi-layer.l1 { background: rgba(88, 166, 255, 0.05); border-color: rgba(88, 166, 255, 0.3); }
+        .osi-layer.l2 { background: rgba(88, 166, 255, 0.1); border-color: rgba(88, 166, 255, 0.5); }
+        .osi-layer.l3 { background: rgba(88, 166, 255, 0.15); border-color: var(--accent-blue); }
+        .osi-layer.l4 { background: rgba(0, 212, 170, 0.15); border-color: var(--l4-color); }
+        .osi-layer.l5 { background: rgba(163, 113, 247, 0.1); border-color: rgba(163, 113, 247, 0.6); }
+        .osi-layer.l6 { background: rgba(163, 113, 247, 0.15); border-color: var(--accent-purple); }
+        .osi-layer.l7 { background: rgba(255, 107, 53, 0.15); border-color: var(--l7-color); }
+        .layer-num {
+            width: 32px; height: 32px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 0.85em; margin-right: 14px; flex-shrink: 0;
+        }
+        .l1 .layer-num { background: rgba(88, 166, 255, 0.5); color: white; }
+        .l2 .layer-num { background: rgba(88, 166, 255, 0.7); color: white; }
+        .l3 .layer-num { background: var(--accent-blue); color: white; }
+        .l4 .layer-num { background: var(--l4-color); color: var(--bg-primary); }
+        .l5 .layer-num { background: rgba(163, 113, 247, 0.6); color: white; }
+        .l6 .layer-num { background: var(--accent-purple); color: white; }
+        .l7 .layer-num { background: var(--l7-color); color: white; }
+        .layer-info { flex: 1; }
+        .layer-name { font-weight: 600; font-size: 1em; margin-bottom: 2px; }
+        .l1 .layer-name { color: rgba(88, 166, 255, 0.7); }
+        .l2 .layer-name { color: rgba(88, 166, 255, 0.9); }
+        .l3 .layer-name { color: var(--accent-blue); }
+        .l4 .layer-name { color: var(--l4-color); }
+        .l5 .layer-name { color: rgba(163, 113, 247, 0.9); }
+        .l6 .layer-name { color: var(--accent-purple); }
+        .l7 .layer-name { color: var(--l7-color); }
+        .layer-desc { font-size: 0.82em; color: var(--text-secondary); }
+        .layer-example { font-size: 0.75em; color: var(--text-muted); margin-top: 2px; }
+
+        /* Diagrams */
+        .diagram-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+            margin-bottom: 32px;
+        }
+        .diagram-title { font-size: 1.3em; margin-bottom: 24px; text-align: center; color: var(--text-primary); }
+        .diagram-svg { width: 100%; height: auto; }
+
+        /* Cards */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 28px;
+        }
+        .card.l4 { border-top: 4px solid var(--l4-color); }
+        .card.l7 { border-top: 4px solid var(--l7-color); }
+        .card h2 { font-size: 1.4em; margin-bottom: 8px; }
+        .card.l4 h2 { color: var(--l4-color); }
+        .card.l7 h2 { color: var(--l7-color); }
+        .card .subtitle { color: var(--text-secondary); font-size: 0.9em; margin-bottom: 16px; }
+        .card p { color: var(--text-secondary); margin-bottom: 16px; }
+        .feature-list { list-style: none; }
+        .feature-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .feature-list li:last-child { border-bottom: none; }
+        .feature-list .icon { color: var(--accent-green); }
+
+        /* Tables */
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 32px;
+        }
+        .comparison-table th, .comparison-table td {
+            padding: 14px 18px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        .comparison-table th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+        }
+        .comparison-table th:nth-child(2) { color: var(--l4-color); }
+        .comparison-table th:nth-child(3) { color: var(--l7-color); }
+        .comparison-table tr:last-child td { border-bottom: none; }
+        .comparison-table tr:hover td { background: rgba(88, 166, 255, 0.05); }
+        .comparison-table td { color: var(--text-secondary); }
+
+        /* Animation */
+        .anim-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 32px;
+        }
+        .anim-controls {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .anim-btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95em;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .anim-btn:hover { transform: scale(1.05); }
+        .anim-btn.l4 { background: var(--l4-color); color: var(--bg-primary); }
+        .anim-btn.l7 { background: var(--l7-color); color: white; }
+        .anim-btn.reset { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); }
+        #animSvg { width: 100%; height: 380px; background: var(--bg-primary); border-radius: 10px; }
+        .anim-log {
+            margin-top: 16px;
+            padding: 14px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            font-family: 'Monaco', monospace;
+            font-size: 0.85em;
+            max-height: 160px;
+            overflow-y: auto;
+        }
+        .log-entry { padding: 3px 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .log-entry:last-child { border-bottom: none; }
+        .log-entry .ts { color: var(--text-muted); margin-right: 10px; }
+        .log-entry.l4-log { color: var(--l4-color); }
+        .log-entry.l7-log { color: var(--l7-color); }
+
+        /* Key Points */
+        .key-point {
+            background: var(--bg-secondary);
+            border-left: 4px solid var(--accent-blue);
+            padding: 18px 22px;
+            margin-bottom: 16px;
+            border-radius: 0 8px 8px 0;
+        }
+        .key-point.l4 { border-left-color: var(--l4-color); }
+        .key-point.l7 { border-left-color: var(--l7-color); }
+        .key-point h4 { margin-bottom: 6px; }
+        .key-point.l4 h4 { color: var(--l4-color); }
+        .key-point.l7 h4 { color: var(--l7-color); }
+        .key-point p { color: var(--text-secondary); font-size: 0.95em; }
+
+        /* Products */
+        .product-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .product-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s;
+        }
+        .product-card:hover { transform: translateY(-4px); box-shadow: 0 8px 25px rgba(0,0,0,0.3); }
+        .product-card.l4 { border-top: 3px solid var(--l4-color); }
+        .product-card.l7 { border-top: 3px solid var(--l7-color); }
+        .product-card.both { border-top: 3px solid; border-image: linear-gradient(90deg, var(--l4-color), var(--l7-color)) 1; }
+        .product-icon { font-size: 2em; margin-bottom: 10px; }
+        .product-card h4 { font-size: 1em; margin-bottom: 6px; }
+        .product-card p { color: var(--text-secondary); font-size: 0.85em; margin-bottom: 10px; }
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 15px; font-size: 0.75em; margin: 2px; }
+        .tag.l4 { background: rgba(0, 212, 170, 0.2); color: var(--l4-color); }
+        .tag.l7 { background: rgba(255, 107, 53, 0.2); color: var(--l7-color); }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 30px;
+            color: var(--text-muted);
+            font-size: 0.85em;
+            border-top: 1px solid var(--border);
+        }
+
+        @media (max-width: 1024px) {
+            .card-grid, .product-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 768px) {
+            .container { padding: 20px; }
+            .header h1 { font-size: 1.8em; }
+            .nav-tabs { padding: 12px; }
+            .nav-tab { padding: 8px 12px; font-size: 0.8em; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>🔀 四层 vs 七层负载均衡</h1>
+        <p>深入理解 OSI 模型与网络转发原理</p>
+    </header>
+
+    <nav class="nav-tabs">
+        <button class="nav-tab active" onclick="showSection('osi')">🏗️ OSI 七层模型</button>
+        <button class="nav-tab" onclick="showSection('comparison')">⚖️ L4 vs L7 对比</button>
+        <button class="nav-tab" onclick="showSection('products')">🛠️ 产品选型</button>
+        <button class="nav-tab" onclick="showSection('interactive')">🎮 交互演示</button>
+        <button class="nav-tab" onclick="showSection('why')">❓ 为什么强调</button>
+    </nav>
+
+    <div class="container">
+        <!-- OSI Model Section -->
+        <section id="osi" class="section active">
+            <h2 style="margin-bottom: 12px; text-align: center;">🌐 OSI 七层网络模型</h2>
+            <p style="text-align: center; color: var(--text-secondary); margin-bottom: 30px;">
+                理解四层/七层负载均衡，先理解 OSI 模型。点击任意层查看详情。
+            </p>
+
+            <div class="osi-tower">
+                <div class="osi-layer l7" onclick="highlightLayer('l7')">
+                    <div class="layer-num">7</div>
+                    <div class="layer-info">
+                        <div class="layer-name">应用层 (Application)</div>
+                        <div class="layer-desc">HTTP、HTTPS、DNS、FTP、SMTP</div>
+                        <div class="layer-example">浏览器、Web 服务、API</div>
+                    </div>
+                </div>
+                <div class="osi-layer l6" onclick="highlightLayer('l6')">
+                    <div class="layer-num">6</div>
+                    <div class="layer-info">
+                        <div class="layer-name">表示层 (Presentation)</div>
+                        <div class="layer-desc">数据格式转换、加密解密、压缩</div>
+                        <div class="layer-example">SSL/TLS、JPEG、ASCII、Base64</div>
+                    </div>
+                </div>
+                <div class="osi-layer l5" onclick="highlightLayer('l5')">
+                    <div class="layer-num">5</div>
+                    <div class="layer-info">
+                        <div class="layer-name">会话层 (Session)</div>
+                        <div class="layer-desc">会话管理、连接建立/维护/终止</div>
+                        <div class="layer-example">RPC、SQL 会话、NetBIOS</div>
+                    </div>
+                </div>
+                <div class="osi-layer l4" onclick="highlightLayer('l4')">
+                    <div class="layer-num">4</div>
+                    <div class="layer-info">
+                        <div class="layer-name">传输层 (Transport)</div>
+                        <div class="layer-desc">TCP、UDP、端口号、端到端连接</div>
+                        <div class="layer-example">端口 80/443/3306、滑动窗口</div>
+                    </div>
+                </div>
+                <div class="osi-layer l3" onclick="highlightLayer('l3')">
+                    <div class="layer-num">3</div>
+                    <div class="layer-info">
+                        <div class="layer-name">网络层 (Network)</div>
+                        <div class="layer-desc">IP 地址、路由选择、数据包转发</div>
+                        <div class="layer-example">IP、ICMP、路由器</div>
+                    </div>
+                </div>
+                <div class="osi-layer l2" onclick="highlightLayer('l2')">
+                    <div class="layer-num">2</div>
+                    <div class="layer-info">
+                        <div class="layer-name">数据链路层 (Data Link)</div>
+                        <div class="layer-desc">MAC 地址、帧传输、错误检测</div>
+                        <div class="layer-example">以太网、交换机、网卡</div>
+                    </div>
+                </div>
+                <div class="osi-layer l1" onclick="highlightLayer('l1')">
+                    <div class="layer-num">1</div>
+                    <div class="layer-info">
+                        <div class="layer-name">物理层 (Physical)</div>
+                        <div class="layer-desc">比特流传输、电气信号、物理介质</div>
+                        <div class="layer-example">网线、光纤、集线器</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="diagram-container">
+                <h3 class="diagram-title">🎯 负载均衡在 OSI 模型中的位置</h3>
+                <svg class="diagram-svg" viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Client -->
+                    <rect x="30" y="110" width="90" height="80" rx="8" fill="#21262d" stroke="#58a6ff" stroke-width="2"/>
+                    <text x="75" y="145" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">客户端</text>
+                    <text x="75" y="165" text-anchor="middle" fill="#8b949e" font-size="9">浏览器/App</text>
+
+                    <!-- Arrow -->
+                    <path d="M120 150 L190 150" stroke="#58a6ff" stroke-width="3" marker-end="url(#arr)"/>
+
+                    <!-- L4 LB -->
+                    <rect x="190" y="60" width="170" height="90" rx="10" fill="#161b22" stroke="#00d4aa" stroke-width="3"/>
+                    <text x="275" y="90" text-anchor="middle" fill="#00d4aa" font-size="13" font-weight="700">四层负载均衡</text>
+                    <text x="275" y="112" text-anchor="middle" fill="#8b949e" font-size="10">L4 Load Balancer</text>
+                    <line x1="205" y1="125" x2="345" y2="125" stroke="#30363d"/>
+                    <text x="275" y="140" text-anchor="middle" fill="#e6edf3" font-size="9">只看 IP + Port</text>
+
+                    <!-- L7 LB -->
+                    <rect x="190" y="165" width="170" height="90" rx="10" fill="#161b22" stroke="#ff6b35" stroke-width="3"/>
+                    <text x="275" y="195" text-anchor="middle" fill="#ff6b35" font-size="13" font-weight="700">七层负载均衡</text>
+                    <text x="275" y="217" text-anchor="middle" fill="#8b949e" font-size="10">L7 Load Balancer</text>
+                    <line x1="205" y1="230" x2="345" y2="230" stroke="#30363d"/>
+                    <text x="275" y="245" text-anchor="middle" fill="#e6edf3" font-size="9">解析 URL/Header</text>
+
+                    <!-- Arrow L4 -->
+                    <path d="M360 105 L440 80" stroke="#00d4aa" stroke-width="2" marker-end="url(#l4arr)"/>
+                    <path d="M360 105 L440 105" stroke="#00d4aa" stroke-width="2" marker-end="url(#l4arr)"/>
+
+                    <!-- Arrow L7 -->
+                    <path d="M360 210 L440 230" stroke="#ff6b35" stroke-width="2" marker-end="url(#l7arr)"/>
+
+                    <!-- Backend -->
+                    <rect x="440" y="50" width="110" height="60" rx="6" fill="#161b22" stroke="#30363d"/>
+                    <text x="495" y="75" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">后端 1</text>
+                    <text x="495" y="95" text-anchor="middle" fill="#8b949e" font-size="9">10.0.0.1:8080</text>
+
+                    <rect x="440" y="120" width="110" height="60" rx="6" fill="#161b22" stroke="#30363d"/>
+                    <text x="495" y="145" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">后端 2</text>
+                    <text x="495" y="165" text-anchor="middle" fill="#8b949e" font-size="9">10.0.0.2:8080</text>
+
+                    <rect x="440" y="200" width="110" height="60" rx="6" fill="#161b22" stroke="#30363d"/>
+                    <text x="495" y="225" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">后端 3</text>
+                    <text x="495" y="245" text-anchor="middle" fill="#8b949e" font-size="9">/api/users</text>
+
+                    <!-- Info Box -->
+                    <rect x="580" y="80" width="200" height="160" rx="8" fill="#161b22" stroke="#30363d"/>
+                    <text x="680" y="105" text-anchor="middle" fill="#d29922" font-size="11" font-weight="600">⚡ 核心区别</text>
+                    <text x="595" y="130" fill="#00d4aa" font-size="10">四层 (L4) - 传输层:</text>
+                    <text x="595" y="148" fill="#8b949e" font-size="9">• 基于 IP + Port</text>
+                    <text x="595" y="163" fill="#8b949e" font-size="9">• 不解析内容</text>
+                    <text x="595" y="178" fill="#8b949e" font-size="9">• 性能极高</text>
+                    <text x="595" y="200" fill="#ff6b35" font-size="10">七层 (L7) - 应用层:</text>
+                    <text x="595" y="218" fill="#8b949e" font-size="9">• 基于 HTTP 内容</text>
+                    <text x="595" y="233" fill="#8b949e" font-size="9">• 解析 URL/Header</text>
+
+                    <defs>
+                        <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+                        <marker id="l4arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#00d4aa"/></marker>
+                        <marker id="l7arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ff6b35"/></marker>
+                    </defs>
+                </svg>
+            </div>
+
+            <div class="key-point l4">
+                <h4>🟢 为什么叫"四层"负载均衡？</h4>
+                <p>因为它工作在 <strong>OSI 模型的第 4 层（传输层）</strong>，基于 <strong>IP 地址 + 端口号</strong> 进行转发决策。它只关心"数据包要发到哪个 IP:Port"，不解析数据包的具体内容。就像快递员只根据收件地址（IP:Port）送货，不关心包裹里是什么。</p>
+            </div>
+
+            <div class="key-point l7">
+                <h4>🟠 为什么叫"七层"负载均衡？</h4>
+                <p>因为它工作在 <strong>OSI 模型的第 7 层（应用层）</strong>，需要解析 <strong>HTTP/HTTPS</strong> 等应用层协议。它可以读取 URL 路径、请求头、Cookie 等信息，就像快递员不仅看地址，还会拆开包裹看看里面的物品清单（URL），然后决定送到哪个部门（后端服务）。</p>
+            </div>
+        </section>
+
+        <!-- Comparison Section -->
+        <section id="comparison" class="section">
+            <h2 style="margin-bottom: 24px; text-align: center;">⚖️ 四层 vs 七层负载均衡深度对比</h2>
+
+            <div class="card-grid">
+                <div class="card l4">
+                    <h2>🟢 四层负载均衡 (L4)</h2>
+                    <p class="subtitle">传输层 · 基于连接</p>
+                    <p>基于 TCP/UDP 协议的 IP 地址和端口号进行流量分发。不解析应用层数据，只负责建立连接并转发。</p>
+                    <ul class="feature-list">
+                        <li><span class="icon">⚡</span> <strong>性能极高</strong> - 转发速度快，延迟低</li>
+                        <li><span class="icon">🔒</span> <strong>透明转发</strong> - 不修改数据包内容</li>
+                        <li><span class="icon">🌐</span> <strong>协议无关</strong> - 支持任意 TCP/UDP</li>
+                        <li><span class="icon">💾</span> <strong>资源占用低</strong> - 只维护连接状态</li>
+                    </ul>
+                </div>
+
+                <div class="card l7">
+                    <h2>🟠 七层负载均衡 (L7)</h2>
+                    <p class="subtitle">应用层 · 基于内容</p>
+                    <p>解析 HTTP/HTTPS 等应用层协议，基于 URL、Header、Cookie 等信息进行智能路由。</p>
+                    <ul class="feature-list">
+                        <li><span class="icon">🎯</span> <strong>智能路由</strong> - 基于 URL/Header 路由</li>
+                        <li><span class="icon">🛡️</span> <strong>安全防护</strong> - 拦截恶意请求</li>
+                        <li><span class="icon">📊</span> <strong>内容优化</strong> - 压缩、缓存、SSL</li>
+                        <li><span class="icon">🔧</span> <strong>灵活控制</strong> - 重写 URL、Header</li>
+                    </ul>
+                </div>
+            </div>
+
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>对比维度</th>
+                        <th>🟢 四层 (L4)</th>
+                        <th>🟠 七层 (L7)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><strong>OSI 层级</strong></td><td>第 4 层 - 传输层</td><td>第 7 层 - 应用层</td></tr>
+                    <tr><td><strong>转发依据</strong></td><td>IP 地址 + 端口号</td><td>URL、Header、Cookie</td></tr>
+                    <tr><td><strong>数据解析</strong></td><td>不解析应用层数据</td><td>解析 HTTP/HTTPS</td></tr>
+                    <tr><td><strong>性能</strong></td><td>极高（百万级 QPS）</td><td>较高（数万级 QPS）</td></tr>
+                    <tr><td><strong>延迟</strong></td><td>极低（微秒级）</td><td>较低（毫秒级）</td></tr>
+                    <tr><td><strong>资源消耗</strong></td><td>低</td><td>较高</td></tr>
+                    <tr><td><strong>路由能力</strong></td><td>简单（端口区分服务）</td><td>灵活（按路径/Header）</td></tr>
+                    <tr><td><strong>SSL 终结</strong></td><td>不支持（透传）</td><td>支持（可解密 HTTPS）</td></tr>
+                    <tr><td><strong>缓存能力</strong></td><td>无</td><td>可缓存静态资源</td></tr>
+                    <tr><td><strong>会话保持</strong></td><td>IP Hash</td><td>Cookie、Session</td></tr>
+                    <tr><td><strong>典型场景</strong></td><td>数据库、游戏、IoT</td><td>Web 应用、API 服务</td></tr>
+                    <tr><td><strong>代表产品</strong></td><td>LVS、AWS NLB</td><td>NGINX、Kong、AWS ALB</td></tr>
+                </tbody>
+            </table>
+
+            <div class="diagram-container">
+                <h3 class="diagram-title">🔍 实际数据包对比</h3>
+                <svg class="diagram-svg" viewBox="0 0 800 250" xmlns="http://www.w3.org/2000/svg">
+                    <!-- L4 Packet -->
+                    <rect x="50" y="20" width="350" height="200" rx="10" fill="#161b22" stroke="#00d4aa" stroke-width="2"/>
+                    <text x="225" y="50" text-anchor="middle" fill="#00d4aa" font-size="14" font-weight="700">四层数据包</text>
+                    <text x="225" y="70" text-anchor="middle" fill="#8b949e" font-size="10">Layer 4 只看到这些：</text>
+
+                    <rect x="70" y="90" width="310" height="30" rx="4" fill="rgba(88, 166, 255, 0.15)" stroke="rgba(88, 166, 255, 0.5)"/>
+                    <text x="225" y="110" text-anchor="middle" fill="#58a6ff" font-size="11">Src IP | Dst IP</text>
+
+                    <rect x="70" y="130" width="310" height="30" rx="4" fill="rgba(0, 212, 170, 0.15)" stroke="rgba(0, 212, 170, 0.5)"/>
+                    <text x="225" y="150" text-anchor="middle" fill="#00d4aa" font-size="11">Src Port | Dst Port</text>
+
+                    <rect x="70" y="170" width="310" height="35" rx="4" fill="rgba(163, 113, 247, 0.1)" stroke="rgba(163, 113, 247, 0.3)"/>
+                    <text x="225" y="192" text-anchor="middle" fill="#8b949e" font-size="10">应用数据 (不解析)</text>
+
+                    <!-- L7 Packet -->
+                    <rect x="420" y="20" width="350" height="200" rx="10" fill="#161b22" stroke="#ff6b35" stroke-width="2"/>
+                    <text x="595" y="50" text-anchor="middle" fill="#ff6b35" font-size="14" font-weight="700">七层数据包</text>
+                    <text x="595" y="70" text-anchor="middle" fill="#8b949e" font-size="10">L7 可以解析全部：</text>
+
+                    <rect x="440" y="90" width="310" height="25" rx="4" fill="rgba(88, 166, 255, 0.15)" stroke="rgba(88, 166, 255, 0.5)"/>
+                    <text x="595" y="107" text-anchor="middle" fill="#58a6ff" font-size="10">IP 头</text>
+
+                    <rect x="440" y="120" width="310" height="25" rx="4" fill="rgba(0, 212, 170, 0.15)" stroke="rgba(0, 212, 170, 0.5)"/>
+                    <text x="595" y="137" text-anchor="middle" fill="#00d4aa" font-size="10">TCP 头 (Port)</text>
+
+                    <rect x="440" y="150" width="310" height="55" rx="4" fill="rgba(255, 107, 53, 0.15)" stroke="rgba(255, 107, 53, 0.5)"/>
+                    <text x="500" y="170" fill="#ff6b35" font-size="9">GET /api/users HTTP/1.1</text>
+                    <text x="500" y="185" fill="#8b949e" font-size="9">Host: api.example.com</text>
+                    <text x="500" y="200" fill="#8b949e" font-size="9">Authorization: Bearer xxx</text>
+                </svg>
+            </div>
+        </section>
+
+        <!-- Products Section -->
+        <section id="products" class="section">
+            <h2 style="margin-bottom: 24px; text-align: center;">🛠️ 常见产品选型</h2>
+
+            <div class="product-grid">
+                <div class="product-card both">
+                    <div class="product-icon">🔄</div>
+                    <h4>NGINX</h4>
+                    <p>高性能反向代理服务器，支持四层/七层负载均衡</p>
+                    <span class="tag l4">L4</span><span class="tag l7">L7</span>
+                </div>
+                <div class="product-card l4">
+                    <div class="product-icon">⚡</div>
+                    <h4>LVS (Linux Virtual Server)</h4>
+                    <p>Linux 内核级负载均衡，性能极高</p>
+                    <span class="tag l4">L4</span>
+                </div>
+                <div class="product-card l4">
+                    <div class="product-icon">☁️</div>
+                    <h4>AWS NLB</h4>
+                    <p>AWS 网络负载均衡器</p>
+                    <span class="tag l4">L4</span>
+                </div>
+                <div class="product-card l7">
+                    <div class="product-icon">🌐</div>
+                    <h4>AWS ALB</h4>
+                    <p>AWS 应用负载均衡器</p>
+                    <span class="tag l7">L7</span>
+                </div>
+                <div class="product-card both">
+                    <div class="product-icon">🐵</div>
+                    <h4>Kong / APISIX</h4>
+                    <p>API 网关，支持四层/七层</p>
+                    <span class="tag l4">L4</span><span class="tag l7">L7</span>
+                </div>
+                <div class="product-card l4">
+                    <div class="product-icon">🔷</div>
+                    <h4>云产品 SLB</h4>
+                    <p>阿里云/腾讯云四层负载均衡</p>
+                    <span class="tag l4">L4</span>
+                </div>
+            </div>
+
+            <div class="diagram-container">
+                <h3 class="diagram-title">🎯 产品能力对照表</h3>
+                <table class="comparison-table">
+                    <thead>
+                        <tr><th>产品</th><th>四层转发</th><th>七层转发</th><th>SSL 终结</th><th>健康检查</th><th>性能</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>NGINX</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>极高</td></tr>
+                        <tr><td>LVS</td><td>✓</td><td>✗</td><td>✗</td><td>✓</td><td>极高</td></tr>
+                        <tr><td>AWS NLB</td><td>✓</td><td>✗</td><td>✗</td><td>✓</td><td>极高</td></tr>
+                        <tr><td>AWS ALB</td><td>✗</td><td>✓</td><td>✓</td><td>✓</td><td>高</td></tr>
+                        <tr><td>Kong</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>中高</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Interactive Section -->
+        <section id="interactive" class="section">
+            <h2 style="margin-bottom: 24px; text-align: center;">🎮 交互式流程演示</h2>
+
+            <div class="anim-container">
+                <div class="anim-controls">
+                    <button class="anim-btn l4" onclick="startAnim('l4')">▶️ 四层转发流程</button>
+                    <button class="anim-btn l7" onclick="startAnim('l7')">▶️ 七层转发流程</button>
+                    <button class="anim-btn reset" onclick="resetAnim()">🔄 重置</button>
+                </div>
+
+                <svg id="animSvg" viewBox="0 0 800 380" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Client -->
+                    <g id="aClient">
+                        <circle cx="70" cy="190" r="35" fill="#21262d" stroke="#58a6ff" stroke-width="2"/>
+                        <text x="70" y="186" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">客户端</text>
+                        <text x="70" y="200" text-anchor="middle" fill="#8b949e" font-size="9">Browser</text>
+                    </g>
+
+                    <!-- LB -->
+                    <g id="aLB">
+                        <rect x="200" y="120" width="130" height="140" rx="10" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+                        <text x="265" y="150" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700" id="lbLabel">负载均衡器</text>
+                        <text x="265" y="175" text-anchor="middle" fill="#8b949e" font-size="10" id="lbTypeLabel">L4 / L7</text>
+                        <line x1="215" y1="185" x2="315" y2="185" stroke="#30363d"/>
+                        <text x="265" y="205" text-anchor="middle" fill="#6e7681" font-size="9" id="lbDetail">选择后端</text>
+                        <text x="265" y="220" text-anchor="middle" fill="#6e7681" font-size="9" id="lbDetail2"></text>
+                    </g>
+
+                    <!-- Backend -->
+                    <g id="aBackend" opacity="0.3">
+                        <rect x="470" y="140" width="100" height="100" rx="8" fill="#161b22" stroke="#30363d"/>
+                        <text x="520" y="180" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600" id="backendLabel">后端服务</text>
+                        <text x="520" y="200" text-anchor="middle" fill="#8b949e" font-size="9" id="backendUrl"></text>
+                        <text x="520" y="225" text-anchor="middle" fill="#3fb950" font-size="10" id="backendStatus">待命中</text>
+                    </g>
+
+                    <!-- Packets -->
+                    <g id="reqPkt" opacity="0">
+                        <rect x="0" y="180" width="35" height="20" rx="4" fill="#58a6ff"/>
+                        <text x="17" y="194" text-anchor="middle" fill="white" font-size="9">REQ</text>
+                    </g>
+                    <g id="resPkt" opacity="0">
+                        <rect x="0" y="180" width="35" height="20" rx="4" fill="#3fb950"/>
+                        <text x="17" y="194" text-anchor="middle" fill="white" font-size="9">RES</text>
+                    </g>
+
+                    <!-- Log -->
+                    <rect x="40" y="300" width="720" height="65" rx="8" fill="#0d1117" stroke="#30363d"/>
+                    <text x="60" y="322" fill="#8b949e" font-size="10">📋 处理日志</text>
+                    <g id="animLogText">
+                        <text x="60" y="345" fill="#6e7681" font-size="9">点击按钮开始演示...</text>
+                    </g>
+                </svg>
+
+                <div class="anim-log" id="animLog">
+                    <div class="log-entry"><span class="ts">[--:--:--]</span> 点击上方按钮开始演示</div>
+                </div>
+            </div>
+
+            <div class="key-point" style="border-left-color: var(--accent-orange);">
+                <h4 style="color: var(--accent-orange);">💡 演示要点</h4>
+                <p><strong>四层</strong>：客户端 → LB(只看IP:Port) → 后端 | 速度快，不关心内容<br>
+                <strong>七层</strong>：客户端 → LB(解析HTTP) → 根据URL路由到不同后端 | 功能丰富</p>
+            </div>
+        </section>
+
+        <!-- Why Section -->
+        <section id="why" class="section">
+            <h2 style="margin-bottom: 24px; text-align: center;">❓ 为什么总是强调四层/七层？</h2>
+
+            <div class="key-point" style="border-left-color: var(--accent-blue);">
+                <h4 style="color: var(--accent-blue);">📌 核心原因：选择不同的层，决定了你能做什么</h4>
+                <p>SLB 和 NGINX 在宣传时强调"四层/七层"，是因为这决定了产品的<strong>能力边界</strong>和<strong>适用场景</strong>。选错层级，可能导致性能浪费或功能缺失。</p>
+            </div>
+
+            <div class="card-grid" style="margin-top: 30px;">
+                <div class="card l4">
+                    <h2>🟢 选四层的场景</h2>
+                    <ul class="feature-list">
+                        <li><span class="icon">🎮</span> 游戏服务器（长连接、低延迟）</li>
+                        <li><span class="icon">🗄️</span> 数据库代理（MySQL、Redis）</li>
+                        <li><span class="icon">📱</span> 物联网 MQTT 协议</li>
+                        <li><span class="icon">🔊</span> 视频流媒体（RTMP、HLS）</li>
+                        <li><span class="icon">🔒</span> 需要超高并发（百万级）</li>
+                        <li><span class="icon">⚡</span> 对延迟极度敏感</li>
+                    </ul>
+                </div>
+
+                <div class="card l7">
+                    <h2>🟠 选七层的场景</h2>
+                    <ul class="feature-list">
+                        <li><span class="icon">🌐</span> Web 应用/API 服务</li>
+                        <li><span class="icon">🔐</span> 需要 HTTPS 终结</li>
+                        <li><span class="icon">🔀</span> 按 URL 路径路由到不同服务</li>
+                        <li><span class="icon">🍪</span> 基于 Cookie/Session 的会话保持</li>
+                        <li><span class="icon">🛡️</span> 需要 WAF 防护</li>
+                        <li><span class="icon">📊</span> API 限流、认证授权</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="diagram-container">
+                <h3 class="diagram-title">🏆 最佳实践：组合使用</h3>
+                <svg class="diagram-svg" viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Client -->
+                    <rect x="30" y="80" width="80" height="60" rx="8" fill="#21262d" stroke="#58a6ff" stroke-width="2"/>
+                    <text x="70" y="106" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">客户端</text>
+                    <text x="70" y="125" text-anchor="middle" fill="#8b949e" font-size="8">Browser</text>
+
+                    <!-- L4 LB -->
+                    <rect x="150" y="60" width="140" height="100" rx="10" fill="#161b22" stroke="#00d4aa" stroke-width="3"/>
+                    <text x="220" y="90" text-anchor="middle" fill="#00d4aa" font-size="12" font-weight="700">四层 SLB</text>
+                    <text x="220" y="110" text-anchor="middle" fill="#8b949e" font-size="9">高性能入口</text>
+                    <line x1="165" y1="125" x2="275" y2="125" stroke="#30363d"/>
+                    <text x="220" y="145" text-anchor="middle" fill="#e6edf3" font-size="8">SSL 终结</text>
+
+                    <!-- Arrow -->
+                    <path d="M290 110 L330 110" stroke="#58a6ff" stroke-width="3" marker-end="url(#arr)"/>
+
+                    <!-- L7 LB -->
+                    <rect x="330" y="60" width="140" height="100" rx="10" fill="#161b22" stroke="#ff6b35" stroke-width="3"/>
+                    <text x="400" y="90" text-anchor="middle" fill="#ff6b35" font-size="12" font-weight="700">七层网关</text>
+                    <text x="400" y="110" text-anchor="middle" fill="#8b949e" font-size="9">智能路由</text>
+                    <line x1="345" y1="125" x2="455" y2="125" stroke="#30363d"/>
+                    <text x="400" y="145" text-anchor="middle" fill="#e6edf3" font-size="8">认证/限流</text>
+
+                    <!-- Arrow -->
+                    <path d="M470 110 L510 110" stroke="#58a6ff" stroke-width="3" marker-end="url(#arr)"/>
+
+                    <!-- Backend -->
+                    <rect x="510" y="60" width="260" height="100" rx="10" fill="#0d1117" stroke="#30363d"/>
+                    <text x="640" y="90" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="600">后端微服务集群</text>
+                    <rect x="530" y="105" width="60" height="35" rx="4" fill="#21262d" stroke="#30363d"/>
+                    <text x="560" y="127" text-anchor="middle" fill="#e6edf3" font-size="8">用户</text>
+                    <rect x="605" y="105" width="60" height="35" rx="4" fill="#21262d" stroke="#30363d"/>
+                    <text x="635" y="127" text-anchor="middle" fill="#e6edf3" font-size="8">订单</text>
+                    <rect x="680" y="105" width="70" height="35" rx="4" fill="#21262d" stroke="#30363d"/>
+                    <text x="715" y="127" text-anchor="middle" fill="#e6edf3" font-size="8">支付</text>
+
+                    <!-- Labels -->
+                    <text x="220" y="200" text-anchor="middle" fill="#00d4aa" font-size="10">⚡ 追求极致性能</text>
+                    <text x="400" y="200" text-anchor="middle" fill="#ff6b35" font-size="10">🛡️ 业务安全控制</text>
+                    <text x="640" y="200" text-anchor="middle" fill="#8b949e" font-size="10">🎯 业务逻辑处理</text>
+
+                    <defs>
+                        <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+                    </defs>
+                </svg>
+            </div>
+
+            <div class="key-point l4">
+                <h4>💎 四层 + 七层组合是最佳实践</h4>
+                <p><strong>四层 SLB（入口）</strong>：处理海量连接，SSL 终结，基础负载均衡<br>
+                <strong>七层网关（内部）</strong>：URL 路由、认证授权、限流熔断、API 管理<br>
+                <br>
+                这样既能保证<strong>高性能</strong>，又能实现<strong>精细化的业务控制</strong>。</p>
+            </div>
+        </section>
+    </div>
+
+    <footer class="footer">
+        <p>📚 四层 vs 七层负载均衡深度解析 | 理解 OSI 模型与网络转发原理</p>
+    </footer>
+
+    <script>
+        // Tab Navigation
+        function showSection(id) {
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+
+        // Layer Highlight
+        function highlightLayer(layer) {
+            document.querySelectorAll('.osi-layer').forEach(l => l.classList.remove('highlight'));
+            document.querySelectorAll('.' + layer).forEach(l => l.classList.add('highlight'));
+            setTimeout(() => {
+                document.querySelectorAll('.osi-layer').forEach(l => l.classList.remove('highlight'));
+            }, 2000);
+        }
+
+        // Animation
+        let animRunning = false;
+        let animTimeout = null;
+
+        function resetAnim() {
+            animRunning = false;
+            clearTimeout(animTimeout);
+            document.getElementById('aBackend').setAttribute('opacity', '0.3');
+            document.getElementById('reqPkt').setAttribute('opacity', '0');
+            document.getElementById('resPkt').setAttribute('opacity', '0');
+            document.getElementById('lbLabel').textContent = '负载均衡器';
+            document.getElementById('lbTypeLabel').textContent = 'L4 / L7';
+            document.getElementById('lbDetail').textContent = '选择后端';
+            document.getElementById('lbDetail2').textContent = '';
+            document.getElementById('backendLabel').textContent = '后端服务';
+            document.getElementById('backendUrl').textContent = '';
+            document.getElementById('backendStatus').textContent = '待命中';
+            document.getElementById('backendStatus').setAttribute('fill', '#3fb950');
+            document.getElementById('animLog').innerHTML = '<div class="log-entry"><span class="ts">[' + getTs() + ']</span> 已重置</div>';
+        }
+
+        function getTs() {
+            return new Date().toTimeString().split(' ')[0].substring(0, 8);
+        }
+
+        function addLog(msg, type = '') {
+            const log = document.getElementById('animLog');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            entry.innerHTML = '<span class="ts">[' + getTs() + ']</span> ' + msg;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function movePacket(pkt, fromX, toX, duration, cb) {
+            pkt.setAttribute('opacity', '1');
+            pkt.setAttribute('transform', 'translate(' + fromX + ', 0)');
+            const start = performance.now();
+            function anim(now) {
+                const prog = Math.min((now - start) / duration, 1);
+                const ease = 1 - Math.pow(1 - prog, 3);
+                pkt.setAttribute('transform', 'translate(' + (fromX + (toX - fromX) * ease) + ', 0)');
+                if (prog < 1) requestAnimationFrame(anim);
+                else { pkt.setAttribute('opacity', '0'); if (cb) cb(); }
+            }
+            requestAnimationFrame(anim);
+        }
+
+        function startAnim(type) {
+            if (animRunning) return;
+            animRunning = true;
+            resetAnim();
+            if (type === 'l4') runL4Anim();
+            else runL7Anim();
+        }
+
+        function runL4Anim() {
+            addLog('🚀 启动四层转发流程', 'l4-log');
+            document.getElementById('lbLabel').textContent = '四层负载均衡';
+            document.getElementById('lbTypeLabel').textContent = 'L4 - TCP/UDP';
+            document.getElementById('lbDetail').textContent = '只看 IP:Port';
+            document.getElementById('backendLabel').textContent = '后端服务器';
+
+            animTimeout = setTimeout(() => {
+                addLog('📦 接收客户端请求 (TCP)', 'l4-log');
+                movePacket(document.getElementById('reqPkt'), 105, 200, 400, () => {
+                    animTimeout = setTimeout(() => {
+                        addLog('🔍 L4: 检查目的 IP:Port (80)', 'l4-log');
+                        animTimeout = setTimeout(() => {
+                            addLog('⚖️ 负载均衡: 轮询选择后端 10.0.0.1:8080', 'l4-log');
+                            document.getElementById('aBackend').setAttribute('opacity', '1');
+                            document.getElementById('backendUrl').textContent = '10.0.0.1:8080';
+                            animTimeout = setTimeout(() => {
+                                addLog('📤 转发请求到后端 (不修改内容)', 'l4-log');
+                                movePacket(document.getElementById('reqPkt'), 330, 470, 400, () => {
+                                    animTimeout = setTimeout(() => {
+                                        addLog('⏳ 后端处理...', 'l4-log');
+                                        animTimeout = setTimeout(() => {
+                                            document.getElementById('backendStatus').textContent = '处理完成';
+                                            addLog('✅ 后端返回响应', 'l4-log');
+                                            animTimeout = setTimeout(() => {
+                                                movePacket(document.getElementById('resPkt'), 470, 330, 400, () => {
+                                                    animTimeout = setTimeout(() => {
+                                                        movePacket(document.getElementById('resPkt'), 200, 105, 400, () => {
+                                                            addLog('✅ 四层转发完成！透明传输，极低延迟', 'l4-log');
+                                                            animRunning = false;
+                                                        });
+                                                    }, 200);
+                                                });
+                                            }, 300);
+                                        }, 500);
+                                    }, 300);
+                                });
+                            }, 300);
+                        });
+                    }, 400);
+                });
+            }, 300);
+        }
+
+        function runL7Anim() {
+            addLog('🚀 启动七层转发流程', 'l7-log');
+            document.getElementById('lbLabel').textContent = '七层负载均衡';
+            document.getElementById('lbTypeLabel').textContent = 'L7 - HTTP';
+            document.getElementById('lbDetail').textContent = '解析 HTTP 内容';
+            document.getElementById('backendLabel').textContent = '微服务';
+
+            animTimeout = setTimeout(() => {
+                addLog('📦 接收客户端请求 (HTTP)', 'l7-log');
+                movePacket(document.getElementById('reqPkt'), 105, 200, 400, () => {
+                    animTimeout = setTimeout(() => {
+                        addLog('🔍 L7: 解析 HTTP 请求', 'l7-log');
+                        animTimeout = setTimeout(() => {
+                            addLog('   - 方法: GET /api/users', 'l7-log');
+                            animTimeout = setTimeout(() => {
+                                addLog('   - Host: api.example.com', 'l7-log');
+                                animTimeout = setTimeout(() => {
+                                    addLog('   - Header 分析完成', 'l7-log');
+                                    animTimeout = setTimeout(() => {
+                                        addLog('🎯 路由决策: /api/users → user-service', 'l7-log');
+                                        document.getElementById('aBackend').setAttribute('opacity', '1');
+                                        document.getElementById('backendUrl').textContent = '/api/users';
+                                        document.getElementById('backendLabel').textContent = '用户服务';
+                                        animTimeout = setTimeout(() => {
+                                            addLog('🔐 认证检查: JWT Token 有效', 'l7-log');
+                                            animTimeout = setTimeout(() => {
+                                                addLog('📤 转发请求到后端', 'l7-log');
+                                                movePacket(document.getElementById('reqPkt'), 330, 470, 400, () => {
+                                                    animTimeout = setTimeout(() => {
+                                                        addLog('⏳ 后端处理...', 'l7-log');
+                                                        animTimeout = setTimeout(() => {
+                                                            document.getElementById('backendStatus').textContent = '处理完成';
+                                                            addLog('✅ 后端返回响应 (JSON)', 'l7-log');
+                                                            animTimeout = setTimeout(() => {
+                                                                movePacket(document.getElementById('resPkt'), 470, 330, 400, () => {
+                                                                    animTimeout = setTimeout(() => {
+                                                                        addLog('📊 记录日志: QPS+1, 延迟 45ms', 'l7-log');
+                                                                        animTimeout = setTimeout(() => {
+                                                                            movePacket(document.getElementById('resPkt'), 200, 105, 400, () => {
+                                                                                addLog('✅ 七层转发完成！智能路由 + 安全检查', 'l7-log');
+                                                                                animRunning = false;
+                                                                            });
+                                                                        }, 300);
+                                                                    });
+                                                                });
+                                                            }, 400);
+                                                        }, 600);
+                                                    }, 300);
+                                                });
+                                            }, 400);
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    }, 400);
+                });
+            }, 300);
+        }
+    </script>
+</body>
+</html>

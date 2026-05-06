@@ -1,0 +1,1880 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL 语法树解析 - SQL AST Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: linear-gradient(90deg, #0ea5e9 0%, #3b82f6 100%);
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(14, 165, 233, 0.3);
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .sidebar {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+        
+        .sidebar h3 {
+            color: #38bdf8;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+            border-bottom: 2px solid #38bdf8;
+            padding-bottom: 10px;
+        }
+        
+        .sql-example-btn {
+            display: block;
+            width: 100%;
+            padding: 12px 15px;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.3s ease;
+            font-size: 0.9em;
+        }
+        
+        .sql-example-btn:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+        }
+        
+        .sql-example-btn.active {
+            background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        }
+        
+        .content-area {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            gap: 20px;
+        }
+        
+        .sql-input-section {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        
+        .sql-input-section h3 {
+            color: #38bdf8;
+            margin-bottom: 15px;
+        }
+        
+        .sql-code {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 20px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #a5b4fc;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .keyword { color: #c084fc; font-weight: bold; }
+        .function { color: #fbbf24; }
+        .string { color: #86efac; }
+        .number { color: #fca5a5; }
+        .comment { color: #6b7280; font-style: italic; }
+        .identifier { color: #7dd3fc; }
+        .operator { color: #f472b6; }
+        
+        .visualization-section {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            min-height: 500px;
+        }
+        
+        .visualization-section h3 {
+            color: #38bdf8;
+            margin-bottom: 15px;
+        }
+        
+        #tree-container {
+            width: 100%;
+            height: 600px;
+            background: #0f172a;
+            border-radius: 10px;
+            overflow: auto;
+            position: relative;
+        }
+        
+        .node circle {
+            fill: #1e40af;
+            stroke: #60a5fa;
+            stroke-width: 2px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .node circle:hover {
+            fill: #3b82f6;
+            stroke: #93c5fd;
+            stroke-width: 3px;
+            filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.6));
+        }
+        
+        .node text {
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 12px;
+            fill: #e2e8f0;
+            text-anchor: middle;
+            dominant-baseline: middle;
+            pointer-events: none;
+        }
+        
+        .node .node-label {
+            font-weight: bold;
+            font-size: 13px;
+        }
+        
+        .node .node-type {
+            font-size: 10px;
+            fill: #94a3b8;
+        }
+        
+        .link {
+            fill: none;
+            stroke: #475569;
+            stroke-width: 1.5px;
+        }
+        
+        .node-detail {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid #38bdf8;
+            border-radius: 10px;
+            padding: 15px;
+            max-width: 300px;
+            display: none;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        
+        .node-detail.show {
+            display: block;
+        }
+        
+        .node-detail h4 {
+            color: #38bdf8;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        
+        .node-detail p {
+            font-size: 12px;
+            line-height: 1.5;
+            color: #cbd5e1;
+        }
+        
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 10px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+        }
+        
+        .info-section {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 16px;
+            padding: 25px;
+            margin-top: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        
+        .info-section h2 {
+            color: #38bdf8;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+        
+        .node-types-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+        }
+        
+        .node-type-card {
+            background: rgba(15, 23, 42, 0.6);
+            border-radius: 10px;
+            padding: 15px;
+            border-left: 4px solid #3b82f6;
+        }
+        
+        .node-type-card h4 {
+            color: #60a5fa;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .node-type-card p {
+            font-size: 12px;
+            color: #94a3b8;
+            line-height: 1.5;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .tab-btn {
+            padding: 10px 20px;
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            color: #60a5fa;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .tab-btn:hover, .tab-btn.active {
+            background: #3b82f6;
+            color: white;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .structure-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        
+        .structure-table th, .structure-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #334155;
+        }
+        
+        .structure-table th {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            font-weight: 600;
+        }
+        
+        .structure-table tr:hover {
+            background: rgba(59, 130, 246, 0.1);
+        }
+        
+        .complexity-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        
+        .badge-simple { background: #10b981; color: white; }
+        .badge-medium { background: #f59e0b; color: white; }
+        .badge-complex { background: #ef4444; color: white; }
+        
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                max-height: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌳 MySQL 语法树解析器</h1>
+        <p>深入理解 SQL 如何从文本解析为抽象语法树 (AST)</p>
+    </div>
+    
+    <div class="container">
+        <div class="main-grid">
+            <div class="sidebar">
+                <h3>📚 SQL 示例选择</h3>
+                <button class="sql-example-btn active" data-example="simple_select">
+                    <span class="complexity-badge badge-simple">简单</span><br>
+                    基础 SELECT 查询
+                </button>
+                <button class="sql-example-btn" data-example="select_where">
+                    <span class="complexity-badge badge-simple">简单</span><br>
+                    SELECT + WHERE 条件
+                </button>
+                <button class="sql-example-btn" data-example="select_join">
+                    <span class="complexity-badge badge-medium">中等</span><br>
+                    多表 JOIN 查询
+                </button>
+                <button class="sql-example-btn" data-example="select_aggregate">
+                    <span class="complexity-badge badge-medium">中等</span><br>
+                    聚合函数 + GROUP BY
+                </button>
+                <button class="sql-example-btn" data-example="select_subquery">
+                    <span class="complexity-badge badge-complex">复杂</span><br>
+                    子查询 (Subquery)
+                </button>
+                <button class="sql-example-btn" data-example="select_union">
+                    <span class="complexity-badge badge-complex">复杂</span><br>
+                    UNION 联合查询
+                </button>
+                <button class="sql-example-btn" data-example="insert">
+                    <span class="complexity-badge badge-simple">简单</span><br>
+                    INSERT 插入语句
+                </button>
+                <button class="sql-example-btn" data-example="update">
+                    <span class="complexity-badge badge-medium">中等</span><br>
+                    UPDATE 更新语句
+                </button>
+                <button class="sql-example-btn" data-example="delete">
+                    <span class="complexity-badge badge-medium">中等</span><br>
+                    DELETE 删除语句
+                </button>
+                <button class="sql-example-btn" data-example="complex_query">
+                    <span class="complexity-badge badge-complex">复杂</span><br>
+                    综合复杂查询
+                </button>
+            </div>
+            
+            <div class="content-area">
+                <div class="sql-input-section">
+                    <h3>📝 SQL 源代码</h3>
+                    <div class="sql-code" id="sql-display"></div>
+                </div>
+                
+                <div class="visualization-section">
+                    <h3>🔍 语法树可视化 (AST)</h3>
+                    <div id="tree-container">
+                        <svg id="tree-svg"></svg>
+                        <div class="node-detail" id="node-detail">
+                            <h4 id="detail-title">节点详情</h4>
+                            <p id="detail-content"></p>
+                        </div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #1e40af;"></div>
+                            <span>语句节点 (Statement)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #059669;"></div>
+                            <span>表达式节点 (Expression)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #dc2626;"></div>
+                            <span>标识符节点 (Identifier)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #7c3aed;"></div>
+                            <span>字面量节点 (Literal)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background: #ea580c;"></div>
+                            <span>运算符节点 (Operator)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="node-types">节点类型详解</button>
+                <button class="tab-btn" data-tab="structure">语法树结构规则</button>
+                <button class="tab-btn" data-tab="process">解析流程</button>
+            </div>
+            
+            <div class="tab-content active" id="node-types">
+                <h2>MySQL 语法树核心节点类型</h2>
+                <div class="node-types-grid">
+                    <div class="node-type-card">
+                        <h4>🔷 SELECT_STMT - 查询语句</h4>
+                        <p>SELECT 语句的根节点，包含 select_list、from_clause、where_clause、group_by、order_by 等子节点。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🔷 INSERT_STMT - 插入语句</h4>
+                        <p>INSERT 语句的根节点，包含 table_reference、column_list、values_clause 或 select_stmt 子节点。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🔷 UPDATE_STMT - 更新语句</h4>
+                        <p>UPDATE 语句的根节点，包含 table_references、set_clause、where_clause 等子节点。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🔷 DELETE_STMT - 删除语句</h4>
+                        <p>DELETE 语句的根节点，包含 table_references、where_clause、order_by、limit 等子节点。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟢 TABLE_REF - 表引用</h4>
+                        <p>表示表引用，包含数据库名、表名、别名等信息。JOIN 操作中会包含多个 TABLE_REF。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟢 COLUMN_REF - 列引用</h4>
+                        <p>表示列引用，包含表名/别名前缀和列名，如 t1.id。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟢 FUNC_CALL - 函数调用</h4>
+                        <p>表示函数调用节点，包含函数名和参数列表，如 COUNT(*)、MAX(salary)。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟢 BINARY_OP - 二元运算</h4>
+                        <p>表示二元运算表达式，如 =、<、>、AND、OR、+、- 等运算符。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🔴 IDENT - 标识符</h4>
+                        <p>表示标识符节点，存储表名、列名、别名等名称信息。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟣 LITERAL - 字面量</h4>
+                        <p>表示常量值，包括字符串、数字、NULL、布尔值等。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟣 NUMBER_LITERAL - 数字字面量</h4>
+                        <p>表示数字常量，如整数、浮点数。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟣 STRING_LITERAL - 字符串字面量</h4>
+                        <p>表示字符串常量，用单引号或双引号包裹的文本。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟠 JOIN - 连接操作</h4>
+                        <p>表示 JOIN 操作节点，包含 JOIN 类型、左表、右表和 ON 条件。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟠 ORDER_BY - 排序</h4>
+                        <p>表示 ORDER BY 子句，包含排序表达式和排序方向 (ASC/DESC)。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟠 GROUP_BY - 分组</h4>
+                        <p>表示 GROUP BY 子句，包含分组表达式列表。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>🟠 LIMIT - 限制</h4>
+                        <p>表示 LIMIT 子句，包含偏移量和行数限制。</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="tab-content" id="structure">
+                <h2>MySQL 语法树结构规则</h2>
+                <table class="structure-table">
+                    <thead>
+                        <tr>
+                            <th>节点类型</th>
+                            <th>必需子节点</th>
+                            <th>可选子节点</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>SELECT_STMT</td>
+                            <td>select_list</td>
+                            <td>from_clause, where_clause, group_by, having, order_by, limit</td>
+                            <td>SELECT 语句根节点</td>
+                        </tr>
+                        <tr>
+                            <td>INSERT_STMT</td>
+                            <td>table_ref, values_clause</td>
+                            <td>column_list, on_duplicate</td>
+                            <td>INSERT 语句根节点</td>
+                        </tr>
+                        <tr>
+                            <td>UPDATE_STMT</td>
+                            <td>table_refs, set_clause</td>
+                            <td>where_clause, order_by, limit</td>
+                            <td>UPDATE 语句根节点</td>
+                        </tr>
+                        <tr>
+                            <td>DELETE_STMT</td>
+                            <td>table_refs</td>
+                            <td>where_clause, order_by, limit</td>
+                            <td>DELETE 语句根节点</td>
+                        </tr>
+                        <tr>
+                            <td>FROM_CLAUSE</td>
+                            <td>table_reference_list</td>
+                            <td>join_clauses</td>
+                            <td>FROM 子句节点</td>
+                        </tr>
+                        <tr>
+                            <td>WHERE_CLAUSE</td>
+                            <td>condition_expr</td>
+                            <td>-</td>
+                            <td>WHERE 条件节点</td>
+                        </tr>
+                        <tr>
+                            <td>JOIN</td>
+                            <td>left_table, right_table, join_type</td>
+                            <td>on_condition</td>
+                            <td>JOIN 操作节点</td>
+                        </tr>
+                        <tr>
+                            <td>BINARY_EXPR</td>
+                            <td>left, operator, right</td>
+                            <td>-</td>
+                            <td>二元表达式节点</td>
+                        </tr>
+                        <tr>
+                            <td>FUNC_CALL</td>
+                            <td>func_name, args_list</td>
+                            <td>distinct_flag</td>
+                            <td>函数调用节点</td>
+                        </tr>
+                        <tr>
+                            <td>SUBQUERY</td>
+                            <td>select_stmt</td>
+                            <td>correlation</td>
+                            <td>子查询节点</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="tab-content" id="process">
+                <h2>SQL 解析流程</h2>
+                <div class="node-types-grid">
+                    <div class="node-type-card">
+                        <h4>1️⃣ 词法分析 (Lexical Analysis)</h4>
+                        <p>将 SQL 字符串分割成 Token 序列。识别关键字 (SELECT, FROM)、标识符、运算符、字面量等。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>2️⃣ 语法分析 (Syntax Analysis)</h4>
+                        <p>根据 MySQL 语法规则，将 Token 序列构建成语法树。检查语法正确性。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>3️⃣ 语义分析 (Semantic Analysis)</h4>
+                        <p>检查表名、列名是否存在，验证数据类型兼容性，解析别名引用。</p>
+                    </div>
+                    <div class="node-type-card">
+                        <h4>4️⃣ 查询优化 (Query Optimization)</h4>
+                        <p>基于语法树生成执行计划，选择最优的索引和 JOIN 顺序。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // SQL 示例数据
+        const sqlExamples = {
+            simple_select: {
+                sql: `SELECT id, name, email
+FROM users`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "SELECT 查询语句根节点",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "id", description: "列引用: id" },
+                                { name: "COLUMN_REF", type: "identifier", value: "name", description: "列引用: name" },
+                                { name: "COLUMN_REF", type: "identifier", value: "email", description: "列引用: email" }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                { name: "TABLE_REF", type: "identifier", value: "users", description: "表引用: users" }
+                            ]
+                        }
+                    ]
+                }
+            },
+            select_where: {
+                sql: `SELECT id, name, age
+FROM employees
+WHERE age > 25 AND department = 'Sales'`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "SELECT 查询语句",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "id", description: "列引用: id" },
+                                { name: "COLUMN_REF", type: "identifier", value: "name", description: "列引用: name" },
+                                { name: "COLUMN_REF", type: "identifier", value: "age", description: "列引用: age" }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                { name: "TABLE_REF", type: "identifier", value: "employees", description: "表引用: employees" }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件子句",
+                            children: [
+                                {
+                                    name: "AND",
+                                    type: "operator",
+                                    description: "逻辑与运算符",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(>)",
+                                            type: "operator",
+                                            description: "大于比较",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "age", description: "列引用: age" },
+                                                { name: "LITERAL", type: "literal", value: "25", description: "数字字面量: 25" }
+                                            ]
+                                        },
+                                        {
+                                            name: "BINARY_OP(=)",
+                                            type: "operator",
+                                            description: "等于比较",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "department", description: "列引用: department" },
+                                                { name: "LITERAL", type: "literal", value: "'Sales'", description: "字符串字面量: 'Sales'" }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            select_join: {
+                sql: `SELECT e.name, d.department_name, e.salary
+FROM employees e
+INNER JOIN departments d ON e.dept_id = d.id
+WHERE e.salary > 5000`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "SELECT 多表 JOIN 查询",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "e.name", description: "列引用: e.name" },
+                                { name: "COLUMN_REF", type: "identifier", value: "d.department_name", description: "列引用: d.department_name" },
+                                { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列引用: e.salary" }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句包含 JOIN",
+                            children: [
+                                {
+                                    name: "INNER_JOIN",
+                                    type: "join",
+                                    description: "内连接操作",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "employees AS e", description: "左表: employees 别名 e" },
+                                        { name: "TABLE_REF", type: "identifier", value: "departments AS d", description: "右表: departments 别名 d" },
+                                        {
+                                            name: "ON_CONDITION",
+                                            type: "clause",
+                                            description: "JOIN 连接条件",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(=)",
+                                                    type: "operator",
+                                                    description: "等于比较",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.dept_id", description: "列引用: e.dept_id" },
+                                                        { name: "COLUMN_REF", type: "identifier", value: "d.id", description: "列引用: d.id" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件子句",
+                            children: [
+                                {
+                                    name: "BINARY_OP(>)",
+                                    type: "operator",
+                                    description: "大于比较",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列引用: e.salary" },
+                                        { name: "LITERAL", type: "literal", value: "5000", description: "数字字面量: 5000" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            select_aggregate: {
+                sql: `SELECT d.department_name, 
+       COUNT(*) AS emp_count,
+       AVG(e.salary) AS avg_salary,
+       MAX(e.salary) AS max_salary
+FROM employees e
+JOIN departments d ON e.dept_id = d.id
+GROUP BY d.department_name
+HAVING COUNT(*) > 5
+ORDER BY avg_salary DESC`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "聚合查询语句",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "d.department_name", description: "列引用: d.department_name" },
+                                {
+                                    name: "FUNC_CALL(COUNT)",
+                                    type: "function",
+                                    description: "COUNT 聚合函数",
+                                    alias: "emp_count",
+                                    children: [
+                                        { name: "WILDCARD(*)", type: "identifier", value: "*", description: "通配符 *" }
+                                    ]
+                                },
+                                {
+                                    name: "FUNC_CALL(AVG)",
+                                    type: "function",
+                                    description: "AVG 聚合函数",
+                                    alias: "avg_salary",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列引用: e.salary" }
+                                    ]
+                                },
+                                {
+                                    name: "FUNC_CALL(MAX)",
+                                    type: "function",
+                                    description: "MAX 聚合函数",
+                                    alias: "max_salary",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列引用: e.salary" }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                {
+                                    name: "JOIN",
+                                    type: "join",
+                                    description: "JOIN 操作",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "employees AS e", description: "表: employees" },
+                                        { name: "TABLE_REF", type: "identifier", value: "departments AS d", description: "表: departments" },
+                                        {
+                                            name: "ON_CONDITION",
+                                            type: "clause",
+                                            description: "连接条件",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(=)",
+                                                    type: "operator",
+                                                    description: "等于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.dept_id", description: "列: e.dept_id" },
+                                                        { name: "COLUMN_REF", type: "identifier", value: "d.id", description: "列: d.id" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "GROUP_BY",
+                            type: "clause",
+                            description: "GROUP BY 分组子句",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "d.department_name", description: "分组列" }
+                            ]
+                        },
+                        {
+                            name: "HAVING",
+                            type: "clause",
+                            description: "HAVING 过滤子句",
+                            children: [
+                                {
+                                    name: "BINARY_OP(>)",
+                                    type: "operator",
+                                    description: "大于比较",
+                                    children: [
+                                        {
+                                            name: "FUNC_CALL(COUNT)",
+                                            type: "function",
+                                            description: "COUNT 函数",
+                                            children: [
+                                                { name: "WILDCARD(*)", type: "identifier", value: "*", description: "通配符" }
+                                            ]
+                                        },
+                                        { name: "LITERAL", type: "literal", value: "5", description: "数字: 5" }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "ORDER_BY",
+                            type: "clause",
+                            description: "ORDER BY 排序子句",
+                            children: [
+                                {
+                                    name: "SORT_SPEC",
+                                    type: "expression",
+                                    description: "排序规格",
+                                    direction: "DESC",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "avg_salary", description: "排序列" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            select_subquery: {
+                sql: `SELECT name, salary
+FROM employees
+WHERE salary > (
+    SELECT AVG(salary) 
+    FROM employees
+)
+AND department_id IN (
+    SELECT id 
+    FROM departments 
+    WHERE location = 'Beijing'
+)`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "包含子查询的 SELECT",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "name", description: "列: name" },
+                                { name: "COLUMN_REF", type: "identifier", value: "salary", description: "列: salary" }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                { name: "TABLE_REF", type: "identifier", value: "employees", description: "表: employees" }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件",
+                            children: [
+                                {
+                                    name: "AND",
+                                    type: "operator",
+                                    description: "逻辑与",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(>)",
+                                            type: "operator",
+                                            description: "大于比较",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "salary", description: "列: salary" },
+                                                {
+                                                    name: "SUBQUERY",
+                                                    type: "subquery",
+                                                    description: "标量子查询",
+                                                    children: [
+                                                        {
+                                                            name: "SELECT_STMT",
+                                                            type: "statement",
+                                                            description: "子查询 SELECT",
+                                                            children: [
+                                                                {
+                                                                    name: "SELECT_LIST",
+                                                                    type: "clause",
+                                                                    description: "子查询 SELECT 列表",
+                                                                    children: [
+                                                                        {
+                                                                            name: "FUNC_CALL(AVG)",
+                                                                            type: "function",
+                                                                            description: "AVG 函数",
+                                                                            children: [
+                                                                                { name: "COLUMN_REF", type: "identifier", value: "salary", description: "列: salary" }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    name: "FROM_CLAUSE",
+                                                                    type: "clause",
+                                                                    description: "子查询 FROM",
+                                                                    children: [
+                                                                        { name: "TABLE_REF", type: "identifier", value: "employees", description: "表: employees" }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            name: "IN",
+                                            type: "operator",
+                                            description: "IN 运算符",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "department_id", description: "列: department_id" },
+                                                {
+                                                    name: "SUBQUERY",
+                                                    type: "subquery",
+                                                    description: "列表子查询",
+                                                    children: [
+                                                        {
+                                                            name: "SELECT_STMT",
+                                                            type: "statement",
+                                                            description: "子查询 SELECT",
+                                                            children: [
+                                                                {
+                                                                    name: "SELECT_LIST",
+                                                                    type: "clause",
+                                                                    description: "子查询 SELECT 列表",
+                                                                    children: [
+                                                                        { name: "COLUMN_REF", type: "identifier", value: "id", description: "列: id" }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    name: "FROM_CLAUSE",
+                                                                    type: "clause",
+                                                                    description: "子查询 FROM",
+                                                                    children: [
+                                                                        { name: "TABLE_REF", type: "identifier", value: "departments", description: "表: departments" }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    name: "WHERE_CLAUSE",
+                                                                    type: "clause",
+                                                                    description: "子查询 WHERE",
+                                                                    children: [
+                                                                        {
+                                                                            name: "BINARY_OP(=)",
+                                                                            type: "operator",
+                                                                            description: "等于",
+                                                                            children: [
+                                                                                { name: "COLUMN_REF", type: "identifier", value: "location", description: "列: location" },
+                                                                                { name: "LITERAL", type: "literal", value: "'Beijing'", description: "字符串: 'Beijing'" }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            select_union: {
+                sql: `SELECT id, name, 'Employee' AS type
+FROM employees
+WHERE department = 'IT'
+UNION ALL
+SELECT id, name, 'Manager' AS type
+FROM managers
+WHERE level > 2
+ORDER BY name`,
+                tree: {
+                    name: "UNION_STMT",
+                    type: "statement",
+                    description: "UNION 联合查询",
+                    children: [
+                        {
+                            name: "SELECT_STMT(1)",
+                            type: "statement",
+                            description: "第一个 SELECT",
+                            children: [
+                                {
+                                    name: "SELECT_LIST",
+                                    type: "clause",
+                                    description: "SELECT 列表",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "id", description: "列: id" },
+                                        { name: "COLUMN_REF", type: "identifier", value: "name", description: "列: name" },
+                                        { name: "ALIAS_EXPR", type: "expression", value: "'Employee' AS type", description: "别名表达式" }
+                                    ]
+                                },
+                                {
+                                    name: "FROM_CLAUSE",
+                                    type: "clause",
+                                    description: "FROM 子句",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "employees", description: "表: employees" }
+                                    ]
+                                },
+                                {
+                                    name: "WHERE_CLAUSE",
+                                    type: "clause",
+                                    description: "WHERE 条件",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(=)",
+                                            type: "operator",
+                                            description: "等于",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "department", description: "列: department" },
+                                                { name: "LITERAL", type: "literal", value: "'IT'", description: "字符串: 'IT'" }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "UNION_ALL",
+                            type: "operator",
+                            description: "UNION ALL 操作符",
+                            children: []
+                        },
+                        {
+                            name: "SELECT_STMT(2)",
+                            type: "statement",
+                            description: "第二个 SELECT",
+                            children: [
+                                {
+                                    name: "SELECT_LIST",
+                                    type: "clause",
+                                    description: "SELECT 列表",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "id", description: "列: id" },
+                                        { name: "COLUMN_REF", type: "identifier", value: "name", description: "列: name" },
+                                        { name: "ALIAS_EXPR", type: "expression", value: "'Manager' AS type", description: "别名表达式" }
+                                    ]
+                                },
+                                {
+                                    name: "FROM_CLAUSE",
+                                    type: "clause",
+                                    description: "FROM 子句",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "managers", description: "表: managers" }
+                                    ]
+                                },
+                                {
+                                    name: "WHERE_CLAUSE",
+                                    type: "clause",
+                                    description: "WHERE 条件",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(>)",
+                                            type: "operator",
+                                            description: "大于",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "level", description: "列: level" },
+                                                { name: "LITERAL", type: "literal", value: "2", description: "数字: 2" }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "ORDER_BY",
+                            type: "clause",
+                            description: "全局 ORDER BY",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "name", description: "排序列: name" }
+                            ]
+                        }
+                    ]
+                }
+            },
+            insert: {
+                sql: `INSERT INTO employees (name, age, department_id, salary)
+VALUES ('张三', 28, 1, 8000.00)`,
+                tree: {
+                    name: "INSERT_STMT",
+                    type: "statement",
+                    description: "INSERT 插入语句",
+                    children: [
+                        {
+                            name: "TABLE_REF",
+                            type: "identifier",
+                            value: "employees",
+                            description: "目标表: employees"
+                        },
+                        {
+                            name: "COLUMN_LIST",
+                            type: "clause",
+                            description: "插入列列表",
+                            children: [
+                                { name: "IDENT", type: "identifier", value: "name", description: "列: name" },
+                                { name: "IDENT", type: "identifier", value: "age", description: "列: age" },
+                                { name: "IDENT", type: "identifier", value: "department_id", description: "列: department_id" },
+                                { name: "IDENT", type: "identifier", value: "salary", description: "列: salary" }
+                            ]
+                        },
+                        {
+                            name: "VALUES_CLAUSE",
+                            type: "clause",
+                            description: "VALUES 子句",
+                            children: [
+                                {
+                                    name: "VALUE_ROW",
+                                    type: "expression",
+                                    description: "值行",
+                                    children: [
+                                        { name: "STRING_LITERAL", type: "literal", value: "'张三'", description: "字符串: '张三'" },
+                                        { name: "NUMBER_LITERAL", type: "literal", value: "28", description: "数字: 28" },
+                                        { name: "NUMBER_LITERAL", type: "literal", value: "1", description: "数字: 1" },
+                                        { name: "NUMBER_LITERAL", type: "literal", value: "8000.00", description: "数字: 8000.00" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            update: {
+                sql: `UPDATE employees e
+JOIN departments d ON e.dept_id = d.id
+SET e.salary = e.salary * 1.1,
+    e.last_update = NOW()
+WHERE d.location = 'Shanghai'
+AND e.performance_rating >= 4`,
+                tree: {
+                    name: "UPDATE_STMT",
+                    type: "statement",
+                    description: "UPDATE 更新语句",
+                    children: [
+                        {
+                            name: "TABLE_REFS",
+                            type: "clause",
+                            description: "更新表引用",
+                            children: [
+                                {
+                                    name: "JOIN",
+                                    type: "join",
+                                    description: "JOIN 操作",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "employees AS e", description: "表: employees 别名 e" },
+                                        { name: "TABLE_REF", type: "identifier", value: "departments AS d", description: "表: departments 别名 d" },
+                                        {
+                                            name: "ON_CONDITION",
+                                            type: "clause",
+                                            description: "连接条件",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(=)",
+                                                    type: "operator",
+                                                    description: "等于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.dept_id", description: "列: e.dept_id" },
+                                                        { name: "COLUMN_REF", type: "identifier", value: "d.id", description: "列: d.id" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "SET_CLAUSE",
+                            type: "clause",
+                            description: "SET 赋值子句",
+                            children: [
+                                {
+                                    name: "ASSIGNMENT",
+                                    type: "operator",
+                                    description: "赋值操作",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "被赋值列: e.salary" },
+                                        {
+                                            name: "BINARY_OP(*)",
+                                            type: "operator",
+                                            description: "乘法运算",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列: e.salary" },
+                                                { name: "NUMBER_LITERAL", type: "literal", value: "1.1", description: "数字: 1.1" }
+                                            ]
+                                        }
+                                    ]
+                                },
+                                {
+                                    name: "ASSIGNMENT",
+                                    type: "operator",
+                                    description: "赋值操作",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.last_update", description: "被赋值列: e.last_update" },
+                                        {
+                                            name: "FUNC_CALL(NOW)",
+                                            type: "function",
+                                            description: "NOW() 函数",
+                                            children: []
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件",
+                            children: [
+                                {
+                                    name: "AND",
+                                    type: "operator",
+                                    description: "逻辑与",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(=)",
+                                            type: "operator",
+                                            description: "等于",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "d.location", description: "列: d.location" },
+                                                { name: "STRING_LITERAL", type: "literal", value: "'Shanghai'", description: "字符串: 'Shanghai'" }
+                                            ]
+                                        },
+                                        {
+                                            name: "BINARY_OP(>=)",
+                                            type: "operator",
+                                            description: "大于等于",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "e.performance_rating", description: "列: e.performance_rating" },
+                                                { name: "NUMBER_LITERAL", type: "literal", value: "4", description: "数字: 4" }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            delete: {
+                sql: `DELETE e
+FROM employees e
+LEFT JOIN orders o ON e.id = o.employee_id
+WHERE o.id IS NULL
+AND e.created_at < DATE_SUB(NOW(), INTERVAL 1 YEAR)`,
+                tree: {
+                    name: "DELETE_STMT",
+                    type: "statement",
+                    description: "DELETE 删除语句",
+                    children: [
+                        {
+                            name: "DELETE_TARGET",
+                            type: "identifier",
+                            value: "e",
+                            description: "删除目标: e (employees)"
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                {
+                                    name: "LEFT_JOIN",
+                                    type: "join",
+                                    description: "LEFT JOIN 操作",
+                                    children: [
+                                        { name: "TABLE_REF", type: "identifier", value: "employees AS e", description: "左表: employees" },
+                                        { name: "TABLE_REF", type: "identifier", value: "orders AS o", description: "右表: orders" },
+                                        {
+                                            name: "ON_CONDITION",
+                                            type: "clause",
+                                            description: "连接条件",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(=)",
+                                                    type: "operator",
+                                                    description: "等于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.id", description: "列: e.id" },
+                                                        { name: "COLUMN_REF", type: "identifier", value: "o.employee_id", description: "列: o.employee_id" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件",
+                            children: [
+                                {
+                                    name: "AND",
+                                    type: "operator",
+                                    description: "逻辑与",
+                                    children: [
+                                        {
+                                            name: "IS_NULL",
+                                            type: "operator",
+                                            description: "IS NULL 判断",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "o.id", description: "列: o.id" }
+                                            ]
+                                        },
+                                        {
+                                            name: "BINARY_OP(<)",
+                                            type: "operator",
+                                            description: "小于比较",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "e.created_at", description: "列: e.created_at" },
+                                                {
+                                                    name: "FUNC_CALL(DATE_SUB)",
+                                                    type: "function",
+                                                    description: "DATE_SUB 函数",
+                                                    children: [
+                                                        {
+                                                            name: "FUNC_CALL(NOW)",
+                                                            type: "function",
+                                                            description: "NOW() 函数",
+                                                            children: []
+                                                        },
+                                                        { name: "INTERVAL_EXPR", type: "expression", value: "INTERVAL 1 YEAR", description: "时间间隔表达式" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            complex_query: {
+                sql: `SELECT 
+    d.department_name,
+    CONCAT(e.first_name, ' ', e.last_name) AS full_name,
+    e.salary,
+    RANK() OVER (PARTITION BY d.id ORDER BY e.salary DESC) AS salary_rank
+FROM employees e
+INNER JOIN departments d ON e.dept_id = d.id
+LEFT JOIN (SELECT employee_id, COUNT(*) AS project_count 
+           FROM employee_projects 
+           GROUP BY employee_id) ep ON e.id = ep.employee_id
+WHERE e.hire_date >= '2020-01-01'
+AND (ep.project_count > 3 OR e.salary > 100000)
+ORDER BY d.department_name, salary_rank
+LIMIT 20 OFFSET 10`,
+                tree: {
+                    name: "SELECT_STMT",
+                    type: "statement",
+                    description: "复杂综合查询",
+                    children: [
+                        {
+                            name: "SELECT_LIST",
+                            type: "clause",
+                            description: "SELECT 列表",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "d.department_name", description: "列: d.department_name" },
+                                {
+                                    name: "FUNC_CALL(CONCAT)",
+                                    type: "function",
+                                    description: "CONCAT 函数",
+                                    alias: "full_name",
+                                    children: [
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.first_name", description: "列: e.first_name" },
+                                        { name: "STRING_LITERAL", type: "literal", value: "' '", description: "空格字符串" },
+                                        { name: "COLUMN_REF", type: "identifier", value: "e.last_name", description: "列: e.last_name" }
+                                    ]
+                                },
+                                { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列: e.salary" },
+                                {
+                                    name: "WINDOW_FUNC(RANK)",
+                                    type: "function",
+                                    description: "窗口函数 RANK()",
+                                    alias: "salary_rank",
+                                    children: [
+                                        {
+                                            name: "OVER_CLAUSE",
+                                            type: "clause",
+                                            description: "OVER 子句",
+                                            children: [
+                                                {
+                                                    name: "PARTITION_BY",
+                                                    type: "clause",
+                                                    description: "PARTITION BY",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "d.id", description: "分区列: d.id" }
+                                                    ]
+                                                },
+                                                {
+                                                    name: "ORDER_BY",
+                                                    type: "clause",
+                                                    description: "窗口排序",
+                                                    children: [
+                                                        {
+                                                            name: "SORT_SPEC",
+                                                            type: "expression",
+                                                            direction: "DESC",
+                                                            children: [
+                                                                { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "排序列: e.salary" }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "FROM_CLAUSE",
+                            type: "clause",
+                            description: "FROM 子句",
+                            children: [
+                                {
+                                    name: "LEFT_JOIN",
+                                    type: "join",
+                                    description: "LEFT JOIN",
+                                    children: [
+                                        {
+                                            name: "INNER_JOIN",
+                                            type: "join",
+                                            description: "INNER JOIN",
+                                            children: [
+                                                { name: "TABLE_REF", type: "identifier", value: "employees AS e", description: "表: employees" },
+                                                { name: "TABLE_REF", type: "identifier", value: "departments AS d", description: "表: departments" },
+                                                {
+                                                    name: "ON_CONDITION",
+                                                    type: "clause",
+                                                    description: "连接条件",
+                                                    children: [
+                                                        {
+                                                            name: "BINARY_OP(=)",
+                                                            type: "operator",
+                                                            description: "等于",
+                                                            children: [
+                                                                { name: "COLUMN_REF", type: "identifier", value: "e.dept_id", description: "列: e.dept_id" },
+                                                                { name: "COLUMN_REF", type: "identifier", value: "d.id", description: "列: d.id" }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            name: "SUBQUERY",
+                                            type: "subquery",
+                                            description: "派生表子查询",
+                                            alias: "ep",
+                                            children: [
+                                                {
+                                                    name: "SELECT_STMT",
+                                                    type: "statement",
+                                                    description: "派生表 SELECT",
+                                                    children: [
+                                                        {
+                                                            name: "SELECT_LIST",
+                                                            type: "clause",
+                                                            description: "SELECT 列表",
+                                                            children: [
+                                                                { name: "COLUMN_REF", type: "identifier", value: "employee_id", description: "列: employee_id" },
+                                                                {
+                                                                    name: "FUNC_CALL(COUNT)",
+                                                                    type: "function",
+                                                                    description: "COUNT 函数",
+                                                                    alias: "project_count",
+                                                                    children: [
+                                                                        { name: "WILDCARD(*)", type: "identifier", value: "*", description: "通配符" }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        },
+                                                        {
+                                                            name: "FROM_CLAUSE",
+                                                            type: "clause",
+                                                            description: "FROM 子句",
+                                                            children: [
+                                                                { name: "TABLE_REF", type: "identifier", value: "employee_projects", description: "表: employee_projects" }
+                                                            ]
+                                                        },
+                                                        {
+                                                            name: "GROUP_BY",
+                                                            type: "clause",
+                                                            description: "GROUP BY",
+                                                            children: [
+                                                                { name: "COLUMN_REF", type: "identifier", value: "employee_id", description: "分组列" }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            name: "ON_CONDITION",
+                                            type: "clause",
+                                            description: "连接条件",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(=)",
+                                                    type: "operator",
+                                                    description: "等于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.id", description: "列: e.id" },
+                                                        { name: "COLUMN_REF", type: "identifier", value: "ep.employee_id", description: "列: ep.employee_id" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "WHERE_CLAUSE",
+                            type: "clause",
+                            description: "WHERE 条件",
+                            children: [
+                                {
+                                    name: "AND",
+                                    type: "operator",
+                                    description: "逻辑与",
+                                    children: [
+                                        {
+                                            name: "BINARY_OP(>=)",
+                                            type: "operator",
+                                            description: "大于等于",
+                                            children: [
+                                                { name: "COLUMN_REF", type: "identifier", value: "e.hire_date", description: "列: e.hire_date" },
+                                                { name: "STRING_LITERAL", type: "literal", value: "'2020-01-01'", description: "日期字符串" }
+                                            ]
+                                        },
+                                        {
+                                            name: "OR",
+                                            type: "operator",
+                                            description: "逻辑或",
+                                            children: [
+                                                {
+                                                    name: "BINARY_OP(>)",
+                                                    type: "operator",
+                                                    description: "大于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "ep.project_count", description: "列: ep.project_count" },
+                                                        { name: "NUMBER_LITERAL", type: "literal", value: "3", description: "数字: 3" }
+                                                    ]
+                                                },
+                                                {
+                                                    name: "BINARY_OP(>)",
+                                                    type: "operator",
+                                                    description: "大于",
+                                                    children: [
+                                                        { name: "COLUMN_REF", type: "identifier", value: "e.salary", description: "列: e.salary" },
+                                                        { name: "NUMBER_LITERAL", type: "literal", value: "100000", description: "数字: 100000" }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            name: "ORDER_BY",
+                            type: "clause",
+                            description: "ORDER BY 排序",
+                            children: [
+                                { name: "COLUMN_REF", type: "identifier", value: "d.department_name", description: "排序列1" },
+                                { name: "COLUMN_REF", type: "identifier", value: "salary_rank", description: "排序列2" }
+                            ]
+                        },
+                        {
+                            name: "LIMIT_CLAUSE",
+                            type: "clause",
+                            description: "LIMIT 子句",
+                            children: [
+                                { name: "LIMIT_COUNT", type: "literal", value: "20", description: "限制行数: 20" },
+                                { name: "OFFSET", type: "literal", value: "10", description: "偏移量: 10" }
+                            ]
+                        }
+                    ]
+                }
+            }
+        };
+
+        // 颜色映射
+        const colorMap = {
+            statement: '#1e40af',
+            clause: '#059669',
+            identifier: '#dc2626',
+            literal: '#7c3aed',
+            operator: '#ea580c',
+            function: '#0891b2',
+            join: '#be185d',
+            expression: '#4338ca',
+            subquery: '#0d9488'
+        };
+
+        // 语法高亮
+        function highlightSQL(sql) {
+            const keywords = ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER', 'ON', 'AND', 'OR', 'NOT', 'NULL', 'IS', 'IN', 'EXISTS', 'UNION', 'ALL', 'GROUP', 'BY', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'VALUES', 'SET', 'INTO', 'AS', 'DISTINCT', 'ASC', 'DESC', 'BETWEEN', 'LIKE', 'OVER', 'PARTITION', 'INTERVAL', 'YEAR'];
+            const functions = ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CONCAT', 'NOW', 'DATE_SUB', 'RANK', 'ROW_NUMBER'];
+            
+            let highlighted = sql
+                .replace(/(\'[^\']*\')/g, '<span class="string">$1</span>')
+                .replace(/(\b\d+\.?\d*\b)/g, '<span class="number">$1</span>');
+            
+            keywords.forEach(kw => {
+                const regex = new RegExp(`\\b${kw}\\b`, 'gi');
+                highlighted = highlighted.replace(regex, `<span class="keyword">${kw}</span>`);
+            });
+            
+            functions.forEach(fn => {
+                const regex = new RegExp(`\\b${fn}\\b`, 'gi');
+                highlighted = highlighted.replace(regex, `<span class="function">${fn}</span>`);
+            });
+            
+            highlighted = highlighted.replace(/(\*|\=|\>|\<|\+|\-|\*|\/|\%)/g, '<span class="operator">$1</span>');
+            
+            return highlighted;
+        }
+
+        // 渲染树
+        function renderTree(treeData) {
+            const container = document.getElementById('tree-container');
+            const svg = d3.select('#tree-svg');
+            svg.selectAll('*').remove();
+            
+            // 计算树的大小
+            const nodeCount = countNodes(treeData);
+            const width = Math.max(800, nodeCount * 120);
+            const height = Math.max(600, getTreeDepth(treeData) * 100);
+            
+            svg.attr('width', width).attr('height', height);
+            
+            const g = svg.append('g').attr('transform', 'translate(50,50)');
+            
+            // 创建树布局
+            const treeLayout = d3.tree().size([width - 100, height - 100]);
+            
+            const root = d3.hierarchy(treeData);
+            treeLayout(root);
+            
+            // 绘制连接线
+            g.selectAll('.link')
+                .data(root.links())
+                .enter()
+                .append('path')
+                .attr('class', 'link')
+                .attr('d', d3.linkVertical()
+                    .x(d => d.x)
+                    .y(d => d.y));
+            
+            // 绘制节点
+            const nodes = g.selectAll('.node')
+                .data(root.descendants())
+                .enter()
+                .append('g')
+                .attr('class', 'node')
+                .attr('transform', d => `translate(${d.x},${d.y})`)
+                .on('click', (event, d) => showNodeDetail(d.data));
+            
+            nodes.append('circle')
+                .attr('r', d => d.depth === 0 ? 25 : 18)
+                .style('fill', d => colorMap[d.data.type] || '#64748b');
+            
+            nodes.append('text')
+                .attr('class', 'node-label')
+                .attr('dy', d => d.depth === 0 ? -30 : -25)
+                .text(d => d.data.name.length > 15 ? d.data.name.substring(0, 12) + '...' : d.data.name);
+            
+            nodes.append('text')
+                .attr('class', 'node-type')
+                .attr('dy', d => d.depth === 0 ? 35 : 28)
+                .text(d => d.data.type);
+            
+            // 添加缩放功能
+            const zoom = d3.zoom()
+                .scaleExtent([0.3, 3])
+                .on('zoom', (event) => {
+                    g.attr('transform', event.transform);
+                });
+            
+            svg.call(zoom);
+        }
+
+        function countNodes(node) {
+            let count = 1;
+            if (node.children) {
+                node.children.forEach(child => {
+                    count += countNodes(child);
+                });
+            }
+            return count;
+        }
+
+        function getTreeDepth(node) {
+            if (!node.children || node.children.length === 0) return 1;
+            return 1 + Math.max(...node.children.map(getTreeDepth));
+        }
+
+        function showNodeDetail(nodeData) {
+            const detail = document.getElementById('node-detail');
+            const title = document.getElementById('detail-title');
+            const content = document.getElementById('detail-content');
+            
+            title.textContent = nodeData.name;
+            let html = `<strong>类型:</strong> ${nodeData.type}<br>`;
+            if (nodeData.description) {
+                html += `<strong>描述:</strong> ${nodeData.description}<br>`;
+            }
+            if (nodeData.value) {
+                html += `<strong>值:</strong> ${nodeData.value}<br>`;
+            }
+            if (nodeData.alias) {
+                html += `<strong>别名:</strong> ${nodeData.alias}<br>`;
+            }
+            if (nodeData.direction) {
+                html += `<strong>方向:</strong> ${nodeData.direction}<br>`;
+            }
+            content.innerHTML = html;
+            detail.classList.add('show');
+            
+            setTimeout(() => {
+                detail.classList.remove('show');
+            }, 5000);
+        }
+
+        // 加载示例
+        function loadExample(exampleKey) {
+            const example = sqlExamples[exampleKey];
+            document.getElementById('sql-display').innerHTML = highlightSQL(example.sql);
+            renderTree(example.tree);
+            
+            // 更新按钮状态
+            document.querySelectorAll('.sql-example-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.dataset.example === exampleKey) {
+                    btn.classList.add('active');
+                }
+            });
+        }
+
+        // 事件监听
+        document.querySelectorAll('.sql-example-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                loadExample(btn.dataset.example);
+            });
+        });
+
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+            });
+        });
+
+        // 初始化
+        loadExample('simple_select');
+    </script>
+</body>
+</html>
