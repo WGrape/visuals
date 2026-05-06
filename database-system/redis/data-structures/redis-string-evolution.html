@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis String 数据结构演进史</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e27;
+            --bg-secondary: #111633;
+            --bg-card: #1a1f4e;
+            --text-primary: #e8eaf6;
+            --text-secondary: #9fa8da;
+            --accent-red: #ff6b6b;
+            --accent-blue: #4ecdc4;
+            --accent-purple: #a29bfe;
+            --accent-orange: #ffeaa7;
+            --accent-green: #55efc4;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* 背景粒子效果 */
+        .bg-particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(78, 205, 196, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(162, 155, 254, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(255, 107, 107, 0.05) 0%, transparent 70%);
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-purple), var(--accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+        }
+
+        /* 时间轴容器 */
+        .timeline {
+            position: relative;
+            padding: 40px 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, var(--accent-red), var(--accent-purple), var(--accent-blue));
+            border-radius: 2px;
+            transform: translateX(-50%);
+        }
+
+        /* 版本卡片 */
+        .version-card {
+            position: relative;
+            width: 45%;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .version-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 16px 48px rgba(78, 205, 196, 0.2);
+        }
+
+        .version-card.left {
+            margin-right: auto;
+        }
+
+        .version-card.right {
+            margin-left: auto;
+        }
+
+        .version-card::before {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: var(--accent-red);
+            border-radius: 50%;
+            top: 40px;
+            border: 4px solid var(--bg-primary);
+            z-index: 2;
+        }
+
+        .version-card.left::before {
+            right: -10.5%;
+            box-shadow: 0 0 20px var(--accent-red);
+        }
+
+        .version-card.right::before {
+            left: -10.5%;
+            box-shadow: 0 0 20px var(--accent-purple);
+        }
+
+        .version-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        .badge-2x { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); }
+        .badge-3x { background: linear-gradient(135deg, #a29bfe, #6c5ce7); }
+        .badge-4x { background: linear-gradient(135deg, #55efc4, #00b894); }
+        .badge-7x { background: linear-gradient(135deg, #ffeaa7, #fdcb6e); color: #2d3436; }
+
+        .version-title {
+            font-size: 1.4rem;
+            margin-bottom: 12px;
+            color: var(--text-primary);
+        }
+
+        .version-desc {
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 20px;
+        }
+
+        /* 内存结构可视化 */
+        .memory-block {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .struct-line {
+            display: flex;
+            margin: 4px 0;
+            align-items: center;
+        }
+
+        .struct-field {
+            display: inline-flex;
+            align-items: center;
+            height: 32px;
+            padding: 0 12px;
+            border-radius: 4px;
+            margin-right: 4px;
+            font-weight: 500;
+        }
+
+        .field-int { background: rgba(255, 107, 107, 0.3); border-left: 3px solid var(--accent-red); }
+        .field-char { background: rgba(78, 205, 196, 0.3); border-left: 3px solid var(--accent-blue); }
+        .field-uchar { background: rgba(162, 155, 254, 0.3); border-left: 3px solid var(--accent-purple); }
+        .field-void { background: rgba(85, 239, 196, 0.3); border-left: 3px solid var(--accent-green); }
+        .field-alloc { background: rgba(255, 234, 167, 0.3); border-left: 3px solid var(--accent-orange); }
+
+        .struct-size {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            margin-left: 8px;
+        }
+
+        /* 特性列表 */
+        .features {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .feature-tag {
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .feature-tag.highlight {
+            background: rgba(78, 205, 196, 0.2);
+            color: var(--accent-blue);
+        }
+
+        /* 核心对比区 */
+        .core-section {
+            margin-top: 80px;
+            text-align: center;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            margin-bottom: 40px;
+            color: var(--text-primary);
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .compare-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .compare-card h3 {
+            color: var(--accent-blue);
+            margin-bottom: 16px;
+            font-size: 1.2rem;
+        }
+
+        .compare-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .compare-item:last-child {
+            border-bottom: none;
+        }
+
+        .compare-label {
+            color: var(--text-secondary);
+        }
+
+        .compare-value {
+            font-weight: 600;
+        }
+
+        .val-old { color: var(--accent-red); }
+        .val-new { color: var(--accent-green); }
+
+        /* embstr 特殊区域 */
+        .embstr-section {
+            margin-top: 80px;
+            background: linear-gradient(135deg, rgba(255, 107, 107, 0.1), rgba(162, 155, 254, 0.1));
+            border-radius: 24px;
+            padding: 48px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .embstr-title {
+            font-size: 1.8rem;
+            text-align: center;
+            margin-bottom: 32px;
+            color: var(--accent-orange);
+        }
+
+        .embstr-visual {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .embstr-box {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .embstr-box h4 {
+            margin-bottom: 12px;
+            color: var(--accent-blue);
+        }
+
+        /* 底部总结 */
+        .summary {
+            margin-top: 80px;
+            background: var(--bg-card);
+            border-radius: 24px;
+            padding: 40px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .summary h2 {
+            color: var(--accent-green);
+            margin-bottom: 24px;
+        }
+
+        .summary p {
+            color: var(--text-secondary);
+            line-height: 1.8;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        /* 响应式 */
+        @media (max-width: 900px) {
+            .timeline::before {
+                left: 20px;
+            }
+
+            .version-card {
+                width: calc(100% - 60px);
+                margin-left: 60px !important;
+                margin-right: 0 !important;
+            }
+
+            .version-card::before {
+                left: -50px !important;
+                right: auto !important;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .section-title {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-particles"></div>
+
+    <div class="container">
+        <header>
+            <h1>Redis String 数据结构演进史</h1>
+            <p class="subtitle">从 C 字符串到 SDS 的性能优化之路</p>
+        </header>
+
+        <div class="timeline">
+            <!-- Redis 2.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-2x">Redis 2.0</span>
+                <h2 class="version-title">SDS 初代版本</h2>
+                <p class="version-desc">
+                    2010 年，Redis 首次引入 SDS 作为字符串实现。
+                    此前直接使用 C 字符串（char*），存在缓冲区溢出和 O(n) 长度获取问题。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-red); margin-bottom: 8px;">// sdshdr (Redis 2.0 - 2.6)</div>
+                    <div class="struct-line">
+                        <span class="struct-field field-int">int len</span>
+                        <span class="struct-size">4 bytes</span>
+                    </div>
+                    <div class="struct-line">
+                        <span class="struct-field field-int">int free</span>
+                        <span class="struct-size">4 bytes</span>
+                    </div>
+                    <div class="struct-line">
+                        <span class="struct-field field-char">char buf[]</span>
+                        <span class="struct-size">柔性数组</span>
+                    </div>
+                    <div style="margin-top: 8px; color: var(--text-secondary);">
+                        头部大小: <strong style="color: var(--accent-red);">8 bytes</strong>
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">O(1) 长度获取</span>
+                    <span class="feature-tag highlight">二进制安全</span>
+                    <span class="feature-tag">空间预分配</span>
+                    <span class="feature-tag">惰性释放</span>
+                </div>
+            </div>
+
+            <!-- Redis 2.2 -->
+            <div class="version-card right">
+                <span class="version-badge badge-2x">Redis 2.2</span>
+                <h2 class="version-title">APPEND 优化</h2>
+                <p class="version-desc">
+                    引入高效的字符串追加（APPEND）操作。通过记录已用长度 len，
+                    避免每次追加都重新分配内存。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-purple); margin-bottom: 8px;">// 追加操作流程</div>
+                    <div style="color: var(--text-secondary); font-size: 0.85rem; line-height: 1.8;">
+                        1. 检查 free >= 追加长度?<br>
+                        2. 是 → 直接追加，更新 len<br>
+                        3. 否 → 重新分配，预分配策略
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">APPEND 时间复杂度降低</span>
+                    <span class="feature-tag">减少内存重分配</span>
+                </div>
+            </div>
+
+            <!-- Redis 2.4 -->
+            <div class="version-card left">
+                <span class="version-badge badge-2x">Redis 2.4</span>
+                <h2 class="version-title">预分配策略优化</h2>
+                <p class="version-desc">
+                    优化内存预分配算法。当字符串小于 1MB 时，倍增预分配；
+                    大于 1MB 时，每次多分配 1MB。显著减少内存碎片。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-blue); margin-bottom: 8px;">// 预分配算法 (Redis 2.4+)</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-orange);">if</span> (newLen &lt; 1MB) {<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;alloc = newLen * <span style="color: var(--accent-green);">2</span>;  // 倍增<br>
+                        } <span style="color: var(--accent-orange);">else</span> {<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;alloc = newLen + <span style="color: var(--accent-green);">1MB</span>;  // 固定增量<br>
+                        }
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">内存利用率提升</span>
+                    <span class="feature-tag">减少碎片</span>
+                </div>
+            </div>
+
+            <!-- Redis 3.2 -->
+            <div class="version-card right">
+                <span class="version-badge badge-3x">Redis 3.2 ⭐ 重大重构</span>
+                <h2 class="version-title">SDS 类型分桶 + EMBSTR</h2>
+                <p class="version-desc">
+                    3.2 是转折点！引入 5 种 SDS 类型，头部从 8 字节压缩到 1-3 字节。
+                    短字符串使用 embstr 编码，string 和 redisObject 连续内存分配。
+                </p>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                    <div class="memory-block">
+                        <div style="color: var(--accent-green); margin-bottom: 8px;">// SDS_TYPE_5 (短字符串)</div>
+                        <div class="struct-line">
+                            <span class="struct-field field-char">flags</span>
+                            <span class="struct-size">1 byte</span>
+                        </div>
+                        <div class="struct-line">
+                            <span class="struct-field field-alloc">buf[]</span>
+                            <span class="struct-size">内嵌</span>
+                        </div>
+                        <div style="margin-top: 8px; color: var(--text-secondary);">
+                            头部: <strong style="color: var(--accent-green);">1 byte</strong>
+                        </div>
+                    </div>
+
+                    <div class="memory-block">
+                        <div style="color: var(--accent-purple); margin-bottom: 8px;">// SDS_TYPE_8 (长字符串)</div>
+                        <div class="struct-line">
+                            <span class="struct-field field-uchar">uint8_t flags</span>
+                            <span class="struct-size">1 byte</span>
+                        </div>
+                        <div class="struct-line">
+                            <span class="struct-field field-int">uint64_t len</span>
+                            <span class="struct-size">8 bytes</span>
+                        </div>
+                        <div class="struct-line">
+                            <span class="struct-field field-int">uint64_t alloc</span>
+                            <span class="struct-size">8 bytes</span>
+                        </div>
+                        <div class="struct-line">
+                            <span class="struct-field field-char">char buf[]</span>
+                            <span class="struct-size">柔性数组</span>
+                        </div>
+                        <div style="margin-top: 8px; color: var(--text-secondary);">
+                            头部: <strong style="color: var(--accent-purple);">17 bytes</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="features">
+                    <span class="feature-tag highlight">SDS_TYPE_5/8/16/32/64</span>
+                    <span class="feature-tag highlight">embstr 编码</span>
+                    <span class="feature-tag">44字节阈值</span>
+                    <span class="feature-tag">连续内存分配</span>
+                </div>
+            </div>
+
+            <!-- Redis 4.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-4x">Redis 4.0</span>
+                <h2 class="version-title">模块化 + 动态类型</h2>
+                <p class="version-desc">
+                    引入 Redis Modules API，允许自定义数据类型。
+                    string 类型保持稳定，进一步优化内存分配策略。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--text-secondary); line-height: 1.8;">
+                        • Modules 可扩展 Redis 数据类型<br>
+                        • string 内部优化继续积累<br>
+                        • OBJECT ENCODING 可查看内部类型
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag">Module API</span>
+                    <span class="feature-tag">动态类型系统</span>
+                </div>
+            </div>
+
+            <!-- Redis 7.0 -->
+            <div class="version-card right">
+                <span class="version-badge badge-7x">Redis 7.0+</span>
+                <h2 class="version-title">函数 + 性能巅峰</h2>
+                <p class="version-desc">
+                    Redis 7.0 引入 Redis Functions（取代 Lua 脚本），
+                    string 类型支持更高效的 int 编码优化（当值为纯数字时）。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-orange); margin-bottom: 8px;">// String 内部编码</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        |--- embstr (≤44 bytes) ---|<br>
+                        |--- raw (>44 bytes) -------|<br>
+                        |--- int (纯数字) ----------|
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">int 编码优化</span>
+                    <span class="feature-tag">Functions</span>
+                    <span class="feature-tag">Sharded Pub/Sub</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 核心对比 -->
+        <section class="core-section">
+            <h2 class="section-title">SDS vs C 字符串</h2>
+            <div class="comparison-grid">
+                <div class="compare-card">
+                    <h3>长度获取</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">C 字符串</span>
+                        <span class="compare-value val-old">O(n)</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">SDS</span>
+                        <span class="compare-value val-new">O(1)</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>内存重分配</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">C 字符串</span>
+                        <span class="compare-value val-old">每次 n 次</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">SDS</span>
+                        <span class="compare-value val-new">最多 1 次</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>缓冲区安全</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">C 字符串</span>
+                        <span class="compare-value val-old">❌ 易溢出</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">SDS</span>
+                        <span class="compare-value val-new">✅ 安全</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>二进制安全</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">C 字符串</span>
+                        <span class="compare-value val-old">❌ 遇 \0 截断</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">SDS</span>
+                        <span class="compare-value val-new">✅ 完整存储</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- EMBSTR 详解 -->
+        <section class="embstr-section">
+            <h2 class="embstr-title">EMBSTR 编码的秘密</h2>
+            <p style="text-align: center; color: var(--text-secondary); margin-bottom: 32px;">
+                embstr = embedded string，将 redisObject 和 sds 分配在同一块连续内存
+            </p>
+
+            <div class="embstr-visual">
+                <div class="embstr-box">
+                    <h4>raw 编码 (>44 bytes)</h4>
+                    <div class="memory-block" style="text-align: left;">
+                        <div style="color: var(--accent-red);">redisObject (56 bytes)</div>
+                        <div style="color: var(--accent-blue); padding-left: 16px;">ptr → sdshdr (独立分配)</div>
+                    </div>
+                    <p style="margin-top: 8px; font-size: 0.85rem; color: var(--text-secondary);">
+                        两次内存分配 ❌
+                    </p>
+                </div>
+
+                <div style="font-size: 2rem; color: var(--accent-green);">→</div>
+
+                <div class="embstr-box">
+                    <h4>embstr 编码 (≤44 bytes)</h4>
+                    <div class="memory-block" style="text-align: left;">
+                        <div style="color: var(--accent-red);">redisObject</div>
+                        <div style="color: var(--accent-purple); padding-left: 16px;">SDS_TYPE_5</div>
+                        <div style="color: var(--accent-green); padding-left: 16px;">char buf[] (连续)</div>
+                    </div>
+                    <p style="margin-top: 8px; font-size: 0.85rem; color: var(--accent-green);">
+                        一次内存分配 ✅
+                    </p>
+                </div>
+            </div>
+
+            <div style="margin-top: 32px; text-align: center;">
+                <div class="memory-block" style="display: inline-block; text-align: left;">
+                    <div style="color: var(--accent-orange); margin-bottom: 8px;">// 内存布局 (64-bit 系统)</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.8;">
+                        redisObject: type(1) + encoding(1) + lru(4) + refcount(4) + *ptr(8) = <strong style="color: var(--accent-red);">18 bytes</strong><br>
+                        sdshdr5: flags(1) + buf[] = <strong style="color: var(--accent-purple);">46 bytes</strong><br>
+                        ───────────────────────────────<br>
+                        <strong>总计: 64 bytes</strong>（CPU cache line 对齐！）
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 总结 -->
+        <section class="summary">
+            <h2>演进总结</h2>
+            <p>
+                Redis String 从最初的简单封装，到今天的高性能动态字符串，
+                经历了多次精妙的优化：<br><br>
+                <strong style="color: var(--accent-blue);">空间换时间</strong>（预分配）→
+                <strong style="color: var(--accent-purple);">类型分桶</strong>（SDS_TYPE_X）→
+                <strong style="color: var(--accent-green);">内存对齐</strong>（embstr）<br><br>
+                每一个版本都在追求更低的内存开销和更高的访问效率。
+                这也是 Redis 能够成为内存数据库标杆的核心秘密之一。
+            </p>
+        </section>
+    </div>
+
+    <script>
+        // 滚动动画
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.version-card').forEach(card => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(30px)';
+            card.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+            observer.observe(card);
+        });
+    </script>
+</body>
+</html>

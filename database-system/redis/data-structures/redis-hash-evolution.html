@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis Hash 数据结构演进史</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e27;
+            --bg-secondary: #111633;
+            --bg-card: #1a1f4e;
+            --text-primary: #e8eaf6;
+            --text-secondary: #9fa8da;
+            --accent-red: #ff6b6b;
+            --accent-blue: #4ecdc4;
+            --accent-purple: #a29bfe;
+            --accent-orange: #ffeaa7;
+            --accent-green: #55efc4;
+            --accent-yellow: #fdcb6e;
+            --accent-pink: #fd79a8;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .bg-particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(78, 205, 196, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(162, 155, 254, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(253, 203, 110, 0.05) 0%, transparent 70%);
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-orange), var(--accent-yellow));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+        }
+
+        .timeline {
+            position: relative;
+            padding: 40px 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, var(--accent-red), var(--accent-orange), var(--accent-yellow), var(--accent-green));
+            border-radius: 2px;
+            transform: translateX(-50%);
+        }
+
+        .version-card {
+            position: relative;
+            width: 45%;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .version-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 16px 48px rgba(255, 234, 167, 0.2);
+        }
+
+        .version-card.left {
+            margin-right: auto;
+        }
+
+        .version-card.right {
+            margin-left: auto;
+        }
+
+        .version-card::before {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: var(--accent-orange);
+            border-radius: 50%;
+            top: 40px;
+            border: 4px solid var(--bg-primary);
+            z-index: 2;
+        }
+
+        .version-card.left::before {
+            right: -10.5%;
+            box-shadow: 0 0 20px var(--accent-orange);
+        }
+
+        .version-card.right::before {
+            left: -10.5%;
+            box-shadow: 0 0 20px var(--accent-yellow);
+        }
+
+        .version-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        .badge-2x { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); }
+        .badge-3x { background: linear-gradient(135deg, #a29bfe, #6c5ce7); }
+        .badge-4x { background: linear-gradient(135deg, #55efc4, #00b894); }
+        .badge-7x { background: linear-gradient(135deg, #ffeaa7, #fdcb6e); color: #2d3436; }
+
+        .version-title {
+            font-size: 1.4rem;
+            margin-bottom: 12px;
+            color: var(--text-primary);
+        }
+
+        .version-desc {
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 20px;
+        }
+
+        .memory-block {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .struct-line {
+            display: flex;
+            margin: 4px 0;
+            align-items: center;
+        }
+
+        .struct-field {
+            display: inline-flex;
+            align-items: center;
+            height: 32px;
+            padding: 0 12px;
+            border-radius: 4px;
+            margin-right: 4px;
+            font-weight: 500;
+        }
+
+        .field-int { background: rgba(255, 107, 107, 0.3); border-left: 3px solid var(--accent-red); }
+        .field-char { background: rgba(78, 205, 196, 0.3); border-left: 3px solid var(--accent-blue); }
+        .field-uchar { background: rgba(162, 155, 254, 0.3); border-left: 3px solid var(--accent-purple); }
+        .field-void { background: rgba(85, 239, 196, 0.3); border-left: 3px solid var(--accent-green); }
+        .field-alloc { background: rgba(255, 234, 167, 0.3); border-left: 3px solid var(--accent-orange); }
+        .field-yellow { background: rgba(253, 203, 110, 0.3); border-left: 3px solid var(--accent-yellow); }
+
+        .struct-size {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            margin-left: 8px;
+        }
+
+        .features {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .feature-tag {
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .feature-tag.highlight {
+            background: rgba(255, 234, 167, 0.2);
+            color: var(--accent-orange);
+        }
+
+        .core-section {
+            margin-top: 80px;
+            text-align: center;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            margin-bottom: 40px;
+            color: var(--text-primary);
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .compare-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .compare-card h3 {
+            color: var(--accent-orange);
+            margin-bottom: 16px;
+            font-size: 1.2rem;
+        }
+
+        .compare-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .compare-item:last-child {
+            border-bottom: none;
+        }
+
+        .compare-label {
+            color: var(--text-secondary);
+        }
+
+        .compare-value {
+            font-weight: 600;
+        }
+
+        .val-old { color: var(--accent-red); }
+        .val-new { color: var(--accent-green); }
+
+        .encoding-section {
+            margin-top: 80px;
+            background: linear-gradient(135deg, rgba(255, 234, 167, 0.1), rgba(253, 203, 110, 0.1));
+            border-radius: 24px;
+            padding: 48px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .encoding-title {
+            font-size: 1.8rem;
+            text-align: center;
+            margin-bottom: 32px;
+            color: var(--accent-orange);
+        }
+
+        .encoding-visual {
+            display: flex;
+            justify-content: center;
+            align-items: stretch;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .encoding-box {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            flex: 1;
+            min-width: 280px;
+            max-width: 400px;
+        }
+
+        .encoding-box h4 {
+            margin-bottom: 12px;
+            color: var(--accent-blue);
+        }
+
+        .arrow {
+            display: flex;
+            align-items: center;
+            font-size: 2rem;
+            color: var(--accent-green);
+        }
+
+        .threshold-info {
+            margin-top: 40px;
+            text-align: center;
+        }
+
+        .threshold-box {
+            display: inline-block;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px 40px;
+            border: 2px solid var(--accent-orange);
+        }
+
+        .threshold-box h4 {
+            color: var(--accent-orange);
+            margin-bottom: 8px;
+        }
+
+        .threshold-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--accent-green);
+        }
+
+        .summary {
+            margin-top: 80px;
+            background: var(--bg-card);
+            border-radius: 24px;
+            padding: 40px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .summary h2 {
+            color: var(--accent-green);
+            margin-bottom: 24px;
+        }
+
+        .summary p {
+            color: var(--text-secondary);
+            line-height: 1.8;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .visual-hash {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin: 16px 0;
+        }
+
+        .hash-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            justify-content: center;
+        }
+
+        .hash-slot {
+            width: 60px;
+            height: 36px;
+            background: var(--bg-secondary);
+            border: 2px solid var(--accent-purple);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .hash-slot.filled {
+            background: rgba(162, 155, 254, 0.3);
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+        }
+
+        .hash-slot.empty {
+            background: rgba(255, 107, 107, 0.1);
+            border-color: var(--accent-red);
+            border-style: dashed;
+        }
+
+        .hash-bucket {
+            font-size: 0.8rem;
+            color: var(--accent-yellow);
+        }
+
+        @media (max-width: 900px) {
+            .timeline::before {
+                left: 20px;
+            }
+
+            .version-card {
+                width: calc(100% - 60px);
+                margin-left: 60px !important;
+                margin-right: 0 !important;
+            }
+
+            .version-card::before {
+                left: -50px !important;
+                right: auto !important;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .section-title {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-particles"></div>
+
+    <div class="container">
+        <header>
+            <h1>Redis Hash 数据结构演进史</h1>
+            <p class="subtitle">从压缩列表到字典的完美平衡</p>
+        </header>
+
+        <div class="timeline">
+            <!-- Redis 2.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-2x">Redis 2.0</span>
+                <h2 class="version-title">ziplist 实现 Hash</h2>
+                <p class="version-desc">
+                    2010 年，Hash 类型诞生。采用 ziplist（压缩列表）作为底层实现，
+                    field-value 对连续存储，内存紧凑。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-orange); margin-bottom: 8px;">// ziplist 存储结构</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.8;">
+                        |zlbytes|zltail|zllen|field1|val1|field2|val2|...|zlend|<br><br>
+                        • zlbytes: 列表总字节数<br>
+                        • zltail: 尾节点偏移量<br>
+                        • zllen: 节点数量<br>
+                        •zlend: 结束标记 (0xFF)
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">连续内存存储</span>
+                    <span class="feature-tag highlight">O(1) 首尾操作</span>
+                    <span class="feature-tag">小数据友好</span>
+                    <span class="feature-tag">无指针开销</span>
+                </div>
+            </div>
+
+            <!-- Redis 2.2 -->
+            <div class="version-card right">
+                <span class="version-badge badge-2x">Redis 2.2</span>
+                <h2 class="version-title">字典雏形</h2>
+                <p class="version-desc">
+                    开始引入 dict 字典结构，为后续编码转换做准备。
+                    Hash 增长超过阈值时开始考虑字典实现。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-purple); margin-bottom: 8px;">// dictEntry 结构</div>
+                    <div class="struct-line">
+                        <span class="struct-field field-void">void *key</span>
+                        <span class="struct-size">8 bytes</span>
+                    </div>
+                    <div class="struct-line">
+                        <span class="struct-field field-void">void *val</span>
+                        <span class="struct-size">8 bytes</span>
+                    </div>
+                    <div class="struct-line">
+                        <span class="struct-field field-void">dictEntry *next</span>
+                        <span class="struct-size">8 bytes</span>
+                    </div>
+                    <div style="margin-top: 8px; color: var(--text-secondary);">
+                        每个 bucket: <strong style="color: var(--accent-purple);">24 bytes</strong>
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag">O(1) 单点查询</span>
+                    <span class="feature-tag">哈希冲突链</span>
+                </div>
+            </div>
+
+            <!-- Redis 3.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-3x">Redis 3.0 ⭐ 重大改进</span>
+                <h2 class="version-title">ziplist ↔ dict 编码转换</h2>
+                <p class="version-desc">
+                    引入完整的编码转换机制。当 Hash 字段数小于 hash-max-ziplist-entries（512）
+                    且每个 field/value 长度小于 hash-max-ziplist-value（64字节）时使用 ziplist，
+                    否则转换为 dict。
+                </p>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                    <div class="memory-block">
+                        <div style="color: var(--accent-orange); margin-bottom: 8px;">ziplist 编码</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
+                            优点: 内存紧凑<br>
+                            缺点: 查询 O(n)<br>
+                            适用: 小数据量
+                        </div>
+                    </div>
+
+                    <div class="memory-block">
+                        <div style="color: var(--accent-purple); margin-bottom: 8px;">dict 编码</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
+                            优点: 查询 O(1)<br>
+                            缺点: 内存开销大<br>
+                            适用: 大数据量
+                        </div>
+                    </div>
+                </div>
+
+                <div class="features">
+                    <span class="feature-tag highlight">自动编码转换</span>
+                    <span class="feature-tag highlight">阈值可配置</span>
+                    <span class="feature-tag">512 字段阈值</span>
+                    <span class="feature-tag">64 字节限制</span>
+                </div>
+            </div>
+
+            <!-- Redis 4.0 -->
+            <div class="version-card right">
+                <span class="version-badge badge-4x">Redis 4.0</span>
+                <h2 class="version-title">渐进式 Rehash</h2>
+                <p class="version-desc">
+                    引入渐进式 rehash 机制。当 dict 需要扩容/缩容时，
+                    分多次完成，避免一次性大内存迁移导致的阻塞。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-blue); margin-bottom: 8px;">// 渐进式 Rehash 流程</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-green);">Step 1:</span> 创建新哈希表 ht[1]<br>
+                        <span style="color: var(--accent-green);">Step 2:</span> 每次操作迁移 1 个 bucket<br>
+                        <span style="color: var(--accent-green);">Step 3:</span> 迁移完成 → 交换 ht[0] ↔ ht[1]<br>
+                        <span style="color: var(--accent-orange);">特点:</span> 读写操作分摊重哈希成本
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">零阻塞扩容</span>
+                    <span class="feature-tag">O(1) 均摊复杂度</span>
+                    <span class="feature-tag">后台分片执行</span>
+                </div>
+            </div>
+
+            <!-- Redis 6.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-3x">Redis 6.0</span>
+                <h2 class="version-title">Hash 编码参数调整</h2>
+                <p class="version-desc">
+                    优化 hash-max-ziplist-entries 默认值从 512 → 1000，
+                    hash-max-ziplist-value 从 64 → 512 字节。
+                    适应更复杂的应用场景。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-yellow); margin-bottom: 8px;">// Redis 6.0 配置</div>
+                    <div class="compare-item">
+                        <span class="compare-label">hash-max-ziplist-entries</span>
+                        <span class="compare-value val-new">1000</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">hash-max-ziplist-value</span>
+                        <span class="compare-value val-new">512 bytes</span>
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag">更大 ziplist 阈值</span>
+                    <span class="feature-tag">更灵活配置</span>
+                </div>
+            </div>
+
+            <!-- Redis 7.0 -->
+            <div class="version-card right">
+                <span class="version-badge badge-7x">Redis 7.0+ ⭐ 重大变革</span>
+                <h2 class="version-title">listpack 替换 ziplist</h2>
+                <p class="version-desc">
+                    Redis 7.0 将 Hash 的 ziplist 替换为 listpack。
+                    listpack 是 ziplist 的改进版，解决了 ziplist 级联更新问题。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-green); margin-bottom: 8px;">// listpack vs ziplist 区别</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-red);">ziplist:</span> 每个节点存储前节点长度<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;→ 删除中间节点可能级联更新<br><br>
+                        <span style="color: var(--accent-green);">listpack:</span> 存储总长度，跳过式遍历<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;→ 删除操作无需更新后续节点
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">无级联更新</span>
+                    <span class="feature-tag highlight">listpack 编码</span>
+                    <span class="feature-tag">向后兼容</span>
+                    <span class="feature-tag">性能更稳定</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 编码转换可视化 -->
+        <section class="encoding-section">
+            <h2 class="encoding-title">Hash 编码转换机制</h2>
+            <p style="text-align: center; color: var(--text-secondary); margin-bottom: 32px;">
+                Redis 根据数据量自动选择最优编码，平衡内存与性能
+            </p>
+
+            <div class="encoding-visual">
+                <div class="encoding-box">
+                    <h4>小数据量: listpack/ziplist</h4>
+                    <div class="memory-block" style="text-align: left;">
+                        <div style="font-size: 0.8rem; line-height: 1.6; color: var(--text-secondary);">
+                            <span style="color: var(--accent-orange);">适用条件:</span><br>
+                            • 字段数 &lt; 1000<br>
+                            • 每 field/value &lt; 512 bytes<br><br>
+                            <span style="color: var(--accent-green);">优势:</span><br>
+                            • 内存紧凑<br>
+                            • CPU 缓存友好<br>
+                            • 无指针开销
+                        </div>
+                    </div>
+                    <div class="visual-hash">
+                        <div style="font-size: 0.75rem; color: var(--text-secondary);">field|value 连续存储</div>
+                        <div style="display: flex; gap: 4px; justify-content: center; margin-top: 8px;">
+                            <div style="background: rgba(255,234,167,0.3); padding: 8px 12px; border-radius: 4px; font-size: 0.7rem;">f1</div>
+                            <div style="background: rgba(78,205,196,0.3); padding: 8px 12px; border-radius: 4px; font-size: 0.7rem;">v1</div>
+                            <div style="background: rgba(255,234,167,0.3); padding: 8px 12px; border-radius: 4px; font-size: 0.7rem;">f2</div>
+                            <div style="background: rgba(78,205,196,0.3); padding: 8px 12px; border-radius: 4px; font-size: 0.7rem;">v2</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="arrow">⟷</div>
+
+                <div class="encoding-box">
+                    <h4>大数据量: dict (字典)</h4>
+                    <div class="memory-block" style="text-align: left;">
+                        <div style="font-size: 0.8rem; line-height: 1.6; color: var(--text-secondary);">
+                            <span style="color: var(--accent-orange);">触发条件:</span><br>
+                            • 字段数 ≥ 1000<br>
+                            或<br>
+                            • field/value ≥ 512 bytes<br><br>
+                            <span style="color: var(--accent-purple);">结构:</span><br>
+                            • 哈希表 + 链表解决冲突<br>
+                            • O(1) 单点查询
+                        </div>
+                    </div>
+                    <div class="visual-hash">
+                        <div style="font-size: 0.75rem; color: var(--text-secondary);">哈希桶数组</div>
+                        <div style="display: flex; gap: 4px; justify-content: center; margin-top: 8px; flex-wrap: wrap;">
+                            <div class="hash-slot filled">k1→v1</div>
+                            <div class="hash-slot empty">-</div>
+                            <div class="hash-slot filled">k2→v2</div>
+                            <div class="hash-slot empty">-</div>
+                            <div class="hash-slot filled">k3→v3</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="threshold-info">
+                <div class="threshold-box">
+                    <h4>编码阈值配置</h4>
+                    <div style="margin-top: 12px; text-align: left; font-size: 0.9rem;">
+                        <div class="compare-item">
+                            <span class="compare-label">hash-max-ziplist-entries</span>
+                            <span class="compare-value">1000</span>
+                        </div>
+                        <div class="compare-item">
+                            <span class="compare-label">hash-max-ziplist-value</span>
+                            <span class="compare-value">512 bytes</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 核心对比 -->
+        <section class="core-section">
+            <h2 class="section-title">Hash 编码对比</h2>
+            <div class="comparison-grid">
+                <div class="compare-card">
+                    <h3>查询性能</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">ziplist/listpack</span>
+                        <span class="compare-value val-old">O(n)</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">dict</span>
+                        <span class="compare-value val-new">O(1)</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>内存占用</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">ziplist/listpack</span>
+                        <span class="compare-value val-new">极低</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">dict</span>
+                        <span class="compare-value val-old">较高</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>适用场景</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">ziplist/listpack</span>
+                        <span class="compare-value">小数据量</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">dict</span>
+                        <span class="compare-value">大数据量</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>级联更新</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">ziplist</span>
+                        <span class="compare-value val-old">❌ 存在</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">listpack</span>
+                        <span class="compare-value val-new">✅ 无</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">dict</span>
+                        <span class="compare-value val-new">✅ 无</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 总结 -->
+        <section class="summary">
+            <h2>演进总结</h2>
+            <p>
+                Redis Hash 从最初单一的 ziplist 实现，演变为智能的双编码系统：<br><br>
+                <strong style="color: var(--accent-orange);">ziplist/listpack</strong> →
+                <strong style="color: var(--accent-purple);">自动转换</strong> →
+                <strong style="color: var(--accent-green);">dict</strong><br><br>
+                核心优化路径：<br>
+                <strong style="color: var(--accent-blue);">小数据省内存</strong>（紧凑存储）|
+                <strong style="color: var(--accent-yellow);">大数据保性能</strong>（O(1)查询）|
+                <strong style="color: var(--accent-green);">渐进式扩容</strong>（零阻塞）<br><br>
+                这套"自动档"编码切换机制，让 Redis Hash 能够在不同数据规模下都保持最优表现。
+            </p>
+        </section>
+    </div>
+
+    <script>
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.version-card').forEach(card => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(30px)';
+            card.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+            observer.observe(card);
+        });
+    </script>
+</body>
+</html>

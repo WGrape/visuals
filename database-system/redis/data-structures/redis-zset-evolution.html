@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis Zset 数据结构演进史</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e27;
+            --bg-secondary: #111633;
+            --bg-card: #1a1f4e;
+            --text-primary: #e8eaf6;
+            --text-secondary: #9fa8da;
+            --accent-red: #ff6b6b;
+            --accent-blue: #4ecdc4;
+            --accent-purple: #a29bfe;
+            --accent-orange: #ffeaa7;
+            --accent-green: #55efc4;
+            --accent-yellow: #fdcb6e;
+            --accent-pink: #fd79a8;
+            --accent-indigo: #a855f7;
+            --accent-gold: #f59e0b;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .bg-particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(245, 158, 11, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(168, 85, 247, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(245, 158, 11, 0.05) 0%, transparent 70%);
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-gold), var(--accent-orange), var(--accent-indigo));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+        }
+
+        .timeline {
+            position: relative;
+            padding: 40px 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, var(--accent-gold), var(--accent-orange), var(--accent-indigo), var(--accent-purple));
+            border-radius: 2px;
+            transform: translateX(-50%);
+        }
+
+        .version-card {
+            position: relative;
+            width: 45%;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .version-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 16px 48px rgba(245, 158, 11, 0.2);
+        }
+
+        .version-card.left {
+            margin-right: auto;
+        }
+
+        .version-card.right {
+            margin-left: auto;
+        }
+
+        .version-card::before {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: var(--accent-gold);
+            border-radius: 50%;
+            top: 40px;
+            border: 4px solid var(--bg-primary);
+            z-index: 2;
+        }
+
+        .version-card.left::before {
+            right: -10.5%;
+            box-shadow: 0 0 20px var(--accent-gold);
+        }
+
+        .version-card.right::before {
+            left: -10.5%;
+            box-shadow: 0 0 20px var(--accent-indigo);
+        }
+
+        .version-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        .badge-2x { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .badge-3x { background: linear-gradient(135deg, #a29bfe, #6c5ce7); }
+        .badge-4x { background: linear-gradient(135deg, #55efc4, #00b894); }
+        .badge-7x { background: linear-gradient(135deg, #ffeaa7, #fdcb6e); color: #2d3436; }
+
+        .version-title {
+            font-size: 1.4rem;
+            margin-bottom: 12px;
+            color: var(--text-primary);
+        }
+
+        .version-desc {
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 20px;
+        }
+
+        .memory-block {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .struct-line {
+            display: flex;
+            margin: 4px 0;
+            align-items: center;
+        }
+
+        .struct-field {
+            display: inline-flex;
+            align-items: center;
+            height: 32px;
+            padding: 0 12px;
+            border-radius: 4px;
+            margin-right: 4px;
+            font-weight: 500;
+        }
+
+        .field-int { background: rgba(255, 107, 107, 0.3); border-left: 3px solid var(--accent-red); }
+        .field-char { background: rgba(78, 205, 196, 0.3); border-left: 3px solid var(--accent-blue); }
+        .field-uchar { background: rgba(162, 155, 254, 0.3); border-left: 3px solid var(--accent-purple); }
+        .field-void { background: rgba(85, 239, 196, 0.3); border-left: 3px solid var(--accent-green); }
+        .field-alloc { background: rgba(255, 234, 167, 0.3); border-left: 3px solid var(--accent-orange); }
+        .field-gold { background: rgba(245, 158, 11, 0.3); border-left: 3px solid var(--accent-gold); }
+        .field-indigo { background: rgba(168, 85, 247, 0.3); border-left: 3px solid var(--accent-indigo); }
+        .field-red { background: rgba(255, 107, 107, 0.3); border-left: 3px solid var(--accent-red); }
+
+        .struct-size {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            margin-left: 8px;
+        }
+
+        .features {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .feature-tag {
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .feature-tag.highlight {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--accent-gold);
+        }
+
+        .core-section {
+            margin-top: 80px;
+            text-align: center;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            margin-bottom: 40px;
+            color: var(--text-primary);
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .compare-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .compare-card h3 {
+            color: var(--accent-gold);
+            margin-bottom: 16px;
+            font-size: 1.2rem;
+        }
+
+        .compare-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .compare-item:last-child {
+            border-bottom: none;
+        }
+
+        .compare-label {
+            color: var(--text-secondary);
+        }
+
+        .compare-value {
+            font-weight: 600;
+        }
+
+        .val-old { color: var(--accent-red); }
+        .val-new { color: var(--accent-green); }
+
+        .skiplist-section {
+            margin-top: 80px;
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(168, 85, 247, 0.1));
+            border-radius: 24px;
+            padding: 48px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .skiplist-title {
+            font-size: 1.8rem;
+            text-align: center;
+            margin-bottom: 32px;
+            color: var(--accent-gold);
+        }
+
+        .skiplist-visual {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .skiplist-tree {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 24px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .skiplist-level {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 16px;
+            position: relative;
+        }
+
+        .skiplist-level::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            right: 50%;
+            top: 50%;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .skiplist-node {
+            width: 50px;
+            height: 36px;
+            background: rgba(245, 158, 11, 0.2);
+            border: 2px solid var(--accent-gold);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            color: var(--accent-gold);
+            margin: 0 4px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .skiplist-node.highlight {
+            background: rgba(168, 85, 247, 0.3);
+            border-color: var(--accent-indigo);
+            color: var(--accent-indigo);
+        }
+
+        .skiplist-node.bottom {
+            background: rgba(55, 239, 196, 0.2);
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+        }
+
+        .skiplist-labels {
+            display: flex;
+            justify-content: space-around;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 8px;
+        }
+
+        .skiplist-note {
+            text-align: center;
+            margin-top: 24px;
+            padding: 16px;
+            background: var(--bg-card);
+            border-radius: 12px;
+        }
+
+        .summary {
+            margin-top: 80px;
+            background: var(--bg-card);
+            border-radius: 24px;
+            padding: 40px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .summary h2 {
+            color: var(--accent-green);
+            margin-bottom: 24px;
+        }
+
+        .summary p {
+            color: var(--text-secondary);
+            line-height: 1.8;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .dual-structure {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+
+        .dual-box {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 16px;
+            min-width: 200px;
+            flex: 1;
+        }
+
+        .dual-box h4 {
+            color: var(--accent-blue);
+            margin-bottom: 12px;
+            text-align: center;
+        }
+
+        @media (max-width: 900px) {
+            .timeline::before {
+                left: 20px;
+            }
+
+            .version-card {
+                width: calc(100% - 60px);
+                margin-left: 60px !important;
+                margin-right: 0 !important;
+            }
+
+            .version-card::before {
+                left: -50px !important;
+                right: auto !important;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .section-title {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-particles"></div>
+
+    <div class="container">
+        <header>
+            <h1>Redis Zset 数据结构演进史</h1>
+            <p class="subtitle">跳表 + 字典的完美组合</p>
+        </header>
+
+        <div class="timeline">
+            <!-- Redis 2.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-2x">Redis 2.0</span>
+                <h2 class="version-title">Zset 诞生 + ziplist</h2>
+                <p class="version-desc">
+                    2010 年，Zset（有序集合）诞生。底层使用 ziplist 实现，
+                    member 和 score 成对存储，按 score 有序排列。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-gold); margin-bottom: 8px;">// ziplist 存储结构</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.8;">
+                        |...|score1|member1|score2|member2|...|<br><br>
+                        • 按 score 升序排列<br>
+                        • member + score 连续存储<br>
+                        • 二分查找定位
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">紧凑内存</span>
+                    <span class="feature-tag">O(log n) 范围查询</span>
+                    <span class="feature-tag">小数据友好</span>
+                </div>
+            </div>
+
+            <!-- Redis 2.4 -->
+            <div class="version-card right">
+                <span class="version-badge badge-2x">Redis 2.4</span>
+                <h2 class="version-title">阈值机制确立</h2>
+                <p class="version-desc">
+                    确立 ziplist 的使用条件。当元素数量不超过 zset-max-ziplist-entries
+                    且每个元素长度不超过 zset-max-ziplist-value 时使用 ziplist。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-orange); margin-bottom: 8px;">// ziplist 限制条件</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-green);">✓</span> 元素数 ≤ 128<br>
+                        <span style="color: var(--accent-green);">✓</span> member 长度 ≤ 64 bytes<br><br>
+                        任意一条不满足 → 转换为 skiplist + dict
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">自动编码转换</span>
+                    <span class="feature-tag">128 元素阈值</span>
+                </div>
+            </div>
+
+            <!-- Redis 2.8 -->
+            <div class="version-card left">
+                <span class="version-badge badge-2x">Redis 2.8</span>
+                <h2 class="version-title">ZRANGEBYSCORE 优化</h2>
+                <p class="version-desc">
+                    优化 ZRANGEBYSCORE 等范围查询命令的性能。
+                    ziplist 的二分查找机制确保 O(log n) 的范围定位。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-blue); margin-bottom: 8px;">// 范围查询复杂度</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-gold);">ziplist:</span><br>
+                        &nbsp;&nbsp;定位: O(log n)<br>
+                        &nbsp;&nbsp;返回连续元素: O(m) [m=返回数量]<br><br>
+                        <span style="color: var(--accent-indigo);">skiplist:</span><br>
+                        &nbsp;&nbsp;定位: O(log n)<br>
+                        &nbsp;&nbsp;返回连续元素: O(log n + m)
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag">范围查询优化</span>
+                    <span class="feature-tag">ZSET 命令完善</span>
+                </div>
+            </div>
+
+            <!-- Redis 3.0 -->
+            <div class="version-card right">
+                <span class="version-badge badge-3x">Redis 3.0 ⭐ 核心变革</span>
+                <h2 class="version-title">skiplist + dict 组合</h2>
+                <p class="version-desc">
+                    革命性突破！引入 skiplist（跳表）和 dict（字典）组合作为 Zset 的高性能底层实现。
+                    skiplist 保证有序，dict 保证 O(1) 单点查询。
+                </p>
+
+                <div class="dual-structure">
+                    <div class="dual-box">
+                        <h4>skiplist 跳表</h4>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
+                            • 节点按 score 有序<br>
+                            • 多层链表加速查找<br>
+                            • O(log n) 范围查询<br>
+                            • O(log n) 插入/删除
+                        </div>
+                    </div>
+                    <div class="dual-box">
+                        <h4>dict 字典</h4>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
+                            • member → score 映射<br>
+                            • O(1) ZSCORE 查询<br>
+                            • O(1) ZREM 删除<br>
+                            • 哈希表实现
+                        </div>
+                    </div>
+                </div>
+
+                <div class="memory-block" style="margin-top: 12px;">
+                    <div style="color: var(--accent-purple); margin-bottom: 8px;">// zset 结构 (Redis 3.0+)</div>
+                    <div class="struct-line">
+                        <span class="struct-field field-void">dict *dict</span>
+                        <span class="struct-size">member→score</span>
+                    </div>
+                    <div class="struct-line">
+                        <span class="struct-field field-void">skiplist *zsl</span>
+                        <span class="struct-size">score→member</span>
+                    </div>
+                    <div style="margin-top: 8px; color: var(--text-secondary);">
+                        <span style="color: var(--accent-orange);">关键:</span> 指向同一个 zskiplistNode
+                    </div>
+                </div>
+
+                <div class="features">
+                    <span class="feature-tag highlight">双索引结构</span>
+                    <span class="feature-tag highlight">O(1) 单点查询</span>
+                    <span class="feature-tag">O(log n) 范围</span>
+                </div>
+            </div>
+
+            <!-- Redis 4.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-4x">Redis 4.0</span>
+                <h2 class="version-title">参数调整与优化</h2>
+                <p class="version-desc">
+                    调整 zset-max-ziplist-entries 从 128 → 128（保持），
+                    优化跳表的随机层数生成算法，保持结构稳定。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-green); margin-bottom: 8px;">// Redis 4.0 配置</div>
+                    <div class="compare-item">
+                        <span class="compare-label">zset-max-ziplist-entries</span>
+                        <span class="compare-value">128</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">zset-max-ziplist-value</span>
+                        <span class="compare-value">64 bytes</span>
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag">跳表优化</span>
+                    <span class="feature-tag">渐进式 rehash</span>
+                </div>
+            </div>
+
+            <!-- Redis 6.2 -->
+            <div class="version-card right">
+                <span class="version-badge badge-4x">Redis 6.2</span>
+                <h2 class="version-title">阈值大幅提升</h2>
+                <p class="version-desc">
+                    将 zset-max-ziplist-entries 从 128 → 128，
+                    但优化了内部实现，提升 ZRANK/ZREVRANK 等排名查询的性能。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-blue); margin-bottom: 8px;">// ZRANK vs ZSCORE</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-gold);">ZRANK:</span><br>
+                        &nbsp;&nbsp;跳表中定位 → O(log n)<br>
+                        &nbsp;&nbsp;返回成员排名<br><br>
+                        <span style="color: var(--accent-indigo);">ZSCORE:</span><br>
+                        &nbsp;&nbsp;字典中查找 → O(1)！<br>
+                        &nbsp;&nbsp;返回分数
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">O(log n) 排名查询</span>
+                    <span class="feature-tag">O(1) 分值查询</span>
+                </div>
+            </div>
+
+            <!-- Redis 7.0 -->
+            <div class="version-card left">
+                <span class="version-badge badge-7x">Redis 7.0+ ⭐ 底层升级</span>
+                <h2 class="version-title">listpack 替换 ziplist</h2>
+                <p class="version-desc">
+                    Redis 7.0 将 Zset 的 ziplist 替换为 listpack。
+                    skiplist + dict 组合保持不变，只是 ziplist 部分升级为 listpack。
+                </p>
+                <div class="memory-block">
+                    <div style="color: var(--accent-purple); margin-bottom: 8px;">// Redis 7.0 Zset 编码</div>
+                    <div style="font-size: 0.85rem; line-height: 1.8;">
+                        <span style="color: var(--accent-orange);">小数据:</span> listpack<br>
+                        &nbsp;&nbsp;• 无级联更新<br>
+                        &nbsp;&nbsp;• 内存更紧凑<br><br>
+                        <span style="color: var(--accent-indigo);">大数据:</span> skiplist + dict<br>
+                        &nbsp;&nbsp;• O(log n) 范围查询<br>
+                        &nbsp;&nbsp;• O(1) 单点查询
+                    </div>
+                </div>
+                <div class="features">
+                    <span class="feature-tag highlight">listpack 编码</span>
+                    <span class="feature-tag highlight">无级联更新</span>
+                    <span class="feature-tag">向后兼容</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- skiplist 可视化 -->
+        <section class="skiplist-section">
+            <h2 class="skiplist-title">skiplist + dict 双索引结构</h2>
+            <p style="text-align: center; color: var(--text-secondary); margin-bottom: 32px;">
+                同一份数据，两种访问路径：字典 O(1) 查询 + 跳表 O(log n) 范围
+            </p>
+
+            <div class="skiplist-visual">
+                <div class="skiplist-tree">
+                    <div style="text-align: center; color: var(--accent-gold); margin-bottom: 16px; font-weight: bold;">
+                        skiplist 跳表结构
+                    </div>
+
+                    <div class="skiplist-level">
+                        <div class="skiplist-node">L3</div>
+                        <div style="width: 30px;"></div>
+                        <div class="skiplist-node">L3</div>
+                    </div>
+
+                    <div class="skiplist-level">
+                        <div class="skiplist-node">L2</div>
+                        <div class="skiplist-node">L2</div>
+                        <div class="skiplist-node">L2</div>
+                        <div class="skiplist-node">L2</div>
+                        <div class="skiplist-node">L2</div>
+                    </div>
+
+                    <div class="skiplist-level">
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                        <div class="skiplist-node">L1</div>
+                    </div>
+
+                    <div class="skiplist-level">
+                        <div class="skiplist-node bottom">L0: Alice</div>
+                        <div class="skiplist-node bottom">L0: Bob</div>
+                        <div class="skiplist-node bottom highlight">L0: Carol</div>
+                        <div class="skiplist-node bottom">L0: Dave</div>
+                        <div class="skiplist-node bottom">L0: Eve</div>
+                    </div>
+
+                    <div class="skiplist-labels">
+                        <span>score: 85</span>
+                        <span>score: 90</span>
+                        <span style="color: var(--accent-indigo);">score: 95 ★</span>
+                        <span>score: 100</span>
+                        <span>score: 110</span>
+                    </div>
+
+                    <div class="skiplist-note">
+                        <div style="color: var(--accent-orange); margin-bottom: 8px;">
+                            查找 Carol (score: 95) 的路径：
+                        </div>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                            L3: Head → L3 → <br>
+                            L2: → → L2 → <br>
+                            L1: → → → → L1 → <br>
+                            L0: Alice → Bob → <span style="color: var(--accent-indigo);">Carol ✅</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 32px; flex-wrap: wrap; justify-content: center; margin-top: 24px;">
+                    <div class="memory-block" style="text-align: left; min-width: 280px;">
+                        <div style="color: var(--accent-gold); margin-bottom: 8px;">// skiplist 优势</div>
+                        <div style="font-size: 0.8rem; line-height: 1.6; color: var(--text-secondary);">
+                            ✓ ZRANGE / ZREVRANGE → O(log n + m)<br>
+                            ✓ ZRANK / ZREVRANK → O(log n)<br>
+                            ✓ ZRANGEBYSCORE → O(log n + m)<br>
+                            ✓ 按序遍历高效
+                        </div>
+                    </div>
+
+                    <div class="memory-block" style="text-align: left; min-width: 280px;">
+                        <div style="color: var(--accent-indigo); margin-bottom: 8px;">// dict 优势</div>
+                        <div style="font-size: 0.8rem; line-height: 1.6; color: var(--text-secondary);">
+                            ✓ ZSCORE → O(1) ⭐<br>
+                            ✓ ZREM → O(1) ⭐<br>
+                            ✓ SISMEMBER 同款逻辑<br>
+                            ✓ member 存在性判断
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 32px; text-align: center;">
+                    <div class="memory-block" style="display: inline-block; text-align: left;">
+                        <div style="color: var(--accent-purple); margin-bottom: 8px;">// 为什么需要两个结构？</div>
+                        <div style="font-size: 0.9rem; line-height: 1.8;">
+                            <span style="color: var(--accent-orange);">需求1:</span> "按分数范围查成员" → skiplist 擅长<br>
+                            <span style="color: var(--accent-blue);">需求2:</span> "查某成员分数" → dict 擅长<br><br>
+                            <span style="color: var(--accent-green);">解法:</span> 两个结构指向同一份 zskiplistNode，
+                            增删改时同步更新，内存开销翻倍但性能双赢！
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 编码对比 -->
+        <section class="core-section">
+            <h2 class="section-title">Zset 编码对比</h2>
+            <div class="comparison-grid">
+                <div class="compare-card">
+                    <h3>内存效率</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">listpack/ziplist</span>
+                        <span class="compare-value val-new">★★★★★</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">skiplist+dict</span>
+                        <span class="compare-value val-old">★★★☆☆</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>单点查询 (ZSCORE)</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">listpack/ziplist</span>
+                        <span class="compare-value">O(n)</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">skiplist+dict</span>
+                        <span class="compare-value val-new">O(1) ⭐</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>范围查询 (ZRANGE)</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">listpack/ziplist</span>
+                        <span class="compare-value val-new">O(log n + m)</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">skiplist+dict</span>
+                        <span class="compare-value val-new">O(log n + m)</span>
+                    </div>
+                </div>
+
+                <div class="compare-card">
+                    <h3>适用场景</h3>
+                    <div class="compare-item">
+                        <span class="compare-label">listpack</span>
+                        <span class="compare-value">&lt;128 元素</span>
+                    </div>
+                    <div class="compare-item">
+                        <span class="compare-label">skiplist+dict</span>
+                        <span class="compare-value">大数据量</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 总结 -->
+        <section class="summary">
+            <h2>演进总结</h2>
+            <p>
+                Redis Zset 的演进是"鱼与熊掌兼得"的典范：<br><br>
+                <strong style="color: var(--accent-gold);">按序存储</strong>（范围查询）+
+                <strong style="color: var(--accent-indigo);">O(1) 查询</strong>（单点定位）=
+                <strong style="color: var(--accent-green);">skiplist + dict</strong><br><br>
+                核心设计哲学：<br>
+                <strong style="color: var(--accent-orange);">空间换时间</strong> — 两份索引，但都是指针<br>
+                <strong style="color: var(--accent-blue);">自动切换</strong> — 小数据用 listpack 省内存<br>
+                <strong style="color: var(--accent-purple);">各司其职</strong> — skiplist 管有序，dict 管去重+快速查询<br><br>
+                这就是为什么 Zset 能同时支持"排行榜"（ZRANGE）和"实时分数"（ZSCORE）两种高频场景。
+            </p>
+        </section>
+    </div>
+
+    <script>
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.version-card').forEach(card => {
+            card.style.opacity = '0';
+            card.style.transform = 'translateY(30px)';
+            card.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+            observer.observe(card);
+        });
+    </script>
+</body>
+</html>
