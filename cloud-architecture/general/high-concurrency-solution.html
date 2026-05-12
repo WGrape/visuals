@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高并发全景方案 — 从入口到存储的分层防护体系</title>
+    <style>
+        :root {
+            --bg: #080c14;
+            --bg2: #0f1520;
+            --bg3: #151d2e;
+            --bg4: #1b2540;
+            --border: #1e2d4a;
+            --border-lit: #2a3f6a;
+            --text: #e8ecf4;
+            --text2: #94a3c0;
+            --text3: #5a6a8a;
+            --blue: #4da6ff;
+            --blue-dim: rgba(77,166,255,0.12);
+            --cyan: #36d6c8;
+            --green: #3dd68c;
+            --green-dim: rgba(61,214,140,0.12);
+            --orange: #f0a040;
+            --orange-dim: rgba(240,160,64,0.12);
+            --red: #f06060;
+            --red-dim: rgba(240,96,96,0.12);
+            --purple: #a78bfa;
+            --purple-dim: rgba(167,139,250,0.12);
+            --pink: #f472b6;
+            --yellow: #fbbf24;
+            --teal: #2dd4bf;
+        }
+        *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', sans-serif;
+            line-height: 1.7;
+            overflow-x: hidden;
+        }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-lit); border-radius: 3px; }
+
+        /* ========== 顶部导航 ========== */
+        .topbar {
+            position: fixed; top:0; left:0; right:0; z-index:100;
+            height: 52px;
+            background: rgba(8,12,20,0.88);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+            display: flex; align-items: center;
+            padding: 0 2rem; gap: 1.5rem;
+        }
+        .topbar-brand {
+            font-weight: 800; font-size: 1rem; white-space: nowrap;
+            background: linear-gradient(135deg, var(--cyan), var(--blue));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .topbar-nav { display:flex; gap:2px; overflow-x:auto; scrollbar-width:none; }
+        .topbar-nav::-webkit-scrollbar { display:none; }
+        .topbar-link {
+            padding: 5px 12px; border-radius: 6px; font-size: 0.78rem;
+            color: var(--text3); cursor: pointer; white-space: nowrap;
+            transition: all .2s; text-decoration: none; font-weight: 500;
+        }
+        .topbar-link:hover { color: var(--text2); background: rgba(255,255,255,0.04); }
+        .topbar-link.active { color: var(--blue); background: var(--blue-dim); }
+
+        .container {
+            position: relative; z-index:1;
+            max-width: 1200px; margin: 0 auto;
+            padding: 64px 1.5rem 5rem;
+        }
+
+        /* ========== Hero ========== */
+        .hero { text-align:center; padding: 3.5rem 0 2rem; }
+        .hero-badge {
+            display:inline-block; padding:4px 14px; border-radius:20px;
+            font-size:.75rem; font-weight:600; letter-spacing:.5px;
+            color: var(--cyan); background: rgba(54,214,200,0.08);
+            border:1px solid rgba(54,214,200,0.18); margin-bottom:1.2rem;
+        }
+        .hero h1 {
+            font-size: clamp(1.8rem, 4.5vw, 3rem);
+            font-weight: 900; line-height:1.15; margin-bottom:.8rem;
+            background: linear-gradient(135deg, #fff 20%, var(--cyan) 60%, var(--blue) 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .hero p { font-size:1rem; color:var(--text2); max-width:720px; margin:0 auto; }
+
+        /* ========== 全局架构图 ========== */
+        .arch-flow {
+            background: var(--bg2); border:1px solid var(--border);
+            border-radius:16px; padding:2rem 1.5rem; margin: 2rem 0 3rem;
+            overflow-x: auto;
+        }
+        .arch-flow-title { font-size:.85rem; font-weight:700; color:var(--cyan); margin-bottom:1.2rem; }
+        .arch-layers {
+            display: flex; align-items: stretch; gap: 0;
+            min-width: 900px;
+        }
+        .arch-layer {
+            flex:1; text-align:center; padding:1rem .6rem;
+            border-right: 2px dashed var(--border);
+            position: relative;
+            transition: all .3s;
+        }
+        .arch-layer:last-child { border-right:none; }
+        .arch-layer:hover { background: rgba(77,166,255,0.03); }
+        .arch-layer-num {
+            position:absolute; top:-8px; left:50%; transform:translateX(-50%);
+            width:18px; height:18px; border-radius:50%;
+            background: var(--bg2); border:2px solid;
+            font-size:.65rem; font-weight:800;
+            display:flex; align-items:center; justify-content:center;
+        }
+        .arch-layer-icon { font-size:1.8rem; margin:.5rem 0 .3rem; }
+        .arch-layer-name { font-size:.82rem; font-weight:700; margin-bottom:.3rem; }
+        .arch-layer-desc { font-size:.68rem; color:var(--text3); line-height:1.5; }
+        .arch-arrow {
+            flex-shrink:0; display:flex; align-items:center; justify-content:center;
+            padding: 0 .3rem; color: var(--text3); font-size:.9rem;
+        }
+
+        /* ========== 层级内容 ========== */
+        .layer-section {
+            margin-bottom: 3.5rem;
+            scroll-margin-top: 65px;
+            opacity:1; transform: translateY(0);
+            transition: opacity .5s ease, transform .5s ease;
+        }
+        .layer-section.visible { opacity:1; transform:translateY(0); }
+
+        .layer-header {
+            display:flex; align-items:center; gap:1rem;
+            margin-bottom:1.2rem; padding-bottom:.8rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .layer-icon {
+            width:44px; height:44px; border-radius:12px;
+            display:flex; align-items:center; justify-content:center;
+            font-size:1.4rem; flex-shrink:0;
+        }
+        .layer-title { font-size:1.3rem; font-weight:800; }
+        .layer-sub { font-size:.82rem; color:var(--text2); }
+
+        .layer-intro {
+            background: var(--bg3); border:1px solid var(--border);
+            border-radius:12px; padding:1.2rem 1.4rem;
+            margin-bottom:1.2rem; font-size:.88rem; color:var(--text2); line-height:1.8;
+            border-left: 3px solid var(--blue);
+        }
+        .layer-intro strong { color: var(--text); }
+
+        /* ========== 策略卡片 ========== */
+        .strat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: .8rem;
+        }
+        .strat-card {
+            background: var(--bg3); border:1px solid var(--border);
+            border-radius:10px; padding:1.2rem;
+            cursor:pointer; transition: all .25s;
+            position:relative; overflow:hidden;
+        }
+        .strat-card:hover {
+            border-color: var(--border-lit);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 24px rgba(0,0,0,.25);
+        }
+        .strat-card::after {
+            content:''; position:absolute; top:0; left:0;
+            width:3px; height:100%; border-radius:3px 0 0 3px;
+        }
+        .strat-card:hover::after { opacity:1; }
+        .strat-card.l-green::after { background: var(--green); }
+        .strat-card.l-blue::after { background: var(--blue); }
+        .strat-card.l-orange::after { background: var(--orange); }
+        .strat-card.l-red::after { background: var(--red); }
+        .strat-card.l-purple::after { background: var(--purple); }
+        .strat-card.l-cyan::after { background: var(--cyan); }
+
+        .strat-head { display:flex; align-items:center; gap:.6rem; margin-bottom:.5rem; }
+        .strat-icon { font-size:1.3rem; flex-shrink:0; }
+        .strat-name { font-size:.95rem; font-weight:700; }
+        .strat-brief { font-size:.82rem; color:var(--text2); margin-bottom:.6rem; }
+
+        .strat-detail {
+            max-height:0; overflow:hidden;
+            transition: max-height .4s cubic-bezier(.4,0,.2,1);
+        }
+        .strat-card.open .strat-detail { max-height:1200px; }
+
+        .strat-detail-inner {
+            border-top:1px solid var(--border); padding-top:.8rem;
+        }
+        .strat-label {
+            font-size:.7rem; font-weight:700; text-transform:uppercase;
+            letter-spacing:.6px; margin-bottom:.4rem;
+        }
+        .strat-label.green { color:var(--green); }
+        .strat-label.blue { color:var(--blue); }
+        .strat-label.orange { color:var(--orange); }
+        .strat-label.red { color:var(--red); }
+        .strat-label.purple { color:var(--purple); }
+
+        .strat-text {
+            font-size:.82rem; color:var(--text2); line-height:1.75;
+            margin-bottom:.8rem;
+        }
+        .strat-text code {
+            background: rgba(77,166,255,0.1); color: var(--blue);
+            padding: 1px 5px; border-radius:3px; font-size:.78rem;
+            font-family: 'SF Mono','Fira Code',monospace;
+        }
+        .strat-code {
+            background: rgba(0,0,0,.35); border-radius:8px;
+            padding:.7rem .9rem; margin-bottom:.7rem;
+            font-family:'SF Mono','Fira Code',monospace;
+            font-size:.76rem; line-height:1.65; color:var(--cyan);
+            border-left: 2px solid var(--border-lit);
+            overflow-x:auto; white-space: pre;
+        }
+        .strat-code .cm { color:var(--text3); }
+        .strat-code .kw { color:var(--purple); }
+        .strat-code .str { color:var(--green); }
+        .strat-code .num { color:var(--orange); }
+
+        .strat-tags { display:flex; flex-wrap:wrap; gap:.35rem; }
+        .strat-tag {
+            padding:2px 8px; border-radius:4px;
+            font-size:.68rem; font-weight:600;
+        }
+        .strat-tag.t-green { background:var(--green-dim); color:var(--green); }
+        .strat-tag.t-blue { background:var(--blue-dim); color:var(--blue); }
+        .strat-tag.t-orange { background:var(--orange-dim); color:var(--orange); }
+        .strat-tag.t-purple { background:var(--purple-dim); color:var(--purple); }
+        .strat-tag.t-cyan { background:rgba(54,214,200,0.1); color:var(--cyan); }
+
+        .strat-expand {
+            font-size:.7rem; color:var(--text3); text-align:right; margin-top:.4rem;
+        }
+        .strat-card:not(.open) .strat-expand::after { content:'展开详情 ↓'; }
+        .strat-card.open .strat-expand::after { content:'收起 ↑'; }
+
+        /* ========== 层间连接线 ========== */
+        .layer-connector {
+            display:flex; justify-content:center; padding:.5rem 0; margin-bottom:1.5rem;
+        }
+        .layer-connector-line {
+            width:2px; height:40px; position:relative;
+            background: linear-gradient(to bottom, var(--border-lit), transparent);
+        }
+        .layer-connector-line::after {
+            content:'▼'; position:absolute; bottom:-8px; left:50%; transform:translateX(-50%);
+            font-size:.7rem; color:var(--text3);
+        }
+        /* 移动端层间连接 */
+        @media(max-width:768px){
+            .layer-connector { margin-bottom:1rem; padding:.3rem 0; }
+            .layer-connector-line { height:30px; }
+        }
+
+        /* ========== 总结区域 ========== */
+        .summary-section {
+            background: var(--bg2); border:1px solid var(--border);
+            border-radius:16px; padding:2rem;
+        }
+        .summary-section h2 {
+            font-size:1.2rem; font-weight:800; margin-bottom:1rem;
+            background: linear-gradient(135deg, var(--cyan), var(--green));
+            -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+        }
+        .summary-grid {
+            display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+            gap:.8rem; margin-bottom:1.5rem;
+        }
+        .summary-item {
+            background:var(--bg3); border:1px solid var(--border);
+            border-radius:10px; padding:1rem;
+        }
+        .summary-item h4 { font-size:.85rem; font-weight:700; margin-bottom:.3rem; }
+        .summary-item p { font-size:.78rem; color:var(--text2); }
+        .principle-list { list-style:none; counter-reset:p; }
+        .principle-list li {
+            counter-increment:p; padding:.6rem 0 .6rem 2.2rem;
+            font-size:.85rem; color:var(--text2); position:relative;
+            border-bottom:1px solid var(--border);
+        }
+        .principle-list li:last-child { border-bottom:none; }
+        .principle-list li::before {
+            content:counter(p); position:absolute; left:0; top:.6rem;
+            width:1.5rem; height:1.5rem; border-radius:50%;
+            background:var(--blue-dim); color:var(--blue);
+            font-size:.72rem; font-weight:800;
+            display:flex; align-items:center; justify-content:center;
+        }
+
+        /* ========== 背景 ========== */
+        #bg-canvas {
+            position:fixed; top:0; left:0; width:100%; height:100%;
+            z-index:0; pointer-events:none; opacity:.4;
+        }
+
+        @media(max-width:768px) {
+            .container { padding:56px .8rem 3rem; }
+            .strat-grid { grid-template-columns:1fr; }
+            .arch-layers { min-width:700px; }
+            .topbar { padding:0 .8rem; gap:.8rem; }
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<nav class="topbar">
+    <div class="topbar-brand">⚡ 高并发全景方案</div>
+    <div class="topbar-nav">
+        <a class="topbar-link active" href="#overview">全景架构</a>
+        <a class="topbar-link" href="#L1">L1 客户端</a>
+        <a class="topbar-link" href="#L2">L2 CDN</a>
+        <a class="topbar-link" href="#L3">L3 SLB</a>
+        <a class="topbar-link" href="#L4">L4 Nginx</a>
+        <a class="topbar-link" href="#L5">L5 网关</a>
+        <a class="topbar-link" href="#L6">L6 服务</a>
+        <a class="topbar-link" href="#L7">L7 缓存</a>
+        <a class="topbar-link" href="#L8">L8 数据库</a>
+        <a class="topbar-link" href="#L9">L9 存储</a>
+        <a class="topbar-link" href="#L10">L10 第三方</a>
+        <a class="topbar-link" href="#summary">总结</a>
+    </div>
+</nav>
+
+<div class="container">
+
+    <!-- Hero -->
+    <div class="hero">
+        <div class="hero-badge">🏗️ HIGH-CONCURRENCY ARCHITECTURE</div>
+        <h1>高并发全景防护方案</h1>
+        <p>从用户浏览器到持久化存储，每一层做什么、防什么、怎么防——一张图讲透高并发系统的完整分层防御体系</p>
+    </div>
+
+    <!-- 全局架构图 -->
+    <div class="arch-flow" id="overview">
+        <div class="arch-flow-title">🗺️ 请求全链路架构图（点击可跳转到对应层级）</div>
+        <div class="arch-layers">
+            <a class="arch-layer" href="#L1" style="border-color:var(--green);text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--green);border-color:var(--green);">1</div>
+                <div class="arch-layer-icon">👤</div>
+                <div class="arch-layer-name" style="color:var(--green);">客户端</div>
+                <div class="arch-layer-desc">浏览器/APP<br>请求合并、防抖节流<br>本地缓存</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L2" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--blue);border-color:var(--blue);">2</div>
+                <div class="arch-layer-icon">🌐</div>
+                <div class="arch-layer-name" style="color:var(--blue);">CDN</div>
+                <div class="arch-layer-desc">边缘缓存<br>静态资源加速<br>就近访问</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L3" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--cyan);border-color:var(--cyan);">3</div>
+                <div class="arch-layer-icon">⚖️</div>
+                <div class="arch-layer-name" style="color:var(--cyan);">SLB</div>
+                <div class="arch-layer-desc">负载均衡<br>四/七层转发<br>健康检查</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L4" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--orange);border-color:var(--orange);">4</div>
+                <div class="arch-layer-icon">🔧</div>
+                <div class="arch-layer-name" style="color:var(--orange);">Nginx</div>
+                <div class="arch-layer-desc">反向代理<br>限流、熔断<br>动静分离</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L5" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--purple);border-color:var(--purple);">5</div>
+                <div class="arch-layer-icon">🚪</div>
+                <div class="arch-layer-name" style="color:var(--purple);">API网关</div>
+                <div class="arch-layer-desc">鉴权、路由<br>限流熔断<br>协议转换</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L6" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--pink);border-color:var(--pink);">6</div>
+                <div class="arch-layer-icon">⚙️</div>
+                <div class="arch-layer-name" style="color:var(--pink);">微服务集群</div>
+                <div class="arch-layer-desc">业务逻辑<br>线程池、无锁设计<br>异步、并发控制</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L7" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--red);border-color:var(--red);">7</div>
+                <div class="arch-layer-icon">⚡</div>
+                <div class="arch-layer-name" style="color:var(--red);">Redis</div>
+                <div class="arch-layer-desc">分布式缓存<br>分布式锁<br>排行榜/计数器</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L8" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--yellow);border-color:var(--yellow);">8</div>
+                <div class="arch-layer-icon">🗃️</div>
+                <div class="arch-layer-name" style="color:var(--yellow);">MySQL</div>
+                <div class="arch-layer-desc">分库分表<br>读写分离<br>索引优化</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L9" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--teal);border-color:var(--teal);">9</div>
+                <div class="arch-layer-icon">💾</div>
+                <div class="arch-layer-name" style="color:var(--teal);">持久化存储</div>
+                <div class="arch-layer-desc">消息队列<br>对象存储<br>搜索引擎</div>
+            </a>
+            <div class="arch-arrow">→</div>
+            <a class="arch-layer" href="#L10" style="text-decoration:none;color:inherit;">
+                <div class="arch-layer-num" style="color:var(--text2);border-color:var(--text2);">10</div>
+                <div class="arch-layer-icon">🔗</div>
+                <div class="arch-layer-name" style="color:var(--text2);">第三方服务</div>
+                <div class="arch-layer-desc">支付、短信<br>外部API<br>超时、熔断、降级</div>
+            </a>
+        </div>
+    </div>
+
+    <!-- ===== L1 客户端 ===== -->
+    <div class="layer-section" id="L1">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:var(--green-dim);">👤</div>
+            <div><div class="layer-title" style="color:var(--green);">L1 · 客户端层</div><div class="layer-sub">Browser / APP / 小程序 — 请求的起点，拦截在源头</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>最高效的请求是不发出的请求。客户端是离用户最近的一层，能在这里拦截掉的请求，就绝不让它进入网络。通过<code>本地缓存</code>、<code>请求合并</code>、<code>防抖节流</code>三大手段，大幅减少不必要的网络开销。
+        </div>
+        <div class="strat-grid" id="grid-L1"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L2 CDN ===== -->
+    <div class="layer-section" id="L2">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:var(--blue-dim);">🌐</div>
+            <div><div class="layer-title" style="color:var(--blue);">L2 · CDN 层</div><div class="layer-sub">Content Delivery Network — 就近分发，减轻源站压力</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>让用户从最近的节点获取数据，而非回源。CDN 是高并发架构中<strong>性价比最高</strong>的优化手段。静态资源（JS/CSS/图片/视频）全部走 CDN，可挡掉 60%~80% 的总流量。动态内容也可以通过 CDN Edge Function 做边缘计算。
+        </div>
+        <div class="strat-grid" id="grid-L2"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L3 SLB ===== -->
+    <div class="layer-section" id="L3">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:rgba(54,214,200,0.1);">⚖️</div>
+            <div><div class="layer-title" style="color:var(--cyan);">L3 · SLB 负载均衡层</div><div class="layer-sub">四层/七层负载均衡 — 流量的第一个"调度中心"</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>SLB（Server Load Balancer）是所有流量的入口守门员。它负责将请求<strong>均匀分配</strong>到后端多个 Nginx/网关节点上。通过<strong>健康检查</strong>自动摘除故障节点，通过<strong>会话保持</strong>保证用户粘性。SLB 本身是高可用的（多可用区部署），单点故障概率极低。
+        </div>
+        <div class="strat-grid" id="grid-L3"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L4 Nginx ===== -->
+    <div class="layer-section" id="L4">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:var(--orange-dim);">🔧</div>
+            <div><div class="layer-title" style="color:var(--orange);">L4 · Nginx 反向代理层</div><div class="layer-sub">七层反向代理 — 第一道"精细化"流量控制防线</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>Nginx 是整个高并发架构中<strong>承上启下</strong>的关键节点。它向上承接 SLB 分发的流量，向下转发给 API 网关或直接到微服务。Nginx 天生擅长处理<strong>海量并发连接</strong>（epoll + 非阻塞IO），同时承担<strong>限流、动静分离、SSL卸载、日志</strong>等关键职责。
+        </div>
+        <div class="strat-grid" id="grid-L4"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L5 API网关 ===== -->
+    <div class="layer-section" id="L5">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:var(--purple-dim);">🚪</div>
+            <div><div class="layer-title" style="color:var(--purple);">L5 · API 网关层</div><div class="layer-sub">Spring Cloud Gateway / Kong — 统一入口，精细化管控</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>API 网关是微服务架构的<strong>"统一门面"</strong>。所有外部请求只与网关通信，网关负责<strong>鉴权、限流、路由、熔断、降级、协议转换、日志审计</strong>。它把横切关注点从业务代码中剥离出来，让微服务只专注业务逻辑。网关层是实施<strong> Sentinel/Resilience4j 熔断限流</strong>的最佳位置。
+        </div>
+        <div class="strat-grid" id="grid-L5"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L6 微服务集群 ===== -->
+    <div class="layer-section" id="L6">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:rgba(244,114,182,0.1);">⚙️</div>
+            <div><div class="layer-title" style="color:var(--pink);">L6 · 微服务业务层</div><div class="layer-sub">Spring Boot / Go — 高并发战斗的核心战场</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>业务层是高并发系统的<strong>核心战场</strong>。代码层面的每个细节都会被流量放大——一个 <code>synchronized</code> 可能让吞吐量从10万降到1千，一个慢 SQL 可以拖垮整个连接池。这一层需要关注：<strong>本地缓存（Caffeine）、无锁设计（CAS/Disruptor）、线程池隔离、异步编程（CompletableFuture/WebFlux）、连接池调优</strong>。
+        </div>
+        <div class="strat-grid" id="grid-L6"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L7 Redis ===== -->
+    <div class="layer-section" id="L7">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:var(--red-dim);">⚡</div>
+            <div><div class="layer-title" style="color:var(--red);">L7 · Redis 缓存层</div><div class="layer-sub">分布式缓存 — 高并发读写的第一道加速器</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>Redis 是高并发架构中<strong>投资回报率最高</strong>的中间件。一次 Redis 读操作 <1ms，一次 MySQL 读操作可能 5~50ms。用好 Redis 可以把 90% 以上的读请求挡在数据库之外。但 Redis 也引入了新问题：<strong>缓存穿透/击穿/雪崩、热点Key、大Key、缓存一致性</strong>。
+        </div>
+        <div class="strat-grid" id="grid-L7"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L8 MySQL ===== -->
+    <div class="layer-section" id="L8">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:rgba(251,191,36,0.1);">🗃️</div>
+            <div><div class="layer-title" style="color:var(--yellow);">L8 · MySQL 数据库层</div><div class="layer-sub">关系型数据库 — 数据持久化的最终防线</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>无论上层怎么优化，最终<strong>写操作都要落到数据库</strong>。MySQL 是整个链路中<strong>最脆弱、最昂贵</strong>的节点——单机 QPS 上限通常在 5000~20000，且写操作比读操作慢 10~100 倍。核心策略：<strong>读写分离</strong>（主写从读）、<strong>分库分表</strong>（水平拆分）、<strong>索引优化</strong>（避免全表扫描）、<strong>连接池调优</strong>（HikariCP）。
+        </div>
+        <div class="strat-grid" id="grid-L8"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L9 持久化存储 ===== -->
+    <div class="layer-section" id="L9">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:rgba(45,212,191,0.1);">💾</div>
+            <div><div class="layer-title" style="color:var(--teal);">L9 · 消息队列 & 搜索引擎</div><div class="layer-sub">Kafka / Elasticsearch / OSS — 削峰、检索、归档</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>这一层解决三个问题：<strong>削峰</strong>（Kafka/RocketMQ 缓冲瞬时流量）、<strong>检索</strong>（Elasticsearch 承担复杂查询，解放 MySQL）、<strong>存储</strong>（OSS/S3 存储大文件，数据库只存元数据）。消息队列还是<strong>异步解耦</strong>的核心——把非实时操作（发通知、写日志、数据同步）从同步链路中剥离出去。
+        </div>
+        <div class="strat-grid" id="grid-L9"></div>
+    </div>
+    <div class="layer-connector"><div class="layer-connector-line"></div></div>
+
+    <!-- ===== L10 第三方服务 ===== -->
+    <div class="layer-section" id="L10">
+        <div class="layer-header">
+            <div class="layer-icon" style="background:rgba(148,163,192,0.1);">🔗</div>
+            <div><div class="layer-title" style="color:var(--text2);">L10 · 第三方服务层</div><div class="layer-sub">支付/短信/地图 — 你无法控制的，但你必须防御的</div></div>
+        </div>
+        <div class="layer-intro">
+            <strong>核心理念：</strong>第三方服务是你<strong>无法控制</strong>的外部依赖——它们的可用性、延迟、限流策略都不在你手上。但它们的故障会<strong>拖垮你的系统</strong>。核心原则：<strong>永远不要信任外部服务</strong>。必须设置<strong>超时时间</strong>、<strong>熔断器</strong>、<strong>降级策略</strong>（如支付失败返回"稍后再试"）、<strong>异步调用</strong>（把同步等待变成消息回调）。
+        </div>
+        <div class="strat-grid" id="grid-L10"></div>
+    </div>
+
+    <!-- ===== 总结 ===== -->
+    <div class="layer-section" id="summary">
+        <div class="summary-section">
+            <h2>🎯 高并发防护十大核心原则</h2>
+            <ol class="principle-list">
+                <li><strong>能缓存的绝不回源</strong> — 多级缓存（客户端→CDN→本地缓存→Redis→数据库），层层拦截</li>
+                <li><strong>能异步的绝不同步</strong> — 消息队列削峰，CompletableFuture 并行，WebFlux 响应式</li>
+                <li><strong>能合并的绝不单发</strong> — 批量查询、请求合并（Collapser）、Pipeline</li>
+                <li><strong>能限流的绝不硬扛</strong> — 每一层都要有限流（客户端→网关→服务→DB连接池）</li>
+                <li><strong>能降级的绝不死等</strong> — 熔断 + 降级 + 兜底，保核心链路</li>
+                <li><strong>能用无锁的别加锁</strong> — CAS/Atomic/ConcurrentHashMap/Disruptor，锁是吞吐量的天敌</li>
+                <li><strong>能拆分的别集中</strong> — 分库分表、读写分离、微服务拆分、热点Key打散</li>
+                <li><strong>能就近的别远程</strong> — CDN、本地缓存、同机房调用、避免跨区域</li>
+                <li><strong>能预热的别冷启动</strong> — 缓存预热、JVM预热、K8s readinessProbe、连接池预热</li>
+                <li><strong>能监控的别盲跑</strong> — Prometheus + Grafana 全链路监控，P99 告警，实时容量评估</li>
+            </ol>
+
+            <div style="margin-top:2rem;">
+                <h2 style="font-size:1.1rem;font-weight:800;color:var(--orange);margin-bottom:1rem;">📊 各层防护手段一览</h2>
+                <div class="summary-grid">
+                    <div class="summary-item"><h4 style="color:var(--green);">👤 客户端</h4><p>本地缓存、防抖节流、请求合并、数据预加载</p></div>
+                    <div class="summary-item"><h4 style="color:var(--blue);">🌐 CDN</h4><p>静态资源缓存、边缘计算、域名分片、WebSocket就近接入</p></div>
+                    <div class="summary-item"><h4 style="color:var(--cyan);">⚖️ SLB</h4><p>负载均衡、健康检查、会话保持、DDoS基础防护</p></div>
+                    <div class="summary-item"><h4 style="color:var(--orange);">🔧 Nginx</h4><p>限流（limit_req）、动静分离、SSL卸载、gzip压缩</p></div>
+                    <div class="summary-item"><h4 style="color:var(--purple);">🚪 网关</h4><p>统一鉴权、路由、Sentinel限流熔断、灰度发布</p></div>
+                    <div class="summary-item"><h4 style="color:var(--pink);">⚙️ 服务</h4><p>线程池隔离、本地缓存、无锁设计、异步编排</p></div>
+                    <div class="summary-item"><h4 style="color:var(--red);">⚡ Redis</h4><p>分布式缓存、布隆过滤器、分布式锁、热点Key本地缓存</p></div>
+                    <div class="summary-item"><h4 style="color:var(--yellow);">🗃️ MySQL</h4><p>读写分离、分库分表、索引优化、连接池调优</p></div>
+                    <div class="summary-item"><h4 style="color:var(--teal);">💾 MQ & ES</h4><p>削峰填谷、异步解耦、复杂查询下推、数据归档</p></div>
+                    <div class="summary-item"><h4 style="color:var(--text2);">🔗 第三方</h4><p>超时设置、熔断降级、异步回调、多供应商备份</p></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+// ==================== 各层策略数据 ====================
+const LAYERS = {
+    L1: [
+        {
+            icon:'🧠', name:'本地缓存', cls:'l-green', tagCls:'t-green',
+            brief:'把频繁读取的数据缓存在浏览器内存/IndexedDB/SharedPreferences中，完全零网络开销。',
+            detail:'本地缓存是最快的"缓存"，因为请求根本不离开设备。典型场景：用户配置信息、字典数据、已读状态。使用 <code>localStorage</code>（5MB限制）存小量KV数据，<code>IndexedDB</code> 存大量结构化数据，<code>Service Worker</code> 做离线缓存。关键：设置合理的 TTL 和版本号，确保数据不过期。',
+            code:`// Web 端本地缓存示例\nconst CACHE_KEY = 'user_config';\nconst CACHE_TTL = 5 * 60 * 1000; // 5分钟\n\nfunction getUserConfig() {\n  const raw = localStorage.getItem(CACHE_KEY);\n  if (raw) {\n    const { data, ts } = JSON.parse(raw);\n    if (Date.now() - ts < CACHE_TTL) return data; // 命中\n  }\n  // 未命中 → 请求接口\n  return fetch('/api/config').then(r => r.json()).then(data => {\n    localStorage.setItem(CACHE_KEY,\n      JSON.stringify({ data, ts: Date.now() }));\n    return data;\n  });\n}`,
+            tags:['localStorage','IndexedDB','Service Worker','TTL']
+        },
+        {
+            icon:'🔄', name:'请求合并 (Request Collapsing)', cls:'l-green', tagCls:'t-green',
+            brief:'在固定时间窗口内收集多个相同/相似的请求，合并成一个请求发送，减少网络开销和服务器压力。',
+            detail:'100个组件同时需要"用户信息"，如果各自发请求就是100次HTTP调用。请求合并可以把这100个合并成1个批量请求。前端可以用 <code>Axios拦截器 + Promise缓存</code> 实现，后端可以用 Hystrix Collapser 或自定义批量接口。',
+            code:`// 前端请求合并：相同请求只发一次\nconst pendingMap = new Map();\n\nfunction mergedFetch(url) {\n  if (pendingMap.has(url)) return pendingMap.get(url);\n  const promise = fetch(url).finally(() => {\n    pendingMap.delete(url);\n  });\n  pendingMap.set(url, promise);\n  return promise;\n}\n\n// 100个组件调用 mergedFetch('/api/user')\n// 实际只发出 1 个请求 🎯`,
+            tags:['Collapser','批量接口','Promise缓存','Hystrix']
+        },
+        {
+            icon:'⏱️', name:'防抖与节流', cls:'l-green', tagCls:'t-green',
+            brief:'防抖(Debounce)：频繁触发只执行最后一次；节流(Throttle)：固定频率执行。减少无效请求。',
+            detail:'搜索框输入：用户每输入一个字符就触发搜索？不！用防抖等用户停顿300ms后再搜索。滚动加载：用户快速滑动时每帧触发加载？不！用节流每200ms最多触发一次。这是最简单但最有效的客户端优化。',
+            code:`// Lodash 防抖节流\nimport { debounce, throttle } from 'lodash';\n\n// 搜索框防抖：停止输入300ms后才发请求\nconst onSearch = debounce((keyword) => {\n  fetch(\\\`/api/search?q=\\\${keyword}\\\`);\n}, 300);\n\n// 滚动加载节流：每200ms最多触发一次\nconst onScroll = throttle(() => {\n  if (nearBottom()) loadMore();\n}, 200);`,
+            tags:['debounce','throttle','lodash','用户输入']
+        },
+        {
+            icon:'📦', name:'数据预加载 & 预取', cls:'l-green', tagCls:'t-green',
+            brief:'在用户还没发起请求之前，就提前把可能需要的数据拉到本地。消灭"等待时间"。',
+            detail:'电商平台在商品详情页会提前预加载：商品评价第一页、推荐商品列表、库存状态。React Query 的 <code>prefetchQuery</code>、Next.js 的 <code>&lt;Link prefetch&gt;</code> 都是这个思路。核心是<strong>预测用户下一步行为</strong>，提前准备好数据。',
+            code:`// React Query 预取\nconst queryClient = useQueryClient();\n\n// 鼠标悬浮时预取商品详情\n<div onMouseEnter={() => {\n  queryClient.prefetchQuery(\n    ['product', id],\n    () => fetchProduct(id),\n    { staleTime: 60000 }\n  );\n}}>\n  {product.name}\n</div>`,
+            tags:['React Query','prefetch','Next.js','预测加载']
+        }
+    ],
+    L2: [
+        {
+            icon:'🖼️', name:'静态资源全量CDN化', cls:'l-blue', tagCls:'t-blue',
+            brief:'JS/CSS/图片/视频/字体全部走CDN，用户从最近的边缘节点获取，命中率通常>95%。',
+            detail:'CDN 的核心原理是<strong>空间换时间</strong>。全球部署数百个边缘节点，用户访问时 DNS 解析到最近的节点。静态资源设置 <code>Cache-Control: max-age=31536000, immutable</code>（一年强缓存），文件名带 hash 做版本控制。这一步能把 60%~80% 的总流量挡在源站之外。',
+            code:`// CDN 缓存策略（Nginx 配置）\nlocation ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff2)$ {\n    expires 365d;\n    add_header Cache-Control \\\n        "public, max-age=31536000, immutable";\n    # 文件名带 contenthash，永远不变\n    # /static/js/app.a3b2c1.js\n}\n\n// 文件更新 = 新文件名 = 用户自动获取最新版`,
+            tags:['Cache-Control','contenthash','immutable','边缘节点']
+        },
+        {
+            icon:'🌍', name:'域名分片 (Sharding)', cls:'l-blue', tagCls:'t-blue',
+            brief:'浏览器对同一域名的并发连接数有限制（6个），使用多域名突破并行下载上限。',
+            detail:'Chrome 对同一域名的最大并发连接数为 6 个。如果页面有 30 个静态资源，6 个一批要 5 轮才能全部加载完。使用 <code>cdn1.example.com</code>、<code>cdn2.example.com</code> 等多个域名，并发上限变成 6×N。但注意 HTTP/2 下已不需要域名分片（多路复用）。',
+            code:`<!-- HTTP/1.1 时代：域名分片 -->\n<link href="//cdn1.example.com/app.js">\n<link href="//cdn2.example.com/vendor.js">\n<link href="//cdn1.example.com/style.css">\n\n<!-- HTTP/2 时代：不需要了 -->\n<!-- 多路复用，一个TCP连接并行传输所有资源 -->\n<!-- 但仍建议用CDN域名与API域名分离（避免带Cookie） -->`,
+            tags:['HTTP/2','并发连接','多路复用','Cookie隔离']
+        },
+        {
+            icon:'🚀', name:'边缘计算 (Edge Computing)', cls:'l-blue', tagCls:'t-blue',
+            brief:'在CDN边缘节点执行简单逻辑（鉴权、重定向、A/B测试），减少回源次数。',
+            detail:'Cloudflare Workers、阿里云DCDN的Edge Routine、Vercel Edge Functions 都支持在边缘节点运行 JS/WASM。典型场景：JWT 验证、地域重定向、A/B 测试分流、简单的 HTML 改写。请求在边缘就处理完了，根本不需要到源站。',
+            code:`// Cloudflare Worker: 边缘JWT鉴权\nexport default {\n  async fetch(request) {\n    const token = request.headers\n      .get('Authorization')?.replace('Bearer ','');\n    if (!verifyJWT(token)) {\n      return new Response('Unauthorized', { status: 401 });\n    }\n    // 鉴权通过，回源\n    return fetch(request);\n  }\n};\n// 非法请求在边缘就被拦截，不到源站`,
+            tags:['Cloudflare Workers','Edge Function','边缘鉴权','DCDN']
+        }
+    ],
+    L3: [
+        {
+            icon:'⚖️', name:'负载均衡算法', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'将流量均匀分配到后端多个节点。轮询(RR)、加权轮询(WRR)、最少连接(LC)、IP Hash。',
+            detail:'SLB 的核心能力。4层SLB（LVS/ALB）工作在传输层，性能极高（百万级并发）；7层SLB工作在应用层，能识别URL/Header。推荐策略：<strong>最少连接</strong>（适合请求处理时间差异大的场景）、<strong>加权轮询</strong>（适合服务器性能不一致的场景）。需要会话保持的场景用 IP Hash 或 Cookie 插入。',
+            code:`# 阿里云 SLB 监听配置\n# 四层（TCP）：性能高，不解析HTTP\nProtocol: TCP\nScheduler: wrr（加权轮询）\nHealth Check: TCP探测，间隔5s，不健康阈值3次\n\n# 七层（HTTP）：能识别URL，支持域名/路径路由\nProtocol: HTTP\nScheduler: wlc（加权最少连接）\nSticky Session: insert（Cookie插入）`,
+            tags:['LVS','WRR','WLC','健康检查']
+        },
+        {
+            icon:'🏥', name:'健康检查 & 故障摘除', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'自动检测后端节点健康状态，故障节点自动从负载池中摘除，恢复后自动加回。',
+            detail:'SLB 每隔几秒对后端节点发健康检查请求（TCP SYN / HTTP GET / 自定义探测）。连续 N 次失败则标记为不健康，不再分发流量。连续 M 次成功则恢复。这是<strong>自动容灾</strong>的基础能力，配置时注意：检查间隔太短会浪费资源，太长会延迟发现故障。',
+            code:`# Nginx 健康检查配置（商业版/maxscale）\nupstream backend {\n    server 10.0.0.1:8080 max_fails=3 fail_timeout=30s;\n    server 10.0.0.2:8080 max_fails=3 fail_timeout=30s;\n    server 10.0.0.3:8080 backup;  # 备份节点\n}\n# 30s内失败3次 → 摘除，30s后重试\n# 恢复后自动加回`,
+            tags:['max_fails','fail_timeout','backup','自动摘除']
+        },
+        {
+            icon:'🛡️', name:'DDoS 基础防护', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'SLB 层自带 DDoS 防护能力，可抵御 SYN Flood、UDP Flood 等网络层攻击。',
+            detail:'云厂商的 SLB/ALB 通常内置 DDoS 基础防护（5Gbps 左右免费）。更强的防护需要接入 DDoS 高防 IP。关键配置：<strong>访问控制ACL</strong>（封禁恶意IP段）、<strong>黑洞路由</strong>（极端情况下直接丢弃流量保护其他用户）、<strong>限速</strong>（限制单IP的QPS）。',
+            code:`# 阿里云安全组规则（网络层防护）\n# 只允许特定IP段访问管理端口\n- 协议: TCP, 端口: 22/3306/6379\n- 授权: 10.0.0.0/8（仅内网访问）\n\n# 公网只开放 80/443\n- 协议: TCP, 端口: 80/443\n- 授权: 0.0.0.0/0\n\n# SLB 访问控制（ACL）\n# 白名单模式：只允许指定IP访问`,
+            tags:['DDoS','安全组','ACL','黑洞']
+        },
+        {
+            icon:'🔗', name:'会话保持', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'确保同一个用户的请求始终落到同一台后端服务器，适用于有本地状态的服务。',
+            detail:'有两种方式：<strong>Cookie插入</strong>（SLB自动在响应中插入Cookie，下次请求携带即可路由）和 <strong>IP Hash</strong>（根据客户端IP的hash值选择后端）。注意：会话保持会导致<strong>负载不均</strong>，只在确实需要时开启。最佳实践：尽量<strong>无状态化</strong>，把 session 存到 Redis。',
+            code:`# 无状态化：session → Redis\n# 传统方式（有状态）：\nsession.setAttribute("user", userData);\n# ↓ 改为 ↓\n// token 存 Redis，请求携带 token\nredis.set("session:" + token, userData, 1800);\n\n# Nginx IP Hash（不推荐，尽量无状态）\nupstream backend {\n    ip_hash;\n    server 10.0.0.1:8080;\n    server 10.0.0.2:8080;\n}`,
+            tags:['Redis Session','无状态','IP Hash','Cookie插入']
+        }
+    ],
+    L4: [
+        {
+            icon:'🚦', name:'Nginx 限流 (limit_req)', cls:'l-orange', tagCls:'t-orange',
+            brief:'在 Nginx 层按 IP/URI 限流，把超量请求挡在业务层之前。使用漏桶算法。',
+            detail:'Nginx 的 <code>limit_req_zone</code> 模块基于漏桶算法实现限流。配置 <code>rate=10r/s</code> 表示每秒只放行10个请求，<code>burst=20</code> 允许20个突发请求排队。这是<strong>最早的一道限流防线</strong>，好处是无需改动业务代码。还可以结合 <code>limit_conn</code> 限制并发连接数。',
+            code:`# Nginx 限流配置\n# 定义限流规则：按客户端IP限流\nlimit_req_zone \\$binary_remote_addr \\n    zone=api_limit:10m rate=100r/s;\n\n# 限制并发连接数\nlimit_conn_zone \\$binary_remote_addr \\n    zone=conn_limit:10m;\n\nserver {\n    location /api/ {\n        limit_req zone=api_limit burst=50 nodelay;\n        limit_conn conn_limit 100;\n        limit_req_status 429;\n    }\n}\n# 超出返回 429 Too Many Requests`,
+            tags:['limit_req','limit_conn','漏桶算法','429']
+        },
+        {
+            icon:'🖼️', name:'动静分离', cls:'l-orange', tagCls:'t-orange',
+            brief:'静态请求走Nginx本地/CDN，动态请求转发到后端服务。减少后端负担。',
+            detail:'Nginx 天生擅长处理静态文件——<code>sendfile</code> 零拷贝、<code>gzip</code> 压缩、<code>expires</code> 缓存控制。把 <code>/static/</code>、<code>/images/</code>、<code>/css/</code> 等静态路径直接由 Nginx 响应，<code>/api/</code> 才转发到后端。可以减少后端 40%~60% 的请求量。',
+            code:`server {\n    # 静态资源：Nginx 直接响应\n    location /static/ {\n        alias /data/static/;\n        sendfile on;          # 零拷贝\n        tcp_nopush on;\n        gzip on;              # 压缩\n        expires 30d;          # 缓存30天\n    }\n\n    # 动态请求：转发到后端\n    location /api/ {\n        proxy_pass http://backend;\n        proxy_set_header X-Real-IP \\$remote_addr;\n        proxy_connect_timeout 3s;\n        proxy_read_timeout 5s;  # 超时设置！\n    }\n}`,
+            tags:['sendfile','gzip','零拷贝','proxy_pass']
+        },
+        {
+            icon:'🔒', name:'SSL/TLS 卸载', cls:'l-orange', tagCls:'t-orange',
+            brief:'HTTPS 加解密由 Nginx 完成，后端服务使用 HTTP 通信，减少 CPU 开销。',
+            detail:'TLS 握手和加解密是 CPU 密集型操作。如果把 HTTPS 流量直接到微服务，每台服务的 CPU 都要承担加解密开销。SSL 卸载后，Nginx → 后端用内网 HTTP 通信，微服务不需要处理证书。在极高并发下，SSL 卸载能节省 10%~30% 的 CPU。',
+            code:`# Nginx SSL 卸载配置\nserver {\n    listen 443 ssl http2;\n    ssl_certificate     /etc/nginx/ssl/cert.pem;\n    ssl_certificate_key /etc/nginx/ssl/key.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_session_cache shared:SSL:10m;  # 复用Session\n    ssl_session_timeout 10m;\n\n    location / {\n        # 后端用内网HTTP通信\n        proxy_pass http://backend;\n    }\n}`,
+            tags:['SSL卸载','HTTP/2','session_cache','内网通信']
+        },
+        {
+            icon:'📋', name:'访问日志 & 请求追踪', cls:'l-orange', tagCls:'t-orange',
+            brief:'Nginx 层记录每个请求的详细信息，生成唯一的 TraceID 传递给下游，用于全链路追踪。',
+            detail:'Nginx 是请求的"第一站"，在这里生成 <code>X-Request-Id</code> 并注入到请求头中，所有下游服务透传这个ID。这样当一个请求出错时，可以通过这个ID在 ELK 中快速检索到经过的所有节点和耗时。配合 <code>OpenTelemetry</code> 实现分布式追踪。',
+            code:`# Nginx 生成 TraceID\nmap \\$request_id \\$req_id {\n    default \\$request_id;\n}\n\nserver {\n    # 注入 TraceID 到请求头\n    proxy_set_header X-Request-Id \\$req_id;\n\n    # 自定义日志格式（含耗时）\n    log_format trace '\\$remote_addr - [\\$time_local] '\n        '\\$req_id \\$request '\n        'status=\\$status rt=\\$request_time '\n        'upstream=\\$upstream_response_time';\n    access_log /var/log/nginx/trace.log trace;\n}`,
+            tags:['TraceID','OpenTelemetry','ELK','分布式追踪']
+        }
+    ],
+    L5: [
+        {
+            icon:'🔑', name:'统一鉴权', cls:'l-purple', tagCls:'t-purple',
+            brief:'所有API请求在网关层完成身份认证和权限校验，未授权请求直接拦截，不进入业务层。',
+            detail:'把鉴权逻辑从每个微服务中剥离到网关层。请求到达网关后，解析 JWT Token / Session Token，验证签名、过期时间、权限范围。合法请求注入用户信息到 Header 后转发，微服务直接信任网关传递的信息。这不仅<strong>减少重复代码</strong>，还确保了<strong>安全策略一致</strong>。',
+            code:`// Spring Cloud Gateway 全局鉴权过滤器\n@Component\npublic class AuthFilter implements GlobalFilter {\n    @Override\n    public Mono<Void> filter(ServerWebExchange exchange,\n                              GatewayFilterChain chain) {\n        String token = exchange.getRequest()\n            .getHeaders().getFirst("Authorization");\n        if (token == null || !jwtUtil.verify(token)) {\n            exchange.getResponse().setStatusCode(401);\n            return exchange.getResponse().setComplete();\n        }\n        // 验证通过，注入用户信息\n        exchange.getRequest().mutate()\n            .header("X-User-Id", jwtUtil.getUserId(token))\n            .build();\n        return chain.filter(exchange);\n    }\n}`,
+            tags:['JWT','GlobalFilter','RBAC','统一鉴权']
+        },
+        {
+            icon:'🚦', name:'网关层限流 (Sentinel)', cls:'l-purple', tagCls:'t-purple',
+            brief:'在网关层按路由/分组/API维度实施精细化限流，支持QPS、并发线程数、异常比例等多种规则。',
+            detail:'Nginx 的限流是粗粒度的（按IP/URI），Sentinel 在网关层可以做到<strong>按API、按用户等级、按参数</strong>的精细化限流。比如：普通用户100QPS，VIP用户1000QPS；搜索接口500QPS，下单接口100QPS。还支持<strong>热点参数限流</strong>：同一个商品ID的查询限流100QPS，不同商品ID各自计算。',
+            code:`// Sentinel 网关限流规则\nGatewayRuleConfig rule = new GatewayRuleConfig();\nrule.setResource("order-api");       // 资源名\nrule.setGrade(RuleConstant.FLOW_GRADE_QPS);\nrule.setCount(200);                   // QPS阈值\nrule.setIntervalSec(1);               // 统计窗口1s\nrule.setControlBehavior(\n    RuleConstant.CONTROL_BEHAVIOR_WARM_UP); // 预热模式\nrule.setBurstCount(50);                // 允许突发\nrule.setParamItem(                    // 热点参数限流\n    new GatewayParamFlowItem()\n        .setParseStrategy(PARAM_PARSE_STRATEGY_CLIENT_IP)\n        .setThreshold(20));             // 单IP 20QPS`,
+            tags:['Sentinel','热点参数','精细化限流','网关路由']
+        },
+        {
+            icon:'🔌', name:'熔断 & 降级', cls:'l-purple', tagCls:'t-purple',
+            brief:'当下游服务异常率超标时自动熔断，返回兜底数据而不是传播故障。保核心、舍边缘。',
+            detail:'网关层是实施<strong>服务级熔断</strong>的最佳位置。当订单服务的错误率 > 50%，自动熔断：不再转发请求到订单服务，直接返回降级响应（如"系统繁忙，请稍后再试"）。熔断器状态机：关闭→打开→半开→(试探成功)→关闭。Sentinel 支持按<strong>异常比例、慢调用比例、异常数</strong>三种策略触发熔断。',
+            code:`// Sentinel 熔断规则（异常比例）\nDegradeRule rule = new DegradeRule("orderService");\nrule.setGrade(CircuitBreakerStrategy.ERROR_RATIO);\nrule.setCount(0.5);           // 异常比例50%\nrule.setTimeWindow(30);       // 熔断持续30s\nrule.setMinRequestAmount(50); // 最少50个请求才触发\nrule.setStatIntervalMs(10000);// 统计窗口10s\n\n// 降级处理\n@SentinelResource(value = "getOrder",\n    fallback = "getOrderFallback")\npublic Order getOrder(Long id) {\n    return orderService.getById(id);\n}\npublic Order getOrderFallback(Long id, Throwable e) {\n    log.warn("熔断降级: {}", e.getMessage());\n    return Order.empty(); // 兜底数据\n}`,
+            tags:['CircuitBreaker','降级','Sentinel','兜底数据']
+        },
+        {
+            icon:'🔀', name:'路由 & 灰度发布', cls:'l-purple', tagCls:'t-purple',
+            brief:'网关根据请求路径/Header/Cookie将流量路由到不同版本的服务，实现灰度发布和A/B测试。',
+            detail:'灰度发布是安全生产的核心能力。网关根据规则将流量按比例路由：10%的流量到新版本（v2），90%到旧版本（v1）。观察新版本的性能和错误率，没问题再逐步放大比例。常见策略：<strong>版本路由</strong>（Header中带版本号）、<strong>权重路由</strong>（按比例随机分流）、<strong>用户标签路由</strong>（内部用户到新版本）。',
+            code:`// Spring Cloud Gateway 灰度路由\nspring:\n  cloud:\n    gateway:\n      routes:\n      - id: order-service-v2\n        uri: lb://order-service-v2\n        predicates:\n        - Path=/api/order/**\n        - Header=X-Version, v2  # 指定版本\n        filters:\n        - name: RewritePath\n          args:\n            regexp: /api/(?<segment>.*)\n            replacement: /\\$\\{segment}\n      - id: order-service-v1\n        uri: lb://order-service\n        predicates:\n        - Path=/api/order/**\n        # 默认路由到v1`,
+            tags:['灰度发布','金丝雀','A/B测试','版本路由']
+        }
+    ],
+    L6: [
+        {
+            icon:'🧠', name:'本地缓存 (Caffeine)', cls:'l-green', tagCls:'t-green',
+            brief:'JVM进程内缓存，读写延迟<1μs（微秒），挡掉90%+的重复查询，避免打到Redis/DB。',
+            detail:'本地缓存比 Redis 快 1000 倍。Caffeine 是当前最优秀的 Java 本地缓存库（取代 Guava Cache）。配置 <code>maximumSize=10000</code>、<code>expireAfterWrite=5min</code>。适合缓存：<strong>字典数据、配置信息、热点数据、元数据</strong>。配合 Redis 组成<strong>多级缓存</strong>：本地缓存→Redis→数据库。',
+            code:`// Caffeine 本地缓存\nCache<String, UserDTO> userCache = Caffeine.newBuilder()\n    .maximumSize(10_000)           // 最大10000条\n    .expireAfterWrite(5, TimeUnit.MINUTES) // 写入5分钟后过期\n    .recordStats()                 // 开启统计\n    .build();\n\npublic UserDTO getUser(Long id) {\n    // L1: 本地缓存\n    UserDTO user = userCache.getIfPresent(id);\n    if (user != null) return user;\n\n    // L2: Redis\n    user = redisTemplate.opsForValue()\n        .get("user:" + id);\n    if (user != null) {\n        userCache.put(id, user);\n        return user;\n    }\n\n    // L3: 数据库\n    user = userMapper.selectById(id);\n    redisTemplate.opsForValue()\n        .set("user:" + id, user, 30, MINUTES);\n    userCache.put(id, user);\n    return user;\n}`,
+            tags:['Caffeine','多级缓存','Guava Cache','进程内缓存']
+        },
+        {
+            icon:'🔓', name:'无锁设计 (CAS / Atomic)', cls:'l-green', tagCls:'t-green',
+            brief:'用CAS（Compare-And-Swap）替代synchronized，避免线程阻塞，大幅提升并发吞吐量。',
+            detail:'<code>synchronized</code> 是悲观锁——线程获取不到锁就阻塞等待，上下文切换开销大。CAS 是乐观锁——不阻塞，失败了就重试。Java 的 <code>AtomicInteger</code>、<code>LongAdder</code>、<code>ConcurrentHashMap</code> 都是基于 CAS 实现的。<code>LongAdder</code> 在高竞争场景下性能远超 <code>AtomicLong</code>（分段CAS）。计数器、状态标记、限流计数——这些场景都应该用无锁方案。',
+            code:`// ❌ 悲观锁：synchronized（吞吐量低）\nprivate int count = 0;\npublic synchronized void increment() { count++; }\n// 单线程 vs 多线程吞吐差距 > 100倍\n\n// ✅ 乐观锁：LongAdder（高并发首选）\nprivate LongAdder count = new LongAdder();\npublic void increment() { count.increment(); }\npublic long get() { return count.sum(); }\n\n// ✅ CAS 手动实现\nAtomicReference<Config> configRef = new AtomicReference<>();\npublic void updateConfig(Config newConfig) {\n    Config old;\n    do {\n        old = configRef.get();\n    } while (!configRef\n        .compareAndSet(old, newConfig));\n}`,
+            tags:['CAS','LongAdder','Atomic','ConcurrentHashMap']
+        },
+        {
+            icon:'⚡', name:'异步编程 (CompletableFuture)', cls:'l-green', tagCls:'t-green',
+            brief:'把串行的同步调用改为异步并行执行，总耗时 = 最慢的那个，而非它们的总和。',
+            detail:'假设一个页面需要：用户信息(50ms) + 订单列表(100ms) + 消息数(30ms)。串行执行总耗时 180ms；异步并行执行总耗时 = max(50,100,30) = 100ms。<code>CompletableFuture</code> 是 Java 异步编程的核心工具。Spring 5 的 <code>@Async</code>、WebFlux 的 <code>Mono/Flux</code> 也是异步思路。',
+            code:`// 串行执行：总耗时 = 50+100+30 = 180ms\nUser user = userService.getById(id);      // 50ms\nList<Order> orders = orderService.list(id); // 100ms\nint msgCount = msgService.count(id);        // 30ms\n\n// 异步并行：总耗时 = max(50,100,30) = 100ms ⚡\nCompletableFuture<User> userF = CompletableFuture\n    .supplyAsync(() -> userService.getById(id), pool);\nCompletableFuture<List<Order>> orderF = CompletableFuture\n    .supplyAsync(() -> orderService.list(id), pool);\nCompletableFuture<Integer> msgF = CompletableFuture\n    .supplyAsync(() -> msgService.count(id), pool);\n\nCompletableFuture.allOf(userF, orderF, msgF).join();\nUser user = userF.get();\nList<Order> orders = orderF.get();\nint msgCount = msgF.get();`,
+            tags:['CompletableFuture','@Async','WebFlux','并行执行']
+        },
+        {
+            icon:'🏊', name:'线程池隔离 (Bulkhead)', cls:'l-blue', tagCls:'t-blue',
+            brief:'不同业务使用独立的线程池，一个慢业务耗尽线程不会影响其他正常业务。',
+            detail:'Tomcat 默认线程池 200 个线程。如果"导出报表"接口需要 10s，20个并发导出就占用了全部线程，其他所有接口全部排队等待。解决方案：<strong>核心接口</strong>和<strong>非核心接口</strong>使用不同的线程池。Sentinel/Hystrix 的舱壁隔离就是做这个的。',
+            code:`// 自定义线程池隔离\n@Configuration\npublic class ThreadPoolConfig {\n    // 核心业务线程池（订单、支付）\n    @Bean("corePool")\n    public ThreadPoolExecutor corePool() {\n        return new ThreadPoolExecutor(\n            50, 100, 60s, TimeUnit.SECONDS,\n            new LinkedBlockingQueue<>(1000),\n            new ThreadFactoryBuilder().setNameFormat("core-%d").build(),\n            new ThreadPoolExecutor.CallerRunsPolicy());\n    }\n    // 非核心业务线程池（报表、导出）\n    @Bean("batchPool")\n    public ThreadPoolExecutor batchPool() {\n        return new ThreadPoolExecutor(\n            10, 20, 60s, TimeUnit.SECONDS,\n            new LinkedBlockingQueue<>(50),\n            new ThreadFactoryBuilder().setNameFormat("batch-%d").build(),\n            new ThreadPoolExecutor.DiscardOldestPolicy());\n    }\n}`,
+            tags:['ThreadPoolExecutor','舱壁隔离','CallerRuns','队列选择']
+        },
+        {
+            icon:'🔄', name:'Disruptor 高性能队列', cls:'l-blue', tagCls:'t-blue',
+            brief:'单线程每秒处理 600万+ 消息的无锁环形缓冲区，替代传统阻塞队列。',
+            detail:'Disruptor 是 LMAX 交易所开源的超高性能队列。核心创新是<strong>环形数组 + 序号栅栏</strong>，完全无锁、无分支预测失败。适合<strong>日志收集、指标统计、事件分发</strong>等内部高吞吐场景。比 ArrayBlockingQueue 快 10 倍以上。',
+            code:`// Disruptor 定义事件\npublic class TradeEvent {\n    private long orderId;\n    private double amount;\n    // ... getters/setters\n}\n\n// Disruptor 配置\nDisruptor<TradeEvent> disruptor = new Disruptor<>(\n    TradeEvent::new,\n    1024 * 64,           // 环形缓冲区大小（2的幂）\n    DaemonThreadFactory.INSTANCE,\n    ProducerType.MULTI,   // 多生产者\n    new BlockingWaitStrategy() // 等待策略\n);\ndisruptor.handleEventsWith(new TradeHandler());\ndisruptor.start();\n\n// 单线程600万+ events/sec 🚀`,
+            tags:['Disruptor','环形缓冲区','无锁','LMAX']
+        },
+        {
+            icon:'🔌', name:'连接池调优', cls:'l-orange', tagCls:'t-orange',
+            brief:'HTTP/Redis/DB连接池的配置直接决定并发上限。核心参数：最大连接数、超时时间、空闲回收。',
+            detail:'连接池是并发编程的"血管"。参数配置不当是性能问题的头号原因。<strong>HikariCP</strong>（JDBC）、<strong>Apache HttpClient</strong>（HTTP）、<strong>Lettuce</strong>（Redis）三大连接池必须调优。核心公式：<code>连接数 = CPU核心数 × 2 + 磁盘数</code>（MySQL）。太小→排队等待；太大→上下文切换、MySQL线程争用。',
+            code:`// HikariCP 连接池（Spring Boot 默认）\nspring:\n  datasource:\n    hikari:\n      maximum-pool-size: 50        # 最大连接数\n      minimum-idle: 10              # 最小空闲连接\n      connection-timeout: 3000      # 获取连接超时3s\n      idle-timeout: 600000          # 空闲连接回收10min\n      max-lifetime: 1800000         # 连接最大存活30min\n      leak-detection-threshold: 5000 # 连接泄漏检测5s\n\n// Lettuce Redis 连接池\nspring:\n  redis:\n    lettuce:\n      pool:\n        max-active: 50              # 最大连接数\n        max-idle: 20                # 最大空闲\n        min-idle: 5                 # 最小空闲\n        max-wait: 3000ms            # 获取超时`,
+            tags:['HikariCP','Lettuce','连接泄漏','池化']
+        }
+    ],
+    L7: [
+        {
+            icon:'🏗️', name:'Redis 高可用架构', cls:'l-red', tagCls:'t-red',
+            brief:'Redis Sentinel（哨兵）或 Redis Cluster（集群）保证缓存层高可用，单节点故障不影响整体。',
+            detail:'Redis 高可用有两种方案：<strong>Sentinel</strong>（主从+自动故障转移，适合<5万QPS）和 <strong>Cluster</strong>（数据分片到多节点，适合>5万QPS）。Cluster 模式下数据按 Slot 分布在16384个槽上，每个节点负责一部分。关键配置：<code>cluster-node-timeout</code>（节点超时）、<code>cluster-require-full-coverage=no</code>（少数节点故障时集群仍可用）。',
+            code:`# Redis Cluster 最小配置（6节点：3主3从）\nport 6379\ncluster-enabled yes\ncluster-config-file nodes.conf\ncluster-node-timeout 5000    # 节点超时5s\ncluster-require-full-coverage no  # 允许部分故障\n\n# Spring Boot 连接 Redis Cluster\nspring:\n  redis:\n    cluster:\n      nodes:\n        - 10.0.0.1:6379\n        - 10.0.0.2:6379\n        - 10.0.0.3:6379\n        - 10.0.0.4:6379  # 副本\n        - 10.0.0.5:6379  # 副本\n        - 10.0.0.6:6379  # 副本`,
+            tags:['Sentinel','Cluster','16384槽','故障转移']
+        },
+        {
+            icon:'👻', name:'缓存穿透/击穿/雪崩 防御', cls:'l-red', tagCls:'t-red',
+            brief:'三大缓存问题的系统化防御：布隆过滤器防穿透、互斥锁防击穿、随机TTL防雪崩。',
+            detail:'<strong>穿透</strong>（查不存在的数据）→ 布隆过滤器预判 + 缓存空值（短TTL）；<strong>击穿</strong>（热点Key过期）→ 互斥锁（SETNX）只放一个请求去查DB，其余等待 + 逻辑过期（不设物理TTL，异步更新）；<strong>雪崩</strong>（大量Key同时过期）→ TTL加随机偏移 + 多级缓存 + Redis高可用。',
+            code:`// 防击穿：Redisson 分布式锁\npublic String getHotData(String key) {\n    String value = redis.get(key);\n    if (value != null) return value;\n\n    // 获取分布式锁\n    String lockKey = "lock:" + key;\n    RLock lock = redisson.getLock(lockKey);\n    try {\n        if (lock.tryLock(3, 10, TimeUnit.SECONDS)) {\n            // Double Check\n            value = redis.get(key);\n            if (value != null) return value;\n            // 查DB\n            value = db.query(key);\n            // 随机TTL防雪崩\n            int ttl = 1800 + ThreadLocalRandom.current().nextInt(300);\n            redis.set(key, value, ttl);\n        }\n    } finally { lock.unlock(); }\n    return value;\n}`,
+            tags:['布隆过滤器','Redisson','互斥锁','随机TTL']
+        },
+        {
+            icon:'🔑', name:'热点 Key 本地缓存', cls:'l-orange', tagCls:'t-orange',
+            brief:'对Redis单Key QPS>5万的场景，在服务端本地做一级缓存，拦截大部分读请求。',
+            detail:'微博热搜Top1可能有50万QPS全部打到Redis同一个Key上，即使Redis能扛住，网络IO也是瓶颈。方案：JVM内用 Caffeine 缓存热点数据的<strong>副本</strong>，拦截90%+的读请求。配合京东的 <code>hotkey</code> 工具自动探测热点Key并推送到所有服务节点。',
+            code:`// 京东 hotkey 自动探测 + 本地缓存\n// 1. 客户端感知热点Key\nHotKeyClient.init("hotkey-server:8080");\n\n// 2. 使用注解自动本地缓存\n@HotKey(key = "user:#id", expire = 10)\npublic User getUser(Long id) {\n    return userMapper.selectById(id);\n}\n\n// 当 user:10086 的QPS超过阈值\n// hotkey-server 自动推送到所有服务节点\n// 后续请求从本地 Caffeine 获取，不打Redis`,
+            tags:['hotkey','Caffeine','热点探测','京东']
+        },
+        {
+            icon:'🔗', name:'Pipeline & 批量操作', cls:'l-blue', tagCls:'t-blue',
+            brief:'把多个Redis命令打包成一次网络请求发送，减少RT（网络往返）次数。10次命令 → 1次Pipeline。',
+            detail:'Redis 是单线程的，但网络往返才是主要瓶颈。每次命令的网络RT约0.5ms，10次串行命令就要5ms。Pipeline 把10个命令打包成一次请求发送，RT降为0.5ms。但注意：<strong>Pipeline 中的命令不要太多</strong>（建议<100个），否则会阻塞Redis。批量查询场景还可以用 <code>MGET</code>、<code>HMGET</code>。',
+            code:`// ❌ 10次串行请求：RT = 10 × 0.5ms = 5ms\nfor (String key : keys) {\n    String value = redis.get(key);\n}\n\n// ✅ Pipeline：RT = 1 × 0.5ms = 0.5ms\nredisTemplate.executePipelined((RedisCallback<Object>) con -> {\n    for (String key : keys) {\n        con.stringCommands().get(key.getBytes());\n    }\n    return null;  // 返回null，结果在Pipeline结果列表中\n});\n\n// ✅ MGET 批量获取\nList<String> values = redis.mget(keys.toArray(new String[0]));`,
+            tags:['Pipeline','MGET','批量','网络RT']
+        }
+    ],
+    L8: [
+        {
+            icon:'📖', name:'读写分离', cls:'l-purple', tagCls:'t-purple',
+            brief:'写操作走主库，读操作走从库。主库1台 + 从库N台，读能力线性扩展。',
+            detail:'大多数业务是<strong>读多写少</strong>（读:写 = 10:1 是常见比例）。主库负责写并同步到从库，从库承担读请求。1主5从可以把读能力提升5倍。Spring 的 <code>@MasterSlave</code> 注解或 ShardingSphere 的读写分离模块可以自动路由。注意：<strong>主从同步有延迟</strong>（通常10ms~1s），写后立即读可能读到旧数据。',
+            code:`// ShardingSphere 读写分离配置\nspring:\n  shardingsphere:\n    datasource:\n      names: master,slave0,slave1\n      master:\n        url: jdbc:mysql://master:3306/db\n      slave0:\n        url: jdbc:mysql://slave0:3306/db\n      slave1:\n        url: jdbc:mysql://slave1:3306/db\n    rules:\n      readwrite-splitting:\n        data-sources:\n          rw:\n            write-data-source-name: master\n            read-data-source-names: slave0,slave1\n            load-balancer-name: round-robin`,
+            tags:['主从复制','ShardingSphere','Binlog','同步延迟']
+        },
+        {
+            icon:'✂️', name:'分库分表 (Sharding)', cls:'l-purple', tagCls:'t-purple',
+            brief:'单表数据超过千万级后性能急剧下降，通过水平拆分到多个库/表中分散压力。',
+            detail:'MySQL 单表超过 <strong>2000万行</strong>或 <strong>5GB</strong> 后，索引树层级增加、查询变慢、锁争用严重。水平分库分表：按 user_id % 16 拆分成16个库 × 16个表 = 256张表，每张表控制在500万以内。路由规则可以是 <code>hash取模</code>（均匀但扩容难）或 <code>范围</code>（扩容容易但可能热点）。工具推荐 <code>ShardingSphere</code>。',
+            code:`// ShardingSphere 分表配置\nspring:\n  shardingsphere:\n    rules:\n      sharding:\n        tables:\n          t_order:\n            actual-data-nodes: ds_\${0..3}.t_order_\${0..15}\n            table-strategy:\n              standard:\n                sharding-column: user_id\n                sharding-algorithm-name: order_mod\n        sharding-algorithms:\n          order_mod:\n            type: MOD\n            props:\n              sharding-count: 16  # 16张表\n\n// 路由逻辑：order → ds_${user_id%4}.t_order_${user_id%16}`,
+            tags:['ShardingSphere','水平拆分','hash取模','分片路由']
+        },
+        {
+            icon:'🗂️', name:'索引优化', cls:'l-orange', tagCls:'t-orange',
+            brief:'慢查询是高并发的头号杀手。通过合理的索引设计、覆盖索引、SQL改写，避免全表扫描。',
+            detail:'<code>EXPLAIN</code> 是排查慢查询的第一工具。关注 <code>type</code>（至少到 ref 级别，杜绝 ALL 全表扫描）和 <code>Extra</code>（出现 Using filesort/Using temporary 要优化）。核心优化手段：<strong>联合索引+最左前缀</strong>、<strong>覆盖索引</strong>（索引包含所有查询字段，不回表）、<strong>避免索引失效</strong>（不在索引列上做函数运算/隐式转换/左模糊）。',
+            code:`-- 慢查询分析\nEXPLAIN SELECT name, age, phone FROM user\n  WHERE age > 25 AND city = 'shenzhen';\n\n-- 优化：建立联合索引（注意顺序）\nALTER TABLE user ADD INDEX idx_city_age (city, age, name);\n-- 最左前缀：city → city+age → city+age+name\n\n-- 覆盖索引：不需要回表\nSELECT name, age FROM user WHERE city = 'shenzhen';\n-- Extra: Using index ✅（索引覆盖了查询字段）\n\n-- 避免：索引列上做运算\nSELECT * FROM user WHERE YEAR(create_time) = 2024;\n-- ❌ 索引失效！改为：\nSELECT * FROM user WHERE create_time >= '2024-01-01'\n  AND create_time < '2025-01-01';`,
+            tags:['EXPLAIN','覆盖索引','最左前缀','慢查询']
+        },
+        {
+            icon:'⚡', name:'连接池 & SQL调优', cls:'l-orange', tagCls:'t-orange',
+            brief:'数据库连接池大小不是越大越好。公式：连接数 ≈ (CPU核数 × 2) + 有效磁盘数。小连接 + 快SQL。',
+            detail:'一个常见的误区是"把连接池调大就能提高并发"。实际上 MySQL 每个连接对应一个线程，线程上下文切换开销巨大。<strong>HikariCP 推荐：连接数 = CPU核心数 × 2 + 磁盘数</strong>。8核机器设置 20~30 个连接就好。真正应该优化的是 <strong>SQL 本身</strong>——让每个查询在 5ms 内完成，20个连接就能支撑 4000 QPS。',
+            code:`-- 查看当前连接数\nSHOW STATUS LIKE 'Threads_connected';\nSHOW STATUS LIKE 'Max_used_connections';\n\n-- 查看慢查询\nSHOW VARIABLES LIKE 'slow_query%';\nSET GLOBAL slow_query_log = ON;\nSET GLOBAL long_query_time = 0.5; -- 超过0.5s记录\n\n-- 杀掉长时间运行的查询\nSHOW PROCESSLIST;\nKILL <query_id>;\n\n-- HikariCP 最优配置（8核机器）\nmaximum-pool-size: 20\nminimum-idle: 5\nconnection-timeout: 3000  -- 3s获取超时\nleak-detection-threshold: 3000 -- 连接泄漏检测`,
+            tags:['HikariCP','慢查询日志','Processlist','连接公式']
+        }
+    ],
+    L9: [
+        {
+            icon:'⛰️', name:'削峰填谷 (Kafka)', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'通过消息队列缓冲瞬时流量，后端服务按自己的节奏匀速消费。把"峰"削平、"谷"填满。',
+            detail:'秒杀场景：10万人同时抢购，后端下单服务只能处理 5000 QPS。如果请求直接打到服务，服务直接崩溃。正确做法：请求 → API网关 → Kafka → 下单消费者（5000 QPS匀速消费）。超出消费能力的请求在队列中等待，而不是让服务崩溃。Kafka 单集群可支撑<strong>百万级TPS</strong>，是削峰的主力工具。',
+            code:`// Spring Boot Kafka 生产者\n@Service\npublic class OrderService {\n    @Autowired\n    private KafkaTemplate<String, String> kafka;\n\n    public void createOrder(OrderRequest req) {\n        // 验证参数（同步）\n        validate(req);\n        // 扣减库存（Redis原子操作）\n        redis.decr("stock:" + req.getProductId());\n        // 发送到Kafka（异步处理真正的下单逻辑）\n        kafka.send("order-topic", JSON.toJSONString(req));\n        // 立即返回"下单中，请稍候"\n        return "processing";\n    }\n}\n// 消费者按5000QPS匀速消费`,
+            tags:['Kafka','RocketMQ','削峰','异步解耦']
+        },
+        {
+            icon:'🔍', name:'搜索引擎 (Elasticsearch)', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'把复杂的搜索/聚合查询从MySQL迁移到ES，解放数据库，提升查询性能10~100倍。',
+            detail:'<code>LIKE '%keyword%'</code> 在 MySQL 中会导致全表扫描，数据量大时直接超时。Elasticsearch 基于<strong>倒排索引</strong>，全文检索性能是 MySQL 的 10~100 倍。还能做复杂的聚合统计（分组、求和、直方图）。架构：<strong>MySQL 存储主数据 → Canal 监听 Binlog → 实时同步到 ES → 搜索查询走 ES</strong>。',
+            code:`// Canal + Kafka → ES 实时同步\n# Canal 监听 MySQL Binlog\n# 变更事件 → Kafka → Flink/Logstash → ES\n\n// ES 搜索（替代 MySQL LIKE）\nGET /products/_search\n{\n  "query": {\n    "bool": {\n      "must": [\n        { "match": { "name": "iPhone" } },\n        { "range": { "price": { "lte": 5000 } } }\n      ]\n    }\n  },\n  "aggs": {\n    "brand_stats": { "terms": { "field": "brand" } }\n  }\n}\n// 10亿数据，毫秒级响应 🚀`,
+            tags:['Elasticsearch','Canal','Binlog','倒排索引']
+        },
+        {
+            icon:'📂', name:'对象存储 (OSS/S3)', cls:'l-cyan', tagCls:'t-cyan',
+            brief:'大文件（图片/视频/附件）存OSS，数据库只存元数据和URL。数据库不存Blob，这是铁律。',
+            detail:'MySQL 存大文件（Blob）是最糟糕的设计之一——单个 Blob 可能几MB到几十MB，严重影响缓存效率、备份速度、主从同步延迟。正确做法：<strong>文件上传到 OSS/S3</strong>，数据库只存 <code>file_id</code>、<code>file_url</code>、<code>file_size</code> 等元数据。OSS 自带 CDN 加速，天然支持高并发下载。',
+            code:`// 文件上传到 OSS\npublic String uploadFile(MultipartFile file) {\n    String key = "uploads/" + UUID.randomUUID()\n        + getFileExtension(file);\n    // 上传到 OSS（不经过数据库）\n    ossClient.putObject(bucketName, key,\n        file.getInputStream());\n    // 生成访问URL\n    String url = "https://cdn.example.com/" + key;\n    // 数据库只存元数据\n    FileMeta meta = new FileMeta(key, url,\n        file.getSize(), file.getContentType());\n    fileMetaMapper.insert(meta);\n    return url;\n}`,
+            tags:['OSS','S3','CDN加速','元数据分离']
+        }
+    ],
+    L10: [
+        {
+            icon:'⏰', name:'超时设置', cls:'l-purple', tagCls:'t-purple',
+            brief:'调用第三方服务必须设置超时时间！连接超时 + 读取超时。不设置 = 放任线程泄漏。',
+            detail:'这是最容易被忽略但最致命的问题。调用第三方支付接口，如果不设超时，对方故障时你的线程会一直等，直到线程池耗尽、服务崩溃。<strong>铁律：所有外部调用必须设超时</strong>。连接超时建议 3~5s，读取超时根据接口SLA设置（通常 5~10s），最坏情况不超过 30s。',
+            code:`// OkHttpClient 超时配置\nOkHttpClient client = new OkHttpClient.Builder()\n    .connectTimeout(5, TimeUnit.SECONDS)    // 连接超时5s\n    .readTimeout(10, TimeUnit.SECONDS)       // 读取超时10s\n    .writeTimeout(10, TimeUnit.SECONDS)      // 写入超时10s\n    .build();\n\n// Spring RestTemplate 超时\n@Bean\npublic RestTemplate restTemplate() {\n    SimpleClientHttpRequestFactory factory =\n        new SimpleClientHttpRequestFactory();\n    factory.setConnectTimeout(5000);   // 5s\n    factory.setReadTimeout(10000);     // 10s\n    return new RestTemplate(factory);\n}`,
+            tags:['connectTimeout','readTimeout','OkHttp','RestTemplate']
+        },
+        {
+            icon:'🔌', name:'熔断器 (第三方专用)', cls:'l-red', tagCls:'t-red',
+            brief:'为每个第三方服务配置独立的熔断器。支付接口挂了 → 熔断 → 返回"稍后再试" → 不影响下单流程。',
+            detail:'每个第三方服务都要有独立的熔断器。支付服务、短信服务、地图服务——它们的可用性完全不同，不能互相影响。配置：错误率 > 30% 或慢调用 > 50% 时触发熔断，熔断期间直接返回降级响应。恢复后通过半开状态试探放行。',
+            code:`// 为每个第三方服务配置独立熔断\n@Bean\npublic CircuitBreaker paymentCB() {\n    return CircuitBreaker.ofDefaults("paymentService");\n}\n@Bean\npublic CircuitBreaker smsCB() {\n    return CircuitBreaker.ofDefaults("smsService");\n}\n\n// 使用\npublic PayResult pay(PayRequest req) {\n    return CircuitBreaker.decorateSupplier(paymentCB,\n        () -> paymentClient.pay(req))\n        .get();\n    // paymentCB 熔断 → 抛异常 → 降级处理\n}\n\n// 降级：支付不可用时记录待支付订单\n@Recover\npublic PayResult payFallback(PayRequest req) {\n    return PayResult.pending("支付服务暂不可用，请稍后重试");\n}`,
+            tags:['Resilience4j','独立熔断','降级响应','第三方隔离']
+        },
+        {
+            icon:'📩', name:'异步调用 & 重试', cls:'l-blue', tagCls:'t-blue',
+            brief:'把同步等待第三方响应改为异步消息回调。失败自动重试（指数退避+Jitter），不用阻塞业务线程。',
+            detail:'调用短信接口，同步等 2s 才返回。改为：业务线程把"发短信"事件写入 Kafka，短信消费者异步调用第三方接口，成功/失败通过回调通知。如果失败，用<strong>指数退避+Jitter</strong>自动重试：1s → 2s → 4s → 8s... 避免重试风暴。业务线程完全不阻塞，RT从2s降到5ms。',
+            code:`// 异步调用第三方短信\n// 1. 业务线程：写入消息队列（5ms）\n kafka.send("sms-topic", JSON.toJSONString(smsReq));\n return "ok"; // 立即返回\n\n// 2. 消费者：异步调用第三方\n@KafkaListener(topics = "sms-topic")\npublic void onSmsRequest(String msg) {\n    SmsRequest req = JSON.parseObject(msg);\n    // 带重试的调用\n    Retryer<Boolean> retryer = RetryerBuilder\n        .<Boolean>newBuilder()\n        .withWaitStrategy(\n            ExponentialWaitStrategy.withJitter(1, 60))\n        .withStopAfterAttempt(5)\n        .retryIfResult(r -> !r)\n        .build();\n    retryer.call(() -> smsClient.send(req));\n}`,
+            tags:['Kafka','指数退避','Jitter','异步回调']
+        },
+        {
+            icon:'🔀', name:'多供应商备份', cls:'l-orange', tagCls:'t-orange',
+            brief:'关键第三方服务配置备用供应商。主供应商故障时自动切换到备用，提高整体可用性。',
+            detail:'支付不只是支付宝，还有微信支付、银联。短信不只是阿里云，还有腾讯云、容联云。地图不只是高德，还有百度地图。<strong>关键服务必须有Plan B</strong>。通过策略模式封装多供应商，主供应商连续失败N次后自动切换到备用供应商。',
+            code:`// 策略模式 + 自动切换\npublic interface SmsProvider {\n    boolean send(String phone, String content);\n    String name();\n}\n\n@Service\npublic class SmsService {\n    @Primary SmsProvider aliSms;   // 主供应商\n    @Qualifier("tencent") SmsProvider tencentSms; // 备用\n\n    private AtomicInteger failCount = new AtomicInteger(0);\n\n    public boolean send(String phone, String content) {\n        SmsProvider provider = failCount.get() < 3\n            ? aliSms : tencentSms; // 3次失败后切换\n        try {\n            boolean ok = provider.send(phone, content);\n            if (ok) failCount.set(0);\n            return ok;\n        } catch (Exception e) {\n            failCount.incrementAndGet();\n            throw e;\n        }\n    }\n}`,
+            tags:['策略模式','供应商切换','高可用','故障转移']
+        }
+    ]
+};
+
+// ==================== 渲染卡片 ====================
+function renderGrid(id, items) {
+    const container = document.getElementById('grid-' + id);
+    container.innerHTML = items.map(item => `
+        <div class="strat-card ${item.cls}" onclick="this.classList.toggle('open')">
+            <div class="strat-head">
+                <span class="strat-icon">${item.icon}</span>
+                <span class="strat-name">${item.name}</span>
+            </div>
+            <div class="strat-brief">${item.brief}</div>
+            <div class="strat-detail">
+                <div class="strat-detail-inner">
+                    <div class="strat-label ${item.tagCls.replace('t-','')}">详细说明</div>
+                    <div class="strat-text">${item.detail}</div>
+                    <div class="strat-label ${item.tagCls.replace('t-','')}">配置示例</div>
+                    <div class="strat-code">${item.code}</div>
+                    <div class="strat-tags">
+                        ${item.tags.map(t => `<span class="strat-tag ${item.tagCls}">${t}</span>`).join('')}
+                    </div>
+                </div>
+            </div>
+            <div class="strat-expand"></div>
+        </div>
+    `).join('');
+}
+
+// ==================== 背景粒子 ====================
+const bgCanvas = document.getElementById('bg-canvas');
+const bgCtx = bgCanvas.getContext('2d');
+let dots = [];
+
+function initBg() {
+    bgCanvas.width = window.innerWidth;
+    bgCanvas.height = window.innerHeight;
+    dots = Array.from({length: 50}, () => ({
+        x: Math.random() * bgCanvas.width,
+        y: Math.random() * bgCanvas.height,
+        vx: (Math.random() - 0.5) * 0.25,
+        vy: (Math.random() - 0.5) * 0.25,
+        r: Math.random() * 1.2 + 0.3,
+        o: Math.random() * 0.25 + 0.05
+    }));
+}
+
+function drawBg() {
+    bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+    dots.forEach(d => {
+        d.x += d.vx; d.y += d.vy;
+        if (d.x < 0) d.x = bgCanvas.width;
+        if (d.x > bgCanvas.width) d.x = 0;
+        if (d.y < 0) d.y = bgCanvas.height;
+        if (d.y > bgCanvas.height) d.y = 0;
+        bgCtx.beginPath();
+        bgCtx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        bgCtx.fillStyle = `rgba(77,166,255,${d.o})`;
+        bgCtx.fill();
+    });
+    for (let i = 0; i < dots.length; i++) {
+        for (let j = i+1; j < dots.length; j++) {
+            const dx = dots[i].x - dots[j].x, dy = dots[i].y - dots[j].y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 140) {
+                bgCtx.beginPath();
+                bgCtx.moveTo(dots[i].x, dots[i].y);
+                bgCtx.lineTo(dots[j].x, dots[j].y);
+                bgCtx.strokeStyle = `rgba(77,166,255,${0.05*(1-dist/140)})`;
+                bgCtx.lineWidth = 0.4;
+                bgCtx.stroke();
+            }
+        }
+    }
+    requestAnimationFrame(drawBg);
+}
+
+// ==================== 滚动动画 ====================
+function initScroll() {
+    const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+    }, { threshold: 0.05 });
+    document.querySelectorAll('.layer-section').forEach(el => obs.observe(el));
+}
+
+// ==================== 导航高亮 ====================
+function initNav() {
+    const links = document.querySelectorAll('.topbar-link');
+    const ids = Array.from(links).map(l => l.getAttribute('href').slice(1)).filter(Boolean);
+    const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+            if (e.isIntersecting) {
+                links.forEach(l => l.classList.remove('active'));
+                const link = document.querySelector(`.topbar-link[href="#${e.target.id}"]`);
+                if (link) link.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-80px 0px -60% 0px' });
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) obs.observe(el);
+    });
+}
+
+// ==================== 初始化 ====================
+window.addEventListener('load', () => {
+    Object.entries(LAYERS).forEach(([id, items]) => renderGrid(id, items));
+    initBg();
+    drawBg();
+    initScroll();
+    initNav();
+});
+
+window.addEventListener('resize', () => {
+    bgCanvas.width = window.innerWidth;
+    bgCanvas.height = window.innerHeight;
+});
+</script>
+
+</body>
+</html>
