@@ -1,0 +1,1571 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTA升级与断点续传原理详解</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --secondary: #10b981;
+            --accent: #f59e0b;
+            --danger: #ef4444;
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --border: #475569;
+        }
+
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        /* 导航栏 */
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            z-index: 1000;
+            padding: 1rem 2rem;
+        }
+
+        .nav-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .nav-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 1.5rem;
+        }
+
+        .nav-link {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.3s;
+        }
+
+        .nav-link:hover {
+            color: var(--primary);
+        }
+
+        /* 主容器 */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 6rem 2rem 3rem;
+        }
+
+        /* 标题区 */
+        .hero {
+            text-align: center;
+            margin-bottom: 4rem;
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        .hero h1 {
+            font-size: 3.5rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        /* 目录 */
+        .toc {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 3rem;
+            border: 1px solid var(--border);
+        }
+
+        .toc h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            color: var(--text-primary);
+        }
+
+        .toc-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+
+        .toc-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--bg-dark);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 1px solid transparent;
+        }
+
+        .toc-item:hover {
+            border-color: var(--primary);
+            transform: translateX(8px);
+        }
+
+        .toc-number {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        .toc-text {
+            flex: 1;
+        }
+
+        .toc-text h3 {
+            font-size: 1rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .toc-text span {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* 章节 */
+        .section {
+            margin-bottom: 4rem;
+            scroll-margin-top: 100px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .section-icon {
+            width: 56px;
+            height: 56px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .section-subtitle {
+            color: var(--text-secondary);
+            font-size: 1rem;
+        }
+
+        /* 卡片网格 */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 1.75rem;
+            border: 1px solid var(--border);
+            transition: all 0.3s;
+        }
+
+        .card:hover {
+            border-color: var(--primary);
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--bg-dark);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
+        }
+
+        .card code {
+            background: var(--bg-dark);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 0.85rem;
+            color: var(--secondary);
+        }
+
+        /* 流程图容器 */
+        .flow-container {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 2rem;
+            border: 1px solid var(--border);
+            margin: 2rem 0;
+            overflow-x: auto;
+        }
+
+        .flow-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+
+        .flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: 800px;
+            padding: 1rem 0;
+        }
+
+        .flow-step {
+            background: var(--bg-dark);
+            border: 2px solid var(--primary);
+            border-radius: 12px;
+            padding: 1rem 1.5rem;
+            text-align: center;
+            min-width: 120px;
+            transition: all 0.3s;
+        }
+
+        .flow-step:hover {
+            background: var(--primary);
+            transform: scale(1.05);
+        }
+
+        .flow-step.active {
+            background: var(--primary);
+            animation: pulse 1.5s infinite;
+        }
+
+        .flow-step.success {
+            border-color: var(--secondary);
+            background: var(--secondary);
+        }
+
+        .flow-step-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .flow-step-desc {
+            font-size: 0.75rem;
+            opacity: 0.8;
+        }
+
+        .flow-arrow {
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+        }
+
+        /* 时间线 */
+        .timeline {
+            position: relative;
+            padding-left: 3rem;
+            margin: 2rem 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 11px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border);
+        }
+
+        .timeline-item {
+            position: relative;
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2.5rem;
+            top: 1.5rem;
+            width: 14px;
+            height: 14px;
+            background: var(--primary);
+            border-radius: 50%;
+            border: 3px solid var(--bg-dark);
+        }
+
+        .timeline-item h4 {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary);
+        }
+
+        .timeline-item p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* 协议对比表 */
+        .compare-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-card);
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 1.5rem 0;
+        }
+
+        .compare-table th,
+        .compare-table td {
+            padding: 1rem 1.5rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .compare-table th {
+            background: var(--bg-dark);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .compare-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .compare-table tr:hover td {
+            background: var(--bg-card-hover);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .tag-primary { background: var(--primary); }
+        .tag-success { background: var(--secondary); }
+        .tag-warning { background: var(--accent); color: #000; }
+        .tag-danger { background: var(--danger); }
+
+        /* 断点续传动画 */
+        .resumable-demo {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 2rem;
+            border: 1px solid var(--border);
+            margin: 2rem 0;
+        }
+
+        .demo-controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .demo-btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .demo-btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .demo-btn-primary:hover {
+            background: var(--primary-dark);
+        }
+
+        .demo-btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .demo-btn-secondary {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .demo-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .demo-status {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .status-item {
+            background: var(--bg-dark);
+            padding: 1rem;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .status-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .status-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            font-family: 'SF Mono', monospace;
+        }
+
+        .progress-bar-container {
+            background: var(--bg-dark);
+            border-radius: 10px;
+            height: 40px;
+            overflow: hidden;
+            margin-bottom: 1.5rem;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            width: 0%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 1rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .progress-segments {
+            display: flex;
+            height: 40px;
+            margin-bottom: 1rem;
+        }
+
+        .segment {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .segment-done {
+            background: var(--secondary);
+        }
+
+        .segment-current {
+            background: var(--primary);
+            animation: pulse 1s infinite;
+        }
+
+        .segment-pending {
+            background: var(--bg-dark);
+            border: 1px dashed var(--border);
+        }
+
+        .segment-failed {
+            background: var(--danger);
+        }
+
+        /* 网络分层可视化 */
+        .network-layers {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin: 2rem 0;
+        }
+
+        .network-layer {
+            padding: 1rem 1.5rem;
+            border-radius: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s;
+        }
+
+        .network-layer:hover {
+            transform: translateX(8px);
+        }
+
+        .layer-app { background: #8b5cf6; }
+        .layer-trans { background: #3b82f6; }
+        .layer-net { background: #10b981; }
+        .layer-link { background: #f59e0b; }
+        .layer-phys { background: #ef4444; }
+
+        .layer-name {
+            font-weight: 600;
+        }
+
+        .layer-protocol {
+            font-size: 0.85rem;
+            opacity: 0.9;
+        }
+
+        /* 动画 */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .animate-in {
+            animation: slideIn 0.5s ease-out;
+        }
+
+        /* 代码块 */
+        .code-block {
+            background: #0d1117;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .code-block pre {
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: #c9d1d9;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .code-comment { color: #8b949e; }
+        .code-keyword { color: #ff7b72; }
+        .code-string { color: #a5d6ff; }
+        .code-header { color: #7ee787; }
+        .code-number { color: #79c0ff; }
+
+        /* 提示框 */
+        .tip-box {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(16, 185, 129, 0.1));
+            border: 1px solid var(--primary);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .tip-box h4 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .tip-box p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            .flow {
+                flex-direction: column;
+            }
+
+            .flow-arrow {
+                transform: rotate(90deg);
+            }
+        }
+
+        /* 页脚 */
+        .footer {
+            text-align: center;
+            padding: 3rem 2rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+            margin-top: 4rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="nav">
+        <div class="nav-content">
+            <div class="nav-title">📦 OTA & 断点续传原理</div>
+            <div class="nav-links">
+                <a href="#ota-intro" class="nav-link">OTA介绍</a>
+                <a href="#ota-flow" class="nav-link">升级流程</a>
+                <a href="#resumable" class="nav-link">断点续传</a>
+                <a href="#network" class="nav-link">网络协议</a>
+                <a href="#summary" class="nav-link">总结</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Hero区域 -->
+        <div class="hero">
+            <h1>OTA升级与断点续传原理详解</h1>
+            <p>深入理解Over-The-Air更新机制、完整升级流程、以及断点续传技术在移动端和IoT设备中的应用</p>
+        </div>
+
+        <!-- 目录 -->
+        <div class="toc" id="toc">
+            <h2>📋 目录导航</h2>
+            <div class="toc-grid">
+                <div class="toc-item" onclick="scrollToSection('ota-intro')">
+                    <div class="toc-number">1</div>
+                    <div class="toc-text">
+                        <h3>OTA升级概述</h3>
+                        <span>什么是OTA及工作原理</span>
+                    </div>
+                </div>
+                <div class="toc-item" onclick="scrollToSection('ota-flow')">
+                    <div class="toc-number">2</div>
+                    <div class="toc-text">
+                        <h3>完整升级流程</h3>
+                        <span>检测、下载、安装全流程</span>
+                    </div>
+                </div>
+                <div class="toc-item" onclick="scrollToSection('resumable')">
+                    <div class="toc-number">3</div>
+                    <div class="toc-text">
+                        <h3>断点续传技术</h3>
+                        <span>HTTP Range & 分片下载</span>
+                    </div>
+                </div>
+                <div class="toc-item" onclick="scrollToSection('network')">
+                    <div class="toc-number">4</div>
+                    <div class="toc-text">
+                        <h3>网络协议层</h3>
+                        <span>TCP/UDP与传输可靠性</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 第一章：OTA升级概述 -->
+        <section class="section" id="ota-intro">
+            <div class="section-header">
+                <div class="section-icon">📡</div>
+                <div>
+                    <h2 class="section-title">OTA升级概述</h2>
+                    <p class="section-subtitle">Over-The-Air 空中下载技术详解</p>
+                </div>
+            </div>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-icon">📱</div>
+                    <h3>什么是OTA？</h3>
+                    <p>OTA（Over-The-Air）即空中下载技术，是通过移动通信网络（2G/3G/4G/5G/WiFi）远程为设备推送软件更新的技术。无需连接电脑或人工干预，设备自动完成升级。</p>
+                    <div style="margin-top: 1rem;">
+                        <span class="tag tag-primary">移动端</span>
+                        <span class="tag tag-success">IoT设备</span>
+                        <span class="tag tag-warning">车载系统</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🔄</div>
+                    <h3>OTA vs 传统升级</h3>
+                    <p>传统方式需要用户手动下载安装包、连接电脑或SD卡刷机。OTA实现远程静默升级，用户无感知，极大降低维护成本。</p>
+                    <div style="margin-top: 1rem;">
+                        <span class="tag tag-danger">传统：用户介入</span>
+                        <span class="tag tag-success">OTA：自动完成</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🛡️</div>
+                    <h3>安全性要求</h3>
+                    <p>OTA升级涉及固件篡改风险，必须采用签名验证机制。设备端校验包签名，服务端使用私钥签名，设备使用公钥验签。</p>
+                    <code>签名算法：AES-256 + RSA-2048</code>
+                </div>
+            </div>
+
+            <!-- OTA类型对比 -->
+            <div style="margin-top: 2rem;">
+                <h3 style="margin-bottom: 1rem;">📊 OTA升级类型对比</h3>
+                <table class="compare-table">
+                    <thead>
+                        <tr>
+                            <th>类型</th>
+                            <th>描述</th>
+                            <th>包大小</th>
+                            <th>下载时间</th>
+                            <th>适用场景</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag tag-primary">整包升级</span></td>
+                            <td>完整下载新版本APK/固件</td>
+                            <td>大（50MB-500MB）</td>
+                            <td>较长</td>
+                            <td>首次安装、大版本迭代</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag tag-success">增量升级</span></td>
+                            <td>只下载差异部分（BSDiff算法）</td>
+                            <td>小（5MB-50MB）</td>
+                            <td>短</td>
+                            <td>常规版本更新</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag tag-warning">差分包升级</span></td>
+                            <td>基于版本差异生成补丁</td>
+                            <td>中等</td>
+                            <td>中等</td>
+                            <td>热修复、功能更新</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag tag-danger">静默升级</span></td>
+                            <td>后台下载，用户无感知安装</td>
+                            <td>取决于类型</td>
+                            <td>后台进行</td>
+                            <td>安全补丁、紧急修复</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- 第二章：完整升级流程 -->
+        <section class="section" id="ota-flow">
+            <div class="section-header">
+                <div class="section-icon">⚙️</div>
+                <div>
+                    <h2 class="section-title">完整升级流程</h2>
+                    <p class="section-subtitle">从版本检测到升级完成的8个关键步骤</p>
+                </div>
+            </div>
+
+            <!-- 流程可视化 -->
+            <div class="flow-container">
+                <div class="flow-title">🔄 OTA升级完整流程</div>
+                <div class="flow" id="otaFlow">
+                    <div class="flow-step" data-step="1">
+                        <div class="flow-step-title">1. 版本检测</div>
+                        <div class="flow-step-desc">GET /api/version</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="2">
+                        <div class="flow-step-title">2. 通知用户</div>
+                        <div class="flow-step-desc">弹窗/静默</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="3">
+                        <div class="flow-step-title">3. 下载包</div>
+                        <div class="flow-step-desc">Range请求</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="4">
+                        <div class="flow-step-title">4. MD5校验</div>
+                        <div class="flow-step-desc">完整性验证</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="5">
+                        <div class="flow-step-title">5. 签名验签</div>
+                        <div class="flow-step-desc">RSA验签</div>
+                    </div>
+                </div>
+                <div class="flow" style="margin-top: 1rem;">
+                    <div class="flow-step" data-step="6">
+                        <div class="flow-step-title">6. 备份数据</div>
+                        <div class="flow-step-desc">防回退丢失</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="7">
+                        <div class="flow-step-title">7. 安装升级</div>
+                        <div class="flow-step-desc">写入分区</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step" data-step="8">
+                        <div class="flow-step-title">8. 重启验证</div>
+                        <div class="flow-step-desc">启动检查</div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step success" data-step="9">
+                        <div class="flow-step-title">完成!</div>
+                        <div class="flow-step-desc">新版本运行</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 详细时间线 -->
+            <div class="timeline">
+                <div class="timeline-item animate-in">
+                    <h4>Step 1: 版本检测</h4>
+                    <p>客户端向服务端发送当前版本号，服务端返回最新版本信息及下载URL。常见策略：</p>
+                    <ul style="margin-top: 0.5rem; margin-left: 1rem; color: var(--text-secondary);">
+                        <li>主动检测：启动时/定时检测</li>
+                        <li>被动检测：服务端推送检测指令</li>
+                        <li>智能检测：WiFi环境自动检测</li>
+                    </ul>
+                </div>
+
+                <div class="timeline-item animate-in">
+                    <h4>Step 2: 下载策略选择</h4>
+                    <p>根据网络状况和升级类型选择下载策略：</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// 下载策略伪代码</span>
+<span class="code-keyword">if</span> (wifiConnected && fileSize < <span class="code-number">100MB</span>) {
+    downloadNow();  <span class="code-comment">// WiFi下立即下载</span>
+} <span class="code-keyword">else if</span> (cellular) {
+    promptUser();   <span class="code-comment">// 蜂窝网络下询问用户</span>
+} <span class="code-keyword">else</span> {
+    scheduleDownload(); <span class="code-comment">// 预约下载</span>
+}</pre>
+                    </div>
+                </div>
+
+                <div class="timeline-item animate-in">
+                    <h4>Step 3: 断点续传下载</h4>
+                    <p>使用HTTP Range请求支持断点续传，网络中断后可从上次位置继续。这是最核心的可靠性保障。</p>
+                    <code>Range: bytes=500-999 / Range: bytes=500-</code>
+                </div>
+
+                <div class="timeline-item animate-in">
+                    <h4>Step 4-5: 完整性校验</h4>
+                    <p>下载完成后进行双重验证：</p>
+                    <ul style="margin-top: 0.5rem; margin-left: 1rem; color: var(--text-secondary);">
+                        <li><strong>MD5/SHA256校验</strong>：验证包完整性，防止传输损坏</li>
+                        <li><strong>RSA签名验签</strong>：验证包来源可信，防止篡改攻击</li>
+                    </ul>
+                </div>
+
+                <div class="timeline-item animate-in">
+                    <h4>Step 6-7: 安装执行</h4>
+                    <p>Android使用PackageManager/Intent安装APK；iOS通过MobileCoreServices安装；IoT设备写入对应Flash分区。</p>
+                    <div style="margin-top: 0.5rem;">
+                        <span class="tag tag-primary">Android: Intent.ACTION_VIEW</span>
+                        <span class="tag tag-success">iOS: UIApplication.openURL</span>
+                    </div>
+                </div>
+
+                <div class="timeline-item animate-in">
+                    <h4>Step 8: 回滚机制</h4>
+                    <p>升级失败时自动回滚到上一稳定版本。常见策略：</p>
+                    <ul style="margin-top: 0.5rem; margin-left: 1rem; color: var(--text-secondary);">
+                        <li>A/B双分区：同时保留两个系统版本</li>
+                        <li>Recovery模式：独立的恢复系统</li>
+                        <li>Bootloader锁：验证启动镜像完整性</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第三章：断点续传技术 -->
+        <section class="section" id="resumable">
+            <div class="section-header">
+                <div class="section-icon">🔗</div>
+                <div>
+                    <h2 class="section-title">断点续传技术</h2>
+                    <p class="section-subtitle">HTTP Range协议与分片下载原理</p>
+                </div>
+            </div>
+
+            <!-- 交互式演示 -->
+            <div class="resumable-demo">
+                <div class="flow-title">🎮 断点续传交互演示</div>
+
+                <div class="demo-controls">
+                    <button class="demo-btn demo-btn-primary" id="startBtn" onclick="startDownload()">
+                        ▶️ 开始下载
+                    </button>
+                    <button class="demo-btn demo-btn-danger" id="interruptBtn" onclick="interruptDownload()" disabled>
+                        ⏸️ 模拟中断
+                    </button>
+                    <button class="demo-btn demo-btn-secondary" id="resumeBtn" onclick="resumeDownload()" disabled>
+                        🔄 断点续传
+                    </button>
+                    <button class="demo-btn demo-btn-secondary" id="resetBtn" onclick="resetDemo()">
+                        🔁 重置
+                    </button>
+                </div>
+
+                <div class="progress-segments" id="progressSegments">
+                    <!-- 动态生成 -->
+                </div>
+
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar">0%</div>
+                </div>
+
+                <div class="demo-status">
+                    <div class="status-item">
+                        <div class="status-label">总大小</div>
+                        <div class="status-value" id="totalSize">100 MB</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">已下载</div>
+                        <div class="status-value" id="downloaded">0 MB</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">分段数</div>
+                        <div class="status-value" id="segments">10</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">状态</div>
+                        <div class="status-value" id="status" style="color: var(--text-secondary);">等待开始</div>
+                    </div>
+                </div>
+
+                <div class="code-block" id="requestBlock">
+                    <pre id="requestCode"><span class="code-comment">// HTTP请求日志将在这里追加显示</span>
+<span class="code-comment">// 每次操作都会保留历史记录</span></pre>
+                </div>
+            </div>
+
+            <!-- HTTP Range详解 -->
+            <div class="card-grid" style="margin-top: 2rem;">
+                <div class="card">
+                    <div class="card-icon">📬</div>
+                    <h3>HTTP Range 请求头</h3>
+                    <p>客户端告诉服务器需要文件的哪个字节范围，支持单段和多段请求。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-header">Range: bytes=0-99</span>        <span class="code-comment">// 前100字节</span>
+<span class="code-header">Range: bytes=500-</span>        <span class="code-comment">// 从500字节到末尾</span>
+<span class="code-header">Range: bytes=0-99, 200-299</span> <span class="code-comment">// 多段请求</span></pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">📭</div>
+                    <h3>HTTP Content-Range 响应头</h3>
+                    <p>服务器返回实际提供的字节范围和文件总大小。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-header">Content-Range: bytes 0-99/1000</span>
+<span class="code-comment">// 当前: 0-99，总大小: 1000字节</span>
+
+<span class="code-header">Content-Length: 100</span>
+<span class="code-comment">// 本次响应体长度</span>
+
+<span class="code-header">Accept-Ranges: bytes</span>
+<span class="code-comment">// 服务器声明支持断点续传</span></pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🔢</div>
+                    <h3>多线程分片下载</h3>
+                    <p>将文件分成多个片段，多线程并行下载，充分利用带宽提升速度。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// 4线程分片下载</span>
+Thread1: <span class="code-header">Range: bytes=0-249999</span>
+Thread2: <span class="code-header">Range: bytes=250000-499999</span>
+Thread3: <span class="code-header">Range: bytes=500000-749999</span>
+Thread4: <span class="code-header">Range: bytes=750000-999999</span></pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tip-box">
+                <h4>💡 关键点</h4>
+                <p><strong>206 Partial Content</strong>：服务器返回206表示支持断点续传，返回200表示从头开始。客户端需要检查响应状态码来判断。</p>
+            </div>
+        </section>
+
+        <!-- 第四章：网络协议层 -->
+        <section class="section" id="network">
+            <div class="section-header">
+                <div class="section-icon">🌐</div>
+                <div>
+                    <h2 class="section-title">网络协议层</h2>
+                    <p class="section-subtitle">TCP可靠性与HTTP升级协议</p>
+                </div>
+            </div>
+
+            <!-- 网络分层 -->
+            <h3 style="margin-bottom: 1rem;">📶 网络协议分层</h3>
+            <div class="network-layers">
+                <div class="network-layer layer-app">
+                    <span class="layer-name">应用层</span>
+                    <span class="layer-protocol">HTTP/HTTPS | TLS 1.3</span>
+                </div>
+                <div class="network-layer layer-trans">
+                    <span class="layer-name">传输层</span>
+                    <span class="layer-protocol">TCP (三次握手 | 四次挥手 | 滑动窗口)</span>
+                </div>
+                <div class="network-layer layer-net">
+                    <span class="layer-name">网络层</span>
+                    <span class="layer-protocol">IP | ICMP | 路由选择</span>
+                </div>
+                <div class="network-layer layer-link">
+                    <span class="layer-name">数据链路层</span>
+                    <span class="layer-protocol">Ethernet | ARP | MAC地址</span>
+                </div>
+                <div class="network-layer layer-phys">
+                    <span class="layer-name">物理层</span>
+                    <span class="layer-protocol">电信号 | 光信号 | 比特流</span>
+                </div>
+            </div>
+
+            <!-- TCP特性 -->
+            <h3 style="margin-bottom: 1rem; margin-top: 2rem;">🔒 TCP保证可靠传输的机制</h3>
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-icon">🤝</div>
+                    <h3>三次握手建立连接</h3>
+                    <p>TCP通过三次握手建立可靠连接，确保双方都准备好数据传输。</p>
+                    <div class="code-block">
+                        <pre>
+Client → Server: SYN (seq=x)
+Server → Client: SYN+ACK (seq=y, ack=x+1)
+Client → Server: ACK (ack=y+1)
+
+<span class="code-comment">// 连接建立完成，开始传输</span></pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">📮</div>
+                    <h3>确认应答 (ACK)</h3>
+                    <p>每个数据包都需要对方确认（ACK），超时未确认会触发重传。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// 累计确认机制</span>
+发送: Packet #1 #2 #3
+收到: ACK #3  <span class="code-comment">// 表示#3及之前都收到</span></pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🔄</div>
+                    <h3>超时重传</h3>
+                    <p>发送数据后启动定时器，超时未收到ACK则重新发送。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// RTT (Round Trip Time) 动态调整</span>
+RTO = RTT + 4 × RTTD
+<span class="code-comment">// RTO: 重传超时时间</span></pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">📊</div>
+                    <h3>滑动窗口</h3>
+                    <p>流量控制机制，接收方告知发送方可发送的数据量，避免拥塞。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// 窗口大小动态调整</span>
+拥塞窗口(cwnd) × 接收窗口(rwnd)</pre>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🚦</div>
+                    <h3>拥塞控制</h3>
+                    <p>慢启动 → 拥塞避免 → 快速重传 → 快速恢复</p>
+                    <div style="margin-top: 0.5rem;">
+                        <span class="tag tag-primary">慢启动</span>
+                        <span class="tag tag-success">拥塞避免</span>
+                        <span class="tag tag-warning">快速重传</span>
+                        <span class="tag tag-danger">快速恢复</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🔢</div>
+                    <h3>序列号与校验和</h3>
+                    <p>每个字节都有唯一序列号，校验和检测数据损坏。</p>
+                    <div class="code-block">
+                        <pre>
+<span class="code-comment">// 序列号保证按序接收</span>
+Seq = 1000, Len = 500
+<span class="code-comment">// 下一包 Seq = 1500</span></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- HTTP vs HTTPS -->
+            <h3 style="margin-bottom: 1rem; margin-top: 2rem;">🔐 HTTP vs HTTPS 在OTA中的区别</h3>
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th>特性</th>
+                        <th>HTTP</th>
+                        <th>HTTPS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>加密</td>
+                        <td>❌ 明文传输</td>
+                        <td>✅ TLS 1.3 加密</td>
+                    </tr>
+                    <tr>
+                        <td>身份认证</td>
+                        <td>❌ 无</td>
+                        <td>✅ 证书验证服务端身份</td>
+                    </tr>
+                    <tr>
+                        <td>数据完整性</td>
+                        <td>⚠️ 需额外校验</td>
+                        <td>✅ MAC校验</td>
+                    </tr>
+                    <tr>
+                        <td>防篡改</td>
+                        <td>❌ 可被中间人修改</td>
+                        <td>✅ 加密签名防篡改</td>
+                    </tr>
+                    <tr>
+                        <td>OTA推荐</td>
+                        <td>⚠️ 仅内网环境</td>
+                        <td>✅ 必须使用</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="tip-box">
+                <h4>⚠️ 安全警告</h4>
+                <p>OTA升级必须使用HTTPS！未加密的HTTP传输可能被中间人攻击，注入恶意固件。建议启用Certificate Pinning（证书锁定）防止DNS劫持。</p>
+            </div>
+        </section>
+
+        <!-- 第五章：总结 -->
+        <section class="section" id="summary">
+            <div class="section-header">
+                <div class="section-icon">📝</div>
+                <div>
+                    <h2 class="section-title">核心要点总结</h2>
+                    <p class="section-subtitle">OTA升级与断点续传的关键知识点</p>
+                </div>
+            </div>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-icon">🎯</div>
+                    <h3>OTA升级核心</h3>
+                    <ul style="color: var(--text-secondary); margin-left: 1rem;">
+                        <li>远程无线更新，无需人工介入</li>
+                        <li>整包/增量/差分多种升级方式</li>
+                        <li>签名验证确保来源可信</li>
+                        <li>A/B分区支持回滚</li>
+                    </ul>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🔗</div>
+                    <h3>断点续传核心</h3>
+                    <ul style="color: var(--text-secondary); margin-left: 1rem;">
+                        <li>HTTP Range 请求头</li>
+                        <li>206 Partial Content 响应</li>
+                        <li>多线程分片并行下载</li>
+                        <li>本地记录下载进度</li>
+                    </ul>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🌐</div>
+                    <h3>网络协议核心</h3>
+                    <ul style="color: var(--text-secondary); margin-left: 1rem;">
+                        <li>TCP保证可靠传输</li>
+                        <li>三次握手建立连接</li>
+                        <li>滑动窗口流量控制</li>
+                        <li>拥塞控制避免网络瘫痪</li>
+                    </ul>
+                </div>
+
+                <div class="card">
+                    <div class="card-icon">🛡️</div>
+                    <h3>安全建议</h3>
+                    <ul style="color: var(--text-secondary); margin-left: 1rem;">
+                        <li>全程HTTPS加密传输</li>
+                        <li>RSA签名验证固件</li>
+                        <li>MD5/SHA256完整性校验</li>
+                        <li>证书锁定防DNS劫持</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- 架构图 -->
+            <div class="flow-container" style="margin-top: 2rem;">
+                <div class="flow-title">🏗️ OTA完整架构图</div>
+                <svg width="100%" height="300" viewBox="0 0 800 300" style="max-width: 800px; margin: 0 auto; display: block;">
+                    <!-- 客户端 -->
+                    <rect x="50" y="50" width="150" height="200" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+                    <text x="125" y="80" text-anchor="middle" fill="#f8fafc" font-weight="bold">客户端设备</text>
+                    
+                    <!-- 客户端内部组件 -->
+                    <rect x="65" y="95" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="125" y="118" text-anchor="middle" fill="#c084fc" font-size="12">📱 App/固件</text>
+                    
+                    <rect x="65" y="140" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="125" y="163" text-anchor="middle" fill="#60a5fa" font-size="12">📡 下载管理器</text>
+                    
+                    <rect x="65" y="185" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="125" y="208" text-anchor="middle" fill="#34d399" font-size="12">🛡️ 签名验证</text>
+
+                    <!-- 服务器 -->
+                    <rect x="600" y="50" width="150" height="200" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+                    <text x="675" y="80" text-anchor="middle" fill="#f8fafc" font-weight="bold">服务端</text>
+                    
+                    <!-- 服务器内部组件 -->
+                    <rect x="615" y="95" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="675" y="118" text-anchor="middle" fill="#fbbf24" font-size="12">🗄️ 版本服务器</text>
+                    
+                    <rect x="615" y="140" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="675" y="163" text-anchor="middle" fill="#f472b6" font-size="12">📦 文件存储</text>
+                    
+                    <rect x="615" y="185" width="120" height="35" rx="5" fill="#334155"/>
+                    <text x="675" y="208" text-anchor="middle" fill="#a78bfa" font-size="12">🔐 签名服务</text>
+
+                    <!-- 连接箭头 -->
+                    <line x1="200" y1="150" x2="600" y2="150" stroke="#6366f1" stroke-width="2" stroke-dasharray="5,5"/>
+                    <text x="400" y="140" text-anchor="middle" fill="#94a3b8" font-size="12">HTTPS + Range</text>
+
+                    <!-- 数据流向 -->
+                    <path d="M 210 130 Q 400 100 605 130" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrow)"/>
+                    <text x="400" y="95" text-anchor="middle" fill="#10b981" font-size="11">① 版本检测请求</text>
+
+                    <path d="M 210 170 Q 400 200 605 170" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow)"/>
+                    <text x="400" y="215" text-anchor="middle" fill="#f59e0b" font-size="11">② 下载固件包 (断点续传)</text>
+
+                    <!-- 标记 -->
+                    <defs>
+                        <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                            <path d="M0,0 L0,6 L9,3 z" fill="#6366f1"/>
+                        </marker>
+                    </defs>
+                </svg>
+            </div>
+        </section>
+
+        <!-- 页脚 -->
+        <div class="footer">
+            <p>📚 OTA升级与断点续传原理详解 | 交互式技术文档</p>
+        </div>
+    </div>
+
+    <script>
+        // 滚动导航
+        function scrollToSection(id) {
+            document.getElementById(id).scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // 断点续传演示
+        let totalSegments = 10;
+        let currentSegment = 0;
+        let downloadedSegments = [];
+        let isDownloading = false;
+        let downloadInterval = null;
+        let logHistory = []; // 历史日志记录
+
+        function initSegments() {
+            const container = document.getElementById('progressSegments');
+            container.innerHTML = '';
+            for (let i = 0; i < totalSegments; i++) {
+                const segment = document.createElement('div');
+                segment.className = 'segment segment-pending';
+                segment.style.width = '10%';
+                segment.id = `seg-${i}`;
+                container.appendChild(segment);
+            }
+        }
+
+        function updateProgress() {
+            const downloaded = downloadedSegments.length;
+            const percent = Math.round((downloaded / totalSegments) * 100);
+            document.getElementById('progressBar').style.width = percent + '%';
+            document.getElementById('progressBar').textContent = percent + '%';
+            document.getElementById('downloaded').textContent = (downloaded * 10) + ' MB';
+            document.getElementById('status').textContent = downloaded === totalSegments ? '✅ 完成' : '下载中...';
+            document.getElementById('status').style.color = downloaded === totalSegments ? 'var(--secondary)' : 'var(--primary)';
+        }
+
+        function appendLog(html) {
+            const code = document.getElementById('requestCode');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = `<span class="code-comment">// [${timestamp}]</span>\n${html}\n`;
+            logHistory.push(entry);
+            // 追加而非覆盖，保留所有历史日志
+            code.innerHTML = logHistory.join('\n');
+            // 自动滚动到底部
+            const block = document.getElementById('requestBlock');
+            block.scrollTop = block.scrollHeight;
+        }
+
+        function updateCodeBlock() {
+            if (currentSegment < totalSegments) {
+                const start = currentSegment * 10;
+                const end = (currentSegment + 1) * 10 - 1;
+                const html = `<span class="code-comment">// 正在下载分段 ${currentSegment + 1}</span>
+<span class="code-header">GET</span> /firmware/v2.0.0.bin <span class="code-keyword">HTTP</span>/1.1
+<span class="code-header">Host:</span> update.example.com
+<span class="code-header">Range:</span> bytes=${start}-${end}
+<span class="code-header">If-Range:</span> "abc123def456"
+
+<span class="code-comment">// 响应</span>
+<span class="code-keyword">HTTP</span>/<span class="code-number">1.1 206 Partial Content</span>
+<span class="code-header">Content-Range:</span> bytes ${start}-${end}/100
+<span class="code-header">Content-Length:</span> 10`;
+                appendLog(html);
+            }
+        }
+
+        function startDownload() {
+            if (isDownloading) return;
+            isDownloading = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('interruptBtn').disabled = false;
+            document.getElementById('resumeBtn').disabled = true;
+
+            appendLog(`<span class="code-comment">// ▶️ 开始下载任务</span>
+<span class="code-comment">// 目标: firmware/v2.0.0.bin (100MB)</span>
+<span class="code-comment">// 分段数: ${totalSegments}</span>`);
+
+            downloadInterval = setInterval(() => {
+                if (currentSegment < totalSegments && isDownloading) {
+                    // 模拟下载（90%成功率）
+                    if (Math.random() > 0.1) {
+                        downloadedSegments.push(currentSegment);
+                        document.getElementById(`seg-${currentSegment}`).className = 'segment segment-done';
+                        currentSegment++;
+                    } else {
+                        // 模拟失败
+                        document.getElementById(`seg-${currentSegment}`).className = 'segment segment-failed';
+                        appendLog(`<span class="code-comment">// ⚠️ 分段 ${currentSegment + 1} 下载失败，将重试</span>`);
+                    }
+                    updateProgress();
+                    updateCodeBlock();
+                } else if (currentSegment >= totalSegments) {
+                    clearInterval(downloadInterval);
+                    document.getElementById('status').textContent = '✅ 下载完成';
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('interruptBtn').disabled = true;
+                    appendLog(`<span class="code-comment">// ✅ 全部下载完成! ${downloadedSegments.length}/${totalSegments} 段</span>`);
+                }
+            }, 300);
+        }
+
+        function interruptDownload() {
+            clearInterval(downloadInterval);
+            isDownloading = false;
+            document.getElementById('interruptBtn').disabled = true;
+            document.getElementById('resumeBtn').disabled = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('status').textContent = '⏸️ 已中断';
+            document.getElementById('status').style.color = 'var(--accent)';
+
+            // 标记当前段为中断状态
+            if (currentSegment < totalSegments) {
+                const el = document.getElementById(`seg-${currentSegment}`);
+                if (el.className.includes('pending')) {
+                    el.className = 'segment segment-current';
+                }
+            }
+
+            // 追加中断日志
+            appendLog(`<span class="code-comment">// ⏸️ 下载中断!</span>
+<span class="code-comment">// 已下载: ${downloadedSegments.length}/${totalSegments} 段</span>
+<span class="code-comment">// 断点位置: byte ${downloadedSegments.length * 10}</span>
+<span class="code-comment">// 本地记录断点位置...</span>`);
+        }
+
+        function resumeDownload() {
+            document.getElementById('resumeBtn').disabled = true;
+            document.getElementById('interruptBtn').disabled = false;
+            document.getElementById('startBtn').disabled = true;
+            isDownloading = true;
+
+            appendLog(`<span class="code-comment">// 🔄 断点续传启动</span>
+<span class="code-comment">// 从 byte ${downloadedSegments.length * 10} 继续下载</span>`);
+
+            downloadInterval = setInterval(() => {
+                if (currentSegment < totalSegments && isDownloading) {
+                    if (Math.random() > 0.05) { // 续传成功率更高
+                        downloadedSegments.push(currentSegment);
+                        const el = document.getElementById(`seg-${currentSegment}`);
+                        if (el.className.includes('failed') || el.className.includes('current')) {
+                            el.className = 'segment segment-done';
+                        }
+                        currentSegment++;
+                    }
+                    updateProgress();
+                    updateCodeBlock();
+                } else if (currentSegment >= totalSegments) {
+                    clearInterval(downloadInterval);
+                    document.getElementById('status').textContent = '✅ 续传完成';
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('interruptBtn').disabled = true;
+                    document.getElementById('resumeBtn').disabled = true;
+
+                    // 追加完成日志
+                    appendLog(`<span class="code-comment">// 🎉 断点续传成功!</span>
+<span class="code-header">GET</span> /firmware/v2.0.0.bin <span class="code-keyword">HTTP</span>/1.1
+<span class="code-header">Range:</span> bytes=${downloadedSegments.length * 10}-
+<span class="code-header">If-Range:</span> "abc123def456"
+
+<span class="code-keyword">HTTP</span>/<span class="code-number">1.1 206 Partial Content</span>
+<span class="code-comment">// ✅ 从断点位置继续下载!</span>`);
+                }
+            }, 300);
+        }
+
+        function resetDemo() {
+            clearInterval(downloadInterval);
+            isDownloading = false;
+            currentSegment = 0;
+            downloadedSegments = [];
+            logHistory = []; // 清空历史日志
+            initSegments();
+            updateProgress();
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('interruptBtn').disabled = true;
+            document.getElementById('resumeBtn').disabled = true;
+            document.getElementById('status').textContent = '等待开始';
+            document.getElementById('status').style.color = 'var(--text-secondary)';
+
+            document.getElementById('requestCode').innerHTML = 
+                `<span class="code-comment">// HTTP请求日志将在这里追加显示</span>
+<span class="code-comment">// 每次操作都会保留历史记录</span>`;
+        }
+
+        // 初始化
+        initSegments();
+
+        // 滚动动画
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('animate-in');
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.timeline-item, .card').forEach(el => {
+            observer.observe(el);
+        });
+
+        // 流程图步骤高亮
+        const flowSteps = document.querySelectorAll('.flow-step');
+        let currentFlowStep = 0;
+
+        function highlightFlowStep() {
+            flowSteps.forEach((step, i) => {
+                step.classList.remove('active');
+                if (i === currentFlowStep) {
+                    step.classList.add('active');
+                } else if (i < currentFlowStep) {
+                    step.classList.add('success');
+                }
+            });
+            currentFlowStep = (currentFlowStep + 1) % (flowSteps.length + 1);
+        }
+
+        // 页面加载后开始流程动画
+        setTimeout(() => {
+            highlightFlowStep();
+            setInterval(highlightFlowStep, 2000);
+        }, 1000);
+    </script>
+</body>
+</html>
