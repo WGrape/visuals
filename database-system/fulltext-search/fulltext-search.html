@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>全文搜索 — 原理与实现深度解析</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text2: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --accent5: #ffa657;
+    --mysql: #4db6f5;
+    --es: #f7b731;
+    --sqlite: #a8e6cf;
+    --card-bg: #161b22;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* ===== HEADER ===== */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #1a2332 50%, #0d1117 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 60px 40px 50px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(ellipse at center, rgba(88,166,255,0.07) 0%, transparent 60%);
+    pointer-events: none;
+  }
+  .hero-tag {
+    display: inline-block;
+    background: rgba(88,166,255,0.1);
+    border: 1px solid rgba(88,166,255,0.3);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 14px;
+    border-radius: 20px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 18px;
+  }
+  .hero h1 {
+    font-size: clamp(32px, 5vw, 52px);
+    font-weight: 800;
+    background: linear-gradient(135deg, #e6edf3 0%, #58a6ff 50%, #a371f7 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 16px;
+    letter-spacing: -1px;
+  }
+  .hero p {
+    color: var(--text2);
+    font-size: 17px;
+    max-width: 680px;
+    margin: 0 auto 30px;
+  }
+  .hero-tags {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .tag {
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid;
+  }
+  .tag-mysql { background: rgba(77,182,245,0.1); border-color: rgba(77,182,245,0.4); color: var(--mysql); }
+  .tag-es { background: rgba(247,183,49,0.1); border-color: rgba(247,183,49,0.4); color: var(--es); }
+  .tag-sqlite { background: rgba(168,230,207,0.1); border-color: rgba(168,230,207,0.4); color: var(--sqlite); }
+  .tag-core { background: rgba(210,168,255,0.1); border-color: rgba(210,168,255,0.4); color: var(--accent4); }
+
+  /* ===== NAV ===== */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(13,17,23,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 30px;
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+  }
+  .nav a {
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 13.5px;
+    font-weight: 500;
+    padding: 14px 18px;
+    white-space: nowrap;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  .nav a:hover { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* ===== LAYOUT ===== */
+  .container { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
+  .section { margin-bottom: 60px; }
+  .section-title {
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-title .num {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent4));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; font-weight: 800; color: #fff;
+    flex-shrink: 0;
+  }
+  .section-sub {
+    color: var(--text2);
+    font-size: 15px;
+    margin-bottom: 28px;
+    padding-left: 48px;
+  }
+
+  /* ===== CARDS ===== */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: rgba(88,166,255,0.4); }
+  .card h3 {
+    font-size: 17px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card p, .card li { color: var(--text2); font-size: 14.5px; line-height: 1.8; }
+  .card ul { padding-left: 20px; }
+  .card li { margin-bottom: 4px; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* ===== CODE ===== */
+  .code-block {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 16px 0;
+  }
+  .code-header {
+    background: var(--bg3);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--text2);
+  }
+  .code-header .dots { display: flex; gap: 7px; }
+  .code-header .dot {
+    width: 12px; height: 12px; border-radius: 50%;
+  }
+  .dot-r { background: #ff5f57; }
+  .dot-y { background: #febc2e; }
+  .dot-g { background: #28c840; }
+  .code-header .lang {
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+  }
+  pre {
+    padding: 20px 22px;
+    overflow-x: auto;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13.5px;
+    line-height: 1.75;
+  }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm { color: #8b949e; font-style: italic; }
+  .num2 { color: #79c0ff; }
+  .op { color: #ffa657; }
+  .var { color: #e6edf3; }
+  .kw2 { color: #3fb950; }
+
+  /* ===== INVERTED INDEX VISUAL ===== */
+  .inv-visual {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+  }
+  .inv-title { font-size: 14px; color: var(--text2); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+  .docs-row { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .doc-item {
+    background: rgba(88,166,255,0.08);
+    border: 1px solid rgba(88,166,255,0.2);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13.5px;
+  }
+  .doc-item .doc-id { color: var(--accent); font-weight: 700; font-size: 12px; margin-bottom: 4px; }
+  .doc-item .doc-text { color: var(--text2); }
+  .arrow-down { text-align: center; font-size: 22px; color: var(--text2); margin: 8px 0; }
+  .index-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  .index-table th {
+    background: var(--bg);
+    color: var(--text2);
+    font-weight: 600;
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .index-table td {
+    padding: 9px 14px;
+    border-bottom: 1px solid rgba(48,54,61,0.5);
+    vertical-align: middle;
+  }
+  .index-table tr:last-child td { border-bottom: none; }
+  .token { display: inline-block; background: rgba(210,168,255,0.15); border: 1px solid rgba(210,168,255,0.3); color: var(--accent4); padding: 2px 10px; border-radius: 4px; font-weight: 600; font-size: 13px; }
+  .posting { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .post-item {
+    background: rgba(63,185,80,0.1);
+    border: 1px solid rgba(63,185,80,0.25);
+    color: var(--accent2);
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 12.5px;
+  }
+  .df { color: var(--accent5); font-weight: 700; }
+
+  /* ===== DB SECTION ===== */
+  .db-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 20px;
+    padding: 16px 22px;
+    border-radius: 10px;
+    border-left: 4px solid;
+  }
+  .db-header.mysql { background: rgba(77,182,245,0.08); border-color: var(--mysql); }
+  .db-header.es { background: rgba(247,183,49,0.08); border-color: var(--es); }
+  .db-header.sqlite { background: rgba(168,230,207,0.08); border-color: var(--sqlite); }
+  .db-header .db-icon { font-size: 32px; }
+  .db-header .db-name { font-size: 22px; font-weight: 800; }
+  .db-header .db-desc { color: var(--text2); font-size: 14px; margin-top: 2px; }
+  .db-header.mysql .db-name { color: var(--mysql); }
+  .db-header.es .db-name { color: var(--es); }
+  .db-header.sqlite .db-name { color: var(--sqlite); }
+
+  /* ===== PIPELINE ===== */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 20px 0;
+    overflow-x: auto;
+    padding: 4px 0;
+  }
+  .pipe-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-width: 100px;
+  }
+  .pipe-icon {
+    width: 52px; height: 52px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    border: 1px solid;
+    flex-shrink: 0;
+  }
+  .pipe-step .pipe-label { font-size: 12px; color: var(--text2); font-weight: 600; text-align: center; }
+  .pipe-arrow { color: var(--text2); font-size: 18px; margin: 0 4px; padding-bottom: 24px; flex-shrink: 0; }
+
+  /* ===== ALGO ===== */
+  .formula-box {
+    background: rgba(210,168,255,0.07);
+    border: 1px solid rgba(210,168,255,0.2);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 14px 0;
+    font-family: 'SF Mono', monospace;
+    font-size: 14px;
+    line-height: 2;
+  }
+  .formula-box .f-title { color: var(--accent4); font-weight: 700; margin-bottom: 8px; font-size: 13px; letter-spacing: 0.5px; text-transform: uppercase; }
+  .formula-main { color: var(--text); font-size: 15px; font-weight: 600; }
+  .formula-note { color: var(--text2); font-size: 13px; margin-top: 8px; font-family: system-ui; }
+
+  /* ===== COMPARE TABLE ===== */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .compare-table th {
+    padding: 14px 18px;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .compare-table th:nth-child(1) { background: var(--bg3); color: var(--text2); }
+  .compare-table th:nth-child(2) { background: rgba(77,182,245,0.12); color: var(--mysql); }
+  .compare-table th:nth-child(3) { background: rgba(247,183,49,0.12); color: var(--es); }
+  .compare-table th:nth-child(4) { background: rgba(168,230,207,0.12); color: var(--sqlite); }
+  .compare-table td {
+    padding: 12px 18px;
+    border-bottom: 1px solid rgba(48,54,61,0.6);
+    vertical-align: top;
+    line-height: 1.7;
+  }
+  .compare-table tr:last-child td { border-bottom: none; }
+  .compare-table td:nth-child(1) { background: rgba(28,33,40,0.5); color: var(--text); font-weight: 600; font-size: 13px; }
+  .compare-table td:nth-child(2) { background: rgba(77,182,245,0.04); color: var(--text2); }
+  .compare-table td:nth-child(3) { background: rgba(247,183,49,0.04); color: var(--text2); }
+  .compare-table td:nth-child(4) { background: rgba(168,230,207,0.04); color: var(--text2); }
+  .yes { color: var(--accent2); font-weight: 700; }
+  .no { color: var(--accent3); font-weight: 700; }
+  .partial { color: var(--accent5); font-weight: 700; }
+
+  /* ===== SCENARIO ===== */
+  .scenario-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 12px;
+  }
+  .scenario-card h4 { font-size: 15px; font-weight: 700; margin-bottom: 8px; color: var(--accent); }
+  .scenario-card p { color: var(--text2); font-size: 14px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-right: 6px;
+  }
+  .badge-mysql { background: rgba(77,182,245,0.15); color: var(--mysql); }
+  .badge-es { background: rgba(247,183,49,0.15); color: var(--es); }
+  .badge-sqlite { background: rgba(168,230,207,0.15); color: var(--sqlite); }
+
+  /* ===== STEP LIST ===== */
+  .steps { list-style: none; padding: 0; }
+  .steps li {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 16px;
+    align-items: flex-start;
+  }
+  .step-num {
+    width: 28px; height: 28px;
+    background: linear-gradient(135deg, var(--accent), var(--accent4));
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 800; color: #fff;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .step-content h4 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .step-content p { color: var(--text2); font-size: 14px; }
+
+  /* ===== HIGHLIGHT BOX ===== */
+  .highlight-box {
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 14px 0;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  .highlight-box.info { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); }
+  .highlight-box.warn { background: rgba(255,166,87,0.08); border: 1px solid rgba(255,166,87,0.25); }
+  .highlight-box.tip { background: rgba(63,185,80,0.08); border: 1px solid rgba(63,185,80,0.2); }
+  .highlight-box .hb-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .highlight-box .hb-text { font-size: 14px; color: var(--text2); line-height: 1.7; }
+  .highlight-box .hb-text strong { color: var(--text); }
+
+  /* ===== SCROLL TOP ===== */
+  .scroll-top {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    width: 42px; height: 42px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(88,166,255,0.4);
+    text-decoration: none;
+    transition: transform 0.2s;
+    opacity: 0.85;
+  }
+  .scroll-top:hover { transform: translateY(-3px); opacity: 1; }
+
+  /* ===== FOOTER ===== */
+  .footer {
+    border-top: 1px solid var(--border);
+    padding: 30px;
+    text-align: center;
+    color: var(--text2);
+    font-size: 13px;
+  }
+
+  hr.divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 40px 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero" id="top">
+  <div class="hero-tag">技术深度解析</div>
+  <h1>全文搜索 Full-Text Search</h1>
+  <p>从倒排索引原理到 MySQL / Elasticsearch / SQLite 的完整实现机制，彻底讲清楚</p>
+  <div class="hero-tags">
+    <span class="tag tag-core">🔍 倒排索引</span>
+    <span class="tag tag-core">📊 TF-IDF / BM25</span>
+    <span class="tag tag-mysql">🐬 MySQL InnoDB FTS</span>
+    <span class="tag tag-es">🟡 Elasticsearch Lucene</span>
+    <span class="tag tag-sqlite">🪶 SQLite FTS5</span>
+  </div>
+</div>
+
+<!-- NAV -->
+<div class="nav">
+  <a href="#what">什么是全文搜索</a>
+  <a href="#inverted">倒排索引</a>
+  <a href="#pipeline">分析管道</a>
+  <a href="#scoring">相关性评分</a>
+  <a href="#mysql">MySQL 实现</a>
+  <a href="#es">Elasticsearch 实现</a>
+  <a href="#sqlite">SQLite 实现</a>
+  <a href="#compare">对比总结</a>
+  <a href="#scene">选型建议</a>
+</div>
+
+<div class="container">
+
+  <!-- ===== SECTION 1: WHAT ===== -->
+  <div class="section" id="what">
+    <div class="section-title"><span class="num">1</span>什么是全文搜索</div>
+    <div class="section-sub">Full-Text Search — 不同于精确匹配的语义级文本检索</div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3>🔎 精确匹配 vs 全文搜索</h3>
+        <p style="margin-bottom:12px">传统数据库用 <code style="color:var(--accent3);background:rgba(255,123,114,0.1);padding:2px 6px;border-radius:4px">LIKE '%keyword%'</code> 做模糊查询，本质是<strong style="color:var(--text)">全表扫描 + 字符串遍历</strong>，不走索引，性能极差。</p>
+        <ul>
+          <li><strong style="color:var(--accent3)">LIKE查询</strong>：逐行扫描每个字段，时间复杂度 O(n·m)</li>
+          <li><strong style="color:var(--accent2)">全文搜索</strong>：预先建立倒排索引，查询时间接近 O(1)</li>
+          <li>全文搜索还支持<strong style="color:var(--text)">相关性排序</strong>，不只是"有没有"</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>✨ 全文搜索的核心能力</h3>
+        <ul>
+          <li>🏃 <strong style="color:var(--text)">高性能</strong>：倒排索引，毫秒级检索</li>
+          <li>🎯 <strong style="color:var(--text)">相关性排序</strong>：按权重返回最相关结果</li>
+          <li>✂️ <strong style="color:var(--text)">分词理解</strong>：理解词语边界，中英文分词</li>
+          <li>🌀 <strong style="color:var(--text)">词形变换</strong>：支持词干还原（running→run）</li>
+          <li>🚫 <strong style="color:var(--text)">停用词过滤</strong>：过滤 "a/the/的/了" 等无意义词</li>
+          <li>🔄 <strong style="color:var(--text)">同义词扩展</strong>：搜"手机"也能找到"移动电话"</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="highlight-box info">
+      <span class="hb-icon">💡</span>
+      <div class="hb-text">
+        <strong>核心本质：</strong>全文搜索 = <strong>文本预处理（分析管道）</strong> + <strong>倒排索引存储</strong> + <strong>相关性评分算法</strong>。三者缺一不可，后面会逐一深入讲解。
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 2: INVERTED INDEX ===== -->
+  <div class="section" id="inverted">
+    <div class="section-title"><span class="num">2</span>倒排索引 — 全文搜索的核心数据结构</div>
+    <div class="section-sub">Inverted Index — 以词为键、文档列表为值的索引结构</div>
+
+    <div class="card">
+      <h3>📐 正向索引 vs 倒排索引</h3>
+      <div class="grid-2">
+        <div>
+          <div style="color:var(--text2);font-size:13px;margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">正向索引（Forward Index）</div>
+          <div class="code-block">
+            <pre style="font-size:13px"><span class="cm">-- 文档 → 词列表</span>
+Doc1 → [MySQL, 数据库, 索引, 查询]
+Doc2 → [MySQL, 全文, 搜索, InnoDB]
+Doc3 → [Elasticsearch, 全文, Lucene]
+
+<span class="cm">-- 查"全文"? 要扫所有文档 ❌</span></pre>
+          </div>
+        </div>
+        <div>
+          <div style="color:var(--text2);font-size:13px;margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">倒排索引（Inverted Index）</div>
+          <div class="code-block">
+            <pre style="font-size:13px"><span class="cm">-- 词 → 文档列表</span>
+MySQL  → [Doc1, Doc2]
+全文   → [Doc2, Doc3]
+索引   → [Doc1]
+Lucene → [Doc3]
+
+<span class="cm">-- 查"全文"? 直接查 ✅ O(1)</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="inv-visual">
+      <div class="inv-title">🔬 倒排索引构建可视化示例</div>
+      <div class="docs-row">
+        <div class="doc-item">
+          <div class="doc-id">Doc 1</div>
+          <div class="doc-text">MySQL 支持全文搜索索引</div>
+        </div>
+        <div class="doc-item">
+          <div class="doc-id">Doc 2</div>
+          <div class="doc-text">Elasticsearch 全文搜索很强大</div>
+        </div>
+        <div class="doc-item">
+          <div class="doc-id">Doc 3</div>
+          <div class="doc-text">MySQL 和 Elasticsearch 对比分析</div>
+        </div>
+      </div>
+      <div class="arrow-down">↓ 分词 + 构建倒排索引</div>
+      <table class="index-table">
+        <thead>
+          <tr>
+            <th>Token（词项）</th>
+            <th>Posting List（倒排列表）</th>
+            <th>词频 TF</th>
+            <th>文档频率 DF</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="token">MySQL</span></td>
+            <td><div class="posting"><span class="post-item">Doc1(pos:0)</span><span class="post-item">Doc3(pos:0)</span></div></td>
+            <td style="color:var(--accent5)">1,1</td>
+            <td><span class="df">2</span></td>
+          </tr>
+          <tr>
+            <td><span class="token">全文搜索</span></td>
+            <td><div class="posting"><span class="post-item">Doc1(pos:2)</span><span class="post-item">Doc2(pos:1)</span></div></td>
+            <td style="color:var(--accent5)">1,1</td>
+            <td><span class="df">2</span></td>
+          </tr>
+          <tr>
+            <td><span class="token">Elasticsearch</span></td>
+            <td><div class="posting"><span class="post-item">Doc2(pos:0)</span><span class="post-item">Doc3(pos:2)</span></div></td>
+            <td style="color:var(--accent5)">1,1</td>
+            <td><span class="df">2</span></td>
+          </tr>
+          <tr>
+            <td><span class="token">索引</span></td>
+            <td><div class="posting"><span class="post-item">Doc1(pos:3)</span></div></td>
+            <td style="color:var(--accent5)">1</td>
+            <td><span class="df">1</span></td>
+          </tr>
+          <tr>
+            <td><span class="token">对比分析</span></td>
+            <td><div class="posting"><span class="post-item">Doc3(pos:3)</span></div></td>
+            <td style="color:var(--accent5)">1</td>
+            <td><span class="df">1</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <h3>📦 Posting List 结构</h3>
+        <p>倒排列表中每条记录（Posting）通常包含：</p>
+        <br>
+        <ul>
+          <li><strong style="color:var(--accent)">文档ID</strong>：指向哪篇文档</li>
+          <li><strong style="color:var(--accent)">词频 TF</strong>：该词在文档中出现几次</li>
+          <li><strong style="color:var(--accent)">位置信息 pos</strong>：词在文档第几个位置（用于短语查询）</li>
+          <li><strong style="color:var(--accent)">偏移量 offset</strong>：字符级起止位置（用于高亮）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>⚡ 查询过程</h3>
+        <ul>
+          <li>1️⃣ 对查询词同样做分析（分词/小写/词干）</li>
+          <li>2️⃣ 在倒排索引中 <strong style="color:var(--text)">O(1)</strong> 定位各词的 Posting List</li>
+          <li>3️⃣ 对多个词的列表做 <strong style="color:var(--accent2)">AND（交集）</strong>或 <strong style="color:var(--accent5)">OR（并集）</strong>操作</li>
+          <li>4️⃣ 按相关性评分 <strong style="color:var(--text)">排序返回</strong></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 3: PIPELINE ===== -->
+  <div class="section" id="pipeline">
+    <div class="section-title"><span class="num">3</span>文本分析管道 — 文本如何变成索引词</div>
+    <div class="section-sub">Analysis Pipeline — Analyzer = CharFilter + Tokenizer + TokenFilter</div>
+
+    <div class="pipeline">
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(255,123,114,0.1);border-color:rgba(255,123,114,0.3)">📄</div>
+        <div class="pipe-label">原始文本</div>
+      </div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(88,166,255,0.1);border-color:rgba(88,166,255,0.3)">🔤</div>
+        <div class="pipe-label">字符过滤<br>CharFilter</div>
+      </div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(210,168,255,0.1);border-color:rgba(210,168,255,0.3)">✂️</div>
+        <div class="pipe-label">分词器<br>Tokenizer</div>
+      </div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(247,183,49,0.1);border-color:rgba(247,183,49,0.3)">🔧</div>
+        <div class="pipe-label">词项过滤<br>TokenFilter</div>
+      </div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-step">
+        <div class="pipe-icon" style="background:rgba(63,185,80,0.1);border-color:rgba(63,185,80,0.3)">📑</div>
+        <div class="pipe-label">Token列表<br>写入索引</div>
+      </div>
+    </div>
+
+    <div class="grid-3">
+      <div class="card">
+        <h3>🔤 CharFilter（字符过滤）</h3>
+        <p>在分词前对原始字符做清洗：</p><br>
+        <ul>
+          <li>HTML标签去除：<code style="color:var(--accent3);font-size:12px">&lt;b&gt;搜索&lt;/b&gt; → 搜索</code></li>
+          <li>特殊字符替换：<code style="color:var(--accent3);font-size:12px">&amp;amp; → &amp;</code></li>
+          <li>全角转半角：<code style="color:var(--accent3);font-size:12px">ＡＢＣ → ABC</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>✂️ Tokenizer（分词）</h3>
+        <p>把文本切割成词项（Token）：</p><br>
+        <ul>
+          <li><strong style="color:var(--text)">英文</strong>：按空格/标点切割</li>
+          <li><strong style="color:var(--text)">中文</strong>：需要专用分词器（IK/结巴/HanLP）</li>
+          <li><strong style="color:var(--text)">N-gram</strong>：切割成 n 个字符的滑动窗口</li>
+          <li><strong style="color:var(--text)">Whitespace</strong>：仅按空格切割</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>🔧 TokenFilter（词项过滤）</h3>
+        <p>对分出的 Token 做后处理：</p><br>
+        <ul>
+          <li><strong style="color:var(--text)">Lowercase</strong>：全小写化</li>
+          <li><strong style="color:var(--text)">Stop Filter</strong>：删除停用词（the/a/了）</li>
+          <li><strong style="color:var(--text)">Stemmer</strong>：词干还原（running→run）</li>
+          <li><strong style="color:var(--text)">Synonym</strong>：同义词扩展</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>📌 中文分词示例（IK分词器）</h3>
+      <div class="grid-2">
+        <div>
+          <div style="color:var(--text2);font-size:13px;margin-bottom:8px">输入文本</div>
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;font-size:15px;color:var(--text)">
+            我在北京学习机器学习技术
+          </div>
+        </div>
+        <div>
+          <div style="color:var(--text2);font-size:13px;margin-bottom:8px">分词结果（ik_max_word）</div>
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px">
+            <span style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.3);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:14px">我</span>
+            <span style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.3);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:14px">在</span>
+            <span style="background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.3);color:var(--accent);padding:4px 10px;border-radius:6px;font-size:14px">北京</span>
+            <span style="background:rgba(210,168,255,0.12);border:1px solid rgba(210,168,255,0.3);color:var(--accent4);padding:4px 10px;border-radius:6px;font-size:14px">学习</span>
+            <span style="background:rgba(63,185,80,0.12);border:1px solid rgba(63,185,80,0.3);color:var(--accent2);padding:4px 10px;border-radius:6px;font-size:14px">机器学习</span>
+            <span style="background:rgba(63,185,80,0.12);border:1px solid rgba(63,185,80,0.3);color:var(--accent2);padding:4px 10px;border-radius:6px;font-size:14px">技术</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 4: SCORING ===== -->
+  <div class="section" id="scoring">
+    <div class="section-title"><span class="num">4</span>相关性评分算法</div>
+    <div class="section-sub">Relevance Scoring — TF-IDF 与 BM25 的核心原理</div>
+
+    <div class="grid-2">
+      <div>
+        <div class="card">
+          <h3>📐 TF-IDF（经典算法）</h3>
+          <p style="margin-bottom:12px">两个核心直觉：</p>
+          <ul>
+            <li>词在<strong style="color:var(--accent)">这篇文档</strong>出现越多 → 越相关（TF）</li>
+            <li>词在<strong style="color:var(--accent3)">所有文档</strong>中越罕见 → 越有区分度（IDF）</li>
+          </ul>
+        </div>
+        <div class="formula-box">
+          <div class="f-title">TF-IDF 公式</div>
+          <div class="formula-main">Score(t,d) = TF(t,d) × IDF(t)</div>
+          <div class="formula-note">
+            TF(t,d) = count(t in d) / total_tokens(d)<br>
+            IDF(t) = log( N / df(t) )<br>
+            <span style="opacity:0.7">N=文档总数, df(t)=包含词t的文档数</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h3>🚀 BM25（现代算法，ES默认）</h3>
+          <p style="margin-bottom:12px">BM25 是 TF-IDF 的改进版，解决了两个问题：</p>
+          <ul>
+            <li>TF 过大时相关性不再线性增长（词频饱和）</li>
+            <li>长文档包含更多词是正常的（文档长度归一化）</li>
+          </ul>
+        </div>
+        <div class="formula-box">
+          <div class="f-title">BM25 公式</div>
+          <div class="formula-main">Score = IDF × TF·(k₁+1) / (TF + k₁·(1-b+b·|d|/avgdl))</div>
+          <div class="formula-note">
+            k₁ ∈ [1.2, 2.0]：词频饱和参数（默认1.2）<br>
+            b ∈ [0,1]：长度归一化参数（默认0.75）<br>
+            |d|：文档长度, avgdl：平均文档长度
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="highlight-box tip">
+      <span class="hb-icon">🎯</span>
+      <div class="hb-text">
+        <strong>关键理解：</strong>BM25 的 k₁ 参数控制词频的"收益递减"效应——当同一个词出现 100 次和 1 次的文档，不应该有 100 倍的得分差距。b 参数控制文档长度的惩罚力度，避免长文章天然占优势。<br>
+        <strong>MySQL 用 TF-IDF，Elasticsearch 默认用 BM25，SQLite FTS5 用 BM25。</strong>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- ===== SECTION 5: MYSQL ===== -->
+  <div class="section" id="mysql">
+    <div class="db-header mysql">
+      <div class="db-icon">🐬</div>
+      <div>
+        <div class="db-name">MySQL 全文搜索</div>
+        <div class="db-desc">InnoDB 原生 FTS — 基于辅助索引 + TF-IDF 评分</div>
+      </div>
+    </div>
+
+    <div class="section-title" style="font-size:18px;margin-bottom:16px"><span class="num" style="background:var(--mysql);width:28px;height:28px;font-size:13px">5</span>MySQL 底层架构</div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3 style="color:var(--mysql)">🏗️ InnoDB FTS 内部结构</h3>
+        <ul>
+          <li><strong style="color:var(--text)">FTS 辅助索引表（6张）</strong>：按词第一个字符的16进制散列分片存储</li>
+          <li><strong style="color:var(--text)">FTS_DOC_ID 列</strong>：隐含的文档标识符（BIGINT UNSIGNED）</li>
+          <li><strong style="color:var(--text)">FTS 删除表</strong>：被删除文档先标记，异步清理</li>
+          <li><strong style="color:var(--text)">FTS 配置表</strong>：记录同步LSN等元数据</li>
+          <li><strong style="color:var(--text)">内存缓存（FTS Cache）</strong>：写入先进缓存，批量同步磁盘</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--mysql)">🔑 三种查询模式</h3>
+        <ul>
+          <li><strong style="color:var(--accent)">IN NATURAL LANGUAGE MODE</strong>（默认）：自然语言，TF-IDF相关性排序</li>
+          <li><strong style="color:var(--accent)">IN BOOLEAN MODE</strong>：支持 +必须 -排除 * 通配符，不排序</li>
+          <li><strong style="color:var(--accent)">WITH QUERY EXPANSION</strong>：两轮搜索，第二轮用第一轮结果扩展关键词</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">
+        <div class="dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+        <span class="lang">SQL — MySQL 全文搜索完整示例</span>
+      </div>
+      <pre><span class="cm">-- 1. 建表时创建全文索引</span>
+<span class="kw">CREATE TABLE</span> articles (
+  id     <span class="fn">INT</span> PRIMARY KEY AUTO_INCREMENT,
+  title  <span class="fn">VARCHAR</span>(<span class="num2">200</span>),
+  body   <span class="fn">TEXT</span>,
+  <span class="cm">-- 创建全文索引（可以多列联合）</span>
+  <span class="kw">FULLTEXT</span> INDEX idx_fts (title, body)
+) ENGINE=InnoDB <span class="kw">DEFAULT CHARSET</span>=utf8mb4;
+
+<span class="cm">-- 2. 自然语言模式（默认，按相关性排序）</span>
+<span class="kw">SELECT</span> id, title,
+  <span class="fn">MATCH</span>(title, body) <span class="kw">AGAINST</span> (<span class="str">'MySQL 全文搜索'</span>) <span class="kw">AS</span> relevance
+<span class="kw">FROM</span> articles
+<span class="kw">WHERE</span> <span class="fn">MATCH</span>(title, body) <span class="kw">AGAINST</span> (<span class="str">'MySQL 全文搜索'</span>)
+<span class="kw">ORDER BY</span> relevance <span class="kw">DESC</span>;
+
+<span class="cm">-- 3. 布尔模式（精确控制）</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> articles
+<span class="kw">WHERE</span> <span class="fn">MATCH</span>(title, body)
+  <span class="kw">AGAINST</span> (<span class="str">'+MySQL +索引 -删除'</span> <span class="kw">IN BOOLEAN MODE</span>);
+<span class="cm">-- + 必须包含, - 必须排除, * 前缀通配, "" 短语</span>
+<span class="cm">-- "全文搜索" 短语匹配, ~负权重, > < 调整权重</span>
+
+<span class="cm">-- 4. 查询扩展模式（两轮搜索）</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> articles
+<span class="kw">WHERE</span> <span class="fn">MATCH</span>(title, body)
+  <span class="kw">AGAINST</span> (<span class="str">'数据库'</span> <span class="kw">WITH QUERY EXPANSION</span>);
+
+<span class="cm">-- 5. 事后创建索引</span>
+<span class="kw">ALTER TABLE</span> articles
+  <span class="kw">ADD FULLTEXT INDEX</span> idx_fts2 (title, body)
+  <span class="kw">WITH PARSER</span> ngram;  <span class="cm">-- 中文用 ngram 分词</span></pre>
+    </div>
+
+    <div class="card">
+      <h3 style="color:var(--mysql)">🔬 MySQL FTS 内部存储结构（6张辅助表）</h3>
+      <div class="code-block" style="margin:12px 0 0">
+        <pre style="font-size:13px"><span class="cm">-- 当你创建 FULLTEXT INDEX 后，MySQL 会在 .ibd 文件中</span>
+<span class="cm">-- 自动创建 6 张辅助索引段，命名规则：</span>
+FTS_{table_id}_BEING_DELETED        <span class="cm">-- 待删除文档ID列表</span>
+FTS_{table_id}_BEING_DELETED_CACHE  <span class="cm">-- 内存缓存的待删列表</span>
+FTS_{table_id}_CONFIG               <span class="cm">-- FTS配置（同步LSN等）</span>
+FTS_{table_id}_DELETED              <span class="cm">-- 已标记删除的文档ID</span>
+FTS_{table_id}_DELETED_CACHE        <span class="cm">-- 删除缓存</span>
+FTS_{table_id}_0000000000000161_INDEX_1  <span class="cm">-- 实际倒排索引分片</span>
+<span class="cm">-- INDEX_1 ~ INDEX_6：按首字母哈希值分6个分片</span>
+
+<span class="cm">-- 辅助索引表每行结构：</span>
+<span class="cm">-- (word VARCHAR, first_doc_id BIGINT, last_doc_id BIGINT,</span>
+<span class="cm">--  doc_count INT, ilist BLOB)</span>
+<span class="cm">-- ilist：压缩存储 doc_id + word_pos 列表</span></pre>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="color:var(--mysql)">⚙️ 中文支持：ngram 分词</h3>
+        <ul>
+          <li>MySQL 内置 <strong style="color:var(--text)">ngram parser</strong> 支持中文</li>
+          <li>按滑动窗口切割：<code style="color:var(--accent5);font-size:12px">ngram_token_size=2</code></li>
+          <li>"中文搜索" → "中文"、"文搜"、"搜索"</li>
+          <li>配置参数 <code style="color:var(--accent5);font-size:12px">innodb_ft_min_token_size</code>（默认3，中文要改2）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--mysql)">⚠️ MySQL FTS 局限</h3>
+        <ul>
+          <li>停用词过滤较粗糙，无同义词支持</li>
+          <li>中文分词只有 ngram，精度不如专业分词器</li>
+          <li>评分算法固定为 TF-IDF，不可调</li>
+          <li>不支持分布式，大数据量性能有限</li>
+          <li><strong style="color:var(--accent3)">自然语言模式</strong>：结果超50%文档出现的词会被忽略</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 6: ELASTICSEARCH ===== -->
+  <div class="section" id="es">
+    <div class="db-header es">
+      <div class="db-icon">🟡</div>
+      <div>
+        <div class="db-name">Elasticsearch 全文搜索</div>
+        <div class="db-desc">基于 Apache Lucene — 专为全文搜索设计的分布式搜索引擎</div>
+      </div>
+    </div>
+
+    <div class="section-title" style="font-size:18px;margin-bottom:16px"><span class="num" style="background:var(--es);color:#000;width:28px;height:28px;font-size:13px">6</span>Lucene 核心架构</div>
+
+    <div class="card">
+      <h3 style="color:var(--es)">🏗️ Elasticsearch → Lucene 分层架构</h3>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+        <div style="background:rgba(247,183,49,0.08);border:1px solid rgba(247,183,49,0.2);border-radius:8px;padding:12px 18px;font-size:14px">
+          <strong style="color:var(--es)">Elasticsearch 层</strong> <span style="color:var(--text2);margin-left:8px">REST API / 分布式路由 / Shard 管理 / 集群协调</span>
+        </div>
+        <div style="text-align:center;color:var(--text2);font-size:18px">↓</div>
+        <div style="background:rgba(88,166,255,0.07);border:1px solid rgba(88,166,255,0.2);border-radius:8px;padding:12px 18px;font-size:14px">
+          <strong style="color:var(--accent)">Lucene Index（Shard）</strong> <span style="color:var(--text2);margin-left:8px">每个 Shard 是一个完整的 Lucene 索引实例</span>
+        </div>
+        <div style="text-align:center;color:var(--text2);font-size:18px">↓</div>
+        <div style="background:rgba(210,168,255,0.07);border:1px solid rgba(210,168,255,0.2);border-radius:8px;padding:12px 18px;font-size:14px">
+          <strong style="color:var(--accent4)">Segment（段）</strong> <span style="color:var(--text2);margin-left:8px">Lucene 最小存储单元，不可变，多个 Segment 合并成大 Segment（Segment Merge）</span>
+        </div>
+        <div style="text-align:center;color:var(--text2);font-size:18px">↓</div>
+        <div style="background:rgba(63,185,80,0.07);border:1px solid rgba(63,185,80,0.2);border-radius:8px;padding:12px 18px;font-size:14px;display:flex;flex-wrap:wrap;gap:12px">
+          <span><strong style="color:var(--accent2)">倒排索引文件 .tim/.tip</strong></span>
+          <span><strong style="color:var(--accent2)">文档存储 .fdt</strong></span>
+          <span><strong style="color:var(--accent2)">正向索引 .dvd</strong></span>
+          <span><strong style="color:var(--accent2)">字段信息 .fnm</strong></span>
+          <span><strong style="color:var(--accent2)">删除标记 .del</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block" style="margin:16px 0">
+      <div class="code-header">
+        <div class="dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+        <span class="lang">JSON — Elasticsearch 全文搜索完整示例</span>
+      </div>
+      <pre><span class="cm">// 1. 创建索引，配置 Analyzer（中文IK分词）</span>
+PUT /articles
+{
+  <span class="str">"settings"</span>: {
+    <span class="str">"analysis"</span>: {
+      <span class="str">"analyzer"</span>: {
+        <span class="str">"ik_smart_analyzer"</span>: {
+          <span class="str">"type"</span>: <span class="str">"custom"</span>,
+          <span class="str">"tokenizer"</span>: <span class="str">"ik_smart"</span>,       <span class="cm">// IK粗粒度分词</span>
+          <span class="str">"filter"</span>: [<span class="str">"lowercase"</span>, <span class="str">"stop"</span>]   <span class="cm">// 小写 + 停用词</span>
+        }
+      }
+    }
+  },
+  <span class="str">"mappings"</span>: {
+    <span class="str">"properties"</span>: {
+      <span class="str">"title"</span>: {
+        <span class="str">"type"</span>: <span class="str">"text"</span>,
+        <span class="str">"analyzer"</span>: <span class="str">"ik_smart_analyzer"</span>,  <span class="cm">// 写入时分析器</span>
+        <span class="str">"search_analyzer"</span>: <span class="str">"ik_smart"</span>       <span class="cm">// 搜索时分析器</span>
+      },
+      <span class="str">"body"</span>: { <span class="str">"type"</span>: <span class="str">"text"</span>, <span class="str">"analyzer"</span>: <span class="str">"ik_max_word"</span> }
+    }
+  }
+}
+
+<span class="cm">// 2. match 查询（全文搜索最常用）</span>
+GET /articles/_search
+{
+  <span class="str">"query"</span>: {
+    <span class="str">"match"</span>: {
+      <span class="str">"title"</span>: {
+        <span class="str">"query"</span>: <span class="str">"MySQL 全文搜索"</span>,
+        <span class="str">"operator"</span>: <span class="str">"or"</span>,        <span class="cm">// or/and</span>
+        <span class="str">"minimum_should_match"</span>: <span class="str">"75%"</span>  <span class="cm">// 至少75%词匹配</span>
+      }
+    }
+  }
+}
+
+<span class="cm">// 3. multi_match（多字段搜索 + 字段权重）</span>
+GET /articles/_search
+{
+  <span class="str">"query"</span>: {
+    <span class="str">"multi_match"</span>: {
+      <span class="str">"query"</span>: <span class="str">"全文搜索原理"</span>,
+      <span class="str">"fields"</span>: [<span class="str">"title^3"</span>, <span class="str">"body^1"</span>],  <span class="cm">// title 权重3倍</span>
+      <span class="str">"type"</span>: <span class="str">"best_fields"</span>  <span class="cm">// cross_fields/most_fields</span>
+    }
+  }
+}
+
+<span class="cm">// 4. match_phrase（短语匹配，词序和位置）</span>
+GET /articles/_search
+{
+  <span class="str">"query"</span>: {
+    <span class="str">"match_phrase"</span>: {
+      <span class="str">"body"</span>: {
+        <span class="str">"query"</span>: <span class="str">"倒排索引"</span>,
+        <span class="str">"slop"</span>: <span class="num2">1</span>  <span class="cm">// 允许词间距1个词的误差</span>
+      }
+    }
+  }
+}
+
+<span class="cm">// 5. bool 复合查询（最强大的查询方式）</span>
+GET /articles/_search
+{
+  <span class="str">"query"</span>: {
+    <span class="str">"bool"</span>: {
+      <span class="str">"must"</span>:    [{ <span class="str">"match"</span>: { <span class="str">"title"</span>: <span class="str">"全文搜索"</span> }}],
+      <span class="str">"should"</span>:  [{ <span class="str">"match"</span>: { <span class="str">"body"</span>: <span class="str">"BM25"</span> }}],
+      <span class="str">"must_not"</span>:[{ <span class="str">"match"</span>: { <span class="str">"title"</span>: <span class="str">"广告"</span> }}],
+      <span class="str">"filter"</span>:  [{ <span class="str">"term"</span>: { <span class="str">"status"</span>: <span class="str">"published"</span> }}]
+    }
+  },
+  <span class="str">"highlight"</span>: {
+    <span class="str">"fields"</span>: { <span class="str">"title"</span>: {}, <span class="str">"body"</span>: {} }  <span class="cm">// 高亮</span>
+  }
+}</pre>
+    </div>
+
+    <div class="grid-3">
+      <div class="card">
+        <h3 style="color:var(--es)">📂 Segment 不可变原理</h3>
+        <ul>
+          <li>Lucene 写入的 Segment <strong style="color:var(--text)">不可修改</strong></li>
+          <li>删除 = 标记 .del 文件（仍占磁盘）</li>
+          <li>更新 = 删除旧文档 + 写新 Segment</li>
+          <li><strong style="color:var(--accent)">Segment Merge</strong>：后台定期合并小 Segment，清除已删文档，提升查询性能</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--es)">⚡ 近实时搜索（NRT）</h3>
+        <ul>
+          <li>写入先到 <strong style="color:var(--text)">内存 Buffer</strong>（不可搜索）</li>
+          <li>每1秒 <strong style="color:var(--accent2)">Refresh</strong>：Buffer→内存 Segment（可搜索）</li>
+          <li>每30秒 <strong style="color:var(--accent2)">Flush</strong>：Segment 持久化到磁盘</li>
+          <li><strong style="color:var(--accent)">Translog</strong>：类似 WAL，保证数据不丢</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--es)">📊 FST 词典压缩</h3>
+        <ul>
+          <li>Lucene 词典用 <strong style="color:var(--text)">FST（有限状态转换器）</strong>存储</li>
+          <li>比 B-Tree 更省内存（可放进内存）</li>
+          <li>支持前缀/后缀共享，压缩率极高</li>
+          <li>Posting List 用 <strong style="color:var(--accent)">Frame of Reference</strong> 压缩算法</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 7: SQLITE ===== -->
+  <div class="section" id="sqlite">
+    <div class="db-header sqlite">
+      <div class="db-icon">🪶</div>
+      <div>
+        <div class="db-name">SQLite FTS5</div>
+        <div class="db-desc">内嵌式轻量级全文搜索 — 无服务器，单文件，BM25评分</div>
+      </div>
+    </div>
+
+    <div class="section-title" style="font-size:18px;margin-bottom:16px"><span class="num" style="background:var(--sqlite);color:#000;width:28px;height:28px;font-size:13px">7</span>SQLite FTS5 架构</div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3 style="color:var(--sqlite)">🏗️ FTS5 内部存储结构</h3>
+        <ul>
+          <li><strong style="color:var(--text)">虚拟表（Virtual Table）</strong>：通过 SQLite 虚拟表机制实现</li>
+          <li><strong style="color:var(--text)">%_data 表</strong>：B-Tree 存储所有索引数据（倒排+文档）</li>
+          <li><strong style="color:var(--text)">%_idx 表</strong>：词典索引，存储词→数据段映射</li>
+          <li><strong style="color:var(--text)">%_content 表</strong>：文档原始内容（可选 content=""）</li>
+          <li><strong style="color:var(--text)">%_config 表</strong>：FTS5 配置参数</li>
+          <li>倒排索引以 <strong style="color:var(--accent)">B-Tree leaf page</strong> 形式存储，键=词+docid</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--sqlite)">🔑 FTS4 vs FTS5</h3>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="background:var(--bg);border-bottom:1px solid var(--border)">
+              <th style="padding:8px;color:var(--text2)">特性</th>
+              <th style="padding:8px;color:#aaa">FTS4</th>
+              <th style="padding:8px;color:var(--sqlite)">FTS5</th>
+            </tr>
+            <tr style="border-bottom:1px solid rgba(48,54,61,0.4)">
+              <td style="padding:8px;color:var(--text2)">评分算法</td>
+              <td style="padding:8px;color:var(--text2)">TF-IDF</td>
+              <td style="padding:8px;color:var(--accent2)"><strong>BM25</strong></td>
+            </tr>
+            <tr style="border-bottom:1px solid rgba(48,54,61,0.4)">
+              <td style="padding:8px;color:var(--text2)">列过滤</td>
+              <td style="padding:8px;color:var(--accent3)">不支持</td>
+              <td style="padding:8px;color:var(--accent2)">支持</td>
+            </tr>
+            <tr style="border-bottom:1px solid rgba(48,54,61,0.4)">
+              <td style="padding:8px;color:var(--text2)">短语查询</td>
+              <td style="padding:8px;color:var(--accent2)">支持</td>
+              <td style="padding:8px;color:var(--accent2)">支持</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;color:var(--text2)">自定义tokenizer</td>
+              <td style="padding:8px;color:var(--accent3)">有限</td>
+              <td style="padding:8px;color:var(--accent2)">完整API</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">
+        <div class="dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+        <span class="lang">SQL — SQLite FTS5 完整示例</span>
+      </div>
+      <pre><span class="cm">-- 1. 创建 FTS5 虚拟表</span>
+<span class="kw">CREATE VIRTUAL TABLE</span> docs <span class="kw">USING</span> <span class="fn">fts5</span>(
+  title,
+  body,
+  tokenize = <span class="str">'unicode61'</span>,    <span class="cm">-- 默认分词器（英文友好）</span>
+  <span class="cm">-- tokenize = 'porter ascii', -- 词干还原</span>
+  <span class="cm">-- tokenize = 'trigram',      -- trigram模式（支持中文LIKE模糊）</span>
+  content=<span class="str">'articles'</span>,        <span class="cm">-- 关联真实表（content table）</span>
+  content_rowid=<span class="str">'id'</span>
+);
+
+<span class="cm">-- 2. 同步真实表数据到 FTS 索引</span>
+<span class="kw">INSERT INTO</span> docs(docs)
+  <span class="kw">VALUES</span>(<span class="str">'rebuild'</span>);          <span class="cm">-- 全量重建索引</span>
+
+<span class="cm">-- 3. 基本全文搜索</span>
+<span class="kw">SELECT</span> rowid, title,
+  bm25(docs) <span class="kw">AS</span> score       <span class="cm">-- BM25 评分（负值，越小越相关）</span>
+<span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'全文搜索'</span>
+<span class="kw">ORDER BY</span> bm25(docs);        <span class="cm">-- 升序（负值越小=得分越高）</span>
+
+<span class="cm">-- 4. 布尔查询语法</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'MySQL AND 索引 NOT 删除'</span>;
+
+<span class="cm">-- 5. 列过滤（仅搜 title 列）</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'title:全文搜索'</span>;
+
+<span class="cm">-- 6. 短语搜索</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'"倒排 索引"'</span>;  <span class="cm">-- 精确短语</span>
+
+<span class="cm">-- 7. 前缀查询</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'index*'</span>;        <span class="cm">-- 前缀匹配</span>
+
+<span class="cm">-- 8. highlight + snippet 辅助函数</span>
+<span class="kw">SELECT</span>
+  <span class="fn">highlight</span>(docs, <span class="num2">0</span>, <span class="str">'&lt;b&gt;'</span>, <span class="str">'&lt;/b&gt;'</span>) <span class="kw">AS</span> title_hl,
+  <span class="fn">snippet</span>(docs, <span class="num2">1</span>, <span class="str">'&lt;em&gt;'</span>, <span class="str">'&lt;/em&gt;'</span>, <span class="str">'...'</span>, <span class="num2">30</span>) <span class="kw">AS</span> body_snippet
+<span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'索引'</span>;
+
+<span class="cm">-- 9. trigram 模式（SQLite 3.38+，支持中文/LIKE类搜索）</span>
+<span class="kw">CREATE VIRTUAL TABLE</span> docs_cn <span class="kw">USING</span> <span class="fn">fts5</span>(
+  content,
+  tokenize=<span class="str">'trigram'</span>  <span class="cm">-- 3字符滑动窗口，无需外部分词</span>
+);
+<span class="cm">-- 适合中文但索引较大，存储开销约3x</span>
+
+<span class="cm">-- 10. bm25 权重调整（各列权重）</span>
+<span class="kw">SELECT</span> *, bm25(docs, <span class="num2">10.0</span>, <span class="num2">1.0</span>) score
+<span class="kw">FROM</span> docs
+<span class="kw">WHERE</span> docs <span class="kw">MATCH</span> <span class="str">'搜索'</span>
+<span class="kw">ORDER BY</span> score;  <span class="cm">-- title权重10, body权重1</span></pre>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <h3 style="color:var(--sqlite)">🔬 FTS5 B-Tree 存储原理</h3>
+        <ul>
+          <li>所有数据存在 <strong style="color:var(--text)">%_data</strong> 表（隐藏虚拟表）</li>
+          <li>每个 B-Tree 叶页存一段倒排列表：<br>
+            <code style="color:var(--accent5);font-size:12px">key = (level, segment_id, page_no)</code></li>
+          <li>叶页内紧凑存储：词典项 + docID列表（变长整型压缩）</li>
+          <li>写入时先放 <strong style="color:var(--accent)">内存哈希</strong>，到一定量后合并写盘（类似 LSM-tree）</li>
+          <li>查询：先在 %_idx 定位词，再顺序读 %_data 中的 Posting 页</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--sqlite)">🌍 中文处理方案对比</h3>
+        <ul>
+          <li><strong style="color:var(--accent5)">trigram tokenizer</strong>（内置）：无需外部依赖，SQLite 3.38+，索引膨胀约3倍</li>
+          <li><strong style="color:var(--accent)">自定义 tokenizer</strong>（C API）：可接入结巴、jieba-wasm等分词，精度高，实现复杂</li>
+          <li><strong style="color:var(--accent3)">应用层分词</strong>：应用中分好词再存入 FTS，最灵活，维护成本高</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 8: COMPARE ===== -->
+  <div class="section" id="compare">
+    <div class="section-title"><span class="num">8</span>三者深度对比</div>
+    <div class="section-sub">从架构、性能、分词、适用场景多维度横向对比</div>
+
+    <div style="overflow-x:auto">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>对比维度</th>
+            <th>🐬 MySQL InnoDB FTS</th>
+            <th>🟡 Elasticsearch</th>
+            <th>🪶 SQLite FTS5</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>底层引擎</td>
+            <td>InnoDB 辅助索引段（6张隐藏表）</td>
+            <td>Apache Lucene（Segment + FST）</td>
+            <td>B-Tree 虚拟表（%_data）</td>
+          </tr>
+          <tr>
+            <td>索引结构</td>
+            <td>哈希分片倒排索引，BLOB存Posting</td>
+            <td>FST词典 + 压缩Posting List（FOR算法）</td>
+            <td>B-Tree叶页存Posting，变长整型压缩</td>
+          </tr>
+          <tr>
+            <td>评分算法</td>
+            <td>TF-IDF（固定，不可调）</td>
+            <td><span class="yes">BM25（默认，可自定义）</span></td>
+            <td><span class="yes">BM25（内置 bm25() 函数）</span></td>
+          </tr>
+          <tr>
+            <td>中文分词</td>
+            <td><span class="partial">ngram（内置，精度一般）</span></td>
+            <td><span class="yes">IK/HanLP等专业分词（插件）</span></td>
+            <td><span class="partial">trigram（内置）/ 自定义tokenizer</span></td>
+          </tr>
+          <tr>
+            <td>部署方式</td>
+            <td>内嵌 MySQL，无需额外服务</td>
+            <td><span class="partial">独立服务，需单独维护</span></td>
+            <td><span class="yes">无服务，单文件嵌入</span></td>
+          </tr>
+          <tr>
+            <td>分布式支持</td>
+            <td><span class="no">不支持</span></td>
+            <td><span class="yes">原生支持（Shard/Replica）</span></td>
+            <td><span class="no">不支持</span></td>
+          </tr>
+          <tr>
+            <td>写入性能</td>
+            <td>中等（FTS Cache 批量落盘）</td>
+            <td>高（内存Buffer+近实时Refresh）</td>
+            <td>高（内存哈希+LSM风格合并）</td>
+          </tr>
+          <tr>
+            <td>查询性能</td>
+            <td>中等（千万级可用）</td>
+            <td><span class="yes">极高（亿级，分布式并行）</span></td>
+            <td>高（百万级以内）</td>
+          </tr>
+          <tr>
+            <td>数据一致性</td>
+            <td><span class="yes">与主表强一致（事务支持）</span></td>
+            <td><span class="partial">近实时（默认1秒延迟）</span></td>
+            <td><span class="yes">与SQLite事务一致</span></td>
+          </tr>
+          <tr>
+            <td>高亮/摘要</td>
+            <td><span class="no">不支持</span></td>
+            <td><span class="yes">highlight API，支持多种策略</span></td>
+            <td><span class="yes">highlight() / snippet() 内置函数</span></td>
+          </tr>
+          <tr>
+            <td>聚合分析</td>
+            <td><span class="no">不支持</span></td>
+            <td><span class="yes">强大的 Aggregation API</span></td>
+            <td><span class="no">不支持</span></td>
+          </tr>
+          <tr>
+            <td>运维复杂度</td>
+            <td><span class="yes">低（MySQL自带）</span></td>
+            <td><span class="no">高（独立集群，JVM调优）</span></td>
+            <td><span class="yes">极低（嵌入式）</span></td>
+          </tr>
+          <tr>
+            <td>适用数据量</td>
+            <td>百万~千万级</td>
+            <td><span class="yes">亿级以上</span></td>
+            <td>百万级以内</td>
+          </tr>
+          <tr>
+            <td>典型场景</td>
+            <td>已有MySQL系统，简单搜索需求</td>
+            <td>专业搜索引擎，日志分析，大数据</td>
+            <td>移动端/桌面App，小型系统</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 9: SCENE ===== -->
+  <div class="section" id="scene">
+    <div class="section-title"><span class="num">9</span>选型建议</div>
+    <div class="section-sub">根据场景选择最适合的全文搜索方案</div>
+
+    <div class="scenario-card">
+      <h4>🏢 已有 MySQL，需要简单搜索</h4>
+      <p><span class="badge badge-mysql">MySQL FTS</span> 直接在现有 MySQL 中建 FULLTEXT 索引，无需引入新服务。适合博客、CMS、内部工具等<strong style="color:var(--text)">中小规模</strong>业务，数据量千万级以内，不追求极致搜索体验。</p>
+    </div>
+
+    <div class="scenario-card">
+      <h4>🚀 专业搜索引擎，大数据量</h4>
+      <p><span class="badge badge-es">Elasticsearch</span> 电商搜索、知识库、日志平台、新闻推荐等<strong style="color:var(--text)">搜索是核心功能</strong>的场景。支持同义词、拼音、分面过滤、相关性调优，亿级文档毫秒响应。</p>
+    </div>
+
+    <div class="scenario-card">
+      <h4>📱 移动端 / 桌面 App / 小型服务</h4>
+      <p><span class="badge badge-sqlite">SQLite FTS5</span> iOS/Android App内置搜索、Electron桌面应用、个人工具、CLI程序。<strong style="color:var(--text)">零运维，单文件，BM25评分</strong>，百万文档轻松驾驭。</p>
+    </div>
+
+    <div class="highlight-box warn">
+      <span class="hb-icon">⚡</span>
+      <div class="hb-text">
+        <strong>经典架构模式：MySQL + Elasticsearch 双写</strong><br>
+        业务数据写入 MySQL 保证事务一致性，同步写（或异步 Canal/Binlog 同步）到 ES 提供搜索服务。ES 作为只读搜索层，MySQL 作为主存储。这是互联网公司最常见的搜索架构。
+      </div>
+    </div>
+
+    <div class="grid-3" style="margin-top:20px">
+      <div class="card">
+        <h3>🌱 入门推荐路径</h3>
+        <ul class="steps" style="margin-top:8px">
+          <li><span class="step-num" style="width:22px;height:22px;font-size:11px">1</span><div class="step-content"><p>从 <strong style="color:var(--text)">SQLite FTS5</strong> 入门，理解倒排索引和BM25</p></div></li>
+          <li><span class="step-num" style="width:22px;height:22px;font-size:11px">2</span><div class="step-content"><p>在 <strong style="color:var(--text)">MySQL</strong> 项目中实践全文索引，理解生产限制</p></div></li>
+          <li><span class="step-num" style="width:22px;height:22px;font-size:11px">3</span><div class="step-content"><p>学习 <strong style="color:var(--text)">Elasticsearch</strong>，掌握 Lucene Segment 架构</p></div></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>🔑 核心知识点回顾</h3>
+        <ul>
+          <li>倒排索引 = 词→文档列表</li>
+          <li>Analyzer = CharFilter + Tokenizer + Filter</li>
+          <li>BM25 解决 TF 饱和 + 长文档问题</li>
+          <li>ES Segment 不可变 + Merge 机制</li>
+          <li>MySQL FTS 6张辅助表 + Cache</li>
+          <li>SQLite FTS5 B-Tree leaf page 存储</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>⚠️ 常见坑</h3>
+        <ul>
+          <li>MySQL FTS：默认最小词长3字符，中文要改2</li>
+          <li>MySQL FTS：50%以上文档含某词则被忽略（自然语言模式）</li>
+          <li>ES：写后立即查可能查不到（1秒refresh）</li>
+          <li>SQLite FTS5：bm25() 返回负值，ORDER BY 要升序</li>
+          <li>中文一定要用专业分词，不能靠空格切割</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<a class="scroll-top" href="#top">↑</a>
+
+<div class="footer">
+  全文搜索技术深度解析 · MySQL FTS / Elasticsearch Lucene / SQLite FTS5<br>
+  <span style="opacity:0.5;font-size:12px;margin-top:4px;display:block">倒排索引 · BM25 · 分析管道 · Segment架构</span>
+</div>
+
+<script>
+  // Smooth scroll
+  document.querySelectorAll('a[href^="#"]').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const el = document.querySelector(a.getAttribute('href'));
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  // Nav active highlight
+  const sections = document.querySelectorAll('.section[id], .hero[id]');
+  const navLinks = document.querySelectorAll('.nav a');
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(s => {
+      if (window.scrollY >= s.offsetTop - 80) current = s.id;
+    });
+    navLinks.forEach(a => {
+      a.style.color = a.getAttribute('href') === '#' + current ? '#58a6ff' : '';
+      a.style.borderBottomColor = a.getAttribute('href') === '#' + current ? '#58a6ff' : 'transparent';
+    });
+  });
+</script>
+</body>
+</html>
