@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ES 副本为何不能和主分片同节点？节点宕机全流程</title>
+<style>
+  :root {
+    --bg: #0b0d14;
+    --card: #141822;
+    --card2: #1a1e2b;
+    --border: #252936;
+    --text: #d8dae3;
+    --dim: #6b7089;
+    --accent: #5c9ce6;
+    --primary-c: #f06595;
+    --replica-c: #20c997;
+    --master-c: #ffd43b;
+    --danger: #ff6b6b;
+    --warn: #ff922b;
+    --ok: #51cf66;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  header {
+    text-align: center; padding: 56px 20px 36px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 2.2em; background: linear-gradient(135deg, #5c9ce6, #da77f2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  header p { color: var(--dim); margin-top: 6px; max-width: 620px; margin-left: auto; margin-right: auto; }
+
+  .wrapper { max-width: 980px; margin: 0 auto; padding: 0 20px 80px; }
+
+  section { margin-top: 48px; }
+  section h2 {
+    font-size: 1.5em; margin-bottom: 6px; padding-left: 14px;
+    border-left: 4px solid var(--accent); line-height: 1.3;
+  }
+  section .sub { color: var(--dim); margin-bottom: 20px; font-size: 0.92em; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 26px; margin-bottom: 22px;
+  }
+
+  /* ===== ANTI-AFFINITY DEMO ===== */
+  .demo-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; margin: 20px 0; }
+  .demo-box {
+    background: var(--card2); border: 2px solid var(--border); border-radius: 14px;
+    width: 200px; padding: 16px; text-align: center; transition: all 0.4s;
+  }
+  .demo-box .title { font-weight: 700; font-size: 0.9em; margin-bottom: 6px; }
+  .demo-box .subtitle { font-size: 0.72em; color: var(--dim); margin-bottom: 12px; }
+  .demo-box .shard-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .demo-box .shard {
+    width: 48px; height: 48px; border-radius: 10px; font-size: 0.7em; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; transition: all 0.5s;
+  }
+  .demo-box .shard.p { background: linear-gradient(135deg, #f06595, #e64980); color: #fff; box-shadow: 0 2px 10px rgba(240,101,149,0.35); }
+  .demo-box .shard.r { background: linear-gradient(135deg, #20c997, #12b886); color: #fff; box-shadow: 0 2px 10px rgba(32,201,151,0.35); }
+  .demo-box .shard.dead { background: #333; color: #555; box-shadow: none; }
+  .demo-box .shard.glow { box-shadow: 0 0 22px rgba(255,146,43,0.8); transform: scale(1.08); }
+  .demo-box .shard.blink { animation: blink 0.4s ease 3; }
+  @keyframes blink { 50% { opacity: 0.3; transform: scale(1.1); } }
+
+  /* ===== WRONG CONFIG ===== */
+  .wrong-badge {
+    display: inline-block; background: rgba(255,107,107,0.12); color: var(--danger);
+    padding: 2px 10px; border-radius: 4px; font-size: 0.8em; font-weight: 700; margin-left: 8px;
+  }
+  .wrong-badge::before { content: '❌ '; }
+
+  /* ===== TIMELINE ===== */
+  .timeline {
+    position: relative; padding-left: 40px;
+  }
+  .timeline::before {
+    content: ''; position: absolute; left: 16px; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .tl-step {
+    position: relative; margin-bottom: 20px; padding: 14px 18px;
+    background: var(--card2); border: 1px solid var(--border); border-radius: 10px;
+    opacity: 0.35; transition: all 0.6s; cursor: default;
+  }
+  .tl-step.active { opacity: 1; border-color: var(--accent); background: rgba(92,156,230,0.04); }
+  .tl-step::before {
+    content: ''; position: absolute; left: -32px; top: 22px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--border); border: 2px solid var(--bg); z-index: 1;
+    transition: all 0.4s;
+  }
+  .tl-step.active::before { background: var(--accent); box-shadow: 0 0 8px rgba(92,156,230,0.5); }
+  .tl-step .tl-time { font-size: 0.75em; color: var(--dim); margin-bottom: 4px; }
+  .tl-step .tl-title { font-weight: 700; margin-bottom: 4px; font-size: 0.95em; }
+  .tl-step .tl-desc { font-size: 0.85em; color: var(--dim); }
+
+  /* ===== COMPARE ===== */
+  .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .compare-grid { grid-template-columns: 1fr; } }
+  .comp-card {
+    border-radius: 12px; padding: 20px; border: 2px solid var(--border);
+    position: relative; overflow: hidden;
+  }
+  .comp-card.bad { border-color: rgba(255,107,107,0.3); background: rgba(255,107,107,0.04); }
+  .comp-card.good { border-color: rgba(81,207,102,0.3); background: rgba(81,207,102,0.04); }
+  .comp-card .comp-icon { font-size: 2em; margin-bottom: 6px; }
+  .comp-card h4 { margin-bottom: 4px; }
+  .comp-card p { color: var(--dim); font-size: 0.85em; }
+
+  /* ===== CONTROLS ===== */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 18px; }
+  .btn {
+    padding: 10px 22px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card2); color: var(--text); font-size: 0.9em;
+    cursor: pointer; transition: all 0.25s;
+  }
+  .btn:hover { border-color: var(--accent); background: rgba(92,156,230,0.08); }
+  .btn.go { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  .btn.go:hover { opacity: 0.85; }
+  .btn.danger { border-color: var(--danger); color: var(--danger); }
+  .btn.danger:hover { background: rgba(255,107,107,0.08); }
+
+  /* ===== LOG ===== */
+  .event-log {
+    background: #0a0c12; border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; font-family: 'SF Mono', Menlo, ui-monospace, monospace;
+    font-size: 0.82em; max-height: 260px; overflow-y: auto; margin-top: 16px;
+  }
+  .event-log .line { padding: 3px 0; animation: logIn 0.3s ease; }
+  .event-log .line .ts { color: var(--dim); margin-right: 10px; }
+  .event-log .line.info { color: var(--accent); }
+  .event-log .line.warn { color: var(--warn); }
+  .event-log .line.err { color: var(--danger); }
+  .event-log .line.ok { color: var(--ok); }
+  @keyframes logIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+
+  /* ===== STATUS BAR ===== */
+  .status-row {
+    display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 14px;
+  }
+  .status-chip {
+    display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+    border-radius: 20px; border: 1px solid var(--border); background: var(--card2); font-size: 0.82em;
+  }
+  .status-chip .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .status-chip .dot.g { background: var(--ok); box-shadow: 0 0 6px rgba(81,207,102,0.6); }
+  .status-chip .dot.y { background: var(--warn); box-shadow: 0 0 6px rgba(255,146,43,0.6); }
+  .status-chip .dot.r { background: var(--danger); box-shadow: 0 0 6px rgba(255,107,107,0.6); }
+
+  /* callout */
+  .callout {
+    border-left: 4px solid var(--warn); background: rgba(255,146,43,0.05);
+    padding: 14px 18px; border-radius: 0 10px 10px 0; margin: 16px 0; font-size: 0.9em;
+  }
+  .callout.info { border-left-color: var(--accent); background: rgba(92,156,230,0.05); }
+  .callout strong { color: var(--warn); }
+  .callout.info strong { color: var(--accent); }
+
+  footer { text-align: center; padding: 30px; color: var(--dim); font-size: 0.78em; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>副本为什么不能和主分片在同一台机器？</h1>
+  <p>从「反亲和规则」到「节点宕机全流程恢复」，一步到位讲透</p>
+</header>
+
+<div class="wrapper">
+
+<!-- ============================================ -->
+<!-- 1. 反亲和规则 -->
+<!-- ============================================ -->
+<section>
+  <h2>一、铁律：副本和主分片绝不共处一节点</h2>
+  <p class="sub">Elasticsearch 有一条硬约束，叫 Shard Allocation Awareness（分片分配感知）</p>
+
+  <div class="compare-grid">
+    <div class="comp-card bad">
+      <div class="comp-icon">⚠️</div>
+      <h4>错误配置 <span class="wrong-badge">ES 会拒绝</span></h4>
+      <p>如果把 P0 和 P0 的副本 R0 放在同一台 Node-1 上，该节点宕机时，<strong>数据和备份一起丢失</strong>——副本形同虚设。</p>
+    </div>
+    <div class="comp-card good">
+      <div class="comp-icon">✅</div>
+      <h4>正确配置（ES 默认行为）</h4>
+      <p>P0 在 Node-1，R0 在 Node-2。Node-1 宕机 → R0 在 Node-2 上毫发无损 → 立即提升为主分片，<strong>数据零丢失</strong>。</p>
+    </div>
+  </div>
+
+  <div class="callout info">
+    <strong>核心原因一句话：</strong>「不要把鸡蛋放在同一个篮子里」。如果主分片和它的副本在同一台物理机上，这台机器挂了，这个分片的所有数据就彻底没了。副本存在的意义就是「跨节点冗余」。
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- 2. 交互演示 -->
+<!-- ============================================ -->
+<section>
+  <h2>二、眼见为实 — 点击按钮看效果</h2>
+  <p class="sub">一个 3 节点集群，有 3 个主分片 + 1 个副本。观察 P0 和 R0 的位置。</p>
+
+  <div class="card">
+    <div class="demo-row" id="demo-cluster">
+      <!-- JS populated -->
+    </div>
+
+    <div class="btn-row">
+      <button class="btn go" onclick="runKillRecover()">💥 让 Node-1 宕机，观察全过程</button>
+      <button class="btn" onclick="resetDemo()">🔄 重置集群</button>
+    </div>
+
+    <div class="status-row">
+      <div class="status-chip"><span class="dot g" id="s-dot"></span><span id="s-text">集群 GREEN</span></div>
+      <div class="status-chip">P0 主副本在同一节点：<strong id="s-colocate" style="color:var(--ok)">否 ✅</strong></div>
+    </div>
+
+    <div class="event-log" id="event-log">
+      <div class="line info"><span class="ts">[11:53:00]</span> 集群就绪：P0 在 Node-1，R0 在 Node-2 —— 反亲和规则生效</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- 3. 节点宕机 9 步完整流程 -->
+<!-- ============================================ -->
+<section>
+  <h2>三、节点宕机后，ES 的 9 步完整恢复流程</h2>
+  <p class="sub">从一个节点心跳丢失，到集群恢复 GREEN，中间发生了什么？</p>
+
+  <div class="card">
+    <div class="timeline" id="timeline">
+      <div class="tl-step" data-idx="0">
+        <div class="tl-time">T+0s</div>
+        <div class="tl-title">① 心跳丢失 — Node-1 不再响应</div>
+        <div class="tl-desc">Master 节点每隔 1 秒 ping 所有节点。连续 3 次无响应（默认 30s 超时），Master 判定 Node-1 已宕机。</div>
+      </div>
+      <div class="tl-step" data-idx="1">
+        <div class="tl-time">T+30s</div>
+        <div class="tl-title">② Master 确认宕机 — 集群状态变为 RED</div>
+        <div class="tl-desc">Master 发现 P0 的主分片在宕机节点上，该分片不可用 → 集群状态 RED（部分数据不可读写）。</div>
+      </div>
+      <div class="tl-step" data-idx="2">
+        <div class="tl-time">T+30.1s</div>
+        <div class="tl-title">③ Master 检查副本 — 发现 R0 存活且数据最新</div>
+        <div class="tl-desc">Master 查询集群元数据，发现 P0 的副本 R0 在 Node-2 上，且数据与主分片完全同步（in-sync replica）。</div>
+      </div>
+      <div class="tl-step" data-idx="3">
+        <div class="tl-time">T+30.2s</div>
+        <div class="tl-title">④ 副本提升 — R0 立刻被提升为新主分片 P0'</div>
+        <div class="tl-desc">Master 下发指令：将 Node-2 上的 R0 标记为新的主分片。此操作几乎瞬间完成，是内存中的元数据变更。</div>
+      </div>
+      <div class="tl-step" data-idx="4">
+        <div class="tl-time">T+30.3s</div>
+        <div class="tl-title">⑤ 集群状态降级 — RED → YELLOW</div>
+        <div class="tl-desc">新主分片 P0' 已就绪，数据可读写。但由于副本数量不足（少了一个 R0），集群变为 YELLOW。</div>
+      </div>
+      <div class="tl-step" data-idx="5">
+        <div class="tl-time">T+30.4s</div>
+        <div class="tl-title">⑥ 协调节点更新路由表</div>
+        <div class="tl-desc">所有节点更新内部路由表：P0 的新位置是 Node-2。后续写入和读取请求自动路由到新主分片。</div>
+      </div>
+      <div class="tl-step" data-idx="6">
+        <div class="tl-time">T+30.5s</div>
+        <div class="tl-title">⑦ Master 发起副本重建</div>
+        <div class="tl-desc">Master 选择 Node-3（健康节点，与 P0' 不在同一机器），下发指令：从 P0' 拷贝数据，创建新的 R0。</div>
+      </div>
+      <div class="tl-step" data-idx="7">
+        <div class="tl-time">T+31s ~ T+?s</div>
+        <div class="tl-title">⑧ 数据拷贝 — 从新主分片全量同步到新副本</div>
+        <div class="tl-desc">Node-3 从 Node-2 的 P0' 通过网络拷贝 Segments 文件。耗时取决于分片大小（可能秒级到小时级）。</div>
+      </div>
+      <div class="tl-step" data-idx="8">
+        <div class="tl-time">T+?s</div>
+        <div class="tl-title">⑨ 副本就绪 — 集群恢复 GREEN</div>
+        <div class="tl-desc">新 R0 在 Node-3 上创建完成，副本数恢复 → 集群 GREEN。整个过程对客户端透明。</div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn go" onclick="playTimeline()">▶️ 播放完整时间线</button>
+      <button class="btn" onclick="resetTimeline()">🔄 重置</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- 4. 其他常见问题 -->
+<!-- ============================================ -->
+<section>
+  <h2>四、几个你可能会追问的问题</h2>
+
+  <div class="card">
+    <h3>Q1：如果 Master 节点自己宕机了怎么办？</h3>
+    <p style="color:var(--dim);margin-top:6px;">
+      其他 Master-eligible 节点会发起选举，选出新 Master。这个过程叫 <strong>Zen Discovery</strong>（ES7+ 用新的协调层）。
+      新 Master 上来第一件事就是读取集群元数据，然后接管故障恢复流程。所以即使 Master 挂了，恢复也不会中断。
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Q2：如果在副本提升完成之前，又有新数据写入怎么办？</h3>
+    <p style="color:var(--dim);margin-top:6px;">
+      写入会失败并返回错误，因为目标主分片不可用。客户端需要重试。一旦副本提升完成（通常毫秒级），路由表更新后写入即可正常进行。<br>
+      这就是为什么推荐设置 <code style="background:var(--card2);padding:2px 8px;border-radius:4px;">wait_for_active_shards=all</code> —— 确保写入时所有副本都确认。
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Q3：那副本设置几个合适？</h3>
+    <p style="color:var(--dim);margin-top:6px;">
+      至少 1 个副本（生产环境底线）。允许容忍 1 个节点宕机不丢数据。<br>
+      如果集群很大（比如 10+ 节点），可设 2 个副本，容忍 2 个节点同时宕机。<br>
+      <strong>代价：</strong>每增加 1 个副本，存储翻倍，写入延迟增加（需要等更多 ACK）。
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Q4：acker 的分片分配感知怎么配置？</h3>
+    <p style="color:var(--dim);margin-top:6px;">
+      可以通过 <code style="background:var(--card2);padding:2px 8px;border-radius:4px;">cluster.routing.allocation.awareness.attributes</code> 配置机架感知，确保分片不但在不同节点、更在不同机架/可用区。
+    </p>
+  </div>
+</section>
+
+</div>
+
+<footer>ES 分片反亲和 & 节点宕机恢复流程 | 交互演示</footer>
+
+<script>
+// ========== STATE ==========
+let clusterState = 'GREEN'; // GREEN | RED | YELLOW
+let n1alive = true;  // Node 1
+let n2alive = true;  // Node 2
+let n3alive = true;  // Node 3
+// Shard placement: { node, shardId, type:'P'|'R', alive }
+let shards = [
+  { node: 1, shardId: 0, type: 'P' },
+  { node: 2, shardId: 0, type: 'R' },
+  { node: 2, shardId: 1, type: 'P' },
+  { node: 3, shardId: 1, type: 'R' },
+  { node: 3, shardId: 2, type: 'P' },
+  { node: 1, shardId: 2, type: 'R' },
+];
+
+let timelineRunning = false;
+
+// ========== HELPERS ==========
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function addLog(msg, cls='info') {
+  const log = document.getElementById('event-log');
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8) + '.' + String(now.getMilliseconds()).padStart(3,'0');
+  const d = document.createElement('div');
+  d.className = 'line ' + cls;
+  d.innerHTML = `<span class="ts">[${ts}]</span>${msg}`;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+// ========== RENDER DEMO CLUSTER ==========
+function renderDemoCluster(highlightNodes = [], glowShards = []) {
+  const container = document.getElementById('demo-cluster');
+  const nodes = [
+    { id: 1, alive: n1alive, label: 'Node 1 (Master)' },
+    { id: 2, alive: n2alive, label: 'Node 2 (Data)' },
+    { id: 3, alive: n3alive, label: 'Node 3 (Data)' },
+  ];
+
+  // check co-location
+  let colocated = false;
+  for (let i = 0; i < shards.length; i++) {
+    for (let j = i + 1; j < shards.length; j++) {
+      if (shards[i].shardId === shards[j].shardId &&
+          shards[i].node === shards[j].node &&
+          shards[i].type !== shards[j].type) {
+        colocated = true;
+      }
+    }
+  }
+  document.getElementById('s-colocate').textContent = colocated ? '是 ❌' : '否 ✅';
+  document.getElementById('s-colocate').style.color = colocated ? 'var(--danger)' : 'var(--ok)';
+
+  let html = '';
+  for (let n of nodes) {
+    let border = n.alive ? 'var(--border)' : 'var(--danger)';
+    let opacity = n.alive ? '1' : '0.45';
+    if (highlightNodes.includes(n.id)) border = 'var(--warn)';
+
+    html += `<div class="demo-box" style="border-color:${border};opacity:${opacity};" id="node-${n.id}">`;
+    html += `<div class="title" style="color:${n.id===1?'var(--master-c)':'var(--text)'}">🖥️ ${n.label}</div>`;
+    html += `<div class="subtitle">${n.alive ? '🟢 Running' : '🔴 Down'}</div>`;
+    html += `<div class="shard-row">`;
+
+    let nodeShards = shards.filter(s => s.node === n.id);
+    for (let s of nodeShards) {
+      let cls = s.type === 'P' ? 'p' : 'r';
+      let extra = '';
+      if (!n.alive) extra = ' dead';
+      if (glowShards.some(g => g.node === n.id && g.shardId === s.shardId)) extra += ' glow';
+      let label = `P${s.shardId}${s.type === 'R' ? 'R' : ''}`;
+      html += `<div class="shard ${cls}${extra}">${label}</div>`;
+    }
+
+    html += `</div></div>`;
+  }
+  container.innerHTML = html;
+
+  // update status
+  const dot = document.getElementById('s-dot');
+  const txt = document.getElementById('s-text');
+  if (clusterState === 'GREEN') { dot.className = 'dot g'; txt.textContent = '集群 GREEN'; txt.style.color = 'var(--ok)'; }
+  else if (clusterState === 'YELLOW') { dot.className = 'dot y'; txt.textContent = '集群 YELLOW'; txt.style.color = 'var(--warn)'; }
+  else { dot.className = 'dot r'; txt.textContent = '集群 RED'; txt.style.color = 'var(--danger)'; }
+}
+
+// ========== KILL & RECOVER ==========
+async function runKillRecover() {
+  if (!n1alive) { addLog('Node-1 已经宕机了，请先重置', 'warn'); return; }
+  addLog('⚡ 用户触发 Node-1 宕机', 'warn');
+  addLog('', ''); // blank line
+
+  // --- Phase 1: Kill ---
+  n1alive = false;
+  clusterState = 'RED';
+  renderDemoCluster([1], []);
+  await sleep(500);
+  addLog('💔 Master 30 秒未收到 Node-1 心跳，判定宕机', 'err');
+  addLog('🔴 P0 主分片丢失！集群状态 → RED', 'err');
+  await sleep(400);
+
+  // --- Phase 2: Detect replica ---
+  renderDemoCluster([2], [{node:2, shardId:0}]);
+  addLog('🔍 Master 检查副本：R0 在 Node-2 上存活，数据完整', 'info');
+  await sleep(500);
+
+  // --- Phase 3: Promote ---
+  // Move P0 from node 1 to node 2 (promote R0)
+  let r0idx = shards.findIndex(s => s.node === 2 && s.shardId === 0 && s.type === 'R');
+  if (r0idx !== -1) {
+    shards[r0idx].type = 'P';
+  }
+  // Remove old P0 from node 1
+  shards = shards.filter(s => !(s.node === 1 && s.shardId === 0 && s.type === 'P'));
+
+  clusterState = 'YELLOW';
+  renderDemoCluster([2], [{node:2, shardId:0}]);
+  addLog('⬆️ R0 提升为新的主分片 P0\'（在 Node-2 上）！', 'warn');
+  await sleep(300);
+  addLog('🟡 新主分片就绪，但副本数不足 → 集群 YELLOW', 'warn');
+  await sleep(400);
+
+  // --- Phase 4: Route update ---
+  addLog('📋 所有节点更新路由表：P0 新位置 = Node-2', 'info');
+  await sleep(300);
+
+  // --- Phase 5: Rebuild replica ---
+  addLog('🔧 Master 选择 Node-3 重建 R0（与 P0\' 不在同一节点）', 'info');
+  renderDemoCluster([3], [{node:2, shardId:0}]);
+  await sleep(500);
+
+  // Add new R0 on Node 3
+  shards.push({ node: 3, shardId: 0, type: 'R' });
+  clusterState = 'GREEN';
+  renderDemoCluster([3], [{node:3, shardId:0}]);
+  addLog('📦 Node-3 从 P0\' 拷贝 Segments 数据...', 'info');
+  await sleep(600);
+
+  renderDemoCluster([], [{node:3, shardId:0}]);
+  addLog('✅ 新 R0 创建完成！副本数恢复 → 集群 GREEN', 'ok');
+  addLog('', '');
+  addLog('💡 整个过程对客户端完全透明 — 仅经历了一次短暂的重试', 'info');
+}
+
+function resetDemo() {
+  n1alive = n2alive = n3alive = true;
+  clusterState = 'GREEN';
+  shards = [
+    { node: 1, shardId: 0, type: 'P' },
+    { node: 2, shardId: 0, type: 'R' },
+    { node: 2, shardId: 1, type: 'P' },
+    { node: 3, shardId: 1, type: 'R' },
+    { node: 3, shardId: 2, type: 'P' },
+    { node: 1, shardId: 2, type: 'R' },
+  ];
+  document.getElementById('event-log').innerHTML =
+    '<div class="line info"><span class="ts">[11:53:00]</span> 🔄 集群已重置：P0 在 Node-1，R0 在 Node-2 —— 反亲和规则生效</div>';
+  renderDemoCluster();
+}
+
+// ========== TIMELINE ==========
+async function playTimeline() {
+  if (timelineRunning) return;
+  timelineRunning = true;
+  const steps = document.querySelectorAll('#timeline .tl-step');
+  steps.forEach(s => s.classList.remove('active'));
+
+  for (let i = 0; i < steps.length; i++) {
+    await sleep(i === 7 ? 1000 : 600);
+    steps[i].classList.add('active');
+    steps[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // keep previous visible slightly
+    if (i > 1) steps[i - 2]?.classList.remove('active');
+  }
+  await sleep(800);
+  // show all as active at the end
+  steps.forEach(s => s.classList.add('active'));
+  timelineRunning = false;
+}
+
+function resetTimeline() {
+  document.querySelectorAll('#timeline .tl-step').forEach(s => s.classList.remove('active'));
+  timelineRunning = false;
+}
+
+// ========== INIT ==========
+renderDemoCluster();
+</script>
+
+</body>
+</html>
