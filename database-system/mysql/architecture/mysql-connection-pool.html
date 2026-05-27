@@ -1,0 +1,1572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 连接池全场景解析</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222632;
+    --border: #2e3345;
+    --text: #e4e6ef;
+    --text2: #9a9eb5;
+    --text3: #6b6f87;
+    --accent: #6c8cff;
+    --accent2: #4d6fdb;
+    --green: #4ade80;
+    --green2: #22c55e;
+    --yellow: #facc15;
+    --yellow2: #eab308;
+    --red: #f87171;
+    --red2: #ef4444;
+    --orange: #fb923c;
+    --cyan: #22d3ee;
+    --purple: #a78bfa;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    line-height: 1.7;
+    padding: 0;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    color: var(--text2);
+    font-size: 15px;
+    margin-bottom: 40px;
+  }
+
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 48px 0 20px;
+    padding-left: 14px;
+    border-left: 3px solid var(--accent);
+    color: var(--text);
+  }
+
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    color: var(--text);
+  }
+
+  p {
+    font-size: 14px;
+    color: var(--text2);
+    margin-bottom: 12px;
+  }
+
+  .highlight {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .pool-visual {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+  }
+
+  .pool-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .pool-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .pool-badge {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 500;
+  }
+
+  .badge-green { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+  .badge-yellow { background: rgba(250, 204, 21, 0.15); color: var(--yellow); }
+  .badge-red { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+
+  .connections {
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .conn {
+    aspect-ratio: 1;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    position: relative;
+  }
+
+  .conn-idle {
+    background: rgba(74, 222, 128, 0.1);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    color: var(--green);
+  }
+
+  .conn-busy {
+    background: rgba(108, 140, 255, 0.15);
+    border: 1px solid rgba(108, 140, 255, 0.4);
+    color: var(--accent);
+  }
+
+  .conn-waiting {
+    background: rgba(250, 204, 21, 0.1);
+    border: 1px solid rgba(250, 204, 21, 0.3);
+    color: var(--yellow);
+  }
+
+  .conn-rejected {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    color: var(--red);
+  }
+
+  .pool-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+  }
+
+  .stat {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-label {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 2px;
+  }
+
+  .flow-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    min-width: 700px;
+    justify-content: center;
+  }
+
+  .flow-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    min-width: 100px;
+  }
+
+  .flow-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+
+  .flow-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    text-align: center;
+  }
+
+  .flow-desc {
+    font-size: 11px;
+    color: var(--text3);
+    text-align: center;
+    max-width: 100px;
+  }
+
+  .flow-arrow {
+    font-size: 18px;
+    color: var(--text3);
+    margin: 0 4px;
+    flex-shrink: 0;
+    padding-bottom: 28px;
+  }
+
+  .scenario-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .scenario-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+  }
+
+  .scenario-1::before { background: linear-gradient(90deg, var(--green), var(--green2)); }
+  .scenario-2::before { background: linear-gradient(90deg, var(--yellow), var(--orange)); }
+  .scenario-3::before { background: linear-gradient(90deg, var(--orange), var(--red)); }
+
+  .scenario-num {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .scenario-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 16px;
+  }
+
+  .step-list {
+    list-style: none;
+    margin: 16px 0;
+  }
+
+  .step-list li {
+    display: flex;
+    gap: 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    color: var(--text2);
+  }
+
+  .step-list li:last-child { border-bottom: none; }
+
+  .step-num {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .step-green { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+  .step-yellow { background: rgba(250, 204, 21, 0.15); color: var(--yellow); }
+  .step-red { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+
+  .step-content { flex: 1; }
+  .step-content strong { color: var(--text); font-weight: 500; }
+
+  .code-block {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 12px 0;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    overflow-x: auto;
+    color: var(--text2);
+  }
+
+  .code-block .keyword { color: var(--purple); }
+  .code-block .string { color: var(--green); }
+  .code-block .number { color: var(--orange); }
+  .code-block .comment { color: var(--text3); }
+
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 13px;
+  }
+
+  .compare-table th {
+    background: var(--surface2);
+    padding: 12px 16px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .compare-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+  }
+
+  .compare-table tr:hover td {
+    background: rgba(108, 140, 255, 0.04);
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .tag-green { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+  .tag-yellow { background: rgba(250, 204, 21, 0.15); color: var(--yellow); }
+  .tag-red { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+  .tag-blue { background: rgba(108, 140, 255, 0.15); color: var(--accent); }
+
+  .timeline {
+    position: relative;
+    padding-left: 28px;
+    margin: 16px 0;
+  }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 4px;
+    bottom: 4px;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .timeline-item {
+    position: relative;
+    padding: 10px 0;
+    font-size: 14px;
+    color: var(--text2);
+  }
+
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -24px;
+    top: 16px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid;
+  }
+
+  .timeline-item.t-green::before { border-color: var(--green); background: rgba(74, 222, 128, 0.3); }
+  .timeline-item.t-yellow::before { border-color: var(--yellow); background: rgba(250, 204, 21, 0.3); }
+  .timeline-item.t-red::before { border-color: var(--red); background: rgba(248, 113, 113, 0.3); }
+  .timeline-item.t-blue::before { border-color: var(--accent); background: rgba(108, 140, 255, 0.3); }
+
+  .timeline-item strong { color: var(--text); }
+
+  .note-box {
+    background: rgba(108, 140, 255, 0.06);
+    border: 1px solid rgba(108, 140, 255, 0.2);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: var(--text2);
+  }
+
+  .note-box strong {
+    color: var(--accent);
+  }
+
+  .warn-box {
+    background: rgba(250, 204, 21, 0.06);
+    border: 1px solid rgba(250, 204, 21, 0.2);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: var(--text2);
+  }
+
+  .warn-box strong {
+    color: var(--yellow);
+  }
+
+  .danger-box {
+    background: rgba(248, 113, 113, 0.06);
+    border: 1px solid rgba(248, 113, 113, 0.2);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: var(--text2);
+  }
+
+  .danger-box strong {
+    color: var(--red);
+  }
+
+  .interactive-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 24px 0;
+  }
+
+  .controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .btn {
+    padding: 8px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn:hover {
+    border-color: var(--accent);
+    background: rgba(108, 140, 255, 0.1);
+  }
+
+  .btn.active {
+    border-color: var(--accent);
+    background: rgba(108, 140, 255, 0.15);
+    color: var(--accent);
+  }
+
+  .slider-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text2);
+  }
+
+  .slider-group input[type="range"] {
+    width: 120px;
+    accent-color: var(--accent);
+  }
+
+  .slider-value {
+    font-weight: 600;
+    color: var(--accent);
+    min-width: 24px;
+    text-align: center;
+  }
+
+  #pool-viz {
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 6px;
+    margin: 16px 0;
+  }
+
+  #pool-viz .cell {
+    aspect-ratio: 1;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .cell-idle {
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    color: var(--green);
+  }
+
+  .cell-busy {
+    background: rgba(108, 140, 255, 0.12);
+    border: 1px solid rgba(108, 140, 255, 0.35);
+    color: var(--accent);
+    animation: pulse-busy 2s ease-in-out infinite;
+  }
+
+  .cell-waiting {
+    background: rgba(250, 204, 21, 0.1);
+    border: 1px solid rgba(250, 204, 21, 0.3);
+    color: var(--yellow);
+    animation: pulse-wait 1.5s ease-in-out infinite;
+  }
+
+  .cell-rejected {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    color: var(--red);
+  }
+
+  @keyframes pulse-busy {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  @keyframes pulse-wait {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  #viz-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  #viz-stats .vstat {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+  }
+
+  #viz-stats .vstat-val {
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #viz-stats .vstat-lbl {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 2px;
+  }
+
+  .event-log {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 160px;
+    overflow-y: auto;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--text3);
+    margin-top: 12px;
+  }
+
+  .event-log .log-line {
+    padding: 2px 0;
+  }
+
+  .log-green { color: var(--green); }
+  .log-yellow { color: var(--yellow); }
+  .log-red { color: var(--red); }
+  .log-blue { color: var(--accent); }
+
+  .section-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 48px 0;
+  }
+
+  .config-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+
+  .config-table th {
+    background: var(--surface2);
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .config-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+  }
+
+  .config-table code {
+    background: var(--surface2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", monospace;
+    font-size: 12px;
+    color: var(--accent);
+  }
+
+  .footer {
+    text-align: center;
+    padding: 40px 0;
+    color: var(--text3);
+    font-size: 12px;
+  }
+
+  @media (max-width: 640px) {
+    .container { padding: 24px 16px 60px; }
+    h1 { font-size: 22px; }
+    .connections { grid-template-columns: repeat(5, 1fr); }
+    #pool-viz { grid-template-columns: repeat(5, 1fr); }
+    #viz-stats { grid-template-columns: repeat(2, 1fr); }
+    .flow { flex-wrap: wrap; justify-content: center; }
+    .flow-arrow { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <h1>MySQL 连接池全场景解析</h1>
+  <p class="subtitle">当 pool size = 100 时，1 个请求 / 100 个请求 / 101 个请求分别会发生什么？</p>
+
+  <!-- ===== 基础概念 ===== -->
+  <h2>连接池是什么</h2>
+
+  <p>连接池（Connection Pool）是一组<span class="highlight">预先创建好的数据库连接</span>的缓存。应用启动时，连接池会初始化一定数量的 TCP 连接到 MySQL，后续请求直接从池中<span class="highlight">借出</span>连接使用，用完<span class="highlight">归还</span>，避免反复建立/销毁 TCP 连接的开销。</p>
+
+  <div class="pool-visual">
+    <div class="pool-header">
+      <span class="pool-title">连接池结构示意</span>
+      <span class="pool-badge badge-green">初始状态</span>
+    </div>
+    <div class="connections" id="initial-pool">
+    </div>
+    <div class="pool-stats">
+      <div class="stat">
+        <div class="stat-value" style="color: var(--green)">100</div>
+        <div class="stat-label">空闲连接</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="color: var(--accent)">0</div>
+        <div class="stat-label">活跃连接</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="color: var(--yellow)">0</div>
+        <div class="stat-label">等待线程</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="color: var(--text3)">100</div>
+        <div class="stat-label">Pool Size</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>关键参数</strong>：连接池的行为由几个核心配置决定——<code>maxPoolSize</code>（最大连接数）、<code>connectionTimeout</code>（获取连接超时时间）、<code>idleTimeout</code>（空闲连接存活时间）、<code>maxLifetime</code>（连接最大存活时间）。不同的连接池实现（HikariCP、Druid、c3p0）参数名称略有不同，但语义一致。
+  </div>
+
+  <!-- ===== 核心流程 ===== -->
+  <h2>一个请求的完整生命周期</h2>
+
+  <div class="flow-container">
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-icon" style="background: rgba(108,140,255,0.12); color: var(--accent);">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+        </div>
+        <div class="flow-label">请求到达</div>
+        <div class="flow-desc">业务线程发起 SQL 调用</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon" style="background: rgba(74,222,128,0.12); color: var(--green);">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 12h8M12 8v8"/></svg>
+        </div>
+        <div class="flow-label">获取连接</div>
+        <div class="flow-desc">从池中取出空闲连接</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon" style="background: rgba(250,204,21,0.12); color: var(--yellow);">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h14"/></svg>
+        </div>
+        <div class="flow-label">执行 SQL</div>
+        <div class="flow-desc">在借出的连接上执行查询</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon" style="background: rgba(167,139,250,0.12); color: var(--purple);">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12l5 5L20 7"/></svg>
+        </div>
+        <div class="flow-label">获取结果</div>
+        <div class="flow-desc">读取 ResultSet</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon" style="background: rgba(34,211,238,0.12); color: var(--cyan);">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <div class="flow-label">归还连接</div>
+        <div class="flow-desc">close() 实际是归还池</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>关键误区</strong>：代码中调用 <code>connection.close()</code> 并不是关闭 TCP 连接！连接池对 <code>Connection</code> 对象做了代理（Proxy），<code>close()</code> 被拦截后实际执行的是将连接状态重置并归还到池中，TCP 连接依然存活。
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 场景一：1个请求 ===== -->
+  <h2>场景一：1 个请求到来</h2>
+
+  <div class="scenario-card scenario-1">
+    <div class="scenario-num" style="color: var(--green);">SCENARIO 01</div>
+    <div class="scenario-title">池中有 100 个空闲连接，1 个请求到来</div>
+
+    <div class="pool-visual" style="margin-top: 0;">
+      <div class="pool-header">
+        <span class="pool-title">连接池状态变化</span>
+        <span class="pool-badge badge-green">轻松应对</span>
+      </div>
+      <div class="connections" id="scene1-pool"></div>
+      <div class="pool-stats">
+        <div class="stat">
+          <div class="stat-value" style="color: var(--green)">99</div>
+          <div class="stat-label">空闲连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--accent)">1</div>
+          <div class="stat-label">活跃连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--yellow)">0</div>
+          <div class="stat-label">等待线程</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--text3)">100</div>
+          <div class="stat-label">Pool Size</div>
+        </div>
+      </div>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <div class="step-num step-green">1</div>
+        <div class="step-content"><strong>请求到达</strong>，业务线程调用 <code>dataSource.getConnection()</code></div>
+      </li>
+      <li>
+        <div class="step-num step-green">2</div>
+        <div class="step-content"><strong>池中取连接</strong>：连接池发现有空闲连接，直接取出一个分配给该线程。此时空闲连接数变为 99，活跃连接数变为 1</div>
+      </li>
+      <li>
+        <div class="step-num step-green">3</div>
+        <div class="step-content"><strong>执行 SQL</strong>：业务线程通过这个连接发送 SQL 给 MySQL，MySQL 执行后返回结果</div>
+      </li>
+      <li>
+        <div class="step-num step-green">4</div>
+        <div class="step-content"><strong>归还连接</strong>：业务代码执行 <code>connection.close()</code>，代理对象拦截此调用，将连接重置状态（清空事务上下文、回滚未提交事务等），放回池的空闲队列。空闲连接数恢复为 100</div>
+      </li>
+    </ol>
+
+    <div class="timeline">
+      <div class="timeline-item t-green"><strong>getConnection()</strong> — 立即返回，耗时约 0.1ms（内存操作）</div>
+      <div class="timeline-item t-yellow"><strong>执行 SQL</strong> — 网络I/O + MySQL执行，耗时取决于查询复杂度（通常 1ms~100ms）</div>
+      <div class="timeline-item t-blue"><strong>close()</strong> — 归还池，耗时约 0.05ms（重置状态 + 入队）</div>
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>什么时候释放？</strong>连接的"释放"就是 <code>close()</code> 被调用的时刻。在 JDBC 中，标准写法是 try-with-resources 或 finally 块中 close。释放不是销毁 TCP 连接，而是<strong>归还到池中</strong>。如果代码忘记 close，连接就被泄漏（leak），池中可用连接越来越少，最终耗尽。
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 场景二：100个请求 ===== -->
+  <h2>场景二：100 个请求同时到来</h2>
+
+  <div class="scenario-card scenario-2">
+    <div class="scenario-num" style="color: var(--yellow);">SCENARIO 02</div>
+    <div class="scenario-title">池中有 100 个空闲连接，100 个请求同时到来</div>
+
+    <div class="pool-visual" style="margin-top: 0;">
+      <div class="pool-header">
+        <span class="pool-title">连接池状态 — 全部占满</span>
+        <span class="pool-badge badge-yellow">满载运行</span>
+      </div>
+      <div class="connections" id="scene2-pool"></div>
+      <div class="pool-stats">
+        <div class="stat">
+          <div class="stat-value" style="color: var(--green)">0</div>
+          <div class="stat-label">空闲连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--accent)">100</div>
+          <div class="stat-label">活跃连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--yellow)">0</div>
+          <div class="stat-label">等待线程</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--text3)">100</div>
+          <div class="stat-label">Pool Size</div>
+        </div>
+      </div>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <div class="step-num step-yellow">1</div>
+        <div class="step-content"><strong>100 个请求同时到达</strong>，各自调用 <code>getConnection()</code></div>
+      </li>
+      <li>
+        <div class="step-num step-yellow">2</div>
+        <div class="step-content"><strong>竞争分配</strong>：100 个线程从池中抢连接。连接池内部通常用 <code>ConcurrentBag</code>（HikariCP）或锁机制保证线程安全，逐一分配。最终 100 个连接全部分配完毕</div>
+      </li>
+      <li>
+        <div class="step-num step-yellow">3</div>
+        <div class="step-content"><strong>全部在执行</strong>：100 个请求各自在自己的连接上执行 SQL，此时空闲连接 = 0，活跃连接 = 100</div>
+      </li>
+      <li>
+        <div class="step-num step-yellow">4</div>
+        <div class="step-content"><strong>逐步归还</strong>：先执行完的请求先归还连接。每归还一个，空闲连接 +1。后续如果有新请求到来，可以直接复用</div>
+      </li>
+      <li>
+        <div class="step-num step-yellow">5</div>
+        <div class="step-content"><strong>全部归还</strong>：100 个请求全部完成后，连接池恢复到初始状态（空闲 = 100）</div>
+      </li>
+    </ol>
+
+    <div class="warn-box">
+      <strong>注意</strong>：虽然 100 个连接都被占满了，但<strong>没有请求被阻塞或拒绝</strong>。只要请求在 <code>connectionTimeout</code> 之前拿到连接就不会超时。此场景下每个请求都立刻拿到了连接，只是 MySQL 端需要同时处理 100 个查询，可能因锁竞争、CPU 调度等原因导致 SQL 执行变慢。
+    </div>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 场景三：101个请求 ===== -->
+  <h2>场景三：101 个请求同时到来</h2>
+
+  <div class="scenario-card scenario-3">
+    <div class="scenario-num" style="color: var(--red);">SCENARIO 03</div>
+    <div class="scenario-title">池中有 100 个连接，101 个请求同时到来</div>
+
+    <div class="pool-visual" style="margin-top: 0;">
+      <div class="pool-header">
+        <span class="pool-title">连接池状态 — 溢出等待</span>
+        <span class="pool-badge badge-red">第 101 个请求等待</span>
+      </div>
+      <div class="connections" id="scene3-pool"></div>
+      <div class="pool-stats">
+        <div class="stat">
+          <div class="stat-value" style="color: var(--green)">0</div>
+          <div class="stat-label">空闲连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--accent)">100</div>
+          <div class="stat-label">活跃连接</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--yellow)">1</div>
+          <div class="stat-label">等待线程</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color: var(--text3)">100</div>
+          <div class="stat-label">Pool Size</div>
+        </div>
+      </div>
+    </div>
+
+    <ol class="step-list">
+      <li>
+        <div class="step-num step-red">1</div>
+        <div class="step-content"><strong>前 100 个请求</strong>：与场景二相同，占满所有 100 个连接，进入 SQL 执行阶段</div>
+      </li>
+      <li>
+        <div class="step-num step-red">2</div>
+        <div class="step-content"><strong>第 101 个请求</strong>：调用 <code>getConnection()</code> 时，发现池中<strong>没有空闲连接</strong>，且<strong>活跃连接已达 maxPoolSize</strong>，无法创建新连接</div>
+      </li>
+      <li>
+        <div class="step-num step-red">3</div>
+        <div class="step-content"><strong>进入等待队列</strong>：第 101 个线程被阻塞，进入连接池内部的等待队列（HikariCP 用的是 <code>SynchronousQueue</code> 或 <code>LinkedBlockingQueue</code>，取决于配置）</div>
+      </li>
+      <li>
+        <div class="step-num step-red">4</div>
+        <div class="step-content"><strong>等待期间</strong>：线程持续等待，直到：<br>
+          &nbsp;&nbsp;a) 有其他请求执行完 <code>close()</code> 归还了连接 → 立即获取，继续执行 <span class="tag tag-green">正常</span><br>
+          &nbsp;&nbsp;b) 等待超过 <code>connectionTimeout</code> → 抛出 <code>SQLException: Connection is not available</code> <span class="tag tag-red">超时</span>
+        </div>
+      </li>
+      <li>
+        <div class="step-num step-red">5</div>
+        <div class="step-content"><strong>成功获取后</strong>：第 101 个请求拿到归还的连接，正常执行 SQL，然后归还</div>
+      </li>
+    </ol>
+
+    <div class="danger-box">
+      <strong>超时异常</strong>：如果第 101 个请求等待太久（超过 <code>connectionTimeout</code>，HikariCP 默认 30 秒），就会抛出异常：<br>
+      <code style="color: var(--red); font-size: 12px;">java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms</code><br><br>
+      这个异常不是 MySQL 返回的，而是<strong>连接池客户端</strong>自己抛出的——它在本地等了 30 秒还没拿到连接，就放弃了。
+    </div>
+  </div>
+
+  <div class="pool-visual">
+    <div class="pool-header">
+      <span class="pool-title">第 101 个请求的两种结局</span>
+    </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+      <div style="background: rgba(74,222,128,0.06); border: 1px solid rgba(74,222,128,0.2); border-radius: 8px; padding: 16px;">
+        <div style="font-size: 13px; font-weight: 600; color: var(--green); margin-bottom: 8px;">结局 A：成功获取</div>
+        <div class="timeline">
+          <div class="timeline-item t-yellow">线程阻塞等待...</div>
+          <div class="timeline-item t-green">某请求 close() 归还连接</div>
+          <div class="timeline-item t-green">池通知等待线程</div>
+          <div class="timeline-item t-blue">第 101 个请求获取连接，继续执行</div>
+        </div>
+      </div>
+      <div style="background: rgba(248,113,113,0.06); border: 1px solid rgba(248,113,113,0.2); border-radius: 8px; padding: 16px;">
+        <div style="font-size: 13px; font-weight: 600; color: var(--red); margin-bottom: 8px;">结局 B：超时失败</div>
+        <div class="timeline">
+          <div class="timeline-item t-yellow">线程阻塞等待...</div>
+          <div class="timeline-item t-yellow">等待 5s... 10s... 25s...</div>
+          <div class="timeline-item t-red">超过 connectionTimeout（默认 30s）</div>
+          <div class="timeline-item t-red">抛出 SQLTransientConnectionException</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 三场景对比 ===== -->
+  <h2>三种场景核心对比</h2>
+
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>维度</th>
+        <th><span class="tag tag-green">1 个请求</span></th>
+        <th><span class="tag tag-yellow">100 个请求</span></th>
+        <th><span class="tag tag-red">101 个请求</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>空闲连接</strong></td>
+        <td>99（余量充足）</td>
+        <td>0（刚好用完）</td>
+        <td>0（不够分配）</td>
+      </tr>
+      <tr>
+        <td><strong>活跃连接</strong></td>
+        <td>1</td>
+        <td>100</td>
+        <td>100</td>
+      </tr>
+      <tr>
+        <td><strong>等待线程</strong></td>
+        <td>0</td>
+        <td>0</td>
+        <td>1（第 101 个）</td>
+      </tr>
+      <tr>
+        <td><strong>getConnection() 耗时</strong></td>
+        <td>~0.1ms 即时返回</td>
+        <td>~0.1ms 即时返回</td>
+        <td>阻塞等待直到有连接归还或超时</td>
+      </tr>
+      <tr>
+        <td><strong>是否创建新连接</strong></td>
+        <td>否，复用池中连接</td>
+        <td>否，复用池中连接</td>
+        <td>否，已达 maxPoolSize 上限</td>
+      </tr>
+      <tr>
+        <td><strong>请求是否阻塞</strong></td>
+        <td>否</td>
+        <td>否</td>
+        <td>第 101 个线程阻塞</td>
+      </tr>
+      <tr>
+        <td><strong>是否抛异常</strong></td>
+        <td>否</td>
+        <td>否</td>
+        <td>可能（超时则抛异常）</td>
+      </tr>
+      <tr>
+        <td><strong>MySQL 端压力</strong></td>
+        <td>极小</td>
+        <td>较大（100 并发查询）</td>
+        <td>较大 + 客户端有积压</td>
+      </tr>
+      <tr>
+        <td><strong>风险点</strong></td>
+        <td>几乎无</td>
+        <td>慢查询可能拖慢整体</td>
+        <td>连接等待 + 慢查询 = 雪崩风险</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <hr class="section-divider">
+
+  <!-- ===== 连接释放详解 ===== -->
+  <h2>连接释放的底层机制</h2>
+
+  <p>理解"释放"到底发生了什么，是掌握连接池的关键。下面拆解 <code>connection.close()</code> 被调用后的完整过程：</p>
+
+  <div class="code-block">
+    <span class="comment">// 业务代码中的标准写法</span>
+    <span class="keyword">try</span> (Connection conn = dataSource.getConnection()) {
+    <span class="comment">// ↑ 从池中借出连接</span>
+
+    PreparedStatement ps = conn.prepareStatement(<span class="string">"SELECT * FROM users WHERE id = ?"</span>);
+    ps.setInt(<span class="number">1</span>, <span class="number">42</span>);
+    ResultSet rs = ps.executeQuery();
+    <span class="comment">// ... 处理结果 ...</span>
+
+    } <span class="comment">// ← 这里自动调用 close()</span>
+    <span class="comment">// close() 被代理拦截，实际执行：</span>
+    <span class="comment">// 1. 回滚未提交的事务</span>
+    <span class="comment">// 2. 重置 autoCommit = true</span>
+    <span class="comment">// 3. 清空 session 级变量</span>
+    <span class="comment">// 4. 将连接放回池的空闲队列</span>
+    <span class="comment">// 5. 通知等待中的线程（如果有）</span>
+  </div>
+
+  <h3>释放 = 归还，不是断开</h3>
+
+  <table class="config-table">
+    <thead>
+      <tr>
+        <th>操作</th>
+        <th>无连接池</th>
+        <th>有连接池</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>close()</code> 语义</td>
+        <td>关闭 TCP 连接</td>
+        <td>归还到池中（TCP 不断）</td>
+      </tr>
+      <tr>
+        <td>连接状态</td>
+        <td>连接销毁</td>
+        <td>连接重置 + 复用</td>
+      </tr>
+      <tr>
+        <td>下次 getConnection()</td>
+        <td>重新 TCP 三次握手 + MySQL 认证</td>
+        <td>直接从池中取出（~0.1ms）</td>
+      </tr>
+      <tr>
+        <td>性能差异</td>
+        <td>每次约 50~200ms</td>
+        <td>每次约 0.1ms（快 500~2000 倍）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>归还后的"唤醒"机制</h3>
+
+  <p>当第 101 个请求正在等待时，前 100 个请求中任何一个归还连接，都会触发唤醒。不同连接池的实现方式不同：</p>
+
+  <table class="config-table">
+    <thead>
+      <tr>
+        <th>连接池</th>
+        <th>等待机制</th>
+        <th>唤醒策略</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>HikariCP</strong></td>
+        <td><code>ConcurrentBag</code> 的 steal 机制</code></td>
+        <td>等待线程轮询本地队列 + 全局窃取</td>
+      </tr>
+      <tr>
+        <td><strong>Druid</strong></td>
+        <td><code>Condition.await()</code></td>
+        <td>归还时 <code>signal()</code> 唤醒一个等待线程</td>
+      </tr>
+      <tr>
+        <td><strong>c3p0</strong></td>
+        <td>内部阻塞队列</td>
+        <td>归还时入队，等待线程自动获取</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <hr class="section-divider">
+
+  <!-- ===== 关键配置参数 ===== -->
+  <h2>关键配置参数速查</h2>
+
+  <p>理解了三种场景后，这些参数的意义就很清晰了：</p>
+
+  <table class="config-table">
+    <thead>
+      <tr>
+        <th>参数</th>
+        <th>HikariCP</th>
+        <th>Druid</th>
+        <th>含义</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>最大连接数</strong></td>
+        <td><code>maximumPoolSize</code></td>
+        <td><code>maxActive</code></td>
+        <td>池中最多多少个连接（硬上限）</td>
+      </tr>
+      <tr>
+        <td><strong>获取超时</strong></td>
+        <td><code>connectionTimeout</code></td>
+        <td><code>maxWait</code></td>
+        <td>等不到连接时多久抛异常</td>
+      </tr>
+      <tr>
+        <td><strong>最小空闲</strong></td>
+        <td><code>minimumIdle</code></td>
+        <td><code>minIdle</code></td>
+        <td>池中至少保留多少空闲连接</td>
+      </tr>
+      <tr>
+        <td><strong>空闲超时</strong></td>
+        <td><code>idleTimeout</code></td>
+        <td><code>minEvictableIdleTimeMillis</code></td>
+        <td>连接空闲多久后可被回收</td>
+      </tr>
+      <tr>
+        <td><strong>最大存活</strong></td>
+        <td><code>maxLifetime</code></td>
+        <td><code>maxEvictableIdleTimeMillis</code></td>
+        <td>连接最长活多久（防 MySQL 8h 断连）</td>
+      </tr>
+      <tr>
+        <td><strong>连接泄漏检测</strong></td>
+        <td><code>leakDetectionThreshold</code></td>
+        <td><code>removeAbandoned</code></td>
+        <td>连接被借出多久未还则判定泄漏</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="warn-box">
+    <strong>MySQL 的 wait_timeout</strong>：MySQL 默认 <code>wait_timeout=28800</code>（8 小时），如果一个连接空闲超过 8 小时，MySQL 会主动断开。连接池的 <code>maxLifetime</code>（建议设为 25~30 分钟）确保在 MySQL 断开之前主动回收重建，避免"连接已被 MySQL 关掉但池还不知道"的问题。
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 交互式模拟 ===== -->
+  <h2>交互式模拟器</h2>
+
+  <p>拖动滑块模拟不同请求数量下的连接池状态：</p>
+
+  <div class="interactive-panel">
+    <div class="controls">
+      <div class="slider-group">
+        <span>请求数：</span>
+        <input type="range" id="req-slider" min="0" max="150" value="1">
+        <span class="slider-value" id="req-value">1</span>
+      </div>
+      <button class="btn" onclick="resetSim()">重置</button>
+      <button class="btn" onclick="animateSim()">模拟并发</button>
+    </div>
+
+    <div id="pool-viz"></div>
+
+    <div id="viz-stats">
+      <div class="vstat">
+        <div class="vstat-val" id="vs-idle" style="color: var(--green)">99</div>
+        <div class="vstat-lbl">空闲连接</div>
+      </div>
+      <div class="vstat">
+        <div class="vstat-val" id="vs-busy" style="color: var(--accent)">1</div>
+        <div class="vstat-lbl">活跃连接</div>
+      </div>
+      <div class="vstat">
+        <div class="vstat-val" id="vs-wait" style="color: var(--yellow)">0</div>
+        <div class="vstat-lbl">等待请求</div>
+      </div>
+      <div class="vstat">
+        <div class="vstat-val" id="vs-reject" style="color: var(--red)">0</div>
+        <div class="vstat-lbl">超时风险</div>
+      </div>
+    </div>
+
+    <div class="event-log" id="event-log">
+      <div class="log-line log-green">[系统] 连接池已初始化，100 个空闲连接就绪</div>
+    </div>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- ===== 雪崩风险 ===== -->
+  <h2>终极风险：连接池雪崩</h2>
+
+  <p>当请求远超连接池容量时（比如 200 个请求同时到来），可能出现级联故障：</p>
+
+  <div class="pool-visual">
+    <div class="pool-header">
+      <span class="pool-title">雪崩过程</span>
+      <span class="pool-badge badge-red">级联故障</span>
+    </div>
+    <div style="font-size: 14px; color: var(--text2);">
+      <div class="timeline">
+        <div class="timeline-item t-red"><strong>200 请求涌入</strong> — 100 个获取连接执行，100 个等待</div>
+        <div class="timeline-item t-red"><strong>SQL 执行变慢</strong> — MySQL 并发太高，锁竞争加剧，原本 10ms 的查询变成 500ms</div>
+        <div class="timeline-item t-red"><strong>归还变慢</strong> — 连接持有时间拉长，等待队列积压更严重</div>
+        <div class="timeline-item t-red"><strong>超时开始</strong> — 等 30 秒后，100 个等待请求开始批量抛异常</div>
+        <div class="timeline-item t-red"><strong>上游超时</strong> — 应用层报错，HTTP 请求超时，用户重试，更多请求涌入</div>
+        <div class="timeline-item t-red"><strong>系统崩溃</strong> — 恶性循环，服务不可用</div>
+      </div>
+    </div>
+  </div>
+
+  <h3>防御手段</h3>
+
+  <table class="config-table">
+    <thead>
+      <tr>
+        <th>手段</th>
+        <th>原理</th>
+        <th>效果</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>合理设置 pool size</strong></td>
+        <td>根据 <code>connections = ((core_count) * 2) + effective_spindle_count</code> 公式</td>
+        <td>避免连接过多反而降低 MySQL 吞吐</td>
+      </tr>
+      <tr>
+        <td><strong>缩短 connectionTimeout</strong></td>
+        <td>从默认 30s 降到 3~5s</td>
+        <td>快速失败，避免线程长时间阻塞</td>
+      </tr>
+      <tr>
+        <td><strong>SQL 超时控制</strong></td>
+        <td>设置 <code>statement.setQueryTimeout()</code></td>
+        <td>防止单条慢查询长期占用连接</td>
+      </tr>
+      <tr>
+        <td><strong>连接泄漏检测</strong></td>
+        <td>开启 <code>leakDetectionThreshold</code></td>
+        <td>及时发现未 close 的连接</td>
+      </tr>
+      <tr>
+        <td><strong>限流 / 熔断</strong></td>
+        <td>Sentinel / Hystrix / Resilience4j</td>
+        <td>在请求入口拦截，保护连接池不被打满</td>
+      </tr>
+      <tr>
+        <td><strong>异步 + 队列</strong></td>
+        <td>用消息队列削峰</td>
+        <td>将同步请求转为异步处理</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <hr class="section-divider">
+
+  <!-- ===== 总结 ===== -->
+  <h2>一张图总结</h2>
+
+  <div class="pool-visual">
+    <div style="text-align: center; padding: 20px 0;">
+      <svg viewBox="0 0 720 320" width="100%" style="max-width: 720px;">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+        </defs>
+
+        <!-- Pool container -->
+        <rect x="160" y="20" width="400" height="120" rx="12" fill="rgba(108,140,255,0.06)" stroke="rgba(108,140,255,0.3)" stroke-width="1"/>
+        <text x="360" y="46" text-anchor="middle" fill="#6c8cff" font-size="13" font-weight="600">Connection Pool (maxPoolSize = 100)</text>
+
+        <!-- Idle connections -->
+        <rect x="180" y="60" width="160" height="60" rx="8" fill="rgba(74,222,128,0.08)" stroke="rgba(74,222,128,0.3)" stroke-width="1"/>
+        <text x="260" y="86" text-anchor="middle" fill="#4ade80" font-size="12" font-weight="500">空闲连接区</text>
+        <text x="260" y="106" text-anchor="middle" fill="#6b6f87" font-size="11" id="svg-idle">空闲数由请求数决定</text>
+
+        <!-- Active connections -->
+        <rect x="380" y="60" width="160" height="60" rx="8" fill="rgba(108,140,255,0.08)" stroke="rgba(108,140,255,0.3)" stroke-width="1"/>
+        <text x="460" y="86" text-anchor="middle" fill="#6c8cff" font-size="12" font-weight="500">活跃连接区</text>
+        <text x="460" y="106" text-anchor="middle" fill="#6b6f87" font-size="11" id="svg-active">被请求占用的连接</text>
+
+        <!-- Request arrows -->
+        <text x="60" y="78" text-anchor="middle" fill="#9a9eb5" font-size="12">请求</text>
+        <path d="M90 78 L155 78" stroke="#6c8cff" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+
+        <!-- Return arrows -->
+        <path d="M460 125 L460 160" stroke="#22d3ee" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <text x="460" y="180" text-anchor="middle" fill="#22d3ee" font-size="12">close() 归还</text>
+
+        <!-- Waiting area -->
+        <rect x="40" y="200" width="640" height="100" rx="10" fill="rgba(250,204,21,0.04)" stroke="rgba(250,204,21,0.2)" stroke-width="1" stroke-dasharray="6,4"/>
+        <text x="360" y="228" text-anchor="middle" fill="#facc15" font-size="13" font-weight="500">等待队列（仅当请求 > maxPoolSize 时出现）</text>
+        <text x="360" y="254" text-anchor="middle" fill="#6b6f87" font-size="12">线程阻塞等待，直到有连接归还或超过 connectionTimeout</text>
+        <text x="360" y="276" text-anchor="middle" fill="#f87171" font-size="11">超时 → SQLException: Connection is not available, request timed out after 30000ms</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="footer">
+    MySQL Connection Pool 全场景解析 | 深入理解连接分配、占用与释放
+  </div>
+
+</div>
+
+<script>
+// Initialize static pool visualizations
+function createPool(containerId, busyCount, waitingCount) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  for (let i = 0; i < 100; i++) {
+    const conn = document.createElement('div');
+    conn.className = 'conn';
+    if (i < busyCount) {
+      conn.classList.add('conn-busy');
+      conn.textContent = 'R' + (i + 1);
+    } else {
+      conn.classList.add('conn-idle');
+      conn.textContent = '';
+    }
+    container.appendChild(conn);
+  }
+}
+
+createPool('initial-pool', 0, 0);
+createPool('scene1-pool', 1, 0);
+createPool('scene2-pool', 100, 0);
+
+// Scene 3 pool: 100 busy + 1 waiting indicator
+const s3 = document.getElementById('scene3-pool');
+if (s3) {
+  s3.innerHTML = '';
+  for (let i = 0; i < 100; i++) {
+    const conn = document.createElement('div');
+    conn.className = 'conn conn-busy';
+    conn.textContent = 'R' + (i + 1);
+    s3.appendChild(conn);
+  }
+  const waitConn = document.createElement('div');
+  waitConn.className = 'conn conn-waiting';
+  waitConn.textContent = 'W1';
+  waitConn.style.gridColumn = '1';
+  waitConn.style.marginTop = '8px';
+  waitConn.title = '第101个请求在等待';
+  s3.parentElement.appendChild(
+    Object.assign(document.createElement('div'), {
+      style: 'text-align: center; margin-top: 8px; font-size: 12px; color: #facc15;'
+    })
+  );
+}
+
+// Interactive simulator
+const slider = document.getElementById('req-slider');
+const reqValue = document.getElementById('req-value');
+const poolViz = document.getElementById('pool-viz');
+const logEl = document.getElementById('event-log');
+const MAX_POOL = 100;
+
+function updateSim(requests) {
+  reqValue.textContent = requests;
+  poolViz.innerHTML = '';
+
+  const busy = Math.min(requests, MAX_POOL);
+  const waiting = Math.max(0, requests - MAX_POOL);
+  const idle = MAX_POOL - busy;
+
+  document.getElementById('vs-idle').textContent = idle;
+  document.getElementById('vs-busy').textContent = busy;
+  document.getElementById('vs-wait').textContent = waiting;
+  document.getElementById('vs-reject').textContent = waiting > 0 ? waiting : 0;
+
+  // Change reject color based on waiting count
+  const rejectEl = document.getElementById('vs-reject');
+  if (waiting > 50) rejectEl.style.color = '#f87171';
+  else if (waiting > 0) rejectEl.style.color = '#facc15';
+  else rejectEl.style.color = 'var(--text3)';
+
+  for (let i = 0; i < MAX_POOL; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    if (i < busy) {
+      cell.classList.add('cell-busy');
+      cell.textContent = 'R' + (i + 1);
+    } else {
+      cell.classList.add('cell-idle');
+      cell.textContent = '';
+    }
+    poolViz.appendChild(cell);
+  }
+
+  // Add waiting indicators
+  for (let i = 0; i < Math.min(waiting, 50); i++) {
+    const cell = document.createElement('div');
+    cell.classList.add('cell', 'cell-waiting');
+    cell.textContent = 'W' + (i + 1);
+    poolViz.appendChild(cell);
+  }
+
+  // If too many waiting, show overflow indicator
+  if (waiting > 50) {
+    const cell = document.createElement('div');
+    cell.classList.add('cell', 'cell-rejected');
+    cell.textContent = '+' + (waiting - 50);
+    poolViz.appendChild(cell);
+  }
+}
+
+slider.addEventListener('input', function() {
+  updateSim(parseInt(this.value));
+  addLog(parseInt(this.value));
+});
+
+let logTimer = null;
+function addLog(requests) {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(() => {
+    const busy = Math.min(requests, MAX_POOL);
+    const waiting = Math.max(0, requests - MAX_POOL);
+    const idle = MAX_POOL - busy;
+    let line;
+    if (requests === 0) {
+      line = '<span class="log-blue">[空闲]</span> 连接池空闲，100 个连接就绪';
+    } else if (waiting === 0) {
+      line = `<span class="log-green">[正常]</span> ${requests} 个请求获取连接，空闲=${idle}，活跃=${busy}`;
+    } else {
+      line = `<span class="log-yellow">[等待]</span> ${requests} 个请求，${waiting} 个线程阻塞等待，连接池已满`;
+    }
+    if (waiting > 30) {
+      line += ` <span class="log-red">[警告] 等待线程过多，存在超时风险！</span>`;
+    }
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.innerHTML = line;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }, 200);
+}
+
+function resetSim() {
+  slider.value = 0;
+  updateSim(0);
+  logEl.innerHTML = '<div class="log-line log-green">[系统] 连接池已重置，100 个空闲连接就绪</div>';
+}
+
+let animId = null;
+function animateSim() {
+  if (animId) { clearInterval(animId); animId = null; }
+  let count = 0;
+  slider.value = 0;
+  updateSim(0);
+  logEl.innerHTML = '<div class="log-line log-blue">[模拟] 开始模拟并发请求...</div>';
+
+  animId = setInterval(() => {
+    count += 5;
+    if (count > 150) {
+      count = 0;
+      // Reset phase - connections returning
+      const releaseId = setInterval(() => {
+        count -= 10;
+        if (count <= 0) {
+          count = 0;
+          slider.value = 0;
+          updateSim(0);
+          clearInterval(releaseId);
+          const div = document.createElement('div');
+          div.className = 'log-line log-green';
+          div.innerHTML = '[模拟] 所有连接已归还，池恢复初始状态';
+          logEl.appendChild(div);
+        } else {
+          slider.value = count;
+          updateSim(count);
+        }
+      }, 150);
+      clearInterval(animId);
+      animId = null;
+      return;
+    }
+    slider.value = count;
+    updateSim(count);
+
+    const waiting = Math.max(0, count - MAX_POOL);
+    if (count <= MAX_POOL) {
+      const div = document.createElement('div');
+      div.className = 'log-line log-green';
+      div.innerHTML = `[+5请求] 当前 ${count} 个请求，空闲=${MAX_POOL - count}，活跃=${count}`;
+      logEl.appendChild(div);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'log-line';
+      div.innerHTML = `<span class="log-yellow">[+5请求]</span> 当前 ${count} 个请求，${waiting} 个线程等待 <span class="log-red">⚠ 池已满</span>`;
+      logEl.appendChild(div);
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+  }, 200);
+}
+
+// Initialize
+updateSim(1);
+</script>
+
+</body>
+</html>
