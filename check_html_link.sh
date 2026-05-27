@@ -10,6 +10,7 @@ NC='\033[0m' # No Color
 total=0
 missing=0
 found=0
+missing_files=""
 
 echo "开始检查HTML文件链接..."
 echo "=============================="
@@ -77,8 +78,14 @@ while IFS= read -r -d '' html_file; do
             echo -e "${GREEN}✓ $relative_path${NC}"
             found=$((found + 1))
         else
-            echo -e "${RED}✗ $relative_path${NC} -> 未在 $parent_index 中找到链接"
+            missing_info="$relative_path -> 未在 $parent_index 中找到链接"
+            echo -e "${RED}✗ $missing_info${NC}"
             missing=$((missing + 1))
+            if [[ -z "$missing_files" ]]; then
+                missing_files="$missing_info"
+            else
+                missing_files="$missing_files, $missing_info"
+            fi
         fi
     fi
 
@@ -89,6 +96,9 @@ echo "检查完成！"
 echo "总计: $total 个文件"
 echo -e "${GREEN}已链接: $found${NC}"
 echo -e "${RED}未链接: $missing${NC}"
+if [[ $missing -gt 0 ]]; then
+    echo -e "${RED}未链接文件: $missing_files${NC}"
+fi
 
 if [[ $missing -gt 0 ]]; then
     exit 1
