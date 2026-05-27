@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B+ 树：从数据页说起</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f8f9fa;
+    --border: #e2e4e9;
+    --text: #1a1c1e;
+    --text-muted: #6b7280;
+    --accent: #534AB7;
+    --accent-light: #EEEDFE;
+    --blue: #378ADD;
+    --blue-light: #E6F1FB;
+    --green: #1D9E75;
+    --green-light: #E1F5EE;
+    --coral: #D85A30;
+    --coral-light: #FAECE7;
+    --amber: #BA7517;
+    --amber-light: #FAEEDA;
+    --radius: 12px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.7;
+    font-size: 15px;
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  h1 { font-size: 28px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.5px; }
+  h2 { font-size: 21px; font-weight: 600; margin: 48px 0 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+  h3 { font-size: 17px; font-weight: 600; margin: 32px 0 12px; }
+  p { margin: 12px 0; color: var(--text); }
+  ul, ol { margin: 12px 0; padding-left: 24px; }
+  li { margin: 6px 0; }
+  code {
+    font-family: var(--mono);
+    background: var(--accent-light);
+    color: var(--accent);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .note {
+    background: var(--blue-light);
+    border-left: 3px solid var(--blue);
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 8px 8px 0;
+    font-size: 14px;
+    color: #0C447C;
+  }
+  .highlight {
+    background: var(--amber-light);
+    border-left: 3px solid var(--amber);
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 8px 8px 0;
+    font-size: 14px;
+  }
+  .diagram-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 24px 0;
+    overflow-x: auto;
+  }
+  .diagram-container svg {
+    display: block;
+    margin: 0 auto;
+  }
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 24px 0;
+  }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+  }
+  .metric-value {
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--accent);
+    line-height: 1.2;
+  }
+  .metric-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 14px;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-weight: 600;
+    background: var(--surface);
+    font-size: 13px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .calculator {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin: 24px 0;
+  }
+  .calc-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .calc-row label {
+    width: 180px;
+    font-weight: 500;
+    font-size: 14px;
+  }
+  .calc-row input, .calc-row select {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: var(--font);
+    width: 200px;
+  }
+  .calc-result {
+    margin-top: 20px;
+    padding: 16px;
+    background: var(--accent-light);
+    border-radius: 8px;
+  }
+  .calc-result .big {
+    font-size: 32px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .step-animation {
+    position: relative;
+    margin: 24px 0;
+  }
+  .step-controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    align-items: center;
+  }
+  .step-controls button {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    font-size: 14px;
+    font-family: var(--font);
+  }
+  .step-controls button.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .step-controls button:hover { border-color: var(--accent); }
+  .step-counter {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-left: 12px;
+  }
+  .caption {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>B+ 树：从数据页说起</h1>
+<p>从 InnoDB 存储引擎的角度，用可视化方式理解 B+ 树如何用 <strong>16KB 的数据页</strong> 组织百万、千万甚至数十亿行数据。文章聚焦四个核心问题：数据页长什么样、B+ 树如何组织这些页、一次查询要读多少页、以及 B+ 树到底能有多高。</p>
+
+<div class="note">
+  <strong>阅读前提</strong>：你不需要读过 MySQL 源码，知道「磁盘 IO 很慢」「索引能加速查询」就够了。本文将用图示代替公式，用交互代替推导。
+</div>
+
+<h2>1. 一切从「数据页」开始</h2>
+
+<p>InnoDB 并不按「行」来管理数据，而是按 <strong>数据页（Data Page）</strong> 来管理。数据页是 InnoDB 与磁盘交互的最小单位——每次从磁盘读取数据，至少读一整页；每次将数据写回磁盘，至少写一整页。</p>
+
+<div class="metric-grid">
+  <div class="metric-card">
+    <div class="metric-value">16 KB</div>
+    <div class="metric-label">页大小（默认）</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">≈ 2 ~ 200+</div>
+    <div class="metric-label">每页能存行数</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">16,384</div>
+    <div class="metric-label">每页字节数</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">38 字节</div>
+    <div class="metric-label">页头+页尾开销</div>
+  </div>
+</div>
+
+<h3>1.1 数据页的内部结构</h3>
+
+<p>一个 16KB 的页并不是全部用来存数据行的，它有严格的内部分区：</p>
+
+<div class="diagram-container">
+<svg viewBox="0 0 680 480" width="100%" role="img">
+  <title>InnoDB 数据页结构</title>
+  <desc>16KB InnoDB data page internal layout showing File Header, Page Header, Infimum/Supremum, User Records, Free Space, Page Directory, and File Trailer</desc>
+  <style>
+    .page-box { fill: var(--color-background-primary, #fff); stroke: rgba(0,0,0,0.15); stroke-width: 0.5; rx: 12; }
+    .section-rect { rx: 6; stroke-width: 1; }
+    .label-line { stroke: rgba(0,0,0,0.3); stroke-width: 0.5; stroke-dasharray: 3 3; }
+  </style>
+
+  <rect x="100" y="20" width="480" height="440" fill="#FAFAFA" stroke="#B4B2A9" stroke-width="1" rx="12"/>
+
+  <rect x="115" y="35" width="450" height="36" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8" rx="6"/>
+  <text x="125" y="57" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#3C3489">File Header（38 字节）— 页类型、页号、校验和、LSN</text>
+
+  <rect x="115" y="82" width="450" height="36" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.8" rx="6"/>
+  <text x="125" y="104" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C">Page Header（56 字节）— 槽数量、记录数、空闲空间指针</text>
+
+  <rect x="115" y="129" width="220" height="36" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.8" rx="6"/>
+  <text x="125" y="151" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#085041">Infimum + Supremum（26 字节）</text>
+
+  <rect x="345" y="129" width="220" height="36" fill="#FAEEDA" stroke="#EF9F27" stroke-width="0.8" rx="6"/>
+  <text x="355" y="151" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#633806">Page Directory（槽位数组）</text>
+
+  <rect x="115" y="176" width="450" height="120" fill="#FAECE7" stroke="#D85A30" stroke-width="0.8" rx="6"/>
+  <text x="125" y="198" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#712B13">User Records（用户记录）</text>
+  <rect x="125" y="208" width="430" height="16" rx="3" fill="white" stroke="#F0997B" stroke-width="0.5"/>
+  <text x="135" y="219" font-family="monospace" font-size="12" fill="#4A1B0C">Row 1 | 1 | Alice | alice@example.com | 2026-01-01 ...</text>
+  <rect x="125" y="230" width="430" height="16" rx="3" fill="white" stroke="#F0997B" stroke-width="0.5"/>
+  <text x="135" y="241" font-family="monospace" font-size="12" fill="#4A1B0C">Row 2 | 2 | Bob   | bob@example.com   | 2026-01-02 ...</text>
+  <rect x="125" y="252" width="430" height="16" rx="3" fill="white" stroke="#F0997B" stroke-width="0.5"/>
+  <text x="135" y="263" font-family="monospace" font-size="12" fill="#4A1B0C">Row 3 | 3 | Carol | carol@example.com | 2026-01-03 ...</text>
+  <text x="125" y="286" font-family="-apple-system,system-ui,sans-serif" font-size="11" fill="#F0997B">主键排序的单向链表，组内二分查找定位行</text>
+
+  <rect x="115" y="307" width="450" height="36" fill="#EAF3DE" stroke="#639922" stroke-width="0.8" rx="6"/>
+  <text x="125" y="329" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#27500A">Free Space（空闲空间）— 尚未使用的字节</text>
+
+  <rect x="115" y="354" width="450" height="36" fill="#F1EFE8" stroke="#888780" stroke-width="0.8" rx="6"/>
+  <text x="125" y="376" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#444441">File Trailer（8 字节）— 校验和 + LSN 低 4 字节（与 File Header 呼应）</text>
+
+  <text x="600" y="57" font-family="-apple-system,system-ui,sans-serif" font-size="10" fill="#6b7280">0 字节</text>
+  <text x="600" y="376" font-family="-apple-system,system-ui,sans-serif" font-size="10" fill="#6b7280">~16 KB</text>
+  <line x1="588" y1="61" x2="588" y2="368" stroke="#6b7280" stroke-width="0.5"/>
+  <line x1="583" y1="61" x2="593" y2="61" stroke="#6b7280" stroke-width="0.5"/>
+  <line x1="583" y1="370" x2="593" y2="370" stroke="#6b7280" stroke-width="0.5"/>
+</svg>
+<div class="caption">图 1：InnoDB 数据页（16KB）内部结构</div>
+</div>
+
+<p>关键点：</p>
+<ul>
+  <li><strong>38 字节开销</strong>：File Header + File Trailer 用于校验完整性，确保页在写入磁盘时没有损坏。</li>
+  <li><strong>Page Directory（槽位数组）</strong>：这是页内加速的关键。它不是指向每一行，而是将行分组（通常 4~8 行一组），每组一个槽位，指向该组的「最大行」。页内查找时先二分槽位，再在组内顺序扫描。</li>
+  <li><strong>Free Space</strong>：新插入的行从这里分配空间。当 Free Space 不足以容纳新行时，触发页分裂。</li>
+  <li><strong>User Records 是单向链表</strong>：行按主键（聚簇索引）或索引键（二级索引）排序，通过链表串联。但请注意——这个链表只在 <strong>同一个页内</strong> 有效。</li>
+</ul>
+
+<div class="highlight">
+  <strong>这就是「数据页」的本质：</strong>它是一个 16KB 的容器，内部有结构化的头部信息、按主键排序的行链表、一个用于加速页内查找的槽位目录、以及剩余的空闲空间。InnoDB 中 <em>一切</em> 数据结构最终都落在这个 16KB 的单元上。
+</div>
+
+<h2>2. 数据页如何组成 B+ 树</h2>
+
+<p>一个数据页最多存几百行（视行宽而定），但要管理千万行，就需要 <strong>很多很多页</strong>。B+ 树的任务就是把这些页组织成一棵高效的多路搜索树。</p>
+
+<h3>2.1 B+ 树的两种「页」</h3>
+
+<table>
+  <thead>
+    <tr><th>页类型</th><th>存储内容</th><th>数量级</th><th>作用</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>叶子页</strong>（Leaf Page）</td>
+      <td>完整的数据行（聚簇索引）<br>或索引键 + 主键值（二级索引）</td>
+      <td>> 99.9%</td>
+      <td>真正存数据的地方，页之间通过<strong>双向链表</strong>连接</td>
+    </tr>
+    <tr>
+      <td><strong>内节点页</strong>（Internal Page）</td>
+      <td>键值 + 子页指针</td>
+      <td>≪ 1%</td>
+      <td>仅用于导航，告诉引擎「要找的键在哪个子页」</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>一张图看清楚：</p>
+
+<div class="diagram-container">
+<svg viewBox="0 0 680 420" width="100%" role="img">
+  <title>B+ 树整体结构</title>
+  <desc>3-level B+ tree showing root internal page, internal node pages, and leaf pages with a bidirectional linked list</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
+
+  <rect x="230" y="10" width="220" height="54" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
+  <text x="340" y="32" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#3C3489" text-anchor="middle">根节点（Root Page）</text>
+  <text x="340" y="52" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#7F77DD" text-anchor="middle">[ 15 | 30 | 45 ] — 键值 + 子页指针</text>
+
+  <line x1="285" y1="64" x2="100" y2="105" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="340" y1="64" x2="340" y2="105" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="395" y1="64" x2="580" y2="105" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <rect x="30" y="110" width="200" height="54" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="130" y="132" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点（Internal）</text>
+  <text x="130" y="152" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#85B7EB" text-anchor="middle">[ 5 | 10 ] 页</text>
+
+  <rect x="240" y="110" width="200" height="54" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="340" y="132" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点（Internal）</text>
+  <text x="340" y="152" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#85B7EB" text-anchor="middle">[ 20 | 25 ] 页</text>
+
+  <rect x="450" y="110" width="200" height="54" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="550" y="132" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点（Internal）</text>
+  <text x="550" y="152" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#85B7EB" text-anchor="middle">[ 35 | 40 ] 页</text>
+
+  <rect x="25" y="235" width="630" height="40" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="1"/>
+  <text x="340" y="252" font-family="-apple-system,system-ui,sans-serif" font-size="12" font-weight="500" fill="#712B13" text-anchor="middle">叶子页（Leaf Pages）— 所有页通过双向链表连接，支持范围查询</text>
+  <text x="340" y="268" font-family="-apple-system,system-ui,sans-serif" font-size="11" fill="#F0997B" text-anchor="middle">← Page 4 ↔ Page 5 ↔ Page 6 ↔ Page 7 ↔ Page 8 ↔ Page 9 ... →</text>
+
+  <line x1="85" y1="164" x2="55" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="130" y1="164" x2="160" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="290" y1="164" x2="250" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="390" y1="164" x2="430" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="500" y1="164" x2="470" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="550" y1="164" x2="580" y2="230" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <rect x="25" y="290" width="630" height="50" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1"/>
+  <text x="340" y="312" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#085041" text-anchor="middle">这就是一张 B+ 树（聚簇索引）</text>
+  <text x="340" y="330" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#1D9E75" text-anchor="middle">红色层 = 存数据的叶子；蓝色层 = 存导航信息的内节点；紫色 = 根</text>
+
+  <rect x="90" y="360" width="500" height="50" rx="8" fill="#FAFBFB" stroke="#D3D1C7" stroke-width="0.5"/>
+  <text x="340" y="382" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#444441" text-anchor="middle">关键洞察：内节点页和叶子页在物理上是同一种「数据页」</text>
+  <text x="340" y="400" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">它们只是页内存储的内容不同，页结构本身完全一样（都是 16KB，都有 File Header）</text>
+</svg>
+<div class="caption">图 2：B+ 树的逻辑结构 —— 内节点导航，叶子节点存数据，叶子之间双向链表连接</div>
+</div>
+
+<div class="highlight">
+  <strong>核心洞察：</strong>B+ 树的每一层在磁盘上都是 16KB 的页。根节点是一个 16KB 页，每个内节点也是一个 16KB 页，每个叶子节点还是 16KB 页。InnoDB 不想「树」的概念，它只知道页号。所谓「查找」就是：读一个页，从页里找到下一个页号，再读那个页，直到找到叶子页里的行。
+</div>
+
+<h3>2.2 一个页里能存多少「导航信息」？</h3>
+
+<p>内节点页不存整行数据，只存 <strong>键值 + 子页指针</strong>。InnoDB 中每个这样的条目约 14 字节（4 字节页号 + 键值大小），一个 16KB 页可以存约 <strong>1200 个</strong> 这样的导航条目。</p>
+
+<p>也就是说，<strong>每个内节点页最多有约 1200 个孩子</strong>。这就是 B+ 树「多路」的由来——不像二叉树的 2 路，B+ 树每层可以分出上千个分支。</p>
+
+<h2>3. 一次查询的全过程</h2>
+
+<p>假设有张表 <code>users(id INT PRIMARY KEY, name VARCHAR)</code>，要查 <code>SELECT * FROM users WHERE id = 117</code>。InnoDB 是这样工作的：</p>
+
+<div class="step-animation" id="lookup-animation">
+  <div class="step-controls">
+    <button onclick="setStep(1)" id="btn1">步骤 1</button>
+    <button onclick="setStep(2)" id="btn2">步骤 2</button>
+    <button onclick="setStep(3)" id="btn3">步骤 3</button>
+    <button onclick="setStep(4)" id="btn4">步骤 4</button>
+    <span class="step-counter" id="step-label">步骤 1/4</span>
+  </div>
+
+  <div class="diagram-container" id="step-diagram"></div>
+  <div class="caption" id="step-caption"></div>
+</div>
+
+<p>三个步骤，对应三次磁盘 IO：</p>
+
+<ol>
+  <li><strong>从根页开始</strong>：读根页 → 在页内二分查找定位子页指针 → 得到下一个页号。</li>
+  <li><strong>进入内节点页</strong>：读内节点页 → 同样的页内二分 → 得到叶子页号。</li>
+  <li><strong>到达叶子页</strong>：读叶子页 → 页内二分槽位 + 组内顺序扫描 → 命中目标行。</li>
+</ol>
+
+<div class="note">
+  <strong>为什么不是每层都读磁盘？</strong>InnoDB 的 Buffer Pool（缓冲池）会缓存热页。如果根页和内节点已经被缓存，实际磁盘 IO 可能只有 1 次（只读叶子页）。但最坏情况下，确实是一次 IO 一层。
+</div>
+
+<h2>4. 聚簇索引 vs 二级索引 —— 两棵 B+ 树</h2>
+
+<p>一张 InnoDB 表通常至少有两棵 B+ 树：一棵是 <strong>聚簇索引（Clustered Index）</strong>，一棵是 <strong>二级索引（Secondary Index）</strong>。</p>
+
+<div class="diagram-container">
+<svg viewBox="0 0 680 380" width="100%" role="img">
+  <title>聚簇索引与二级索引对比</title>
+  <desc>Comparison of clustered index (leaf stores full row) vs secondary index (leaf stores index key + PK, then lookup back to clustered)</desc>
+
+  <text x="340" y="24" font-family="-apple-system,system-ui,sans-serif" font-size="15" font-weight="600" fill="#1a1c1e" text-anchor="middle">聚簇索引（主键 B+ 树）</text>
+
+  <rect x="170" y="40" width="340" height="40" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
+  <text x="340" y="64" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#3C3489" text-anchor="middle">内节点：只存主键值 + 子页指针</text>
+
+  <line x1="340" y1="80" x2="340" y2="105" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <rect x="170" y="110" width="340" height="40" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="1"/>
+  <text x="340" y="134" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#712B13" text-anchor="middle">叶子页：存储 <strong>完整的行数据</strong>（id, name, email, created_at ...）</text>
+
+  <line x1="20" y1="160" x2="660" y2="160" stroke="#D3D1C7" stroke-width="0.5" stroke-dasharray="5 5"/>
+
+  <text x="340" y="194" font-family="-apple-system,system-ui,sans-serif" font-size="15" font-weight="600" fill="#1a1c1e" text-anchor="middle">二级索引（如 name 列索引）</text>
+
+  <rect x="170" y="210" width="340" height="40" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="340" y="234" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#0C447C" text-anchor="middle">内节点：存 name 值 + 子页指针</text>
+
+  <line x1="340" y1="250" x2="340" y2="275" stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <rect x="170" y="280" width="340" height="40" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="1"/>
+  <text x="340" y="304" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#27500A" text-anchor="middle">叶子页：存 name 值 <strong>+ 对应的主键 id</strong></text>
+
+  <rect x="170" y="335" width="340" height="35" rx="8" fill="#FAEEDA" stroke="#EF9F27" stroke-width="1"/>
+  <text x="340" y="357" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#633806" text-anchor="middle">拿到主键后 → <strong>回表</strong> → 再到聚簇索引里查完整行</text>
+
+  <path d="M510,302 C560,302 580,320 580,350 C580,320 600,302 510,302" fill="none" stroke="#EF9F27" stroke-width="1" marker-end="url(#arr)"/>
+</svg>
+<div class="caption">图 3：一条表两棵 B+ 树 —— 聚簇索引叶子存整行，二级索引叶子只存键+主键</div>
+</div>
+
+<table>
+  <thead>
+    <tr><th>维度</th><th>聚簇索引</th><th>二级索引</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>建表时</td><td>自动以主键创建</td><td>手动 <code>CREATE INDEX</code></td></tr>
+    <tr><td>叶子存什么</td><td>完整行数据</td><td>索引键 + 主键值</td></tr>
+    <tr><td>主键查找</td><td>一次 B+ 树遍历即可</td><td>—</td></tr>
+    <tr><td>非主键查找</td><td>—</td><td>遍历二级索引 B+ 树 → 拿到主键 → <strong>回表</strong> 查聚簇索引</td></tr>
+    <tr><td>每张表有几棵</td><td>恰好 1 棵</td><td>0 到多棵</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>回表（Bookmark Lookup）</strong>：二级索引只存了键 + 主键，如果查询需要的列不在二级索引中，就必须拿着主键再去聚簇索引查一次。这就是「回表」。这也是为什么 <code>SELECT *</code> 往往比 <code>SELECT id, name</code>（覆盖索引）慢的原因——多读了一棵树的叶子页。
+</div>
+
+<h2>5. 页大小、树高与数据量</h2>
+
+<p>这是最核心的「工程数学」：知道页大小和每行的数据量，就能精确推算 B+ 树能装多少数据，以及树有多高。</p>
+
+<h3>5.1 计算模型</h3>
+
+<p>B+ 树高度的计算公式非常简单：</p>
+
+<div class="highlight">
+  <strong>总叶子页数</strong> = ⌈ 总行数 / (每页能存的行数) ⌉<br>
+  <strong>B+ 树高度</strong> ≈ log<sub>fanout</sub>（总叶子页数）+ 1<br>
+  其中 <strong>fanout（扇出）</strong> = 每个内节点页能容纳的子指针数 ≈ ⌊ 16KB / (指针+键大小) ⌋
+</div>
+
+<h3>5.2 交互式推算器</h3>
+
+<p>调整下面参数，实时看看不同场景下 B+ 树的高度变化：</p>
+
+<div class="calculator">
+  <div class="calc-row">
+    <label>每行数据大小</label>
+    <select id="rowSize" onchange="recalc()">
+      <option value="100">小型（100 字节）</option>
+      <option value="200" selected>中型（200 字节）</option>
+      <option value="500">大型（500 字节）</option>
+      <option value="1000">文本型（1 KB）</option>
+      <option value="2000">长文本（2 KB）</option>
+    </select>
+  </div>
+  <div class="calc-row">
+    <label>总行数</label>
+    <select id="rowCount" onchange="recalc()">
+      <option value="100000">10 万行</option>
+      <option value="1000000">100 万行</option>
+      <option value="10000000" selected>1000 万行</option>
+      <option value="100000000">1 亿行</option>
+      <option value="1000000000">10 亿行</option>
+    </select>
+  </div>
+  <div class="calc-row">
+    <label>索引键大小</label>
+    <select id="keySize" onchange="recalc()">
+      <option value="4">INT（4 字节）</option>
+      <option value="8" selected>BIGINT（8 字节）</option>
+      <option value="16">UUID（16 字节）</option>
+      <option value="32">VARCHAR(32)</option>
+    </select>
+  </div>
+  <div class="calc-row">
+    <label>页大小</label>
+    <select id="pageSize" onchange="recalc()">
+      <option value="16384" selected>16 KB（默认）</option>
+      <option value="8192">8 KB</option>
+      <option value="32768">32 KB</option>
+      <option value="65536">64 KB</option>
+    </select>
+  </div>
+  <div class="calc-row">
+    <label>关注：每次查询需要读多少页？</label>
+  </div>
+  <div class="calc-result" id="calcResult"></div>
+</div>
+
+<h3>5.3 经典场景速查表</h3>
+
+<table>
+  <thead>
+    <tr><th>行大小</th><th>100 万行</th><th>1000 万行</th><th>1 亿行</th><th>10 亿行</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>100 B（小型）</td><td>树高 3<br>~6,250 叶子页</td><td>树高 3<br>~62,500 叶子页</td><td>树高 4<br>~625,000 叶子页</td><td>树高 4<br>~6,250,000 页</td></tr>
+    <tr><td>200 B（中型）</td><td>树高 3<br>~12,500 叶子页</td><td>树高 3<br>~125,000 叶子页</td><td>树高 4<br>~1,250,000 页</td><td>树高 4<br>~12,500,000 页</td></tr>
+    <tr><td>500 B（大型）</td><td>树高 3<br>~33,333 叶子页</td><td>树高 3<br>~333,333 叶子页</td><td>树高 4<br>~3,333,333 页</td><td>树高 5<br>~33,333,333 页</td></tr>
+    <tr><td>1 KB（文本）</td><td>树高 3<br>~66,666 叶子页</td><td>树高 3<br>~666,666 叶子页</td><td>树高 4<br>~6,666,666 页</td><td>树高 5<br>~66,666,666 页</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>为什么 B+ 树这么矮？</strong>核心就在于 <strong>扇出（fanout）极大</strong>。一个 16KB 内节点页能容纳约 1200 个子指针。这意味着：
+  <br>— 1 个根页 → 指向 1200 个内节点
+  <br>— 1200 个内节点 → 指向 1200 × 1200 ≈ <strong>144 万</strong> 个叶子页
+  <br>— 树高 3 已经能覆盖 144 万 × 几百行/页 = <strong>数亿行</strong> 数据。
+  <br><br>
+  在实际工程中，<strong>绝大多数 OLTP 场景的 B+ 树高度在 3~4 层</strong>。这也意味着一次主键查询只需要 3~4 次磁盘 IO，如果 Buffer Pool 命中，这个数字会更低。
+</div>
+
+<h3>5.4 为什么 UUID 作主键更「高」？</h3>
+
+<p>把上面的键大小从 INT（4 字节）换成 UUID（16 字节），同一个内节点页能塞的指针数从 ~1200 降到 ~800。这意味着：</p>
+
+<ul>
+  <li><strong>扇出变小</strong>：每层能覆盖的叶子页减少。</li>
+  <li><strong>树更高</strong>：相同数据量下，可能需要多一层。</li>
+  <li><strong>IO 更多</strong>：每次主键查询多看一层 = 多一次可能的磁盘 IO。</li>
+  <li><strong>内存占用更大</strong>：内节点页数量更多，占用更多 Buffer Pool。</li>
+</ul>
+
+<p>所以推荐的 MySQL 实践是：<strong>尽量使用自增 BIGINT 作为主键</strong>，而不是 UUID。</p>
+
+<h2>6. 页的大小为什么是 16KB？</h2>
+
+<p>很多人问到这个问题，答案非常工程化：</p>
+
+<div class="two-col">
+  <div>
+    <h3>太小（如 4KB）</h3>
+    <ul>
+      <li>每个页能存的行数少 → 叶子页数量暴增</li>
+      <li>B+ 树层数可能从 3 层变成 4-5 层</li>
+      <li>页头开销占比高（38/4096 = 0.9%）</li>
+      <li>管理页的元数据开销增大</li>
+    </ul>
+  </div>
+  <div>
+    <h3>太大（如 64KB）</h3>
+    <ul>
+      <li>写一页到磁盘的时间变长</li>
+      <li>Buffer Pool 中缓存粒度变大 → 浪费内存</li>
+      <li>更新小行却要写整页 → 写放大</li>
+      <li>页内记录越多，页内搜索越慢</li>
+      <li>OS 页大小通常是 4KB，大页可能跨多个 OS 页</li>
+    </ul>
+  </div>
+</div>
+
+<p>16KB 是一个「黄金平衡点」——对大多数工作负载来说，既能保持 B+ 树高度在 3-4 层，又不会带来过大的写放大和内存浪费。InnoDB 还支持 8KB、32KB、64KB 的页大小，但极少需要调整。</p>
+
+<h2>7. 页的加载：InnoDB Buffer Pool</h2>
+
+<p>最后回答一个常见疑问：</p>
+
+<blockquote style="border-left: 3px solid var(--accent); padding: 12px 16px; margin: 16px 0; color: var(--text-muted); font-style: italic;">
+  「我有一张 100GB 的表，MySQL 启动时要把 100GB 都加载到内存吗？」<br>
+  <strong>不需要。</strong>
+</blockquote>
+
+<p>InnoDB 使用 <strong>Buffer Pool</strong> 管理内存中的页：</p>
+
+<div class="diagram-container">
+<svg viewBox="0 0 680 320" width="100%" role="img">
+  <title>Buffer Pool 页加载机制</title>
+  <desc>Illustration of InnoDB Buffer Pool loading data pages from disk on demand via LRU eviction</desc>
+
+  <rect x="30" y="20" width="280" height="280" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="1" rx="12"/>
+  <text x="170" y="47" font-family="-apple-system,system-ui,sans-serif" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">磁盘（数据文件 .ibd）</text>
+  <text x="170" y="68" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">100 GB - 数百万个 16KB 页</text>
+
+  <rect x="50" y="88" width="100" height="30" rx="4" fill="white" stroke="#D3D1C7" stroke-width="0.5"/>
+  <text x="100" y="108" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #1</text>
+  <rect x="50" y="124" width="100" height="30" rx="4" fill="white" stroke="#D3D1C7" stroke-width="0.5"/>
+  <text x="100" y="144" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #2</text>
+  <rect x="50" y="160" width="100" height="30" rx="4" fill="white" stroke="#D3D1C7" stroke-width="0.5"/>
+  <text x="100" y="180" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #3</text>
+  <text x="170" y="210" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">...</text>
+  <rect x="50" y="222" width="100" height="30" rx="4" fill="white" stroke="#D3D1C7" stroke-width="0.5"/>
+  <text x="100" y="242" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #N</text>
+
+  <text x="340" y="90" font-family="-apple-system,system-ui,sans-serif" font-size="24" fill="#534AB7" text-anchor="middle">→</text>
+  <text x="340" y="115" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">按需加载</text>
+  <text x="340" y="170" font-family="-apple-system,system-ui,sans-serif" font-size="24" fill="#D85A30" text-anchor="middle">←</text>
+  <text x="340" y="195" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">LRU 淘汰</text>
+
+  <rect x="370" y="20" width="280" height="280" fill="#EEEDFE" stroke="#534AB7" stroke-width="1" rx="12"/>
+  <text x="510" y="47" font-family="-apple-system,system-ui,sans-serif" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">Buffer Pool（内存）</text>
+  <text x="510" y="68" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#7F77DD" text-anchor="middle">通常几 GB到 几十 GB</text>
+
+  <rect x="390" y="88" width="240" height="30" rx="4" fill="white" stroke="#AFA9EC" stroke-width="0.5"/>
+  <text x="510" y="108" font-family="monospace" font-size="11" fill="#3C3489" text-anchor="middle">BP 页 #1（根页 — 长期驻留）</text>
+  <rect x="390" y="124" width="240" height="30" rx="4" fill="white" stroke="#AFA9EC" stroke-width="0.5"/>
+  <text x="510" y="144" font-family="monospace" font-size="11" fill="#3C3489" text-anchor="middle">BP 页 #2（内节点 — 高频命中）</text>
+  <rect x="390" y="160" width="240" height="30" rx="4" fill="white" stroke="#AFA9EC" stroke-width="0.5"/>
+  <text x="510" y="180" font-family="monospace" font-size="11" fill="#3C3489" text-anchor="middle">BP 页 #3（叶子 — 刚被加载）</text>
+  <text x="510" y="210" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#7F77DD" text-anchor="middle">...</text>
+  <rect x="390" y="222" width="240" height="30" rx="4" fill="white" stroke="#AFA9EC" stroke-width="0.5"/>
+  <text x="510" y="242" font-family="monospace" font-size="11" fill="#3C3489" text-anchor="middle">BP 页 #K（空闲页 — 等待新请求）</text>
+
+  <text x="510" y="285" font-family="-apple-system,system-ui,sans-serif" font-size="11" fill="#7F77DD" text-anchor="middle">热数据的页自然留在 Buffer Pool</text>
+</svg>
+<div class="caption">图 4：Buffer Pool 按需加载页，LRU 策略淘汰冷页</div>
+</div>
+
+<ul>
+  <li><strong>按需加载</strong>：只有当查询需要某个页时，才从磁盘加载到 Buffer Pool。</li>
+  <li><strong>LRU 淘汰</strong>：Buffer Pool 满了之后，最久未被访问的冷页被淘汰出内存，为新的页腾出空间。</li>
+  <li><strong>根页和内节点几乎永驻</strong>：因为它们被访问的频率极高，几乎不会被 LRU 淘汰。</li>
+  <li><strong>热数据的叶子页也留在内存</strong>：这就是为什么「热数据」查询比「冷数据」快。</li>
+</ul>
+
+<div class="note">
+  <strong>innodb_buffer_pool_size</strong> 通常是 MySQL 调优的第一个参数。一般建议设置为物理内存的 60%~80%。Buffer Pool 越大，能缓存的页就越多，磁盘 IO 就越少——查询自然越快。
+</div>
+
+<h2>8. 总结</h2>
+
+<p>回到最初的问题，用一句话回答每个：</p>
+
+<table>
+  <thead><tr><th>问题</th><th>答案</th></tr></thead>
+  <tbody>
+    <tr><td>数据页是什么？</td><td>16KB 的容器，有 File Header / Page Header / User Records / Page Directory / Free Space / File Trailer 六个区域。InnoDB 的最小 IO 单位。</td></tr>
+    <tr><td>B+ 树如何组织页？</td><td>内节点页存【键 + 子页指针】，叶子页存数据行。所有叶子的页号通过双向链表串联。</td></tr>
+    <tr><td>一次查询读多少页？</td><td>等于 B+ 树的高度（最坏情况）。每层一页。通常 3~4 页（3~4 次 IO）。Buffer Pool 命中时更少。</td></tr>
+    <tr><td>B+ 树能有多高？</td><td>绝大多数 OLTP 场景 3~4 层。10 亿行也只要 4~5 层。多路扇出是 B+ 树「矮」的根本原因。</td></tr>
+    <tr><td>16KB 为什么合适？</td><td>太小则树变高、IO 增多；太大则写放大、内存浪费。16KB 是数十年来工程实践的收敛值。</td></tr>
+    <tr><td>100GB 的表要全加载吗？</td><td>不需要。Buffer Pool 按需加载热页，LRU 淘汰冷页。内存永远只存热数据的一个子集。</td></tr>
+  </tbody>
+</table>
+
+<p style="margin-top:32px; padding-top:16px; border-top:1px solid var(--border); color: var(--text-muted); font-size:13px;">
+  本文所有图示和计算基于 InnoDB 存储引擎的默认配置（16KB 页大小，COMPACT 行格式）。不同 MySQL 版本、不同配置可能略有差异，但核心原理不变。
+</p>
+
+<script>
+function recalc() {
+  const pageSize = parseInt(document.getElementById('pageSize').value);
+  const rowSize = parseInt(document.getElementById('rowSize').value);
+  const totalRows = parseInt(document.getElementById('rowCount').value);
+  const keySize = parseInt(document.getElementById('keySize').value);
+
+  const pageOverhead = 38 + 56 + 26 + 8;
+  const usableSpace = pageSize - pageOverhead;
+
+  const rowsPerLeaf = Math.floor(usableSpace / (rowSize + 8));
+  const leafPages = Math.ceil(totalRows / rowsPerLeaf);
+
+  const ptrEntrySize = 4 + keySize;
+  const fanout = Math.floor(usableSpace / ptrEntrySize);
+
+  let height = 1;
+  let covered = 1;
+  while (covered < leafPages) {
+    covered *= fanout;
+    height++;
+  }
+
+  const headerOverhead = 38 + 8;
+  const totalMB = ((leafPages * pageSize) + (Math.ceil(leafPages / fanout) * pageSize)) / (1024 * 1024);
+
+  const rowsFmt = totalRows >= 1e9 ? (totalRows / 1e9).toFixed(1) + ' 亿' :
+                  totalRows >= 1e6 ? (totalRows / 1e6).toFixed(0) + ' 万' :
+                  totalRows.toLocaleString();
+  const leafFmt = leafPages >= 10000 ? (leafPages / 10000).toFixed(1) + ' 万' : leafPages.toLocaleString();
+  const pageSizeFmt = pageSize >= 1024 ? (pageSize / 1024) + ' KB' : pageSize + ' B';
+
+  document.getElementById('calcResult').innerHTML = `
+    <div style="margin-bottom:8px;">
+      <span style="font-size:14px;color:#6b7280;">每页可存</span>
+      <span style="font-weight:600;">${rowsPerLeaf.toLocaleString()} 行</span>
+      <span style="font-size:13px;color:#6b7280;margin-left:4px;">（${pageSizeFmt} 页 - ${pageOverhead}B 开销 / ${rowSize + 8}B 行）</span>
+    </div>
+    <div style="margin-bottom:8px;">
+      <span style="font-size:14px;color:#6b7280;">叶子页总数</span>
+      <span style="font-weight:600;">${leafFmt} 页</span>
+      <span style="font-size:13px;color:#6b7280;margin-left:4px;">（${rowsFmt}行 / ${rowsPerLeaf.toLocaleString()}行/页）</span>
+    </div>
+    <div style="margin-bottom:8px;">
+      <span style="font-size:14px;color:#6b7280;">扇出</span>
+      <span style="font-weight:600;">${fanout.toLocaleString()}</span>
+      <span style="font-size:13px;color:#6b7280;margin-left:4px;">（每个内节点页可指向的孩子数）</span>
+    </div>
+    <div style="margin-bottom:8px;">
+      <span style="font-size:14px;color:#6b7280;">B+ 树高度</span>
+      <span class="big">${height}</span>
+      <span style="font-size:13px;color:#6b7280;margin-left:4px;">层（每次主键查询最多 ${height} 次磁盘 IO）</span>
+    </div>
+    <div>
+      <span style="font-size:14px;color:#6b7280;">总磁盘占用约</span>
+      <span style="font-weight:600;">${totalMB.toFixed(1)} MB</span>
+      <span style="font-size:13px;color:#6b7280;margin-left:4px;">（叶子页 + 内节点页）</span>
+    </div>
+  `;
+}
+
+const steps = [
+  {
+    svg: `<svg viewBox="0 0 680 180" width="100%" role="img"><defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/></marker></defs>
+    <rect x="240" y="10" width="200" height="50" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="2"/>
+    <text x="340" y="33" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#3C3489" text-anchor="middle">根页（页号 #3）</text>
+    <text x="340" y="51" font-family="monospace" font-size="12" fill="#7F77DD" text-anchor="middle">[ 10 | 25 | 50 | 100 ]</text>
+    <rect x="430" y="100" width="200" height="50" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="2"/>
+    <text x="530" y="123" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle">叶子页（页号 #42）</text>
+    <text x="530" y="141" font-family="monospace" font-size="12" fill="#D85A30" text-anchor="middle">id: 101 ~ 200</text>
+    <rect x="30" y="100" width="200" height="50" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+    <text x="130" y="123" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点页（页号 #18）</text>
+    <text x="130" y="141" font-family="monospace" font-size="12" fill="#85B7EB" text-anchor="middle">[ 11 | 15 | 20 ]</text>
+    <line x1="310" y1="60" x2="180" y2="97" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="400" y1="60" x2="500" y2="97" stroke="#D85A30" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="50" y="65" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#378ADD">id=117 &gt; 100 → 右子树</text>
+    <text x="340" y="88" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#378ADD">→ 页号 #42</text>
+    </svg>`,
+    caption: '从根页开始：id=117 大于 100，沿最右指针找到叶子页 #42'
+  },
+  {
+    svg: `<svg viewBox="0 0 680 180" width="100%" role="img"><defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/></marker></defs>
+    <rect x="240" y="10" width="200" height="50" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
+    <text x="340" y="33" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#3C3489" text-anchor="middle">根页（页号 #3）</text>
+    <text x="340" y="51" font-family="monospace" font-size="12" fill="#7F77DD" text-anchor="middle">[ 10 | 25 | 50 | 100 ]</text>
+    <rect x="430" y="100" width="200" height="50" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="2"/>
+    <text x="530" y="123" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle">叶子页（页号 #42）</text>
+    <text x="530" y="141" font-family="monospace" font-size="12" fill="#D85A30" text-anchor="middle">id: 101 ~ 200</text>
+    <rect x="30" y="100" width="200" height="50" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+    <text x="130" y="123" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点页（页号 #18）</text>
+    <text x="130" y="141" font-family="monospace" font-size="12" fill="#85B7EB" text-anchor="middle">[ 11 | 15 | 20 ]</text>
+    <line x1="310" y1="60" x2="180" y2="97" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="400" y1="60" x2="500" y2="97" stroke="#D85A30" stroke-width="2" marker-end="url(#arr)"/>
+    <text x="500" y="65" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#D85A30">直接命中！无需内节点</text>
+    <text x="500" y="88" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#D85A30">扇出足够大，树只有 2 层</text>
+    </svg>`,
+    caption: '简化情况：如果树只有 2 层，根页直接指向叶子页'
+  },
+  {
+    svg: `<svg viewBox="0 0 680 220" width="100%" role="img"><defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/></marker></defs>
+    <rect x="240" y="10" width="200" height="50" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
+    <text x="340" y="33" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#3C3489" text-anchor="middle">根页</text>
+    <text x="340" y="51" font-family="monospace" font-size="12" fill="#7F77DD" text-anchor="middle">[ 50 | 200 | 500 ]</text>
+    <rect x="210" y="85" width="260" height="50" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="2"/>
+    <text x="340" y="108" font-family="-apple-system,system-ui,sans-serif" font-size="13" font-weight="500" fill="#0C447C" text-anchor="middle">内节点页（页号 #18）</text>
+    <text x="340" y="126" font-family="monospace" font-size="12" fill="#85B7EB" text-anchor="middle">[ 60 | 80 | 100 | 120 | 150 | 180 ]</text>
+    <rect x="50" y="160" width="120" height="40" rx="6" fill="#F1EFE8" stroke="#D3D1C7" stroke-width="0.5"/>
+    <text x="110" y="185" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #26</text>
+    <rect x="180" y="160" width="120" height="40" rx="6" fill="#F1EFE8" stroke="#D3D1C7" stroke-width="0.5"/>
+    <text x="240" y="185" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #27</text>
+    <rect x="310" y="160" width="120" height="40" rx="6" fill="#FAECE7" stroke="#D85A30" stroke-width="2"/>
+    <text x="370" y="183" font-family="monospace" font-size="11" fill="#712B13" text-anchor="middle">页 #28 ←</text>
+    <text x="370" y="195" font-family="monospace" font-size="10" fill="#D85A30" text-anchor="middle">id: 101~120</text>
+    <rect x="440" y="160" width="120" height="40" rx="6" fill="#F1EFE8" stroke="#D3D1C7" stroke-width="0.5"/>
+    <text x="500" y="185" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #29</text>
+    <rect x="570" y="160" width="90" height="40" rx="6" fill="#F1EFE8" stroke="#D3D1C7" stroke-width="0.5"/>
+    <text x="615" y="185" font-family="monospace" font-size="11" fill="#444441" text-anchor="middle">页 #30</text>
+    <line x1="290" y1="60" x2="340" y2="82" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="340" y1="135" x2="260" y2="158" stroke="#D3D1C7" stroke-width="1" marker-end="url(#arr)"/>
+    <line x1="340" y1="135" x2="370" y2="158" stroke="#D85A30" stroke-width="2" marker-end="url(#arr)"/>
+    <text x="90" y="60" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#378ADD">id=117 → 50&lt;117&lt;200 → 读内节点页 #18</text>
+    <text x="90" y="78" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#378ADD">内节点页内二分：100&lt;117&lt;120 → 叶子页 #28</text>
+    </svg>`,
+    caption: '三步查询：根页 → 内节点（二分定位）→ 叶子页（页内二分 + 顺序扫描命中行）'
+  },
+  {
+    svg: `<svg viewBox="0 0 680 240" width="100%" role="img">
+    <rect x="40" y="20" width="600" height="55" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1"/>
+    <text x="340" y="42" font-family="-apple-system,system-ui,sans-serif" font-size="14" font-weight="600" fill="#085041" text-anchor="middle">叶子页内查找（页号 #28，16KB）</text>
+    <text x="340" y="62" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#5DCAA5" text-anchor="middle">先通过 Page Directory（槽位数组）二分定位到目标行所在的组</text>
+    <rect x="60" y="90" width="560" height="130" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="0.5"/>
+    <text x="340" y="112" font-family="-apple-system,system-ui,sans-serif" font-size="12" font-weight="500" fill="#D85A30" text-anchor="middle">Page Directory（槽位）= 每 4~8 行一个槽位，指向该组最大行</text>
+    <line x1="100" y1="122" x2="100" y2="165" stroke="#D85A30" stroke-width="1" stroke-dasharray="4 3"/>
+    <line x1="240" y1="122" x2="240" y2="165" stroke="#D85A30" stroke-width="1" stroke-dasharray="4 3"/>
+    <line x1="380" y1="122" x2="380" y2="165" stroke="#D85A30" stroke-width="2"/>
+    <line x1="520" y1="122" x2="520" y2="165" stroke="#D85A30" stroke-width="1" stroke-dasharray="4 3"/>
+    <rect x="60" y="130" width="560" height="90" rx="4" fill="white" stroke="#F0997B" stroke-width="0.5"/>
+    <text x="340" y="148" font-family="monospace" font-size="11" fill="#4A1B0C" text-anchor="middle">Row: . . . |101|→|102|→...→|110|→|111|→|117|→|119|→|120|→|121|→ . . .</text>
+    <rect x="420" y="152" width="28" height="16" rx="3" fill="#D85A30" opacity="0.3"/>
+    <text x="340" y="175" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#D85A30" text-anchor="middle">二分槽位：id=117 落在槽位 3（范围 111~120）→ 组内顺序扫描 → 命中！</text>
+    <text x="340" y="200" font-family="-apple-system,system-ui,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">整个叶子页上的查找约 O(log n组) + O(组内行数)，n组 = 页内行数 / 4~8</text>
+    </svg>`,
+    caption: '叶子页内的查找细节：先二分 Page Directory 找组，再在组内顺序扫描命中行'
+  }
+];
+
+let currentStep = 1;
+function setStep(n) {
+  currentStep = n;
+  document.getElementById('step-diagram').innerHTML = steps[n-1].svg;
+  document.getElementById('step-caption').textContent = steps[n-1].caption;
+  document.getElementById('step-label').textContent = '步骤 ' + n + '/4';
+  document.querySelectorAll('.step-controls button').forEach((b,i) => {
+    b.classList.toggle('active', i+1 === n);
+  });
+}
+
+setStep(1);
+recalc();
+</script>
+
+</body>
+</html>

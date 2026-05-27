@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 覆盖索引详解</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #9ba3b5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.8;
+    font-size: 16px;
+  }
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: var(--text2);
+    font-size: 1rem;
+    margin-bottom: 40px;
+  }
+
+  /* Section */
+  .section {
+    margin-bottom: 48px;
+  }
+  .section-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 16px;
+    padding-left: 14px;
+    border-left: 3px solid var(--accent);
+  }
+
+  /* Callout */
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .callout.tip {
+    border-left: 4px solid var(--green);
+  }
+  .callout.warn {
+    border-left: 4px solid var(--orange);
+  }
+  .callout-key {
+    font-weight: 700;
+    color: var(--green);
+    margin-bottom: 4px;
+  }
+  .callout.warn .callout-key { color: var(--orange); }
+
+  p { margin-bottom: 14px; }
+
+  /* Code */
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 16px 0;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+  }
+  pre code { color: var(--text); }
+  :not(pre) > code {
+    background: var(--surface2);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    color: var(--accent2);
+  }
+
+  /* SQL highlight */
+  .kw { color: var(--accent); }
+  .fn { color: var(--accent2); }
+  .str { color: var(--green); }
+  .cmt { color: #5a6078; font-style: italic; }
+
+  /* Flow Diagram */
+  .flow-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 24px 0;
+    flex-wrap: wrap;
+  }
+  .flow-box {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    text-align: center;
+    min-width: 130px;
+  }
+  .flow-box .label { font-size: 0.78rem; color: var(--text2); }
+  .flow-box .value { font-size: 1rem; font-weight: 700; margin-top: 4px; }
+  .flow-arrow {
+    font-size: 1.5rem;
+    color: var(--accent);
+    padding: 0 8px;
+    flex-shrink: 0;
+  }
+  .flow-box.hit { border-color: var(--green); }
+  .flow-box.hit .value { color: var(--green); }
+  .flow-box.miss { border-color: var(--red); }
+  .flow-box.miss .value { color: var(--red); }
+  .flow-box.cover { border-color: var(--accent); background: rgba(108,140,255,0.08); }
+  .flow-box.cover .value { color: var(--accent); }
+
+  /* Comparison Table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.95rem;
+  }
+  thead th {
+    background: var(--surface2);
+    padding: 12px 16px;
+    text-align: left;
+    font-weight: 700;
+    font-size: 0.88rem;
+    color: var(--accent);
+    border-bottom: 2px solid var(--border);
+  }
+  tbody td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:hover { background: var(--surface); }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 99px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .badge-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-no  { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge-partial { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  /* B+Tree Diagram */
+  .btree {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    margin: 24px 0;
+    padding: 20px;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+  }
+  .btree-level {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .btree-node {
+    background: var(--surface2);
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.82rem;
+    text-align: center;
+    line-height: 1.5;
+    min-width: 90px;
+  }
+  .btree-node.leaf {
+    border-color: var(--accent);
+    background: rgba(108,140,255,0.06);
+  }
+  .btree-node.leaf-full {
+    border-color: var(--green);
+    background: rgba(52,211,153,0.06);
+  }
+  .btree-connector {
+    color: var(--text2);
+    font-size: 1.2rem;
+    line-height: 1;
+  }
+  .level-label {
+    font-size: 0.75rem;
+    color: var(--text2);
+    margin-right: 12px;
+    min-width: 52px;
+    text-align: right;
+  }
+
+  /* Animated Process */
+  .process-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .step {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.82rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .step-content {
+    flex: 1;
+    padding-top: 2px;
+  }
+  .step-title {
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .step-desc {
+    color: var(--text2);
+    font-size: 0.92rem;
+  }
+
+  /* Quiz */
+  .quiz {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 24px 0;
+  }
+  .quiz-q {
+    font-weight: 700;
+    margin-bottom: 16px;
+    font-size: 1.05rem;
+  }
+  .quiz-option {
+    padding: 10px 16px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .quiz-option:hover { border-color: var(--accent); background: rgba(108,140,255,0.05); }
+  .quiz-option.correct { border-color: var(--green); background: rgba(52,211,153,0.08); }
+  .quiz-option.wrong { border-color: var(--red); background: rgba(248,113,113,0.08); }
+  .quiz-explain {
+    margin-top: 12px;
+    padding: 14px 18px;
+    background: rgba(108,140,255,0.06);
+    border-radius: 8px;
+    display: none;
+    font-size: 0.93rem;
+  }
+  .quiz-explain.show { display: block; }
+
+  /* Formula box */
+  .formula {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 16px 0;
+    text-align: center;
+    font-size: 1.05rem;
+  }
+  .formula strong { color: var(--accent); }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  @media (max-width: 640px) {
+    h1 { font-size: 1.6rem; }
+    .container { padding: 24px 16px 60px; }
+    .flow-container { flex-direction: column; gap: 8px; }
+    .flow-arrow { transform: rotate(90deg); }
+    .btree-level { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>MySQL 覆盖索引详解</h1>
+  <p class="subtitle">从 B+Tree 结构到查询优化，一文讲透覆盖索引的原理与实践</p>
+
+  <!-- ==================== Section 1: 什么是覆盖索引 ==================== -->
+  <div class="section">
+    <h2 class="section-title">一、什么是覆盖索引</h2>
+
+    <div class="callout tip">
+      <div class="callout-key">核心定义</div>
+      当一个索引包含了查询所需的<strong>全部列</strong>（SELECT 的字段、WHERE 条件、ORDER BY / GROUP BY 字段）时，这个索引就称为<strong>覆盖索引</strong>。查询只需扫描索引树即可返回结果，<strong>无需回表</strong>查询聚簇索引。
+    </div>
+
+    <p>在 MySQL InnoDB 中，数据按聚簇索引（主键索引）组织。二级索引的叶子节点存储的是<strong>索引列的值 + 主键值</strong>，而不是完整行数据。因此，通过二级索引查询时，如果需要获取非索引列的值，就必须拿到主键后<strong>回表</strong>到聚簇索引再次查询。</p>
+
+    <p>覆盖索引的优势在于：<strong>跳过了回表这一步</strong>，直接从二级索引中拿到所有需要的数据。</p>
+  </div>
+
+  <!-- ==================== Section 2: 回表 vs 覆盖 ==================== -->
+  <div class="section">
+    <h2 class="section-title">二、回表查询 vs 覆盖索引</h2>
+
+    <p>假设有如下表结构和索引：</p>
+<pre><code><span class="kw">CREATE TABLE</span> user (
+    id      <span class="kw">BIGINT PRIMARY KEY</span>,
+    name    <span class="kw">VARCHAR(50)</span>,
+    age     <span class="kw">INT</span>,
+    city    <span class="kw">VARCHAR(50)</span>,
+    email   <span class="kw">VARCHAR(100)</span>
+);
+
+<span class="cmt">-- 二级索引：只包含 (city, name) + 主键 id</span>
+<span class="kw">CREATE INDEX</span> idx_city_name <span class="kw">ON</span> user(city, name);</code></pre>
+
+    <!-- 普通回表流程 -->
+    <h3 style="color: var(--red); margin: 28px 0 12px;">场景 A：需要回表（非覆盖）</h3>
+<pre><code><span class="kw">SELECT</span> name, email <span class="kw">FROM</span> user <span class="kw">WHERE</span> city = <span class="str">'深圳'</span>;</code></pre>
+    <p><code>email</code> 不在索引中，查完二级索引后必须回表。</p>
+    <div class="flow-container">
+      <div class="flow-box">
+        <div class="label">客户端</div>
+        <div class="value">SQL 查询</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box cover">
+        <div class="label">二级索引 idx_city_name</div>
+        <div class="value" style="font-size:0.85rem;">定位 city='深圳'<br>取 name + id</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box miss">
+        <div class="label">回表（聚簇索引）</div>
+        <div class="value">用 id 查完整行<br>取 email</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <div class="label">返回</div>
+        <div class="value">name, email</div>
+      </div>
+    </div>
+
+    <!-- 覆盖索引流程 -->
+    <h3 style="color: var(--green); margin: 28px 0 12px;">场景 B：覆盖索引（无需回表）</h3>
+<pre><code><span class="kw">SELECT</span> name <span class="kw">FROM</span> user <span class="kw">WHERE</span> city = <span class="str">'深圳'</span>;</code></pre>
+    <p><code>name</code> 和 <code>city</code> 都在索引中，索引已"覆盖"所有查询列。</p>
+    <div class="flow-container">
+      <div class="flow-box">
+        <div class="label">客户端</div>
+        <div class="value">SQL 查询</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box cover">
+        <div class="label">二级索引 idx_city_name</div>
+        <div class="value" style="font-size:0.85rem;">定位 city='深圳'<br>直接取 name</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box hit">
+        <div class="label">返回</div>
+        <div class="value">name ✅</div>
+      </div>
+    </div>
+
+    <div class="callout tip" style="margin-top: 20px;">
+      <div class="callout-key">判断标准</div>
+      执行计划中 <code>EXPLAIN</code> 输出的 <code>Extra</code> 列显示 <strong>Using index</strong>，就说明用到了覆盖索引，无需回表。
+    </div>
+  </div>
+
+  <!-- ==================== Section 3: B+Tree 结构对比 ==================== -->
+  <div class="section">
+    <h2 class="section-title">三、B+Tree 索引结构对比</h2>
+
+    <p>理解覆盖索引的关键在于理解 InnoDB 两种索引的叶子节点差异：</p>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0;">
+      <!-- 聚簇索引 -->
+      <div class="btree" style="margin:0;">
+        <div style="font-weight:700; color:var(--accent); margin-bottom:4px;">聚簇索引（主键索引）</div>
+        <div style="font-size:0.82rem; color:var(--text2); margin-bottom:12px;">叶子节点存储<strong>完整行数据</strong></div>
+        <div class="btree-level">
+          <span class="level-label">非叶子</span>
+          <div class="btree-node">id: 50<br><span style="font-size:0.75rem;color:var(--text2)">→ 左 / 右</span></div>
+          <div class="btree-node">id: 150<br><span style="font-size:0.75rem;color:var(--text2)">→ 左 / 右</span></div>
+        </div>
+        <div class="btree-connector">│ &nbsp; │ &nbsp; │ &nbsp; │ &nbsp; │</div>
+        <div class="btree-level">
+          <span class="level-label">叶子</span>
+          <div class="btree-node leaf-full" style="min-width:130px;">
+            id=30<br>
+            <span style="font-size:0.72rem;">name='张三' age=25<br>city='北京' email='...'</span>
+          </div>
+          <div class="btree-node leaf-full" style="min-width:130px;">
+            id=80<br>
+            <span style="font-size:0.72rem;">name='李四' age=30<br>city='深圳' email='...'</span>
+          </div>
+          <div class="btree-node leaf-full" style="min-width:130px;">
+            id=200<br>
+            <span style="font-size:0.72rem;">name='王五' age=28<br>city='上海' email='...'</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 二级索引 -->
+      <div class="btree" style="margin:0;">
+        <div style="font-weight:700; color:var(--accent2); margin-bottom:4px;">二级索引 idx_city_name</div>
+        <div style="font-size:0.82rem; color:var(--text2); margin-bottom:12px;">叶子节点存储<strong>索引列 + 主键</strong></div>
+        <div class="btree-level">
+          <span class="level-label">非叶子</span>
+          <div class="btree-node">city='广州'<br><span style="font-size:0.75rem;color:var(--text2)">→ 左 / 右</span></div>
+          <div class="btree-node">city='上海'<br><span style="font-size:0.75rem;color:var(--text2)">→ 左 / 右</span></div>
+        </div>
+        <div class="btree-connector">│ &nbsp; │ &nbsp; │ &nbsp; │ &nbsp; │</div>
+        <div class="btree-level">
+          <span class="level-label">叶子</span>
+          <div class="btree-node leaf" style="min-width:130px;">
+            北京, 张三<br><span style="font-size:0.72rem;color:var(--text2)">主键 id=30</span>
+          </div>
+          <div class="btree-node leaf" style="min-width:130px;">
+            深圳, 李四<br><span style="font-size:0.72rem;color:var(--text2)">主键 id=80</span>
+          </div>
+          <div class="btree-node leaf" style="min-width:130px;">
+            上海, 王五<br><span style="font-size:0.72rem;color:var(--text2)">主键 id=200</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="formula">
+      覆盖索引 = 查询所需的列 <strong>⊆</strong> 索引列 <strong>∪</strong> 主键列
+    </div>
+  </div>
+
+  <!-- ==================== Section 4: 查询过程详解 ==================== -->
+  <div class="section">
+    <h2 class="section-title">四、查询执行过程详解</h2>
+
+    <div class="process-steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">SQL 解析与优化</div>
+          <div class="step-desc">优化器分析 SQL，识别 SELECT / WHERE / ORDER BY 涉及的所有列，检查是否有索引能覆盖这些列。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">索引选择</div>
+          <div class="step-desc">优化器对比多个可用索引的成本。如果某个索引能覆盖所有需要的列，则优先选择它（回表成本为零）。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">索引扫描</div>
+          <div class="step-desc">在二级索引 B+Tree 中定位满足 WHERE 条件的记录。由于索引包含了所有查询列，直接从叶子节点取值返回。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <div class="step-title">返回结果（Using Index）</div>
+          <div class="step-desc">完全跳过聚簇索引查找，EXPLAIN 中 Extra 显示 <code>Using index</code>，I/O 大幅减少。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Section 5: 对比表 ==================== -->
+  <div class="section">
+    <h2 class="section-title">五、覆盖索引 vs 普通索引 vs 联合索引</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>特性</th>
+          <th>聚簇索引（主键）</th>
+          <th>普通二级索引</th>
+          <th>联合索引（非覆盖）</th>
+          <th>覆盖索引</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>叶子节点内容</td>
+          <td>完整行数据</td>
+          <td>索引列 + 主键</td>
+          <td>多个索引列 + 主键</td>
+          <td>多个索引列 + 主键</td>
+        </tr>
+        <tr>
+          <td>是否需要回表</td>
+          <td><span class="badge badge-no">否</span></td>
+          <td><span class="badge badge-partial">通常需要</span></td>
+          <td><span class="badge badge-partial">取决于查询列</span></td>
+          <td><span class="badge badge-yes">否（Using Index）</span></td>
+        </tr>
+        <tr>
+          <td>I/O 次数</td>
+          <td>1 次树搜索</td>
+          <td>2 次（索引 + 回表）</td>
+          <td>2 次（索引 + 回表）</td>
+          <td>1 次树搜索</td>
+        </tr>
+        <tr>
+          <td>存储空间</td>
+          <td>与数据量等大</td>
+          <td>较小</td>
+          <td>中等</td>
+          <td>中等（列更多则更大）</td>
+        </tr>
+        <tr>
+          <td>适用场景</td>
+          <td>主键查询</td>
+          <td>单列等值/范围查询</td>
+          <td>多列组合查询</td>
+          <td>查询列已知且有限</td>
+        </tr>
+        <tr>
+          <td>EXPLAIN Extra</td>
+          <td>（无特殊标记）</td>
+          <td>（无标记或 Using where）</td>
+          <td>Using where / Using filesort</td>
+          <td><code>Using index</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ==================== Section 6: 实战案例 ==================== -->
+  <div class="section">
+    <h2 class="section-title">六、实战案例与验证</h2>
+
+    <h3 style="margin-bottom: 12px;">场景：订单查询优化</h3>
+<pre><code><span class="kw">CREATE TABLE</span> orders (
+    id          <span class="kw">BIGINT PRIMARY KEY AUTO_INCREMENT</span>,
+    user_id     <span class="kw">BIGINT NOT NULL</span>,
+    status      <span class="kw">TINYINT NOT NULL</span>,
+    amount      <span class="kw">DECIMAL(10,2)</span>,
+    created_at  <span class="kw">DATETIME NOT NULL</span>,
+    <span class="kw">INDEX</span> idx_user_status (user_id, status)
+);</code></pre>
+
+    <h4 style="color:var(--red); margin: 20px 0 8px;">❌ 非覆盖 — 需要回表</h4>
+<pre><code><span class="kw">SELECT</span> amount, created_at <span class="kw">FROM</span> orders <span class="kw">WHERE</span> user_id = <span class="str">1001</span> <span class="kw">AND</span> status = <span class="str">1</span>;
+<span class="cmt">-- Extra: Using where  （需要回表取 amount 和 created_at）</span></code></pre>
+
+    <h4 style="color:var(--green); margin: 20px 0 8px;">✅ 覆盖索引 — 调整索引</h4>
+<pre><code><span class="kw">ALTER TABLE</span> orders <span class="kw">ADD INDEX</span> idx_user_status_amount (user_id, status, amount);
+
+<span class="kw">SELECT</span> amount <span class="kw">FROM</span> orders <span class="kw">WHERE</span> user_id = <span class="str">1001</span> <span class="kw">AND</span> status = <span class="str">1</span>;
+<span class="cmt">-- Extra: Using index  ✅ 覆盖索引生效！</span></code></pre>
+
+    <h4 style="color:var(--green); margin: 20px 0 8px;">✅ 额外收益：避免排序</h4>
+<pre><code><span class="kw">SELECT</span> user_id, status, amount
+<span class="kw">FROM</span> orders
+<span class="kw">WHERE</span> user_id = <span class="str">1001</span>
+<span class="kw">ORDER BY</span> status;
+<span class="cmt">-- Extra: Using index  ✅ 索引天然有序，避免 filesort</span></code></pre>
+  </div>
+
+  <!-- ==================== Section 7: 适用场景 ==================== -->
+  <div class="section">
+    <h2 class="section-title">七、覆盖索引的典型适用场景</h2>
+
+    <div class="callout" style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+      <div>
+        <div style="font-weight:700; margin-bottom:8px;">✅ 适合使用</div>
+        <ul style="padding-left:20px; color:var(--text2);">
+          <li style="margin-bottom:6px;">查询列固定且较少的业务查询</li>
+          <li style="margin-bottom:6px;">统计查询（COUNT、SUM 等）</li>
+          <li style="margin-bottom:6px;">分页查询避免排序（ORDER BY 纳入索引）</li>
+          <li style="margin-bottom:6px;">延迟关联优化（子查询用覆盖索引）</li>
+          <li>避免 SELECT * 导致回表</li>
+        </ul>
+      </div>
+      <div>
+        <div style="font-weight:700; margin-bottom:8px;">⚠️ 注意事项</div>
+        <ul style="padding-left:20px; color:var(--text2);">
+          <li style="margin-bottom:6px;">索引列越多，维护成本越高（INSERT/UPDATE 变慢）</li>
+          <li style="margin-bottom:6px;">索引占用更多磁盘空间</li>
+          <li style="margin-bottom:6px;">InnoDB 单页 16KB，索引列过多导致每页记录变少</li>
+          <li style="margin-bottom:6px;">不宜超过 5~6 列，需权衡查询收益与维护代价</li>
+          <li>MySQL 5.6+ 支持索引条件下推（ICP），可部分弥补非覆盖的场景</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Section 8: 常见误区 ==================== -->
+  <div class="section">
+    <h2 class="section-title">八、常见误区</h2>
+
+    <table>
+      <thead>
+        <tr><th style="width:40%">误区</th><th>正解</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>覆盖索引是一种特殊的索引类型</td>
+          <td>覆盖索引不是新类型的索引，而是<strong>任意二级索引</strong>在特定查询下恰好覆盖了所有需要的列</td>
+        </tr>
+        <tr>
+          <td>只要建了联合索引就能覆盖</td>
+          <td>必须查询列 ⊆ 索引列 ∪ 主键列，且遵循<strong>最左前缀原则</strong></td>
+        </tr>
+        <tr>
+          <td>覆盖索引一定比回表快</td>
+          <td>通常是的，但如果索引非常宽（列多），索引扫描可能比回表单行查找更慢，需实测</td>
+        </tr>
+        <tr>
+          <td>主键查询不需要覆盖索引</td>
+          <td>主键索引本身就是聚簇索引，叶子节点就是完整行数据，天然"覆盖"，<strong>不需要额外处理</strong></td>
+        </tr>
+        <tr>
+          <td>SELECT * 也能用覆盖索引</td>
+          <td>极难——除非索引包含了表的所有列，这不现实。应避免 SELECT *</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ==================== Section 9: 验证方法 ==================== -->
+  <div class="section">
+    <h2 class="section-title">九、如何验证覆盖索引生效</h2>
+
+<pre><code><span class="kw">EXPLAIN SELECT</span> name <span class="kw">FROM</span> user <span class="kw">WHERE</span> city = <span class="str">'深圳'</span>;</code></pre>
+
+    <p>关注 <code>EXPLAIN</code> 输出中的以下字段：</p>
+
+    <table>
+      <thead>
+        <tr><th>字段</th><th>覆盖索引时的值</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>type</code></td>
+          <td><code>ref</code> / <code>range</code> / <code>index</code></td>
+          <td>通过索引访问（而非 ALL 全表扫描）</td>
+        </tr>
+        <tr>
+          <td><code>key</code></td>
+          <td>索引名称</td>
+          <td>实际使用的索引</td>
+        </tr>
+        <tr>
+          <td><code>Extra</code></td>
+          <td><strong>Using index</strong></td>
+          <td>🎯 核心标志！表示索引覆盖了查询，无需回表</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn" style="margin-top: 16px;">
+      <div class="callout-key">注意区分</div>
+      <ul style="padding-left:18px; color:var(--text2); font-size:0.93rem;">
+        <li><code>Using index</code>：覆盖索引 ✅</li>
+        <li><code>Using index; Using where</code>：覆盖索引 + 索引过滤 ✅</li>
+        <li><code>Using where</code>（无 Using index）：使用了索引定位，但仍需回表 ⚠️</li>
+        <li><code>Using index for group-by</code>：松散索引扫描优化分组 ✅</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ==================== Section 10: 小测验 ==================== -->
+  <div class="section">
+    <h2 class="section-title">十、检验理解</h2>
+
+    <div class="quiz" id="quiz1">
+      <div class="quiz-q">表 <code>emp(emp_id PK, dept_id, name, salary)</code>，索引 <code>idx_dept (dept_id)</code>。以下哪个查询能用覆盖索引？</div>
+      <div class="quiz-option" onclick="checkAnswer(this, false)">
+        A. <code>SELECT * FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-option" onclick="checkAnswer(this, true)">
+        B. <code>SELECT dept_id FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-option" onclick="checkAnswer(this, false)">
+        C. <code>SELECT name FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-explain" id="explain1">
+        正确答案是 <strong>B</strong>。<code>dept_id</code> 是索引列，查询只需要 <code>dept_id</code>，全部包含在索引中，无需回表。A 需要 name/salary（回表），C 需要 name（回表）。
+      </div>
+    </div>
+
+    <div class="quiz" id="quiz2" style="margin-top: 20px;">
+      <div class="quiz-q">将 <code>idx_dept</code> 改为 <code>idx_dept_salary (dept_id, salary)</code> 后，哪些查询可以利用覆盖索引？</div>
+      <div class="quiz-option" onclick="checkAnswer(this, true)">
+        A. <code>SELECT salary FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-option" onclick="checkAnswer(this, true)">
+        B. <code>SELECT dept_id, salary FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-option" onclick="checkAnswer(this, true)">
+        C. <code>SELECT dept_id FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-option" onclick="checkAnswer(this, false)">
+        D. <code>SELECT name, salary FROM emp WHERE dept_id = 5</code>
+      </div>
+      <div class="quiz-explain" id="explain2">
+        正确答案是 <strong>A、B、C</strong>。联合索引 <code>(dept_id, salary)</code> 的叶子节点包含 <code>dept_id</code>、<code>salary</code> 和主键 <code>emp_id</code>。A 只需 salary ✅，B 需要两个索引列 ✅，C 只需 dept_id ✅（最左前缀）。D 需要 name，不在索引中 ❌。
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 总结 ==================== -->
+  <div class="section">
+    <h2 class="section-title">总结</h2>
+
+    <div class="callout tip">
+      <div class="callout-key">一句话</div>
+      <p>覆盖索引不是一种新的索引类型，而是<strong>二级索引在特定查询下的"恰好够用"</strong>——查询的所有列都在索引中，跳过了回表，减少了随机 I/O，显著提升查询性能。</p>
+      <p style="margin-top:10px;">实践要点：精准 SELECT 列 → 设计合适的联合索引 → EXPLAIN 验证 Using index → 权衡索引维护成本。</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function checkAnswer(el, isCorrect) {
+  const quiz = el.closest('.quiz');
+  const options = quiz.querySelectorAll('.quiz-option');
+  const explain = quiz.querySelector('.quiz-explain');
+
+  // Reset all
+  options.forEach(opt => {
+    opt.classList.remove('correct', 'wrong');
+    opt.style.pointerEvents = 'none';
+  });
+
+  if (isCorrect) {
+    el.classList.add('correct');
+  } else {
+    el.classList.add('wrong');
+    // Also highlight correct ones
+    options.forEach(opt => {
+      if (opt.getAttribute('onclick').includes('true')) {
+        opt.classList.add('correct');
+      }
+    });
+  }
+
+  explain.classList.add('show');
+}
+</script>
+</body>
+</html>
