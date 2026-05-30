@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go 从0到1实现 HTTP 服务器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; color: #1a1a1a; }
+  .subtitle { color: #666; margin-bottom: 32px; font-size: 15px; }
+  h2 { font-size: 20px; font-weight: 600; margin: 40px 0 16px; padding-bottom: 8px; border-bottom: 2px solid #4A90D9; color: #1a1a1a; }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; color: #333; }
+  p { margin-bottom: 16px; font-size: 14px; }
+  .diagram { background: white; border-radius: 12px; padding: 24px; margin: 24px 0; border: 1px solid #e0e0e0; }
+  .diagram svg { display: block; margin: 0 auto; }
+  .code-block { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 16px 20px; margin: 16px 0; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  .code-block pre { margin: 0; font-family: 'SF Mono', 'Fira Code', monospace; }
+  .code-block .comment { color: #6a9955; }
+  .code-block .keyword { color: #569cd6; }
+  .code-block .string { color: #ce9178; }
+  .code-block .func { color: #dcdcaa; }
+  .code-block .type { color: #4ec9b0; }
+  .code-block .num { color: #b5cea8; }
+  .code-block .highlight { background: rgba(255,255,255,0.08); display: inline; padding: 0 2px; border-radius: 2px; }
+  .step { background: white; border-radius: 12px; padding: 20px 24px; margin: 20px 0; border-left: 4px solid #4A90D9; border-top: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; }
+  .step-num { display: inline-block; background: #4A90D9; color: white; width: 28px; height: 28px; border-radius: 50%; text-align: center; line-height: 28px; font-size: 13px; font-weight: 600; margin-right: 8px; }
+  .step-title { font-size: 16px; font-weight: 600; display: inline; }
+  .tip { background: #fff8e1; border: 1px solid #ffd54f; border-radius: 8px; padding: 12px 16px; margin: 16px 0; font-size: 13px; }
+  .tip strong { color: #f57c00; }
+  .warn { background: #fde8e8; border: 1px solid #f44336; border-radius: 8px; padding: 12px 16px; margin: 16px 0; font-size: 13px; }
+  .warn strong { color: #d32f2f; }
+  .layer-box { display: inline-block; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; margin: 4px; }
+  .tcp-box { background: #E6F1FB; color: #185FA5; border: 1px solid #85B7EB; }
+  .app-box { background: #E1F5EE; color: #0F6E56; border: 1px solid #5DCA5; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0; }
+  .compare > div { background: white; border-radius: 8px; padding: 16px; border: 1px solid #e0e0e0; }
+  .compare h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .compare ul { padding-left: 20px; font-size: 13px; }
+  .compare li { margin-bottom: 4px; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 12px; font-family: 'SF Mono', monospace; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+  th { background: #f0f0f0; padding: 8px 12px; text-align: left; font-weight: 600; border: 1px solid #ddd; }
+  td { padding: 8px 12px; border: 1px solid #ddd; }
+  tr:nth-child(even) { background: #fafafa; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Go 从0到1实现 HTTP 服务器</h1>
+<p class="subtitle">从 TCP 底层到 HTTP 应用层，完整解析 Go 网络编程的每一层原理</p>
+
+<!-- 架构分层图 -->
+<h2>一、整体架构：网络分层</h2>
+<div class="diagram">
+<svg viewBox="0 0 680 320" width="100%">
+  <!-- 应用层 -->
+  <rect x="40" y="20" width="600" height="52" rx="8" fill="#E1F5EE" stroke="#5DCA5" stroke-width="1"/>
+  <text x="340" y="50" text-anchor="middle" font-size="14" font-weight="600" fill="#0F6E56">应用层（Application Layer）</text>
+  <text x="340" y="58" text-anchor="middle" font-size="12" fill="#0F6E56">HTTP / HTTP/2 / WebSocket — 我们的业务代码在这里</text>
+
+  <!-- Go net/http -->
+  <rect x="40" y="82" width="600" height="52" rx="8" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1"/>
+  <text x="340" y="112" text-anchor="middle" font-size="14" font-weight="600" fill="#534AB7">Go 标准库层（net/http + net/textproto）</text>
+  <text x="340" y="120" text-anchor="middle" font-size="12" fill="#534AB7">http.Request / http.Response / http.Server — 协议解析 &amp; 路由</text>
+
+  <!-- TCP 层 -->
+  <rect x="40" y="144" width="600" height="52" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="340" y="174" text-anchor="middle" font-size="14" font-weight="600" fill="#185FA5">传输层（Transport Layer）— net 包</text>
+  <text x="340" y="182" text-anchor="middle" font-size="12" fill="#185FA5">net.Listener / net.Conn — TCP 连接管理、读写缓冲</text>
+
+  <!-- Socket / OS -->
+  <rect x="40" y="206" width="600" height="52" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="1"/>
+  <text x="340" y="236" text-anchor="middle" font-size="14" font-weight="600" fill="#993C1D">操作系统层（OS Layer）— Socket API</text>
+  <text x="340" y="244" text-anchor="middle" font-size="12" fill="#993C1D">syscall socket()/bind()/listen()/accept() — Go 通过 syscall 调用 OS</text>
+
+  <!-- 网卡 -->
+  <rect x="40" y="268" width="600" height="32" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="1"/>
+  <text x="340" y="290" text-anchor="middle" font-size="13" fill="#444441">物理层 — 网卡（NIC）→ 二进制比特流</text>
+
+  <!-- 箭头 -->
+  <line x1="340" y1="72" x2="340" y2="82" stroke="#999" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="340" y1="134" x2="340" y2="144" stroke="#999" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="340" y1="196" x2="340" y2="206" stroke="#999" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="340" y1="258" x2="340" y2="268" stroke="#999" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="340" y1="300" x2="340" y2="310" stroke="#999" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<!-- 回答核心问题 -->
+<h2>二、核心问题：TCP 需要自己写吗？</h2>
+
+<div class="compare">
+<div>
+<h4 style="color:#0F6E56">✅ 不需要（99% 场景）</h4>
+<ul>
+<li>用 <code>net/http</code> 标准库，3行启动服务器</li>
+<li>TCP 由 <code>net</code> 包封装好了</li>
+<li>你只写 HTTP 处理逻辑</li>
+<li>Go 官方推荐方式</li>
+</ul>
+</div>
+<div>
+<h4 style="color:#185FA5">✅ 可以自己写（学习/底层场景）</h4>
+<ul>
+<li>用 <code>net.Listen("tcp", ...)</code> 手写 TCP 服务器</li>
+<li>自己解析 HTTP 文本协议（读字节流、按 \r\n 分割）</li>
+<li>理解 TCP 粘包、半包处理</li>
+<li>造轮子 / 面试 / 学习用</li>
+</ul>
+</div>
+</div>
+
+<p>下面我们从最底层开始，<strong>一步步自己实现</strong>一个 HTTP 服务器，先手写 TCP，再手写 HTTP 解析，最后用标准库对比。</p>
+
+<!-- 第一步：手写 TCP 服务器 -->
+<h2>三、Step 1：手写 TCP 服务器（从0开始）</h2>
+
+<div class="step">
+<span class="step-num">1</span><span class="step-title">TCP 三层核心：socket → bind → listen → accept</span>
+</div>
+
+<p>操作系统提供 Socket API，Go 的 <code>net</code> 包封装了这些系统调用。我们先不用 <code>http</code>，只用 <code>net</code> 写一个 TCP 回显服务器。</p>
+
+<div class="code-block">
+<pre><span class="comment">// step1_tcp_server.go — 最朴素的 TCP 服务器</span>
+<span class="comment">// 编译器：go run step1_tcp_server.go</span>
+<span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bufio"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"net"</span>
+    <span class="string">"strings"</span>
+)
+
+<span class="keyword">func</span> <span class="func">main</span>() {
+    <span class="comment">// 1. Listen：在内核中创建监听 socket，绑定端口 8080</span>
+    <span class="comment">//    等价于 syscall: socket(AF_INET, SOCK_STREAM, 0) + bind(8080) + listen(backlog=128)</span>
+    listener, err := net.<span class="func">Listen</span>(<span class="string">"tcp"</span>, <span class="string">":8080"</span>)
+    <span class="keyword">if</span> err != <span class="keyword">nil</span> {
+        <span class="func">panic</span>(err)
+    }
+    <span class="keyword">defer</span> listener.<span class="func">Close</span>()
+    fmt.<span class="func">Println</span>(<span class="string">"TCP 服务器启动，监听 :8080"</span>)
+
+    <span class="keyword">for</span> {
+        <span class="comment">// 2. Accept：阻塞等待客户端连接（内核维护已完成三次握手的队列）</span>
+        <span class="comment">//    等价于 syscall: accept() → 返回新的 fd（文件描述符）</span>
+        conn, err := listener.<span class="func">Accept</span>()
+        <span class="keyword">if</span> err != <span class="keyword">nil</span> {
+            fmt.<span class="func">Println</span>(<span class="string">"Accept error:"</span>, err)
+            <span class="keyword">continue</span>
+        }
+        fmt.<span class="func">Printf</span>(<span class="string">"客户端连接: %s\n"</span>, conn.<span class="func">RemoteAddr</span>())
+
+        <span class="comment">// 3. 每个连接开一个 goroutine 处理（Go 的并发优势！）</span>
+        <span class="keyword">go</span> <span class="func">handleConn</span>(conn)
+    }
+}
+
+<span class="keyword">func</span> <span class="func">handleConn</span>(conn net.Conn) {
+    <span class="keyword">defer</span> conn.<span class="func">Close</span>()
+    reader := bufio.<span class="func">NewReader</span>(conn)
+
+    <span class="keyword">for</span> {
+        <span class="comment">// 4. Read：从内核接收缓冲区读数据（TCP 字节流）</span>
+        <span class="comment">//   注意：TCP 是字节流，一次 Read 可能只读到部分数据（半包）</span>
+        line, err := reader.<span class="func">ReadString</span>(<span class="string">'\n'</span>)
+        <span class="keyword">if</span> err != <span class="keyword">nil</span> {
+            <span class="keyword">return</span>
+        }
+        line = strings.<span class="func">TrimSpace</span>(line)
+        fmt.<span class="func">Printf</span>(<span class="string">"收到: %s\n"</span>, line)
+
+        <span class="comment">// 5. Write：写回响应（写入内核发送缓冲区，由 TCP 协议栈负责发送）</span>
+        conn.<span class="func">Write</span>([]<span class="type">byte</span>(<span class="string">"回声: "</span> + line + <span class="string">"\n"</span>))
+
+        <span class="keyword">if</span> line == <span class="string">"quit"</span> {
+            <span class="keyword">return</span>
+        }
+    }
+}</pre>
+</div>
+
+<div class="tip">
+<strong>关键知识点：</strong><br>
+<strong>TCP 是字节流，不是消息流！</strong> <code>ReadString('\n')</code> 按换行分割是我们自己定义的协议。真实 HTTP 需要按 <code>\r\n\r\n</code> 分割 header，再按 Content-Length 读 body。这就是"粘包/半包"问题的来源。
+</div>
+
+<!-- 第二步：手写 HTTP 解析 -->
+<h2>四、Step 2：在 TCP 之上手写 HTTP 协议解析</h2>
+
+<div class="step">
+<span class="step-num">2</span><span class="step-title">HTTP 协议本质：结构化文本 + TCP 字节流传输</span>
+</div>
+
+<p>HTTP/1.1 是<strong>文本协议</strong>，格式固定。我们只用 TCP 的 <code>net.Conn</code> 读取字节，然后按协议格式解析。</p>
+
+<div class="code-block">
+<pre><span class="comment">// step2_http_parser.go — 在 TCP 之上手写 HTTP 解析</span>
+<span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bufio"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"io"</span>
+    <span class="string">"net"</span>
+    <span class="string">"strings"</span>
+)
+
+<span class="comment">// 我们自己定义的 HTTP 请求结构体（标准库叫 http.Request）</span>
+<span class="keyword">type</span> <span class="type">MyRequest</span> <span class="keyword">struct</span> {
+    Method  <span class="type">string</span>
+    Path    <span class="type">string</span>
+    Version <span class="type">string</span>
+    Headers <span class="keyword">map</span>[<span class="type">string</span>]<span class="type">string</span>
+    Body    <span class="type">string</span>
+}
+
+<span class="keyword">type</span> <span class="type">MyResponse</span> <span class="keyword">struct</span> {
+    StatusCode <span class="type">int</span>
+    Headers    <span class="keyword">map</span>[<span class="type">string</span>]<span class="type">string</span>
+    Body       <span class="type">string</span>
+}
+
+<span class="keyword">func</span> <span class="func">main</span>() {
+    listener, _ := net.<span class="func">Listen</span>(<span class="string">"tcp"</span>, <span class="string">":8080"</span>)
+    <span class="keyword">defer</span> listener.<span class="func">Close</span>()
+    fmt.<span class="func">Println</span>(<span class="string">"HTTP 服务器启动 :8080"</span>)
+
+    <span class="keyword">for</span> {
+        conn, _ := listener.<span class="func">Accept</span>()
+        <span class="keyword">go</span> <span class="func">handleHTTPConn</span>(conn)
+    }
+}
+
+<span class="keyword">func</span> <span class="func">handleHTTPConn</span>(conn net.Conn) {
+    <span class="keyword">defer</span> conn.<span class="func">Close</span>()
+    reader := bufio.<span class="func">NewReader</span>(conn)
+
+    <span class="comment">// ===== 1. 解析请求行 =====</span>
+    requestLine, _ := reader.<span class="func">ReadString</span>(<span class="string">'\n'</span>)
+    requestLine = strings.<span class="func">TrimRight</span>(requestLine, <span class="string">"\r\n"</span>)
+    parts := strings.<span class="func">Split</span>(requestLine, <span class="string">" "</span>)
+    <span class="keyword">if</span> <span class="func">len</span>(parts) &lt; <span class="num">3</span> {
+        <span class="keyword">return</span>
+    }
+
+    req := &amp;<span class="type">MyRequest</span>{
+        Method:  parts[<span class="num">0</span>],
+        Path:    parts[<span class="num">1</span>],
+        Version: parts[<span class="num">2</span>],
+        Headers: <span class="func">make</span>(<span class="keyword">map</span>[<span class="type">string</span>]<span class="type">string</span>),
+    }
+    fmt.<span class="func">Printf</span>(<span class="string">"→ %s %s %s\n"</span>, req.Method, req.Path, req.Version)
+
+    <span class="comment">// ===== 2. 解析请求头（遇到空行 \r\n 为止）=====</span>
+    <span class="keyword">var</span> contentLength <span class="type">int</span> = <span class="num">0</span>
+    <span class="keyword">for</span> {
+        line, _ := reader.<span class="func">ReadString</span>(<span class="string">'\n'</span>)
+        line = strings.<span class="func">TrimRight</span>(line, <span class="string">"\r\n"</span>)
+        <span class="keyword">if</span> line == <span class="string">""</span> {
+            <span class="keyword">break</span>  <span class="comment">// 空行 = header 结束</span>
+        }
+        kv := strings.<span class="func">SplitN</span>(line, <span class="string">": "</span>, <span class="num">2</span>)
+        <span class="keyword">if</span> <span class="func">len</span>(kv) == <span class="num">2</span> {
+            req.Headers[strings.<span class="func">ToLower</span>(kv[<span class="num">0</span>])] = kv[<span class="num">1</span>]
+            <span class="keyword">if</span> strings.<span class="func">ToLower</span>(kv[<span class="num">0</span>]) == <span class="string">"content-length"</span> {
+                fmt.<span class="func">Scanf</span>(kv[<span class="num">1</span>], <span class="string">"%d"</span>, &amp;contentLength)
+            }
+        }
+    }
+
+    <span class="comment">// ===== 3. 读取 Body =====</span>
+    <span class="keyword">if</span> contentLength > <span class="num">0</span> {
+        bodyBuf := <span class="func">make</span>([]<span class="type">byte</span>, contentLength)
+        io.<span class="func">ReadFull</span>(reader, bodyBuf)
+        req.Body = <span class="type">string</span>(bodyBuf)
+        fmt.<span class="func">Println</span>(<span class="string">"Body:"</span>, req.Body)
+    }
+
+    <span class="comment">// ===== 4. 路由处理 =====</span>
+    <span class="keyword">var</span> respBody <span class="type">string</span>
+    <span class="keyword">var</span> statusCode <span class="type">int</span> = <span class="num">200</span>
+    <span class="keyword">switch</span> req.Path {
+    <span class="keyword">case</span> <span class="string">"/"</span>:
+        respBody = <span class="string">"&lt;h1&gt;Hello from 手写 HTTP 服务器!&lt;/h1&gt;"</span>
+    <span class="keyword">case</span> <span class="string">"/api"</span>:
+        respBody = <span class="string">`{"msg":"hello","method":"`</span> + req.Method + <span class="string">`"}`</span>
+    <span class="keyword">default</span>:
+        statusCode = <span class="num">404</span>
+        respBody = <span class="string">"404 Not Found"</span>
+    }
+
+    <span class="comment">// ===== 5. 构造 HTTP 响应，写回 TCP 连接 =====</span>
+    <span class="func">writeHTTPResponse</span>(conn, statusCode, respBody)
+}
+
+<span class="keyword">func</span> <span class="func">writeHTTPResponse</span>(conn net.Conn, statusCode <span class="type">int</span>, body <span class="type">string</span>) {
+    statusText := <span class="string">"OK"</span>
+    <span class="keyword">if</span> statusCode == <span class="num">404</span> {
+        statusText = <span class="string">"Not Found"</span>
+    }
+
+    <span class="comment">// 按 HTTP 协议格式拼接响应文本</span>
+    response := fmt.<span class="func">Sprintf</span>(
+        <span class="string">"HTTP/1.1 %d %s\r\nContent-Length: %d\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s"</span>,
+        statusCode, statusText, <span class="func">len</span>(body), body,
+    )
+    conn.<span class="func">Write</span>([]<span class="type">byte</span>(response))
+}</pre>
+</div>
+
+<div class="diagram">
+<svg viewBox="0 0 680 200" width="100%">
+  <!-- HTTP 请求报文结构 -->
+  <text x="340" y="24" text-anchor="middle" font-size="14" font-weight="600" fill="#333">HTTP 请求报文结构（文本协议）</text>
+
+  <!-- 请求行 -->
+  <rect x="40" y="44" width="600" height="36" rx="6" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="50" y="67" font-size="12" font-family="monospace" fill="#185FA5">GET /api/users?name=foo HTTP/1.1  ← 请求行（Method Path Version）</text>
+
+  <!-- 请求头 -->
+  <rect x="40" y="84" width="600" height="36" rx="6" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1"/>
+  <text x="50" y="107" font-size="12" font-family="monospace" fill="#534AB7">Host: localhost:8080          ← 请求头（Key: Value）</text>
+
+  <rect x="40" y="124" width="600" height="36" rx="6" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1"/>
+  <text x="50" y="147" font-size="12" font-family="monospace" fill="#534AB7">Content-Length: 15             ← 空行之前都是 header</text>
+
+  <!-- 空行 -->
+  <rect x="40" y="164" width="600" height="28" rx="6" fill="#F1EFE8" stroke="#888780" stroke-width="1"/>
+  <text x="50" y="183" font-size="12" fill="#444441">␍␊ (\r\n)  ← 空行，分隔 header 和 body</text>
+
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<!-- 第三步：用标准库 -->
+<h2>五、Step 3：用 Go 标准库 net/http（正式写法）</h2>
+
+<div class="step">
+<span class="step-num">3</span><span class="step-title">生产环境：3 行启动，标准库帮你搞定一切</span>
+</div>
+
+<p>Go 的 <code>net/http</code> 标准库已经完整实现了 HTTP/1.1 和 HTTP/2 协议，包括：连接复用、keep-alive、chunked 传输、TLS、路由、中间件等。</p>
+
+<div class="code-block">
+<pre><span class="comment">// step3_standard_http.go — 生产级写法（推荐）</span>
+<span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"encoding/json"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"net/http"</span>
+)
+
+<span class="keyword">func</span> <span class="func">main</span>() {
+    <span class="comment">// 1. 注册路由（内部维护了一张路由表 = map[pattern]HandlerFunc）</span>
+    http.<span class="func">HandleFunc</span>(<span class="string">"/"</span>, <span class="func">homeHandler</span>)
+    http.<span class="func">HandleFunc</span>(<span class="string">"/api"</span>, <span class="func">apiHandler</span>)
+    http.<span class="func">HandleFunc</span>(<span class="string">"/health"</span>, <span class="func">healthHandler</span>)
+
+    <span class="comment">// 2. 启动服务器（内部会自动完成：Listen + Accept + goroutine per conn + HTTP 解析）</span>
+    fmt.<span class="func">Println</span>(<span class="string">"服务器启动 :8080"</span>)
+    <span class="comment">// ListenAndServe 内部：net.Listen("tcp", addr) → for { Accept() → go serve(conn) }</span>
+    <span class="comment">// 每个连接由 go serve(conn) 处理，conn 中循环读取 HTTP 请求并调用对应 Handler</span>
+    err := http.<span class="func">ListenAndServe</span>(<span class="string">":8080"</span>, <span class="keyword">nil</span>)
+    <span class="keyword">if</span> err != <span class="keyword">nil</span> {
+        <span class="func">panic</span>(err)
+    }
+}
+
+<span class="keyword">func</span> <span class="func">homeHandler</span>(w http.ResponseWriter, r *http.Request) {
+    <span class="comment">// http.ResponseWriter 是对 conn 的封装，Write() 最终写入 TCP 发送缓冲区</span>
+    w.<span class="func">Header</span>().<span class="func">Set</span>(<span class="string">"Content-Type"</span>, <span class="string">"text/html; charset=utf-8"</span>)
+    w.<span class="func">Write</span>([]<span class="type">byte</span>(<span class="string">"&lt;h1&gt;Hello from net/http!&lt;/h1&gt;"</span>))
+}
+
+<span class="keyword">func</span> <span class="func">apiHandler</span>(w http.ResponseWriter, r *http.Request) {
+    <span class="comment">// http.Request 是标准库帮我们解析完的 HTTP 请求结构体</span>
+    fmt.<span class="func">Printf</span>(<span class="string">"收到请求: %s %s\n"</span>, r.Method, r.URL.Path)
+
+    w.<span class="func">Header</span>().<span class="func">Set</span>(<span class="string">"Content-Type"</span>, <span class="string">"application/json"</span>)
+    json.<span class="func">NewEncoder</span>(w).<span class="func">Encode</span>(<span class="keyword">map</span>[<span class="type">string</span>]<span class="type">interface</span>{}{
+        <span class="string">"method"</span>:  r.Method,
+        <span class="string">"path"</span>:    r.URL.Path,
+        <span class="string">"headers"</span>: r.Header,
+    })
+}
+
+<span class="keyword">func</span> <span class="func">healthHandler</span>(w http.ResponseWriter, r *http.Request) {
+    w.<span class="func">Write</span>([]<span class="type">byte</span>(<span class="string">"OK"</span>))
+}</pre>
+</div>
+
+<!-- 原理深挖 -->
+<h2>六、深层原理：net/http 内部到底做了什么？</h2>
+
+<div class="diagram">
+<svg viewBox="0 0 680 420" width="100%">
+  <!-- 标题 -->
+  <text x="340" y="24" text-anchor="middle" font-size="15" font-weight="600" fill="#1a1a1a">net/http.ListenAndServe 内部调用链</text>
+
+  <!-- 第1层 -->
+  <rect x="180" y="44" width="320" height="44" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="1"/>
+  <text x="340" y="62" text-anchor="middle" font-size="13" font-weight="500" fill="#185FA5">main() 调用 http.ListenAndServe(":8080", nil)</text>
+  <text x="340" y="80" text-anchor="middle" font-size="11" fill="#185FA5">入口函数</text>
+
+  <!-- 箭头1 -->
+  <line x1="340" y1="88" x2="340" y2="106" stroke="#999" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- 第2层 -->
+  <rect x="120" y="108" width="440" height="44" rx="8" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1"/>
+  <text x="340" y="126" text-anchor="middle" font-size="13" font-weight="500" fill="#534AB7">net.Listen("tcp", ":8080") → 创建 net.Listener</text>
+  <text x="340" y="144" text-anchor="middle" font-size="11" fill="#534AB7">内部调用 syscall socket()→bind()→listen()</text>
+
+  <!-- 箭头2 -->
+  <line x1="340" y1="152" x2="340" y2="168" stroke="#999" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- 第3层 -->
+  <rect x="120" y="170" width="440" height="44" rx="8" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1"/>
+  <text x="340" y="188" text-anchor="middle" font-size="13" font-weight="500" fill="#534AB7">server.Serve(listener) → for { listener.Accept() }</text>
+  <text x="340" y="206" text-anchor="middle" font-size="11" fill="#534AB7">主协程：死循环接受新连接</text>
+
+  <!-- 箭头3 -->
+  <line x1="340" y1="214" x2="340" y2="230" stroke="#999" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- 第4层：分叉 -->
+  <rect x="40" y="232" width="280" height="52" rx="8" fill="#E1F5EE" stroke="#5DCA5" stroke-width="1"/>
+  <text x="180" y="252" text-anchor="middle" font-size="12" font-weight="500" fill="#0F6E56">go serve(conn) — 每个连接一个 goroutine</text>
+  <text x="180" y="270" text-anchor="middle" font-size="11" fill="#0F6E56">并发处理，goroutine 轻量级线程</text>
+
+  <rect x="360" y="232" width="280" height="52" rx="8" fill="#FAECE7" stroke="#D85A30" stroke-width="1"/>
+  <text x="500" y="252" text-anchor="middle" font-size="12" font-weight="500" fill="#993C1D">listener.Accept() 继续阻塞等待</text>
+  <text x="500" y="270" text-anchor="middle" font-size="11" fill="#993C1D">主协程不阻塞，继续接受新连接</text>
+
+  <!-- 箭头4 左 -->
+  <line x1="180" y1="284" x2="180" y2="300" stroke="#999" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- 第5层 -->
+  <rect x="40" y="302" width="280" height="52" rx="8" fill="#E1F5EE" stroke="#5DCA5" stroke-width="1"/>
+  <text x="180" y="322" text-anchor="middle" font-size="12" font-weight="500" fill="#0F6E56">conn.readRequest() — 解析 HTTP 请求行+header</text>
+  <text x="180" y="340" text-anchor="middle" font-size="11" fill="#0F6E56">按 \r\n 分割，填入 http.Request 结构体</text>
+
+  <!-- 箭头5 -->
+  <line x1="180" y1="354" x2="180" y2="370" stroke="#999" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- 第6层 -->
+  <rect x="40" y="372" width="280" height="36" rx="8" fill="#FAEDED" stroke="#ED9393" stroke-width="1"/>
+  <text x="180" y="394" text-anchor="middle" font-size="12" font-weight="500" fill="#993C1D">调用注册的处理函数 handler.ServeHTTP()</text>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<!-- TCP 粘包问题 -->
+<h2>七、关键难点：TCP 字节流与 HTTP 消息边界</h2>
+
+<table>
+<tr>
+  <th>问题</th><th>原因</th><th>HTTP 解决方案</th>
+</tr>
+<tr>
+  <td>粘包（多个消息挤在一起）</td>
+  <td>TCP 发送缓冲区合并发送</td>
+  <td>用 <code>\r\n</code> 分隔 header，空行分隔 header/body</td>
+</tr>
+<tr>
+  <td>半包（一次读不完）</td>
+  <td>TCP 分段/MSS 限制</td>
+  <td>循环 Read 直到读到完整 HTTP 消息</td>
+</tr>
+<tr>
+  <td>body 长度未知</td>
+  <td>动态内容</td>
+  <td>Content-Length 或 Transfer-Encoding: chunked</td>
+</tr>
+<tr>
+  <td>连接复用（keep-alive）</td>
+  <td>一个 TCP 连接多个 HTTP 请求</td>
+  <td>靠 Content-Length 确定每条消息边界</td>
+</tr>
+</table>
+
+<div class="warn">
+<strong>面试高频：</strong>TCP 有没有"消息"概念？<br>
+<strong>答：没有！</strong> TCP 是字节流（byte stream），只有发送缓冲区和接收缓冲区。HTTP 消息边界完全由应用层协议（\r\n 分隔符 + Content-Length）来界定。这就是 net/http 的 <code>connReader</code> 要做"缓冲读取"的原因。
+</div>
+
+<!-- 完整总结 -->
+<h2>八、总结：从 TCP 到 HTTP 完整映射</h2>
+
+<div class="code-block">
+<pre><span class="comment">// 完整版：手写 HTTP 服务器（整合所有步骤）</span>
+<span class="comment">// 文件：step4_complete.go</span>
+<span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+    <span class="string">"bufio"</span>
+    <span class="string">"fmt"</span>
+    <span class="string">"io"</span>
+    <span class="string">"net"</span>
+    <span class="string">"strings"</span>
+)
+
+<span class="comment">// ─────────────────────────────────────────────</span>
+<span class="comment">// 1. TCP 层：Listen + Accept + goroutine 并发</span>
+<span class="comment">// ─────────────────────────────────────────────</span>
+<span class="keyword">func</span> <span class="func">main</span>() {
+    listener, err := net.<span class="func">Listen</span>(<span class="string">"tcp"</span>, <span class="string">":8080"</span>)
+    <span class="keyword">if</span> err != <span class="keyword">nil</span> { <span class="func">panic</span>(err) }
+    fmt.<span class="func">Println</span>(<span class="string">"🚀 手写 HTTP 服务器启动 :8080"</span>)
+
+    <span class="keyword">for</span> {
+        conn, err := listener.<span class="func">Accept</span>()
+        <span class="keyword">if</span> err != <span class="keyword">nil</span> { <span class="keyword">continue</span> }
+        <span class="keyword">go</span> <span class="func">serve</span>(conn)  <span class="comment">// 每个连接一个 goroutine</span>
+    }
+}
+
+<span class="comment">// ─────────────────────────────────────────────</span>
+<span class="comment">// 2. HTTP 层：在一个 TCP 连接上解析 HTTP 协议</span>
+<span class="comment">//   支持 keep-alive（一个 TCP 连接处理多个请求）</span>
+<span class="comment">// ─────────────────────────────────────────────</span>
+<span class="keyword">func</span> <span class="func">serve</span>(conn net.Conn) {
+    <span class="keyword">defer</span> conn.<span class="func">Close</span>()
+    reader := bufio.<span class="func">NewReader</span>(conn)
+
+    <span class="comment">// keep-alive：循环处理多条请求（HTTP/1.1 默认持久连接）</span>
+    <span class="keyword">for</span> {
+        <span class="comment">// --- 解析请求行 ---</span>
+        requestLine, err := reader.<span class="func">ReadString</span>(<span class="string">'\n'</span>)
+        <span class="keyword">if</span> err != <span class="keyword">nil</span> { <span class="keyword">return</span> }  <span class="comment">// 客户端断开</span>
+        requestLine = strings.<span class="func">TrimRight</span>(requestLine, <span class="string">"\r\n"</span>)
+        <span class="keyword">if</span> requestLine == <span class="string">""</span> { <span class="keyword">continue</span> }
+
+        parts := strings.<span class="func">Split</span>(requestLine, <span class="string">" "</span>)
+        <span class="keyword">if</span> <span class="func">len</span>(parts) &lt; <span class="num">3</span> { <span class="keyword">return</span> }
+
+        method := parts[<span class="num">0</span>]
+        path   := parts[<span class="num">1</span>]
+
+        <span class="comment">// --- 解析请求头 ---</span>
+        headers := <span class="func">make</span>(<span class="keyword">map</span>[<span class="type">string</span>]<span class="type">string</span>)
+        <span class="keyword">var</span> contentLength <span class="type">int</span> = <span class="num">0</span>
+        <span class="keyword">for</span> {
+            line, _ := reader.<span class="func">ReadString</span>(<span class="string">'\n'</span>)
+            line = strings.<span class="func">TrimRight</span>(line, <span class="string">"\r\n"</span>)
+            <span class="keyword">if</span> line == <span class="string">""</span> { <span class="keyword">break</span> }
+            kv := strings.<span class="func">SplitN</span>(line, <span class="string">": "</span>, <span class="num">2</span>)
+            <span class="keyword">if</span> <span class="func">len</span>(kv) == <span class="num">2</span> {
+                headers[strings.<span class="func">ToLower</span>(kv[<span class="num">0</span>])] = kv[<span class="num">1</span>]
+                <span class="keyword">if</span> kv[<span class="num">0</span>] == <span class="string">"Content-Length"</span> {
+                    fmt.<span class="func">Scanf</span>(kv[<span class="num">1</span>], <span class="string">"%d"</span>, &amp;contentLength)
+                }
+            }
+        }
+
+        <span class="comment">// --- 读取 Body（处理半包：循环读直到够数）---</span>
+        <span class="keyword">var</span> body <span class="type">string</span>
+        <span class="keyword">if</span> contentLength > <span class="num">0</span> {
+            buf := <span class="func">make</span>([]<span class="type">byte</span>, contentLength)
+            _, err := io.<span class="func">ReadFull</span>(reader, buf)
+            <span class="keyword">if</span> err == <span class="keyword">nil</span> { body = <span class="type">string</span>(buf) }
+        }
+
+        fmt.<span class="func">Printf</span>(<span class="string">"→ %s %s  Body=%d bytes\n"</span>, method, path, contentLength)
+
+        <span class="comment">// --- 路由 + 构造响应 ---</span>
+        <span class="keyword">var</span> respBody <span class="type">string</span>
+        statusCode := <span class="num">200</span>
+        <span class="keyword">switch</span> path {
+        <span class="keyword">case</span> <span class="string">"/"</span>:
+            respBody = <span class="string">"&lt;html&gt;&lt;body&gt;&lt;h1&gt;从 TCP 到 HTTP，完整实现!&lt;/h1&gt;&lt;/body&gt;&lt;/html&gt;"</span>
+        <span class="keyword">case</span> <span class="string">"/api/hello"</span>:
+            respBody = <span class="string">`{"hello":"world","method":"`</span> + method + <span class="string">`"}`</span>
+        <span class="keyword">default</span>:
+            statusCode = <span class="num">404</span>
+            respBody = <span class="string">"404 page not found"</span>
+        }
+
+        <span class="comment">// --- 写回 HTTP 响应（\r\n 是协议要求，不能用 \n）---</span>
+        statusText := <span class="string">"OK"</span>
+        <span class="keyword">if</span> statusCode == <span class="num">404</span> { statusText = <span class="string">"Not Found"</span> }
+
+        response := fmt.<span class="func">Sprintf</span>(
+            <span class="string">"HTTP/1.1 %d %s\r\n"</span>+
+            <span class="string">"Content-Length: %d\r\n"</span>+
+            <span class="string">"Content-Type: text/html; charset=utf-8\r\n"</span>+
+            <span class="string">"Connection: keep-alive\r\n"</span>+
+            <span class="string">"\r\n"</span>+
+            <span class="string">"%s"</span>,
+            statusCode, statusText, <span class="func">len</span>(respBody), respBody,
+        )
+        conn.<span class="func">Write</span>([]<span class="type">byte</span>(response))
+        <span class="comment">// 循环继续 → 处理下一条 HTTP 请求（keep-alive）</span>
+    }
+}</pre>
+</div>
+
+<h2>九、运行方式</h2>
+<div class="code-block">
+<pre><span class="comment"># 运行手写 TCP 服务器</span>
+go run step1_tcp_server.go
+
+<span class="comment"># 运行手写 HTTP 服务器</span>
+go run step2_http_parser.go
+go run step4_complete.go
+
+<span class="comment"># 测试（另一个终端）</span>
+curl <span class="string">http://localhost:8080/</span>
+curl <span class="string">http://localhost:8080/api/hello</span>
+curl -X POST -d <span class="string">'{"name":"test"}'</span> <span class="string">http://localhost:8080/api/hello</span></pre>
+</div>
+
+<div class="tip">
+<strong>学习路径建议：</strong><br>
+1. 先运行 <code>step1_tcp_server.go</code>，用 <code>telnet localhost 8080</code> 体验 TCP 字节流<br>
+2. 再运行 <code>step4_complete.go</code>，用 <code>curl</code> 体验 HTTP 协议<br>
+3. 最后读 Go 源码 <code>src/net/http/server.go</code> 的 <code>serve()</code> 函数，对比自己的实现
+</div>
+
+<div style="margin-top:40px;padding:16px 0;border-top:1px solid #e0e0e0;font-size:12px;color:#999;text-align:center;">
+  Go 从0到1实现 HTTP 服务器 — TCP 原理 · HTTP 协议解析 · net/http 源码分析
+</div>
+
+</div>
+</body>
+</html>
