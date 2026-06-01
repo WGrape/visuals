@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slab 分配机制 — 深入理解内存管理</title>
+<style>
+  :root {
+    --bg: #FAFBFC;
+    --surface: #FFFFFF;
+    --surface2: #F1F3F5;
+    --text: #1A1A2E;
+    --text2: #6B7280;
+    --text3: #9CA3AF;
+    --accent: #6366F1;
+    --accent-light: #EEF2FF;
+    --accent2: #10B981;
+    --accent2-light: #ECFDF5;
+    --accent3: #F59E0B;
+    --accent3-light: #FFFBEB;
+    --accent4: #EF4444;
+    --accent4-light: #FEF2F2;
+    --border: #E5E7EB;
+    --border2: #D1D5DB;
+    --radius: 12px;
+    --radius-lg: 16px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06);
+    --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    --mono: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* --- Layout --- */
+  .page-header {
+    text-align: center;
+    padding: 60px 24px 40px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .page-header h1 {
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, #6366F1, #8B5CF6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  .page-header .subtitle {
+    font-size: 17px;
+    color: var(--text2);
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  .tag-row {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .tag {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .tag-purple { background: var(--accent-light); color: var(--accent); }
+  .tag-green { background: var(--accent2-light); color: var(--accent2); }
+  .tag-amber { background: var(--accent3-light); color: var(--accent3); }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+
+  /* --- Section --- */
+  .section {
+    margin-bottom: 48px;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.5s, transform 0.5s;
+  }
+  .section.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .section-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .section-label .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    letter-spacing: -0.3px;
+  }
+  .section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    color: var(--text);
+  }
+  .section p {
+    color: var(--text2);
+    margin-bottom: 16px;
+  }
+
+  /* --- Card --- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+  }
+  .card:hover { box-shadow: var(--shadow-lg); }
+  .card-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title .icon {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  /* --- TOC --- */
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px 28px;
+    margin-bottom: 48px;
+    box-shadow: var(--shadow);
+  }
+  .toc-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+  }
+  .toc-list {
+    list-style: none;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .toc-list a {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  .toc-list a:hover { background: var(--surface2); }
+  .toc-list .num {
+    width: 24px; height: 24px;
+    border-radius: 6px;
+    background: var(--accent-light);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* --- Diagrams (inline SVG wrappers) --- */
+  .diagram-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  .diagram-wrap svg { display: block; margin: 0 auto; }
+  .diagram-caption {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text3);
+    margin-top: 12px;
+  }
+
+  /* --- Interactive Slab Visualizer --- */
+  .viz-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin: 20px 0;
+    box-shadow: var(--shadow);
+  }
+  .viz-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .viz-btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border2);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--font);
+  }
+  .viz-btn:hover { background: var(--surface2); border-color: var(--accent); color: var(--accent); }
+  .viz-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .viz-btn-green:hover { border-color: var(--accent2); color: var(--accent2); }
+  .viz-btn-red:hover { border-color: var(--accent4); color: var(--accent4); }
+
+  .slab-visual {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+    gap: 4px;
+    margin-top: 16px;
+  }
+  .slab-slot {
+    height: 48px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    color: white;
+    transition: all 0.3s;
+    cursor: default;
+    position: relative;
+  }
+  .slab-slot.free { background: #E5E7EB; color: #9CA3AF; }
+  .slab-slot.used { background: var(--accent); }
+  .slab-slot.partial { background: var(--accent3); color: var(--text); }
+  .slab-slot.highlight {
+    animation: pulse 0.6s ease-out;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.4);
+  }
+  .slab-slot.freed {
+    animation: fadeout 0.5s ease-out;
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+  }
+  @keyframes fadeout {
+    0% { background: var(--accent2); }
+    100% { background: #E5E7EB; }
+  }
+  .viz-log {
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--surface2);
+    border-radius: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text2);
+    max-height: 160px;
+    overflow-y: auto;
+    line-height: 1.8;
+  }
+  .viz-log .log-line { opacity: 0; animation: logIn 0.3s forwards; }
+  @keyframes logIn { to { opacity: 1; } }
+
+  /* --- Comparison Table --- */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .compare-table th {
+    background: var(--surface2);
+    padding: 10px 16px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 13px;
+    border-bottom: 2px solid var(--border2);
+  }
+  .compare-table td {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+  }
+  .compare-table tr:last-child td { border-bottom: none; }
+  .compare-table .highlight-row { background: var(--accent-light); }
+  .compare-table .highlight-row td { color: var(--accent); font-weight: 500; }
+
+  /* --- Callout --- */
+  .callout {
+    padding: 16px 20px;
+    border-radius: 10px;
+    margin: 16px 0;
+    font-size: 14px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .callout-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .callout-info { background: var(--accent-light); color: #4338CA; }
+  .callout-warn { background: var(--accent3-light); color: #92400E; }
+  .callout-success { background: var(--accent2-light); color: #065F46; }
+
+  /* --- Code --- */
+  .code-block {
+    background: #1E1E2E;
+    color: #CDD6F4;
+    border-radius: 10px;
+    padding: 20px;
+    margin: 16px 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+  }
+  .code-block .comment { color: #6C7086; }
+  .code-block .keyword { color: #CBA6F7; }
+  .code-block .type { color: #89B4FA; }
+  .code-block .func { color: #F9E2AF; }
+  .code-block .string { color: #A6E3A1; }
+
+  /* --- Flow Steps --- */
+  .flow-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 20px 0;
+  }
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    position: relative;
+    padding-bottom: 24px;
+  }
+  .flow-step:last-child { padding-bottom: 0; }
+  .flow-step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 17px;
+    top: 38px;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .flow-step .step-dot {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: var(--accent-light);
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    z-index: 1;
+  }
+  .flow-step .step-content h4 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .flow-step .step-content p {
+    font-size: 14px;
+    color: var(--text2);
+    margin: 0;
+  }
+
+  /* --- Tabs --- */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 0;
+  }
+  .tab {
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* --- Three-col stat --- */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .stat-card {
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat-label {
+    font-size: 12px;
+    color: var(--text3);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  /* --- Scrollbar --- */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  @media (max-width: 640px) {
+    .page-header h1 { font-size: 28px; }
+    .toc-list { grid-template-columns: 1fr; }
+    .stats-row { grid-template-columns: 1fr; }
+    .compare-table { font-size: 12px; }
+    .compare-table th, .compare-table td { padding: 8px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== HEADER ==================== -->
+<header class="page-header">
+  <h1>Slab 分配机制</h1>
+  <p class="subtitle">操作系统内核中最高效的对象缓存与内存分配方案，从 Linux 到 FreeBSD 的核心基石</p>
+  <div class="tag-row">
+    <span class="tag tag-purple">内存管理</span>
+    <span class="tag tag-green">Linux 内核</span>
+    <span class="tag tag-amber">高性能</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- ==================== TOC ==================== -->
+  <nav class="toc" id="toc">
+    <div class="toc-title">学习路线</div>
+    <ul class="toc-list">
+      <li><a href="#sec1"><span class="num">1</span>为什么需要 Slab</a></li>
+      <li><a href="#sec2"><span class="num">2</span>核心架构</a></li>
+      <li><a href="#sec3"><span class="num">3</span>工作流程</a></li>
+      <li><a href="#sec4"><span class="num">4</span>交互式演示</a></li>
+      <li><a href="#sec5"><span class="num">5</span>关键数据结构</a></li>
+      <li><a href="#sec6"><span class="num">6</span>对比分析</a></li>
+      <li><a href="#sec7"><span class="num">7</span>SLUB vs SLAB</a></li>
+      <li><a href="#sec8"><span class="num">8</span>实际代码</a></li>
+    </ul>
+  </nav>
+
+  <!-- ==================== SEC 1: WHY SLAB ==================== -->
+  <section class="section" id="sec1">
+    <div class="section-label"><span class="dot"></span>背景</div>
+    <h2>为什么需要 Slab 分配器？</h2>
+
+    <p>在操作系统内核中，有大量频繁创建和销毁的小对象：进程描述符（task_struct）、文件描述符、网络 socket、dentry 缓存等。如果每次都直接调用页分配器（Buddy System）获取内存，会带来三个严重问题：</p>
+
+    <div class="card">
+      <div class="card-title">
+        <span class="icon" style="background:#FEF2F2;color:#EF4444;">!</span>
+        问题一：严重的内部碎片
+      </div>
+      <p>Buddy System 以<strong>页（4KB）</strong>为最小分配单位。一个 task_struct 可能只有 1.7KB，却要占用整整一页，浪费超过 50% 的空间。内核中这类小对象成千上万，浪费极其惊人。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span class="icon" style="background:#FFFBEB;color:#F59E0B;">!</span>
+        问题二：频繁分配/回收的开销
+      </div>
+      <p>每次分配都要搜索空闲页框、修改页表、更新标记位；释放时又要做合并、回收。这些操作涉及多个自旋锁和中断控制，开销巨大。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span class="icon" style="background:#FFFBEB;color:#F59E0B;">!</span>
+        问题三：重复初始化
+      </div>
+      <p>同一类对象（如 task_struct）被反复分配时，每次都要执行构造函数来初始化数据结构。如果对象频繁创建销毁，重复初始化就是纯粹的浪费。</p>
+    </div>
+
+    <div class="callout callout-success">
+      <span class="callout-icon">&#10003;</span>
+      <span><strong>Slab 分配器的核心思想：</strong>为每种内核对象类型预分配一批对象缓存，对象释放后不立即归还给伙伴系统，而是保留在缓存中供下次复用，同时利用"对象构造/析构"机制避免重复初始化。</span>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 2: CORE ARCH ==================== -->
+  <section class="section" id="sec2">
+    <div class="section-label"><span class="dot"></span>架构</div>
+    <h2>三级架构：Cache → Slab → Object</h2>
+
+    <p>Slab 分配器采用三级层次结构，自顶向下依次为：</p>
+
+    <div class="diagram-wrap">
+      <svg width="100%" viewBox="0 0 760 420" style="max-width:760px;">
+        <!-- Background -->
+        <rect x="0" y="0" width="760" height="420" rx="16" fill="#FAFBFC"/>
+
+        <!-- Cache layer -->
+        <rect x="30" y="20" width="700" height="70" rx="12" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1"/>
+        <text x="380" y="45" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="600" fill="#4338CA">kmem_cache（缓存层）</text>
+        <text x="380" y="68" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#6366F1">每种内核对象一个 Cache，如 task_struct_cache、inode_cache</text>
+
+        <!-- Arrow down -->
+        <line x1="250" y1="90" x2="250" y2="120" stroke="#C7D2FE" stroke-width="1.5"/>
+        <line x1="510" y1="90" x2="510" y2="120" stroke="#C7D2FE" stroke-width="1.5"/>
+        <polygon points="246,118 254,118 250,126" fill="#C7D2FE"/>
+        <polygon points="506,118 514,118 510,126" fill="#C7D2FE"/>
+
+        <!-- Slab 1 (partial) -->
+        <rect x="80" y="130" width="340" height="100" rx="10" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1"/>
+        <text x="250" y="152" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="600" fill="#92400E">Slab（页面组）— Partial</text>
+
+        <!-- Objects inside Slab 1 -->
+        <rect x="100" y="165" width="42" height="28" rx="5" fill="#6366F1"/>
+        <text x="121" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj 0</text>
+        <rect x="150" y="165" width="42" height="28" rx="5" fill="#6366F1"/>
+        <text x="171" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj 1</text>
+        <rect x="200" y="165" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="221" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+        <rect x="250" y="165" width="42" height="28" rx="5" fill="#6366F1"/>
+        <text x="271" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj 3</text>
+        <rect x="300" y="165" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="321" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+
+        <text x="100" y="215" font-family="sans-serif" font-size="10" fill="#92400E">满/空闲对象混合，部分使用中</text>
+
+        <!-- Slab 2 (full) -->
+        <rect x="440" y="130" width="280" height="100" rx="10" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1"/>
+        <text x="580" y="152" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="600" fill="#065F46">Slab（页面组）— Full</text>
+
+        <rect x="460" y="165" width="42" height="28" rx="5" fill="#10B981"/>
+        <text x="481" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj</text>
+        <rect x="510" y="165" width="42" height="28" rx="5" fill="#10B981"/>
+        <text x="531" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj</text>
+        <rect x="560" y="165" width="42" height="28" rx="5" fill="#10B981"/>
+        <text x="581" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj</text>
+        <rect x="610" y="165" width="42" height="28" rx="5" fill="#10B981"/>
+        <text x="631" y="183" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white" font-weight="500">Obj</text>
+
+        <text x="460" y="215" font-family="sans-serif" font-size="10" fill="#065F46">所有对象均已分配</text>
+
+        <!-- Slab 3 (empty) -->
+        <rect x="80" y="250" width="340" height="100" rx="10" fill="#F1F3F5" stroke="#D1D5DB" stroke-width="1"/>
+        <text x="250" y="272" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="600" fill="#6B7280">Slab（页面组）— Empty</text>
+
+        <rect x="100" y="285" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="121" y="303" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+        <rect x="150" y="285" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="171" y="303" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+        <rect x="200" y="285" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="221" y="303" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+        <rect x="250" y="285" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="271" y="303" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+        <rect x="300" y="285" width="42" height="28" rx="5" fill="#E5E7EB"/>
+        <text x="321" y="303" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#9CA3AF" font-weight="500">Free</text>
+
+        <text x="100" y="335" font-family="sans-serif" font-size="10" fill="#6B7280">所有对象空闲，可被回收</text>
+
+        <!-- Legend -->
+        <rect x="460" y="270" width="16" height="16" rx="3" fill="#6366F1"/>
+        <text x="484" y="283" font-family="sans-serif" font-size="12" fill="#4B5563">已使用</text>
+        <rect x="460" y="296" width="16" height="16" rx="3" fill="#E5E7EB"/>
+        <text x="484" y="309" font-family="sans-serif" font-size="12" fill="#4B5563">空闲</text>
+        <rect x="460" y="322" width="16" height="16" rx="3" fill="#10B981"/>
+        <text x="484" y="335" font-family="sans-serif" font-size="12" fill="#4B5563">已满</text>
+
+        <!-- Bottom labels -->
+        <rect x="30" y="370" width="700" height="36" rx="8" fill="#F3F4F6"/>
+        <text x="380" y="393" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#6B7280">
+          Cache 管理多个 Slab | 每个 Slab 由 1~多个连续物理页组成 | 每个 Slab 包含多个同类型 Object
+        </text>
+      </svg>
+      <div class="diagram-caption">图 1：Slab 分配器三级层次结构</div>
+    </div>
+
+    <h3>三种 Slab 状态</h3>
+    <p>每个 Slab（由连续物理页组成）始终处于以下三种状态之一：</p>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-value" style="color:var(--accent2);">Full</div>
+        <div class="stat-label">所有对象已分配<br>无空闲对象</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color:var(--accent3);">Partial</div>
+        <div class="stat-label">部分对象已分配<br>有空闲对象</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color:var(--text3);">Empty</div>
+        <div class="stat-label">所有对象空闲<br>可被系统回收</div>
+      </div>
+    </div>
+
+    <div class="callout callout-info">
+      <span class="callout-icon">i</span>
+      <span>Cache 内部维护三个双向链表：<strong>full、partial、empty</strong>。分配时优先从 partial 链分配，释放时优先归还给 partial 链（而非 empty 链），目的是让 partial slab 保留更多可用对象以加速后续分配。</span>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 3: WORKFLOW ==================== -->
+  <section class="section" id="sec3">
+    <div class="section-label"><span class="dot"></span>流程</div>
+    <h2>分配与回收的完整流程</h2>
+
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab(event, 'tab-alloc')">对象分配流程</div>
+      <div class="tab" onclick="switchTab(event, 'tab-free')">对象释放流程</div>
+    </div>
+
+    <div class="tab-panel active" id="tab-alloc">
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="step-dot">1</div>
+          <div class="step-content">
+            <h4>查找目标 Cache</h4>
+            <p>根据对象类型找到对应的 kmem_cache。例如分配 task_struct 就找 task_struct_cache。每个 Cache 保存了对象大小、对齐要求、构造/析构函数等元信息。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">2</div>
+          <div class="step-content">
+            <h4>从 Partial 链获取空闲对象</h4>
+            <p>遍历 partial 链表，从第一个 partial slab 中取出一个空闲对象（通过空闲对象指针数组 O(1) 定位）。取出后更新 slab 的空闲计数。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">3</div>
+          <div class="step-content">
+            <h4>Partial 链为空？从 Empty 链获取</h4>
+            <p>如果 partial 链没有可用的 slab，则从 empty 链取出一个 slab 并升级为 partial。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">4</div>
+          <div class="step-content">
+            <h4>Empty 链也为空？向 Buddy System 申请新页</h4>
+            <p>所有链表都无可用 slab 时，调用伙伴系统分配新页框，创建新的 slab，初始化其中的对象（执行构造函数），然后分配。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">5</div>
+          <div class="step-content">
+            <h4>返回对象指针</h4>
+            <p>返回指向该对象的指针。由于对象已被构造函数初始化（或从缓存复用），调用者可以直接使用，无需再次初始化。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="tab-free">
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="step-dot">1</div>
+          <div class="step-content">
+            <h4>定位对象所属 Slab</h4>
+            <p>通过对象的物理地址计算出它所在的 slab（利用页描述符 page 中的 slab 指针，或通过地址对齐计算）。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">2</div>
+          <div class="step-content">
+            <h4>调用析构函数</h4>
+            <p>如果该 Cache 配置了析构函数，先执行析构函数清理对象中的资源（如释放内部指针、复位标志位）。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">3</div>
+          <div class="step-content">
+            <h4>标记对象为空闲</h4>
+            <p>将对象加入 slab 内部的空闲对象链表（或位图标记为空闲），更新 slab 的 inuse 计数。</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="step-dot">4</div>
+          <div class="step-content">
+            <h4>调整 Slab 状态</h4>
+            <p>如果 slab 变成全部空闲，从 partial 链移到 empty 链。系统在内存紧张时可以回收 empty slab 的页框还给伙伴系统。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 4: INTERACTIVE VIZ ==================== -->
+  <section class="section" id="sec4">
+    <div class="section-label"><span class="dot"></span>动手试试</div>
+    <h2>交互式 Slab 分配演示</h2>
+    <p>下面是一个简化的 Slab 分配器模拟器。你可以亲自体验对象的分配和释放过程。</p>
+
+    <div class="viz-container">
+      <div style="font-size:13px;color:var(--text2);margin-bottom:12px;">
+        模拟对象类型：<strong>task_struct</strong>（大小约 1.7KB，每个 Slab 可容纳 <span id="obj-per-slab">8</span> 个对象）
+      </div>
+      <div class="viz-controls">
+        <button class="viz-btn viz-btn-green" onclick="slabAlloc()">分配对象</button>
+        <button class="viz-btn viz-btn-red" onclick="slabFree()">释放对象</button>
+        <button class="viz-btn" onclick="slabReset()">重置</button>
+        <button class="viz-btn" onclick="slabNewSlab()">手动创建 Slab</button>
+      </div>
+      <div id="slab-container"></div>
+      <div id="slab-stats" style="display:flex;gap:16px;margin-top:16px;font-size:13px;color:var(--text2);"></div>
+      <div class="viz-log" id="slab-log">
+        <div style="color:var(--text3);">等待操作...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 5: DATA STRUCTURES ==================== -->
+  <section class="section" id="sec5">
+    <div class="section-label"><span class="dot"></span>深入</div>
+    <h2>关键数据结构</h2>
+
+    <p>理解 Slab 的核心在于掌握三个数据结构之间的关系：</p>
+
+    <pre class="code-block">
+<span class="comment">// Linux 内核中的核心结构体（简化版）</span>
+
+<span class="keyword">struct</span> <span class="type">kmem_cache</span> {
+    <span class="keyword">const char</span>        *name;        <span class="comment">// Cache 名称，如 "task_struct"</span>
+    <span class="keyword">unsigned int</span>        object_size;  <span class="comment">// 单个对象的大小</span>
+    <span class="keyword">unsigned int</span>        size;        <span class="comment">// 含对齐填充后的实际大小</span>
+    <span class="keyword">unsigned int</span>        order;        <span class="comment">// 从伙伴系统申请的页框阶数</span>
+    <span class="keyword">unsigned int</span>        num;         <span class="comment">// 每个 Slab 可容纳的对象数</span>
+    <span class="type">void</span>                (*ctor)(<span class="type">void</span> *);  <span class="comment">// 对象构造函数</span>
+    <span class="type">void</span>                (*dtor)(<span class="type">void</span> *);  <span class="comment">// 对象析构函数</span>
+    <span class="type">struct list_head</span>    partial;     <span class="comment">// Partial Slab 双向链表</span>
+    <span class="type">struct list_head</span>    full;        <span class="comment">// Full Slab 双向链表</span>
+    <span class="type">struct list_head</span>    empty;       <span class="comment">// Empty Slab 双向链表</span>
+    <span class="keyword">unsigned int</span>        gfporder;    <span class="comment">// 分配标志</span>
+};
+
+<span class="keyword">struct</span> <span class="type">slab</span> {
+    <span class="type">struct list_head</span>    list;        <span class="comment">// 链表节点（挂在 cache 的某个链表上）</span>
+    <span class="keyword">unsigned int</span>        inuse;       <span class="comment">// 已使用的对象数量</span>
+    <span class="keyword">unsigned int</span>        free;        <span class="comment">// 空闲对象数量</span>
+    <span class="type">void</span>               *s_mem;       <span class="comment">// 指向第一个对象的指针</span>
+    <span class="type">void</span>               **freelist;   <span class="comment">// 空闲对象指针数组</span>
+};
+    </pre>
+
+    <div class="callout callout-info">
+      <span class="callout-icon">i</span>
+      <span><strong>空闲对象管理：</strong>Slab 内部用指针数组（freelist）管理空闲对象。每个空闲对象的起始位置存储着指向下一个空闲对象的指针，形成隐式链表。分配时 O(1) 弹出，释放时 O(1) 压入，非常高效。</span>
+    </div>
+
+    <h3>对象大小对齐与 Slab 着色</h3>
+    <p>为了提高 CPU 缓存命中率，Slab 分配器引入了<strong>着色（coloring）</strong>机制：</p>
+
+    <div class="diagram-wrap">
+      <svg width="100%" viewBox="0 0 760 200" style="max-width:760px;">
+        <rect x="0" y="0" width="760" height="200" rx="12" fill="#FAFBFC"/>
+
+        <!-- Slab A - color offset 0 -->
+        <text x="70" y="24" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#4338CA">Slab A (color=0)</text>
+        <rect x="20" y="32" width="120" height="50" rx="6" fill="#E5E7EB"/>
+        <text x="80" y="62" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#6B7280">对齐偏移 0</text>
+        <rect x="20" y="86" width="120" height="36" rx="4" fill="#6366F1"/>
+        <text x="80" y="108" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 0</text>
+        <rect x="20" y="126" width="120" height="36" rx="4" fill="#6366F1"/>
+        <text x="80" y="148" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 1</text>
+
+        <!-- Slab B - color offset 16 -->
+        <text x="310" y="24" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#4338CA">Slab B (color=16)</text>
+        <rect x="250" y="32" width="120" height="50" rx="6" fill="#FFFBEB"/>
+        <text x="310" y="62" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#92400E">对齐偏移 16B</text>
+        <rect x="250" y="86" width="120" height="36" rx="4" fill="#10B981"/>
+        <text x="310" y="108" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 0</text>
+        <rect x="250" y="126" width="120" height="36" rx="4" fill="#10B981"/>
+        <text x="310" y="148" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 1</text>
+
+        <!-- Slab C - color offset 32 -->
+        <text x="550" y="24" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#4338CA">Slab C (color=32)</text>
+        <rect x="490" y="32" width="120" height="50" rx="6" fill="#FFFBEB"/>
+        <text x="550" y="62" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#92400E">对齐偏移 32B</text>
+        <rect x="490" y="86" width="120" height="36" rx="4" fill="#F59E0B"/>
+        <text x="550" y="108" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 0</text>
+        <rect x="490" y="126" width="120" height="36" rx="4" fill="#F59E0B"/>
+        <text x="550" y="148" text-anchor="middle" font-family="sans-serif" font-size="9" fill="white">Obj 1</text>
+
+        <!-- Bottom explanation -->
+        <rect x="20" y="175" width="720" height="20" rx="4" fill="#F3F4F6"/>
+        <text x="380" y="189" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#6B7280">着色（Coloring）：不同 Slab 的对象起始地址错开，避免映射到同一 CPU Cache Line，减少冲突失效</text>
+      </svg>
+      <div class="diagram-caption">图 2：Slab 着色机制 — 错开对象在缓存行中的映射位置</div>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 6: COMPARISON ==================== -->
+  <section class="section" id="sec6">
+    <div class="section-label"><span class="dot"></span>对比</div>
+    <h2>与其他分配器的对比</h2>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>特性</th>
+          <th>Buddy System</th>
+          <th>Slab 分配器</th>
+          <th>kmalloc</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="highlight-row">
+          <td>最小分配单位</td>
+          <td>1 页 (4KB)</td>
+          <td>单个对象</td>
+          <td>字节级（按 2^n 分类）</td>
+        </tr>
+        <tr>
+          <td>适用对象大小</td>
+          <td>页级（大块）</td>
+          <td>固定大小的内核对象</td>
+          <td>任意小尺寸</td>
+        </tr>
+        <tr>
+          <td>内部碎片</td>
+          <td>严重（小对象）</td>
+          <td>极小</td>
+          <td>较小</td>
+        </tr>
+        <tr>
+          <td>分配速度</td>
+          <td>较慢</td>
+          <td>极快（O(1)）</td>
+          <td>快</td>
+        </tr>
+        <tr>
+          <td>对象初始化</td>
+          <td>每次重新初始化</td>
+          <td>构造函数 + 缓存复用</td>
+          <td>不清零（可设 GFP_ZERO）</td>
+        </tr>
+        <tr>
+          <td>硬件缓存友好</td>
+          <td>一般</td>
+          <td>优秀（着色机制）</td>
+          <td>一般</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-warn">
+      <span class="callout-icon">!</span>
+      <span><strong>kmalloc 与 Slab 的关系：</strong>kmalloc 底层实际上就是 Slab 分配器。内核预创建了一组不同大小的通用 Cache（如 32B、64B、128B...），kmalloc 根据请求大小找到最匹配的 Cache，然后从中分配。所以 kmalloc 本质上是 Slab 的一种"通用封装"。</span>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 7: SLUB vs SLAB ==================== -->
+  <section class="section" id="sec7">
+    <div class="section-label"><span class="dot"></span>演进</div>
+    <h2>SLAB vs SLUB vs SLOB</h2>
+
+    <p>Linux 内核中实际上有三种 Slab 分配器的实现：</p>
+
+    <div class="diagram-wrap">
+      <svg width="100%" viewBox="0 0 760 240" style="max-width:760px;">
+        <rect x="0" y="0" width="760" height="240" rx="12" fill="#FAFBFC"/>
+
+        <!-- SLAB -->
+        <rect x="20" y="20" width="230" height="200" rx="12" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1"/>
+        <text x="135" y="48" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="700" fill="#4338CA">SLAB</text>
+        <text x="135" y="68" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#6366F1">原始实现（Jeff Bonwick）</text>
+        <text x="40" y="98" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 对象队列 + 颜色缓存</text>
+        <text x="40" y="118" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 每个 CPU 有 per-CPU 缓存</text>
+        <text x="40" y="138" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 元数据开销较大</text>
+        <text x="40" y="158" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 代码复杂度高</text>
+        <rect x="60" y="175" width="150" height="26" rx="6" fill="#FEF2F2"/>
+        <text x="135" y="193" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#EF4444">已逐步淘汰</text>
+
+        <!-- SLUB -->
+        <rect x="265" y="20" width="230" height="200" rx="12" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+        <text x="380" y="48" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="700" fill="#065F46">SLUB</text>
+        <text x="380" y="68" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#10B981">当前默认分配器</text>
+        <text x="285" y="98" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 极简元数据（页描述符复用）</text>
+        <text x="285" y="118" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 更好的 NUMA 支持</text>
+        <text x="285" y="138" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 调试功能强大</text>
+        <text x="285" y="158" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 大规模系统性能优异</text>
+        <rect x="305" y="175" width="150" height="26" rx="6" fill="#ECFDF5"/>
+        <text x="380" y="193" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#10B981">Linux 默认选择</text>
+
+        <!-- SLOB -->
+        <rect x="510" y="20" width="230" height="200" rx="12" fill="#F3F4F5" stroke="#D1D5DB" stroke-width="1"/>
+        <text x="625" y="48" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="700" fill="#6B7280">SLOB</text>
+        <text x="625" y="68" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#9CA3AF">极简实现</text>
+        <text x="530" y="98" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 简单的 first-fit</text>
+        <text x="530" y="118" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 内存开销最小</text>
+        <text x="530" y="138" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 适合嵌入式/小内存</text>
+        <text x="530" y="158" font-family="sans-serif" font-size="12" fill="#4B5563">&#8226; 性能一般</text>
+        <rect x="550" y="175" width="150" height="26" rx="6" fill="#F3F4F5"/>
+        <text x="625" y="193" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#6B7280">嵌入式系统使用</text>
+      </svg>
+      <div class="diagram-caption">图 3：三种 Slab 实现的对比</div>
+    </div>
+  </section>
+
+  <!-- ==================== SEC 8: CODE ==================== -->
+  <section class="section" id="sec8">
+    <div class="section-label"><span class="dot"></span>实战</div>
+    <h2>内核中的实际使用</h2>
+
+    <pre class="code-block">
+<span class="comment">// 1. 创建一个新的 Slab Cache</span>
+<span class="type">struct kmem_cache</span> *task_struct_cachep;
+
+task_struct_cachep = <span class="func">kmem_cache_create</span>(
+    <span class="string">"task_struct"</span>,      <span class="comment">// Cache 名称</span>
+    <span class="keyword">sizeof</span>(<span class="type">struct task_struct</span>), <span class="comment">// 对象大小</span>
+    <span class="func">ARCH_MIN_TASKALIGN</span>,  <span class="comment">// 对齐要求</span>
+    SLAB_PANIC | SLAB_NOTRACK, <span class="comment">// 标志位</span>
+    <span class="keyword">NULL</span>                <span class="comment">// 构造函数（可选）</span>
+);
+
+<span class="comment">// 2. 从 Cache 中分配一个对象</span>
+<span class="type">struct task_struct</span> *task;
+task = <span class="func">kmem_cache_alloc</span>(task_struct_cachep, GFP_KERNEL);
+
+<span class="comment">// 3. 使用完毕后释放</span>
+<span class="func">kmem_cache_free</span>(task_struct_cachep, task);
+
+<span class="comment">// 4. 通用分配（kmalloc 底层使用 Slab）</span>
+<span class="type">void</span> *buf = <span class="func">kmalloc</span>(256, GFP_KERNEL);
+<span class="func">kfree</span>(buf);
+    </pre>
+
+    <h3>如何查看内核中的 Slab 信息</h3>
+
+    <pre class="code-block">
+<span class="comment">// 在 Linux 系统中，可以通过以下方式查看</span>
+
+<span class="comment">// 方式 1：查看 /proc/slabinfo</span>
+$ <span class="func">cat</span> /proc/slabinfo
+slabinfo - version: 2.1
+<font color="#A6E3A1"># name            &lt;active_objs&gt;  &lt;num_objs&gt;  &lt;objsize&gt;  ...</font>
+task_struct          512       640      1792  ...    1    8 : tunables ...
+
+<span class="comment">// 方式 2：使用 slabtop 命令（实时监控）</span>
+$ <span class="func">slabtop</span>
+
+<span class="comment">// 方式 3：查看 /sys/kernel/slab/（SLUB 特有）</span>
+$ ls /sys/kernel/slab/task_struct/
+aliases      align       object_size  order  partial ...
+    </pre>
+  </section>
+
+  <!-- ==================== SUMMARY ==================== -->
+  <section class="section" id="sec9">
+    <div class="section-label"><span class="dot"></span>总结</div>
+    <h2>核心要点回顾</h2>
+
+    <div class="card" style="border-left: 4px solid var(--accent);">
+      <div class="card-title" style="margin-bottom:16px;">
+        <span class="icon" style="background:var(--accent-light);color:var(--accent);">&#9733;</span>
+        Slab 分配器的五大核心优势
+      </div>
+      <div style="display:grid;gap:12px;">
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <span style="background:var(--accent);color:white;min-width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">1</span>
+          <div><strong>消除内部碎片</strong> — 将页级分配降为对象级，大幅减少内存浪费</div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <span style="background:var(--accent);color:white;min-width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">2</span>
+          <div><strong>对象缓存复用</strong> — 释放的对象保留在 Cache 中，避免重复分配/回收开销</div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <span style="background:var(--accent);color:white;min-width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">3</span>
+          <div><strong>构造/析构缓存</strong> — 对象初始化结果被保留，避免重复初始化的开销</div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <span style="background:var(--accent);color:white;min-width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">4</span>
+          <div><strong>O(1) 分配速度</strong> — 空闲链表操作，分配和释放都是常数时间</div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <span style="background:var(--accent);color:white;min-width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">5</span>
+          <div><strong>硬件缓存友好</strong> — 着色机制让不同 Slab 的对象映射到不同 Cache Line</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;margin-top:32px;padding:24px;background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);">
+      <p style="font-size:14px;color:var(--text2);margin:0;">恭喜你学完了 Slab 分配机制的核心知识！</p>
+      <p style="font-size:13px;color:var(--text3);margin-top:8px;">你可以回到上方操作交互式演示加深理解，或在内核中用 <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;">slabtop</code> 实际观察。</p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+// ====== Tab switching ======
+function switchTab(e, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  e.target.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+
+// ====== Scroll reveal ======
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+}, { threshold: 0.1 });
+document.querySelectorAll('.section').forEach(s => observer.observe(s));
+
+// ====== Interactive Slab Simulator ======
+const OBJS_PER_SLAB = 8;
+let slabs = [];
+let allocCount = 0;
+
+class Slab {
+  constructor(id) {
+    this.id = id;
+    this.objects = new Array(OBJS_PER_SLAB).fill(null); // null = free, otherwise an alloc id
+    this.state = 'empty';
+  }
+  get inuse() { return this.objects.filter(o => o !== null).length; }
+  get free() { return OBJS_PER_SLAB - this.inuse; }
+  get isFull() { return this.inuse === OBJS_PER_SLAB; }
+  get isEmpty() { return this.inuse === 0; }
+}
+
+function getSlabState(slab) {
+  if (slab.isFull) return 'full';
+  if (slab.isEmpty) return 'empty';
+  return 'partial';
+}
+
+function renderSlabs() {
+  const container = document.getElementById('slab-container');
+  container.innerHTML = '';
+
+  slabs.forEach((slab, si) => {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'margin-bottom:16px;';
+    wrapper.innerHTML = `<div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px;">
+      Slab ${slab.id} — <span style="color:${
+        slab.isFull ? 'var(--accent2)' : slab.isEmpty ? 'var(--text3)' : 'var(--accent3)'
+      }">${getSlabState(slab).toUpperCase()}</span>
+      (${slab.inuse}/${OBJS_PER_SLAB} 已用)
+    </div>`;
+
+    const grid = document.createElement('div');
+    grid.className = 'slab-visual';
+
+    slab.objects.forEach((obj, oi) => {
+      const slot = document.createElement('div');
+      slot.className = 'slab-slot ' + (obj !== null ? 'used' : 'free');
+      slot.textContent = obj !== null ? '#' + obj : 'Free';
+      slot.id = `slab-${si}-${oi}`;
+      grid.appendChild(slot);
+    });
+
+    wrapper.appendChild(grid);
+    container.appendChild(wrapper);
+  });
+
+  updateStats();
+}
+
+function updateStats() {
+  const stats = document.getElementById('slab-stats');
+  const totalObjs = slabs.length * OBJS_PER_SLAB;
+  const usedObjs = slabs.reduce((s, sl) => s + sl.inuse, 0);
+  const freeObjs = totalObjs - usedObjs;
+  const partialSlabs = slabs.filter(s => !s.isFull && !s.isEmpty).length;
+  const fullSlabs = slabs.filter(s => s.isFull).length;
+  const emptySlabs = slabs.filter(s => s.isEmpty).length;
+
+  stats.innerHTML = `
+    <span>总 Slab: <strong>${slabs.length}</strong></span>
+    <span>已分配对象: <strong>${usedObjs}</strong> / ${totalObjs}</span>
+    <span>Full: ${fullSlabs} | Partial: ${partialSlabs} | Empty: ${emptySlabs}</span>
+  `;
+}
+
+function addLog(msg, type = '') {
+  const log = document.getElementById('slab-log');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.style.animationDelay = '0s';
+  const colors = { alloc: 'var(--accent2)', free: 'var(--accent4)', info: 'var(--accent)', warn: 'var(--accent3)' };
+  line.style.color = colors[type] || 'var(--text2)';
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function slabAlloc() {
+  // Find partial slab first
+  let targetSlab = slabs.find(s => getSlabState(s) === 'partial');
+  if (!targetSlab) {
+    // Find empty slab
+    targetSlab = slabs.find(s => s.isEmpty);
+    if (!targetSlab) {
+      // Create new slab from buddy system
+      const newSlab = new Slab(slabs.length);
+      slabs.push(newSlab);
+      targetSlab = newSlab;
+      addLog('向 Buddy System 申请新页框，创建 Slab ' + newSlab.id, 'info');
+    } else {
+      addLog('从 Empty 链取出 Slab ' + targetSlab.id, 'warn');
+    }
+  }
+
+  allocCount++;
+  // Find first free slot
+  const idx = targetSlab.objects.indexOf(null);
+  if (idx === -1) return;
+
+  targetSlab.objects[idx] = allocCount;
+  const prevState = getSlabState(targetSlab);
+  renderSlabs();
+
+  // Highlight
+  const el = document.getElementById(`slab-${slabs.indexOf(targetSlab)}-${idx}`);
+  if (el) el.classList.add('highlight');
+  setTimeout(() => { if (el) el.classList.remove('highlight'); }, 600);
+
+  addLog(`分配对象 #${allocCount} → Slab ${targetSlab.id} [槽 ${idx}]（${prevState} → ${getSlabState(targetSlab)}）`, 'alloc');
+}
+
+function slabFree() {
+  // Find last allocated object (most recently allocated, not yet freed)
+  let targetSlab = null, targetIdx = -1, maxAllocId = 0;
+
+  for (const slab of slabs) {
+    for (let i = 0; i < OBJS_PER_SLAB; i++) {
+      if (slab.objects[i] !== null && slab.objects[i] >= maxAllocId) {
+        maxAllocId = slab.objects[i];
+        targetSlab = slab;
+        targetIdx = i;
+      }
+    }
+  }
+
+  if (!targetSlab) {
+    addLog('没有可释放的对象！', 'warn');
+    return;
+  }
+
+  const prevState = getSlabState(targetSlab);
+  const freedId = targetSlab.objects[targetIdx];
+  targetSlab.objects[targetIdx] = null;
+  renderSlabs();
+
+  const el = document.getElementById(`slab-${slabs.indexOf(targetSlab)}-${targetIdx}`);
+  if (el) el.classList.add('freed');
+  setTimeout(() => { if (el) el.classList.remove('freed'); }, 500);
+
+  addLog(`释放对象 #${freedId} ← Slab ${targetSlab.id} [槽 ${targetIdx}]（${prevState} → ${getSlabState(targetSlab)}）`, 'free');
+}
+
+function slabReset() {
+  slabs = [];
+  allocCount = 0;
+  document.getElementById('slab-log').innerHTML = '<div style="color:var(--text3);">已重置，等待操作...</div>';
+  renderSlabs();
+  addLog('Slab 分配器已重置', 'info');
+}
+
+function slabNewSlab() {
+  const newSlab = new Slab(slabs.length);
+  slabs.push(newSlab);
+  renderSlabs();
+  addLog(`手动创建 Slab ${newSlab.id}（从 Buddy System 获取页框）`, 'info');
+}
+
+// Initialize with one slab
+slabs.push(new Slab(0));
+renderSlabs();
+</script>
+
+</body>
+</html>
