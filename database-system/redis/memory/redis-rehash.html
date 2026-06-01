@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 渐进式 Rehash 可视化</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #1a202c;
+    --muted: #718096;
+    --accent: #e53e3e;
+    --accent2: #dd6b20;
+    --green: #38a169;
+    --blue: #3182ce;
+    --purple: #805ad5;
+    --ht0-bg: #fff5f5;
+    --ht0-border: #fc8181;
+    --ht1-bg: #f0fff4;
+    --ht1-border: #68d391;
+    --moving: #fbd38d;
+    --shadow: 0 4px 20px rgba(0,0,0,0.08);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  .header h1 {
+    font-size: 28px;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .header p {
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  /* Phase indicator */
+  .phase-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-bottom: 28px;
+  }
+  .phase-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--card);
+    border: 2px solid var(--border);
+    transition: all 0.4s ease;
+  }
+  .phase-step.active {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+    transform: scale(1.05);
+  }
+  .phase-step.done {
+    color: #fff;
+    background: var(--green);
+    border-color: var(--green);
+  }
+  .phase-arrow {
+    font-size: 18px;
+    color: var(--border);
+    margin: 0 4px;
+  }
+
+  /* Info banner */
+  .info-banner {
+    background: linear-gradient(135deg, #fff9db, #fff1c1);
+    border: 1px solid #f6e05e;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    font-size: 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .info-banner .icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .info-banner strong { color: #975a16; }
+
+  /* Two tables side by side */
+  .tables-wrapper {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 28px;
+    align-items: flex-start;
+  }
+
+  .hash-table {
+    flex: 1;
+    background: var(--card);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .hash-table.faded { opacity: 0.35; transform: scale(0.97); }
+
+  .table-header {
+    padding: 14px 18px;
+    font-weight: 700;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .ht0 .table-header { background: var(--ht0-bg); color: #c53030; border-bottom: 2px solid var(--ht0-border); }
+  .ht1 .table-header { background: var(--ht1-bg); color: #276749; border-bottom: 2px solid var(--ht1-border); }
+
+  .table-meta {
+    font-size: 12px;
+    font-weight: 500;
+    opacity: 0.8;
+  }
+
+  .bucket-list { padding: 8px 12px 12px; }
+
+  .bucket {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    border-radius: 8px;
+    font-size: 13px;
+    transition: all 0.35s ease;
+    min-height: 36px;
+  }
+  .bucket-index {
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .bucket.empty .bucket-content { color: #cbd5e0; font-style: italic; font-size: 12px; }
+
+  .bucket-content {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .entry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.5s ease;
+    position: relative;
+  }
+  .entry .key { opacity: 0.7; }
+  .entry .val { font-weight: 800; }
+
+  .ht0 .entry { background: #fed7d7; color: #9b2c2c; }
+  .ht1 .entry { background: #c6f6d5; color: #276749; }
+
+  .entry.moving-out {
+    background: var(--moving) !important;
+    color: #744210 !important;
+    animation: pulse-out 0.6s ease;
+  }
+  .entry.moving-in {
+    animation: pop-in 0.4s ease;
+  }
+  .entry.just-added {
+    background: #bee3f8 !important;
+    color: #2a4365 !important;
+    animation: pop-in 0.4s ease;
+  }
+
+  .bucket.rehashing {
+    background: #fefcbf;
+    border: 1px dashed #d69e2e;
+  }
+
+  .bucket.rehashed {
+    background: #f0fff4;
+    border: 1px solid #9ae6b4;
+  }
+
+  .rehash-pointer {
+    position: relative;
+  }
+  .rehash-pointer::before {
+    content: '▶ rehashidx';
+    position: absolute;
+    left: -90px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--accent2);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    animation: blink 1s ease-in-out infinite;
+  }
+
+  @keyframes pulse-out {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.15); opacity: 0.6; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  @keyframes pop-in {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.15); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* Stats row */
+  .stats-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .stat-card {
+    flex: 1;
+    min-width: 140px;
+    background: var(--card);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+    text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 24px;
+    font-weight: 800;
+    margin-bottom: 2px;
+  }
+  .stat-card .stat-label {
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .stat-card.load .stat-value { color: var(--accent); }
+  .stat-card.progress .stat-value { color: var(--blue); }
+  .stat-card.rehashidx .stat-value { color: var(--accent2); }
+  .stat-card.size .stat-value { color: var(--purple); }
+
+  /* Progress bar */
+  .progress-bar-wrapper {
+    margin-bottom: 24px;
+  }
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .progress-bar {
+    height: 10px;
+    background: #edf2f7;
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 5px;
+    background: linear-gradient(90deg, var(--accent2), var(--green));
+    transition: width 0.5s ease;
+  }
+
+  /* Controls */
+  .controls {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 10px 22px;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none !important;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #c53030; }
+  .btn-secondary { background: var(--blue); color: #fff; }
+  .btn-secondary:hover:not(:disabled) { background: #2b6cb0; }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-success:hover:not(:disabled) { background: #2f855a; }
+  .btn-orange { background: var(--accent2); color: #fff; }
+  .btn-orange:hover:not(:disabled) { background: #c05621; }
+  .btn-reset { background: #edf2f7; color: var(--muted); border: 1px solid var(--border); }
+  .btn-reset:hover:not(:disabled) { background: #e2e8f0; color: var(--text); }
+
+  /* Explanation */
+  .explanation {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 22px 24px;
+    box-shadow: var(--shadow);
+    margin-bottom: 24px;
+  }
+  .explanation h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    color: var(--accent2);
+  }
+  .explanation p {
+    font-size: 14px;
+    color: #4a5568;
+    margin-bottom: 8px;
+  }
+  .explanation code {
+    background: #edf2f7;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--accent);
+  }
+
+  /* Why section */
+  .why-section {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 22px 24px;
+    box-shadow: var(--shadow);
+    margin-bottom: 24px;
+  }
+  .why-section h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    color: var(--blue);
+  }
+  .why-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .why-card {
+    padding: 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .why-card.before { background: #fff5f5; border-color: #feb2b2; }
+  .why-card.after { background: #f0fff4; border-color: #9ae6b4; }
+  .why-card h4 { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+  .why-card.before h4 { color: #c53030; }
+  .why-card.after h4 { color: #276749; }
+  .why-card p { font-size: 13px; color: #4a5568; }
+
+  /* Log */
+  .log-section {
+    background: #1a202c;
+    border-radius: 14px;
+    padding: 16px 20px;
+    max-height: 180px;
+    overflow-y: auto;
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+  }
+  .log-section .log-line { color: #a0aec0; }
+  .log-section .log-line .time { color: #718096; }
+  .log-section .log-line .cmd { color: #fbd38d; }
+  .log-section .log-line .info { color: #90cdf4; }
+  .log-section .log-line .success { color: #68d391; }
+  .log-section .log-line .warn { color: #fc8181; }
+
+  /* Auto play toggle */
+  .auto-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .auto-toggle input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent2);
+  }
+
+  @media (max-width: 768px) {
+    .tables-wrapper { flex-direction: column; }
+    .why-grid { grid-template-columns: 1fr; }
+    .rehash-pointer::before { left: -80px; font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <h1>Redis 渐进式 Rehash 可视化</h1>
+    <p>一步步看懂 Redis Hash 如何从 ht[0] 平滑迁移到 ht[1]</p>
+  </div>
+
+  <!-- Phase indicator -->
+  <div class="phase-bar" id="phaseBar">
+    <div class="phase-step active" id="phase0">① 正常运行</div>
+    <div class="phase-arrow">→</div>
+    <div class="phase-step" id="phase1">② 触发扩容</div>
+    <div class="phase-arrow">→</div>
+    <div class="phase-step" id="phase2">③ 渐进迁移</div>
+    <div class="phase-arrow">→</div>
+    <div class="phase-step" id="phase3">④ 完成 Rehash</div>
+  </div>
+
+  <!-- Why section (shown before expansion) -->
+  <div class="why-section" id="whySection">
+    <h3>🤔 为什么需要扩容？</h3>
+    <div class="why-grid">
+      <div class="why-card before">
+        <h4>扩容前 — 拥挤的哈希表</h4>
+        <p>负载因子 = 元素数 / 桶数 > 1，多个 key 挤在同一个桶里形成<strong>链表</strong>，查找退化为 O(n)，性能急剧下降</p>
+      </div>
+      <div class="why-card after">
+        <h4>扩容后 — 宽松的哈希表</h4>
+        <p>桶数翻倍，元素重新分散，链表长度缩短，查找回到 O(1)，内存与性能重新平衡</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Info banner -->
+  <div class="info-banner" id="infoBanner">
+    <span class="icon">💡</span>
+    <div id="infoText"><strong>当前状态：</strong>ht[0] 正常运行中。点击「触发扩容」开始渐进式 Rehash 演示。</div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card load">
+      <div class="stat-value" id="statLoad">1.50</div>
+      <div class="stat-label">负载因子</div>
+    </div>
+    <div class="stat-card progress">
+      <div class="stat-value" id="statProgress">0%</div>
+      <div class="stat-label">Rehash 进度</div>
+    </div>
+    <div class="stat-card rehashidx">
+      <div class="stat-value" id="statRehashIdx">—</div>
+      <div class="stat-label">rehashidx</div>
+    </div>
+    <div class="stat-card size">
+      <div class="stat-value" id="statSize">4 / 0</div>
+      <div class="stat-label">ht[0] / ht[1] 桶数</div>
+    </div>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="progress-bar-wrapper">
+    <div class="progress-label">
+      <span>Rehash 进度</span>
+      <span id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+    </div>
+  </div>
+
+  <!-- Two hash tables -->
+  <div class="tables-wrapper">
+    <div class="hash-table ht0" id="ht0Table">
+      <div class="table-header">
+        <span>📦 ht[0] — 旧表</span>
+        <span class="table-meta" id="ht0Meta">size=4, used=6</span>
+      </div>
+      <div class="bucket-list" id="ht0Buckets"></div>
+    </div>
+    <div class="hash-table ht1 faded" id="ht1Table">
+      <div class="table-header">
+        <span>🆕 ht[1] — 新表</span>
+        <span class="table-meta" id="ht1Meta">未分配</span>
+      </div>
+      <div class="bucket-list" id="ht1Buckets"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <button class="btn btn-primary" id="btnExpand" onclick="triggerExpand()">🚀 触发扩容</button>
+    <button class="btn btn-orange" id="btnStep" onclick="stepRehash()" disabled>⏩ 迁移一个桶</button>
+    <button class="btn btn-success" id="btnAuto" onclick="toggleAuto()" disabled>▶ 自动播放</button>
+    <button class="btn btn-secondary" id="btnAdd" onclick="addEntry()" disabled>➕ 新增元素</button>
+    <button class="btn btn-reset" id="btnReset" onclick="resetAll()">🔄 重置</button>
+    <label class="auto-toggle">
+      <input type="checkbox" id="chkAutoAdd" checked> 迁移时自动新增
+    </label>
+  </div>
+
+  <!-- Explanation -->
+  <div class="explanation" id="explanation">
+    <h3>📖 当前阶段说明</h3>
+    <div id="explainContent">
+      <p>Redis 的字典（dict）内部使用两个哈希表：<code>ht[0]</code> 和 <code>ht[1]</code>。</p>
+      <p>平时只有 <code>ht[0]</code> 在工作，<code>ht[1]</code> 处于未分配状态。</p>
+      <p>当负载因子（used / size）超过阈值时，Redis 会触发扩容，分配一个更大的 <code>ht[1]</code>，然后<strong>渐进式</strong>地把 <code>ht[0]</code> 的元素搬过去。</p>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="log-section" id="logSection">
+    <div class="log-line"><span class="time">[初始化]</span> <span class="info">Redis dict 初始化完成，ht[0] 有 4 个桶、6 个元素</span></div>
+  </div>
+</div>
+
+<script>
+// ===== Data Model =====
+const INITIAL_ENTRIES = [
+  { key: 'name',  val: 'Redis' },
+  { key: 'port',  val: '6379' },
+  { key: 'db',    val: '16' },
+  { key: 'ver',   val: '7.0' },
+  { key: 'mode',  val: 'cluster' },
+  { key: 'role',  val: 'master' },
+];
+
+// Simple hash function for visualization
+function hashKey(key, size) {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) {
+    h = (h * 31 + key.charCodeAt(i)) | 0;
+  }
+  return ((h % size) + size) % size;
+}
+
+// State
+let state = {
+  phase: 0, // 0=normal, 1=expanded, 2=rehashing, 3=done
+  ht0: { size: 4, used: 0, buckets: [[], [], [], []] },
+  ht1: { size: 0, used: 0, buckets: [] },
+  rehashidx: -1,
+  autoPlaying: false,
+  autoTimer: null,
+  entryCounter: 0,
+};
+
+const extraEntries = [
+  { key: 'ttl', val: '3600' },
+  { key: 'maxmem', val: '4gb' },
+  { key: 'aof', val: 'yes' },
+  { key: 'rdb', val: 'no' },
+  { key: 'save', val: '900:1' },
+  { key: 'tcp', val: '511' },
+  { key: 'timeout', val: '0' },
+  { key: 'loglevel', val: 'notice' },
+];
+
+function init() {
+  state.ht0 = { size: 4, used: 0, buckets: [[], [], [], []] };
+  state.ht1 = { size: 0, used: 0, buckets: [] };
+  state.rehashidx = -1;
+  state.phase = 0;
+  state.autoPlaying = false;
+  state.entryCounter = 0;
+
+  INITIAL_ENTRIES.forEach(e => {
+    const idx = hashKey(e.key, state.ht0.size);
+    state.ht0.buckets[idx].push({ ...e });
+    state.ht0.used++;
+  });
+  state.entryCounter = INITIAL_ENTRIES.length;
+
+  render();
+}
+
+// ===== Actions =====
+function triggerExpand() {
+  if (state.phase !== 0) return;
+  const newSize = state.ht0.size * 2;
+  state.ht1 = { size: newSize, used: 0, buckets: Array.from({ length: newSize }, () => []) };
+  state.rehashidx = 0;
+  state.phase = 2;
+
+  addLog('cmd', `触发扩容！ht[0].size=${state.ht0.size} → ht[1].size=${newSize}（翻倍）`);
+  addLog('info', `rehashidx = 0，渐进式 Rehash 开始`);
+  setInfo('扩容已触发！ht[1] 已分配 ' + newSize + ' 个桶。现在点击「迁移一个桶」逐步搬移元素。');
+
+  render();
+}
+
+function stepRehash() {
+  if (state.phase !== 2) return;
+
+  // Move one bucket from ht0 to ht1
+  let movedAny = false;
+  const bucket = state.ht0.buckets[state.rehashidx];
+  if (bucket && bucket.length > 0) {
+    bucket.forEach(entry => {
+      const newIdx = hashKey(entry.key, state.ht1.size);
+      state.ht1.buckets[newIdx].push({ ...entry, _new: true });
+      state.ht1.used++;
+    });
+    const count = bucket.length;
+    state.ht0.used -= count;
+    state.ht0.buckets[state.rehashidx] = [];
+    movedAny = true;
+    addLog('success', `桶 ${state.rehashidx} 迁移完成：${count} 个元素 → ht[1]`);
+  } else {
+    addLog('info', `桶 ${state.rehashidx} 为空，跳过`);
+  }
+
+  state.rehashidx++;
+
+  // Auto add an entry during rehash to show it goes to ht1
+  if (document.getElementById('chkAutoAdd').checked && state.entryCounter < extraEntries.length + INITIAL_ENTRIES.length) {
+    const eIdx = state.entryCounter - INITIAL_ENTRIES.length;
+    if (eIdx >= 0 && eIdx < extraEntries.length) {
+      const e = extraEntries[eIdx];
+      const newIdx = hashKey(e.key, state.ht1.size);
+      state.ht1.buckets[newIdx].push({ ...e, _justAdded: true });
+      state.ht1.used++;
+      state.entryCounter++;
+      addLog('cmd', `新增 <${e.key}:${e.val}> → 直接写入 ht[1] 桶${newIdx}`);
+    }
+  }
+
+  // Check if done
+  if (state.rehashidx >= state.ht0.size) {
+    finishRehash();
+    return;
+  }
+
+  render();
+}
+
+function addEntry() {
+  if (state.phase === 3) return;
+  const eIdx = state.entryCounter - INITIAL_ENTRIES.length;
+  if (eIdx >= extraEntries.length) {
+    addLog('warn', '没有更多预设元素了');
+    return;
+  }
+  const e = extraEntries[eIdx];
+
+  if (state.phase === 0) {
+    const idx = hashKey(e.key, state.ht0.size);
+    state.ht0.buckets[idx].push({ ...e, _justAdded: true });
+    state.ht0.used++;
+    addLog('cmd', `新增 <${e.key}:${e.val}> → ht[0] 桶${idx}`);
+  } else if (state.phase === 2) {
+    const idx = hashKey(e.key, state.ht1.size);
+    state.ht1.buckets[idx].push({ ...e, _justAdded: true });
+    state.ht1.used++;
+    addLog('cmd', `新增 <${e.key}:${e.val}> → ht[1] 桶${idx}（Rehash期间新元素直接进ht[1]）`);
+  }
+  state.entryCounter++;
+  render();
+}
+
+function finishRehash() {
+  // Swap: ht[0] = ht[1], ht[1] = empty
+  state.ht0 = { ...state.ht1 };
+  state.ht0.buckets = state.ht1.buckets.map(b => b.map(e => ({ ...e, _new: false, _justAdded: false })));
+  state.ht1 = { size: 0, used: 0, buckets: [] };
+  state.rehashidx = -1;
+  state.phase = 3;
+
+  addLog('success', `🎉 Rehash 完成！ht[0] 现在有 ${state.ht0.size} 个桶、${state.ht0.used} 个元素`);
+  addLog('info', `ht[1] 已释放，dict->rehashidx = -1`);
+  setInfo('Rehash 完成！ht[1] 已被释放，ht[0] 成为新的主表。可以点击「重置」重新演示。');
+
+  if (state.autoPlaying) toggleAuto();
+  render();
+}
+
+function toggleAuto() {
+  state.autoPlaying = !state.autoPlaying;
+  const btn = document.getElementById('btnAuto');
+  if (state.autoPlaying) {
+    btn.textContent = '⏸ 暂停';
+    state.autoTimer = setInterval(() => {
+      if (state.phase === 2) {
+        stepRehash();
+      } else {
+        toggleAuto();
+      }
+    }, 1200);
+  } else {
+    btn.textContent = '▶ 自动播放';
+    clearInterval(state.autoTimer);
+  }
+}
+
+function resetAll() {
+  if (state.autoPlaying) toggleAuto();
+  document.getElementById('logSection').innerHTML =
+    '<div class="log-line"><span class="time">[重置]</span> <span class="info">Redis dict 重新初始化</span></div>';
+  setInfo('当前状态：ht[0] 正常运行中。点击「触发扩容」开始渐进式 Rehash 演示。');
+  init();
+}
+
+// ===== Render =====
+function render() {
+  renderPhase();
+  renderTable('ht0', state.ht0, false);
+  renderTable('ht1', state.ht1, true);
+  renderStats();
+  renderButtons();
+  renderExplanation();
+}
+
+function renderPhase() {
+  const phases = [0, 1, 2, 3];
+  const phaseMap = { 0: 0, 2: 2, 3: 3 };
+  const activePhase = state.phase === 1 ? 1 : (phaseMap[state.phase] || 0);
+
+  phases.forEach(p => {
+    const el = document.getElementById('phase' + p);
+    el.className = 'phase-step';
+    if (p < activePhase) el.classList.add('done');
+    else if (p === activePhase) el.classList.add('active');
+  });
+
+  // Special: phase 1 is transient, skip to 2
+  if (state.phase === 2) {
+    document.getElementById('phase1').className = 'phase-step done';
+    document.getElementById('phase2').className = 'phase-step active';
+  }
+  if (state.phase === 3) {
+    document.getElementById('phase3').className = 'phase-step active';
+  }
+}
+
+function renderTable(prefix, table, isHt1) {
+  const container = document.getElementById(prefix + 'Buckets');
+  const meta = document.getElementById(prefix + 'Meta');
+  const tableEl = document.getElementById(prefix + 'Table');
+
+  if (table.size === 0) {
+    container.innerHTML = '<div style="text-align:center;color:#cbd5e0;padding:20px;font-size:13px;">未分配</div>';
+    meta.textContent = '未分配';
+    tableEl.classList.add('faded');
+    return;
+  }
+
+  tableEl.classList.remove('faded');
+  meta.textContent = `size=${table.size}, used=${table.used}`;
+
+  let html = '';
+  for (let i = 0; i < table.size; i++) {
+    const bucket = table.buckets[i];
+    const isEmpty = bucket.length === 0;
+    const isRehashing = !isHt1 && state.phase === 2 && i === state.rehashidx;
+    const isRehashed = !isHt1 && state.phase === 2 && i < state.rehashidx;
+    const isPointer = !isHt1 && state.phase === 2 && i === state.rehashidx;
+
+    let cls = 'bucket';
+    if (isEmpty) cls += ' empty';
+    if (isRehashing) cls += ' rehashing';
+    if (isRehashed) cls += ' rehashed';
+    if (isPointer) cls += ' rehash-pointer';
+
+    html += `<div class="${cls}">`;
+    html += `<span class="bucket-index">${i}</span>`;
+    html += `<span class="bucket-content">`;
+
+    if (isEmpty) {
+      html += `<span>null</span>`;
+    } else {
+      bucket.forEach(e => {
+        let entryCls = 'entry';
+        if (e._new) entryCls += ' moving-in';
+        if (e._justAdded) entryCls += ' just-added';
+        html += `<span class="${entryCls}"><span class="key">${e.key}</span>:<span class="val">${e.val}</span></span>`;
+      });
+    }
+
+    html += `</span></div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderStats() {
+  const load = state.ht0.size > 0 ? (state.ht0.used / state.ht0.size).toFixed(2) : '0.00';
+  const total = INITIAL_ENTRIES.length + Math.max(0, state.entryCounter - INITIAL_ENTRIES.length);
+  const total0 = state.ht0.used;
+
+  // During rehash: progress = rehashidx / ht0.size
+  let progress = 0;
+  if (state.phase === 2) {
+    progress = Math.round((state.rehashidx / state.ht0.size) * 100);
+  } else if (state.phase === 3) {
+    progress = 100;
+  }
+
+  document.getElementById('statLoad').textContent = state.phase === 2 ? `${(state.ht0.used / state.ht0.size).toFixed(2)}` : load;
+  document.getElementById('statProgress').textContent = progress + '%';
+  document.getElementById('statRehashIdx').textContent = state.phase === 2 ? state.rehashidx : (state.phase === 3 ? '-1' : '—');
+  document.getElementById('statSize').textContent = `${state.ht0.size} / ${state.ht1.size || 0}`;
+
+  document.getElementById('progressPct').textContent = progress + '%';
+  document.getElementById('progressFill').style.width = progress + '%';
+}
+
+function renderButtons() {
+  document.getElementById('btnExpand').disabled = state.phase !== 0;
+  document.getElementById('btnStep').disabled = state.phase !== 2;
+  document.getElementById('btnAuto').disabled = state.phase !== 2 && !state.autoPlaying;
+  document.getElementById('btnAdd').disabled = state.phase === 3;
+}
+
+function renderExplanation() {
+  const el = document.getElementById('explainContent');
+  if (state.phase === 0) {
+    el.innerHTML = `
+      <p>Redis 的字典（dict）内部使用两个哈希表：<code>ht[0]</code> 和 <code>ht[1]</code>。</p>
+      <p>平时只有 <code>ht[0]</code> 在工作，<code>ht[1]</code> 处于未分配状态。</p>
+      <p>当负载因子（used / size）超过阈值时，Redis 会触发扩容，分配一个更大的 <code>ht[1]</code>，然后<strong>渐进式</strong>地把 <code>ht[0]</code> 的元素搬过去。</p>
+    `;
+  } else if (state.phase === 2) {
+    const pct = Math.round((state.rehashidx / state.ht0.size) * 100);
+    el.innerHTML = `
+      <p>🔥 <strong>Rehash 进行中</strong>（进度 ${pct}%）</p>
+      <p>每次 CRUD 操作时，Redis 会顺带迁移 <code>ht[0]</code> 中 <code>rehashidx=${state.rehashidx}</code> 位置桶的所有元素到 <code>ht[1]</code>，然后将 rehashidx 加 1。</p>
+      <p>📌 <strong>关键规则</strong>：Rehash 期间，<u>新增元素直接写入 ht[1]</u>，修改/删除/查找则<u>同时检查 ht[0] 和 ht[1]</u>。</p>
+      <p>这样做的好处：不需要一次性迁移所有数据，避免长时间阻塞 Redis 主线程！</p>
+    `;
+  } else if (state.phase === 3) {
+    el.innerHTML = `
+      <p>✅ <strong>Rehash 完成！</strong></p>
+      <p>所有元素已迁移到新的 <code>ht[0]</code>（原 ht[1]），旧的 <code>ht[1]</code> 被释放。</p>
+      <p><code>dict->rehashidx</code> 重置为 -1，字典恢复到正常运行状态。</p>
+      <p>📊 对比：原来 4 个桶装 6 个元素（负载因子 1.5），现在 8 个桶装 ${state.ht0.used} 个元素（负载因子 ${(state.ht0.used / state.ht0.size).toFixed(2)}），哈希冲突大幅减少！</p>
+    `;
+  }
+}
+
+// ===== Helpers =====
+function addLog(type, msg) {
+  const el = document.getElementById('logSection');
+  const now = new Date();
+  const ts = `${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = `<span class="time">[${ts}]</span> <span class="${type}">${msg}</span>`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setInfo(text) {
+  document.getElementById('infoText').innerHTML = '<strong>当前状态：</strong>' + text;
+}
+
+// ===== Init =====
+init();
+</script>
+
+</body>
+</html>

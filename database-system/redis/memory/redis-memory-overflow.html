@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Redis 内存用完了会发生什么？</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #f0f4f8;
+      color: #1a202c;
+      line-height: 1.7;
+    }
+
+    /* ===== HEADER ===== */
+    .hero {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 100%);
+      color: #fff;
+      padding: 60px 40px 50px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      width: 400px; height: 400px;
+      border-radius: 50%;
+      background: rgba(229, 57, 53, 0.12);
+      top: -100px; right: -80px;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 300px; height: 300px;
+      border-radius: 50%;
+      background: rgba(255, 193, 7, 0.08);
+      bottom: -80px; left: -60px;
+    }
+    .hero-badge {
+      display: inline-block;
+      background: rgba(229,57,53,0.85);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      padding: 4px 14px;
+      border-radius: 20px;
+      margin-bottom: 18px;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-size: 2.4rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      margin-bottom: 14px;
+    }
+    .hero h1 span { color: #f87171; }
+    .hero p {
+      font-size: 1.05rem;
+      color: #94a3b8;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    /* ===== LAYOUT ===== */
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px 60px;
+    }
+
+    /* ===== SECTION TITLE ===== */
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1a202c;
+      margin-bottom: 18px;
+      margin-top: 44px;
+    }
+    .section-title .icon {
+      width: 36px; height: 36px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+
+    /* ===== CARDS ===== */
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 28px 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+      border: 1px solid #e8edf2;
+    }
+
+    /* ===== SCENARIO CARDS ===== */
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 600px) {
+      .scenario-grid { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 1.7rem; }
+    }
+    .scenario-card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 26px 24px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+      border: 2px solid transparent;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .scenario-card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    }
+    .scenario-card.error { border-color: #fca5a5; }
+    .scenario-card.evict { border-color: #86efac; }
+    .scenario-head {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 14px;
+    }
+    .scenario-head .dot {
+      width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+    }
+    .dot-red { background: #ef4444; }
+    .dot-green { background: #22c55e; }
+    .scenario-head h3 { font-size: 1.05rem; font-weight: 700; }
+    .scenario-card p { font-size: 0.93rem; color: #4a5568; line-height: 1.65; }
+
+    /* ===== FLOW DIAGRAM ===== */
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      position: relative;
+    }
+    .flow-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 18px 0;
+      position: relative;
+    }
+    .flow-item:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 19px;
+      top: 54px;
+      bottom: -18px;
+      width: 2px;
+      background: linear-gradient(to bottom, #cbd5e1, #e2e8f0);
+    }
+    .flow-num {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 15px;
+      flex-shrink: 0;
+      color: #fff;
+      position: relative;
+      z-index: 1;
+    }
+    .flow-num.blue { background: #3b82f6; }
+    .flow-num.orange { background: #f97316; }
+    .flow-num.red { background: #ef4444; }
+    .flow-num.green { background: #22c55e; }
+    .flow-num.purple { background: #8b5cf6; }
+    .flow-content h4 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
+    .flow-content p { font-size: 0.92rem; color: #4a5568; }
+
+    /* ===== POLICY TABLE ===== */
+    .policy-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+    .policy-table thead tr {
+      background: #1a202c;
+      color: #fff;
+    }
+    .policy-table th {
+      padding: 12px 16px;
+      text-align: left;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .policy-table th:first-child { border-radius: 10px 0 0 0; }
+    .policy-table th:last-child { border-radius: 0 10px 0 0; }
+    .policy-table tbody tr {
+      border-bottom: 1px solid #e8edf2;
+      transition: background 0.15s;
+    }
+    .policy-table tbody tr:hover { background: #f8fafc; }
+    .policy-table td { padding: 12px 16px; color: #374151; vertical-align: top; }
+    .policy-table td:first-child { font-weight: 600; color: #1a202c; font-family: monospace; font-size: 0.9rem; }
+    .tag {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .tag-red { background: #fee2e2; color: #b91c1c; }
+    .tag-green { background: #dcfce7; color: #15803d; }
+    .tag-blue { background: #dbeafe; color: #1d4ed8; }
+    .tag-yellow { background: #fef9c3; color: #854d0e; }
+
+    /* ===== CODE BLOCK ===== */
+    .code-wrap {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 20px 24px;
+      overflow-x: auto;
+      margin: 14px 0;
+    }
+    .code-wrap code {
+      font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, monospace;
+      font-size: 0.88rem;
+      color: #e2e8f0;
+      white-space: pre;
+    }
+    .cm { color: #64748b; }      /* comment */
+    .ck { color: #93c5fd; }      /* keyword / config key */
+    .cv { color: #86efac; }      /* value */
+    .cs { color: #fde68a; }      /* string */
+    .ce { color: #f87171; }      /* error */
+    .cp { color: #c084fc; }      /* prompt */
+
+    /* ===== ALERT BOX ===== */
+    .alert {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      border-radius: 12px;
+      padding: 18px 20px;
+      margin: 18px 0;
+    }
+    .alert-icon { font-size: 22px; flex-shrink: 0; line-height: 1.3; }
+    .alert-body h4 { font-size: 0.97rem; font-weight: 700; margin-bottom: 5px; }
+    .alert-body p { font-size: 0.91rem; line-height: 1.65; }
+    .alert-warn { background: #fffbeb; border: 1px solid #fcd34d; }
+    .alert-warn h4 { color: #92400e; }
+    .alert-warn p { color: #78350f; }
+    .alert-info { background: #eff6ff; border: 1px solid #93c5fd; }
+    .alert-info h4 { color: #1e40af; }
+    .alert-info p { color: #1e3a8a; }
+    .alert-success { background: #f0fdf4; border: 1px solid #86efac; }
+    .alert-success h4 { color: #166534; }
+    .alert-success p { color: #14532d; }
+
+    /* ===== SUMMARY BOX ===== */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 12px;
+    }
+    @media (max-width: 600px) {
+      .summary-grid { grid-template-columns: 1fr; }
+    }
+    .summary-item {
+      background: linear-gradient(135deg, #f8fafc, #f0f4f8);
+      border-radius: 14px;
+      padding: 20px;
+      text-align: center;
+      border: 1px solid #e2e8f0;
+    }
+    .summary-item .big { font-size: 2rem; margin-bottom: 6px; }
+    .summary-item h4 { font-size: 0.95rem; font-weight: 700; color: #1a202c; margin-bottom: 5px; }
+    .summary-item p { font-size: 0.85rem; color: #64748b; }
+
+    /* ===== READ / WRITE BADGE ===== */
+    .rw-row {
+      display: flex; gap: 16px; margin: 16px 0; flex-wrap: wrap;
+    }
+    .rw-badge {
+      flex: 1; min-width: 180px;
+      border-radius: 14px;
+      padding: 18px 20px;
+      text-align: center;
+    }
+    .rw-badge.read  { background: #f0fdf4; border: 2px solid #86efac; }
+    .rw-badge.write { background: #fef2f2; border: 2px solid #fca5a5; }
+    .rw-badge .big-text { font-size: 1.6rem; font-weight: 800; margin-bottom: 4px; }
+    .rw-badge.read  .big-text { color: #16a34a; }
+    .rw-badge.write .big-text { color: #dc2626; }
+    .rw-badge p { font-size: 0.88rem; color: #4a5568; }
+
+    /* footer */
+    .footer {
+      text-align: center;
+      color: #94a3b8;
+      font-size: 0.85rem;
+      padding: 30px 20px;
+      border-top: 1px solid #e2e8f0;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-badge">Redis 面试题 #33</div>
+  <h1>Redis 内存用完了<br/><span>会发生什么？</span></h1>
+  <p>内存上限触达后的行为、两种应对策略、8 种淘汰策略详解</p>
+</div>
+
+<div class="container">
+
+  <!-- ===== 核心答案一句话 ===== -->
+  <div class="section-title" style="margin-top: 8px;">
+    <div class="icon" style="background:#fef9c3;">💡</div>
+    核心结论
+  </div>
+  <div class="card">
+    <p style="font-size:1.05rem; line-height:1.9;">
+      当 Redis 内存达到 <strong>maxmemory</strong> 上限时，行为取决于你的配置策略——
+      <br/>① <strong>未配置淘汰机制</strong>：写命令报错，读命令仍可正常执行；
+      <br/>② <strong>配置了淘汰机制</strong>：Redis 自动淘汰旧数据后继续写入，通常用于作缓存。
+    </p>
+  </div>
+
+  <!-- ===== 两种场景 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#fee2e2;">🔀</div>
+    两种应对场景
+  </div>
+  <div class="scenario-grid">
+    <!-- 场景一 -->
+    <div class="scenario-card error">
+      <div class="scenario-head">
+        <div class="dot dot-red"></div>
+        <h3>场景一：返回错误（默认）</h3>
+      </div>
+      <p>
+        <strong>配置：<code>maxmemory-policy noeviction</code></strong><br/><br/>
+        Redis 拒绝所有会增加内存的写操作（SET、LPUSH、HSET…），
+        并返回 <code style="color:#dc2626;">OOM command not allowed when used memory > 'maxmemory'</code> 错误。<br/><br/>
+        ✅ <strong>读命令</strong>（GET、LRANGE…）仍可正常返回。<br/>
+        ❌ <strong>写命令</strong>会报错，应用层必须捕获并处理。
+      </p>
+    </div>
+    <!-- 场景二 -->
+    <div class="scenario-card evict">
+      <div class="scenario-head">
+        <div class="dot dot-green"></div>
+        <h3>场景二：淘汰旧数据（缓存模式）</h3>
+      </div>
+      <p>
+        <strong>配置淘汰策略，如 <code>allkeys-lru</code></strong><br/><br/>
+        Redis 在写入时自动驱逐"最不值得保留"的 Key，
+        腾出空间后再写入新数据，对调用方透明无感知。<br/><br/>
+        ✅ 适合作为<strong>缓存层</strong>使用，数据本身可从数据库重新加载。<br/>
+        ⚠️ 重要持久数据<strong>不要</strong>开淘汰，否则数据会被悄悄删除。
+      </p>
+    </div>
+  </div>
+
+  <!-- 读/写命令对比 -->
+  <div class="rw-row">
+    <div class="rw-badge read">
+      <div class="big-text">✅ 读命令</div>
+      <p>GET / LRANGE / HGET 等<br/>内存满了依然正常返回</p>
+    </div>
+    <div class="rw-badge write">
+      <div class="big-text">❌ 写命令</div>
+      <p>SET / LPUSH / INCR 等<br/>noeviction 时直接报 OOM 错误</p>
+    </div>
+  </div>
+
+  <!-- ===== 触发流程 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#dbeafe;">⚡</div>
+    Redis 内存满时的执行流程
+  </div>
+  <div class="card">
+    <div class="flow">
+      <div class="flow-item">
+        <div class="flow-num blue">1</div>
+        <div class="flow-content">
+          <h4>客户端发送写命令</h4>
+          <p>如 <code>SET key value</code>，Redis 准备处理该命令。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num orange">2</div>
+        <div class="flow-content">
+          <h4>检查当前内存使用量</h4>
+          <p>Redis 判断当前 used_memory 是否超过 <code>maxmemory</code> 设置的阈值。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num purple">3</div>
+        <div class="flow-content">
+          <h4>读取 maxmemory-policy 策略</h4>
+          <p>根据配置的策略决定下一步行为（noeviction / lru / lfu / random / ttl）。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num red">4a</div>
+        <div class="flow-content">
+          <h4>noeviction → 直接报错</h4>
+          <p>返回 <code style="color:#dc2626;">-OOM command not allowed when used memory > 'maxmemory'</code>，命令不执行。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num green">4b</div>
+        <div class="flow-content">
+          <h4>其他策略 → 执行淘汰</h4>
+          <p>按策略找到候选 Key 并删除，释放内存，然后继续执行写命令，对客户端透明。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== maxmemory 配置 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#f3e8ff;">⚙️</div>
+    如何配置内存上限
+  </div>
+  <div class="card">
+    <p style="margin-bottom: 14px; color: #4a5568;">在 <code>redis.conf</code> 中设置，或使用 <code>CONFIG SET</code> 动态修改：</p>
+    <div class="code-wrap">
+      <code><span class="cm"># redis.conf 静态配置</span>
+<span class="ck">maxmemory</span>          <span class="cv">2gb</span>          <span class="cm"># 设置上限为 2GB（支持 kb/mb/gb）</span>
+<span class="ck">maxmemory-policy</span>   <span class="cv">allkeys-lru</span>  <span class="cm"># 设置淘汰策略</span>
+
+<span class="cm"># 动态修改（无需重启，立即生效）</span>
+<span class="cp">127.0.0.1:6379></span> <span class="ck">CONFIG SET</span> <span class="cs">maxmemory</span> <span class="cv">2gb</span>
+<span class="cp">127.0.0.1:6379></span> <span class="ck">CONFIG SET</span> <span class="cs">maxmemory-policy</span> <span class="cv">allkeys-lru</span>
+
+<span class="cm"># 查看当前配置</span>
+<span class="cp">127.0.0.1:6379></span> <span class="ck">CONFIG GET</span> <span class="cs">maxmemory</span>
+<span class="cp">127.0.0.1:6379></span> <span class="ck">CONFIG GET</span> <span class="cs">maxmemory-policy</span></code>
+    </div>
+    <div class="alert alert-warn">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-body">
+        <h4>注意：maxmemory 默认为 0</h4>
+        <p>如果不设置，Redis 不限制内存使用，会一直分配直到耗尽操作系统可用内存，可能导致 OOM Killer 直接杀掉进程！<strong>生产环境务必设置此参数。</strong></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 8 种淘汰策略 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#ecfdf5;">📋</div>
+    8 种淘汰策略详解
+  </div>
+  <div class="card" style="padding: 0; overflow: hidden;">
+    <table class="policy-table">
+      <thead>
+        <tr>
+          <th>策略名称</th>
+          <th>淘汰范围</th>
+          <th>淘汰算法</th>
+          <th>适用场景</th>
+          <th>推荐</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>noeviction</td>
+          <td>不淘汰</td>
+          <td>直接报错</td>
+          <td>数据库模式，不允许丢数据</td>
+          <td><span class="tag tag-blue">默认</span></td>
+        </tr>
+        <tr>
+          <td>allkeys-lru</td>
+          <td>所有 Key</td>
+          <td>LRU（最近最少使用）</td>
+          <td>通用缓存，热点数据分布不均匀</td>
+          <td><span class="tag tag-green">★ 推荐</span></td>
+        </tr>
+        <tr>
+          <td>volatile-lru</td>
+          <td>设了 TTL 的 Key</td>
+          <td>LRU</td>
+          <td>混合存储，部分数据必须保留</td>
+          <td><span class="tag tag-yellow">按需</span></td>
+        </tr>
+        <tr>
+          <td>allkeys-lfu</td>
+          <td>所有 Key</td>
+          <td>LFU（最少频率使用）</td>
+          <td>访问频率差异明显的缓存</td>
+          <td><span class="tag tag-green">★ 推荐</span></td>
+        </tr>
+        <tr>
+          <td>volatile-lfu</td>
+          <td>设了 TTL 的 Key</td>
+          <td>LFU</td>
+          <td>有 TTL 的热点数据缓存</td>
+          <td><span class="tag tag-yellow">按需</span></td>
+        </tr>
+        <tr>
+          <td>allkeys-random</td>
+          <td>所有 Key</td>
+          <td>随机删除</td>
+          <td>所有 Key 访问频率相似</td>
+          <td><span class="tag tag-red">慎用</span></td>
+        </tr>
+        <tr>
+          <td>volatile-random</td>
+          <td>设了 TTL 的 Key</td>
+          <td>随机删除</td>
+          <td>TTL Key 的随机淘汰</td>
+          <td><span class="tag tag-red">慎用</span></td>
+        </tr>
+        <tr>
+          <td>volatile-ttl</td>
+          <td>设了 TTL 的 Key</td>
+          <td>TTL 最短优先</td>
+          <td>希望快过期的先被清理</td>
+          <td><span class="tag tag-yellow">按需</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="alert alert-info">
+    <div class="alert-icon">ℹ️</div>
+    <div class="alert-body">
+      <h4>LRU vs LFU 怎么选？</h4>
+      <p>
+        <strong>LRU（Least Recently Used）</strong>：淘汰最长时间没有被访问的 Key，适合热点数据有明显"时间局部性"的场景。<br/>
+        <strong>LFU（Least Frequently Used）</strong>：淘汰访问次数最少的 Key（Redis 4.0+），适合热点固定、长期高频访问的场景，不会因为"偶发"访问而保留冷数据。
+      </p>
+    </div>
+  </div>
+
+  <!-- ===== 错误演示 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#fff1f2;">🖥️</div>
+    noeviction 模式下的错误演示
+  </div>
+  <div class="card">
+    <p style="margin-bottom: 14px; color: #4a5568;">当内存达到上限，写命令会立即收到 OOM 错误：</p>
+    <div class="code-wrap">
+      <code><span class="cm"># 假设 maxmemory = 100mb，已满</span>
+
+<span class="cp">127.0.0.1:6379></span> <span class="ck">SET</span> <span class="cs">new_key</span> <span class="cv">"hello"</span>
+<span class="ce">(error) OOM command not allowed when used memory > 'maxmemory'</span>
+
+<span class="cp">127.0.0.1:6379></span> <span class="ck">LPUSH</span> <span class="cs">mylist</span> <span class="cv">item</span>
+<span class="ce">(error) OOM command not allowed when used memory > 'maxmemory'</span>
+
+<span class="cm"># 但读命令依然正常工作！</span>
+<span class="cp">127.0.0.1:6379></span> <span class="ck">GET</span> <span class="cs">existing_key</span>
+<span class="cv">"existing_value"</span>   <span class="cm"># ✅ 正常返回</span>
+
+<span class="cp">127.0.0.1:6379></span> <span class="ck">DBSIZE</span>
+<span class="cv">(integer) 1024000</span>  <span class="cm"># ✅ 正常返回</span></code>
+    </div>
+  </div>
+
+  <!-- ===== 最佳实践 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#f0f9ff;">🎯</div>
+    最佳实践建议
+  </div>
+  <div class="card">
+    <div class="flow">
+      <div class="flow-item">
+        <div class="flow-num blue">①</div>
+        <div class="flow-content">
+          <h4>纯缓存场景 → 用 allkeys-lru 或 allkeys-lfu</h4>
+          <p>所有数据都是缓存，都可以从数据库重建，推荐开启 allkeys-lru（或更精准的 allkeys-lfu），不用担心数据丢失。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num orange">②</div>
+        <div class="flow-content">
+          <h4>混合存储场景 → 用 volatile-lru，为持久数据不设 TTL</h4>
+          <p>必须持久化的 Key 不设过期时间，Redis 只会淘汰设了 TTL 的缓存 Key，核心数据得到保护。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num purple">③</div>
+        <div class="flow-content">
+          <h4>设置合理的 maxmemory，留 10~20% 余量</h4>
+          <p>如机器有 8GB，设置 maxmemory 6~7GB，避免极端情况下内存抖动触发 OOM。</p>
+        </div>
+      </div>
+      <div class="flow-item">
+        <div class="flow-num green">④</div>
+        <div class="flow-content">
+          <h4>监控 evicted_keys 指标</h4>
+          <p>通过 <code>INFO stats | grep evicted_keys</code> 观察淘汰频率。淘汰过于频繁说明内存不足，考虑扩容或优化数据结构。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="alert alert-success">
+    <div class="alert-icon">✅</div>
+    <div class="alert-body">
+      <h4>监控命令速查</h4>
+      <p>
+        <code>INFO memory</code> — 查看内存使用详情（used_memory、maxmemory 等）<br/>
+        <code>INFO stats | grep evicted</code> — 查看累计淘汰 Key 数量<br/>
+        <code>MEMORY USAGE &lt;key&gt;</code> — 查询某个 Key 占用的字节数
+      </p>
+    </div>
+  </div>
+
+  <!-- ===== 总结卡片 ===== -->
+  <div class="section-title">
+    <div class="icon" style="background:#fef9c3;">🗂️</div>
+    三句话总结
+  </div>
+  <div class="summary-grid">
+    <div class="summary-item">
+      <div class="big">🚫</div>
+      <h4>默认行为</h4>
+      <p>noeviction 策略，写命令报 OOM 错误，读命令正常执行</p>
+    </div>
+    <div class="summary-item">
+      <div class="big">♻️</div>
+      <h4>缓存模式</h4>
+      <p>配置淘汰策略后，Redis 自动驱逐旧 Key，透明地腾出空间</p>
+    </div>
+    <div class="summary-item">
+      <div class="big">🎛️</div>
+      <h4>策略选择</h4>
+      <p>纯缓存用 allkeys-lru/lfu，混合存储用 volatile-lru</p>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<div class="footer">
+  Redis Memory Management · 面试题 #33 · 内容基于 Redis 官方文档整理
+</div>
+
+</body>
+</html>

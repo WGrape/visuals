@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>jemalloc vs tcmalloc — 内存分配器深度对比</title>
+<style>
+  :root {
+    --bg: #f8f9fb;
+    --card-bg: #fff;
+    --text: #1a1a2e;
+    --text-secondary: #555;
+    --accent: #2563eb;
+    --accent2: #7c3aed;
+    --accent3: #059669;
+    --border: #e5e7eb;
+    --tag-bg: #eff6ff;
+    --tag-text: #2563eb;
+    --code-bg: #1e293b;
+    --code-text: #e2e8f0;
+    --highlight: #fef3c7;
+    --jemalloc: #2563eb;
+    --tcmalloc: #7c3aed;
+    --go: #00add8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.8;
+  }
+
+  /* ---- Hero ---- */
+  .hero {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #1a1a4e 100%);
+    color: #fff;
+    padding: 64px 24px 56px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::after {
+    content: "";
+    position: absolute;
+    top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(circle at 30% 50%, rgba(37, 99, 235, 0.15) 0%, transparent 50%),
+                radial-gradient(circle at 70% 50%, rgba(124, 58, 237, 0.15) 0%, transparent 50%);
+    animation: heroPulse 8s ease-in-out infinite;
+  }
+  @keyframes heroPulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    position: relative;
+    z-index: 1;
+    letter-spacing: -0.02em;
+  }
+  .hero .subtitle {
+    font-size: 1.15rem;
+    color: #94a3b8;
+    margin-top: 12px;
+    position: relative;
+    z-index: 1;
+  }
+  .hero .badges {
+    margin-top: 24px;
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+    position: relative;
+    z-index: 1;
+  }
+  .badge {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .badge.je { background: rgba(37, 99, 235, 0.25); color: #93c5fd; border: 1px solid rgba(37, 99, 235, 0.3); }
+  .badge.tc { background: rgba(124, 58, 237, 0.25); color: #c4b5fd; border: 1px solid rgba(124, 58, 237, 0.3); }
+  .badge.go-badge { background: rgba(0, 173, 216, 0.2); color: #67e8f9; border: 1px solid rgba(0, 173, 216, 0.3); }
+
+  /* ---- Container ---- */
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ---- Section ---- */
+  section {
+    margin: 48px 0;
+  }
+  section h2 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  section h2 .icon {
+    font-size: 1.5rem;
+  }
+  section h3 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin: 28px 0 12px;
+  }
+
+  /* ---- Card ---- */
+  .card {
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 32px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    border: 1px solid var(--border);
+  }
+  .card + .card { margin-top: 20px; }
+
+  /* ---- Split cards ---- */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 700px) {
+    .split { grid-template-columns: 1fr; }
+  }
+
+  /* ---- Table ---- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+  }
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: #f1f5f9;
+    font-weight: 700;
+    color: #334155;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tr:hover td { background: #f8fafc; }
+
+  /* ---- Diagram ---- */
+  .diagram {
+    background: var(--code-bg);
+    border-radius: 12px;
+    padding: 28px;
+    margin: 20px 0;
+    overflow-x: auto;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    font-size: 0.88rem;
+    line-height: 1.7;
+    color: var(--code-text);
+  }
+  .diagram .hl-je { color: #60a5fa; }
+  .diagram .hl-tc { color: #a78bfa; }
+  .diagram .hl-go { color: #67e8f9; }
+  .diagram .hl-dim { color: #94a3b8; }
+  .diagram .hl-warn { color: #fbbf24; }
+
+  /* ---- Callout ---- */
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #eff6ff;
+    padding: 16px 20px;
+    border-radius: 0 8px 8px 0;
+    margin: 20px 0;
+    font-size: 0.95rem;
+  }
+  .callout.purple { border-color: var(--accent2); background: #f5f3ff; }
+  .callout.green  { border-color: var(--accent3); background: #ecfdf5; }
+  .callout.yellow { border-color: #f59e0b; background: #fffbeb; }
+
+  /* ---- Flow ---- */
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin: 20px 0;
+  }
+  .flow-box {
+    background: #fff;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-align: center;
+  }
+  .flow-box.je { border-color: var(--jemalloc); color: var(--jemalloc); }
+  .flow-box.tc { border-color: var(--tcmalloc); color: var(--tcmalloc); }
+  .flow-box.go-box { border-color: var(--go); color: #0891b2; }
+  .flow-arrow {
+    font-size: 1.4rem;
+    color: #94a3b8;
+    font-weight: 700;
+  }
+
+  /* ---- Code inline ---- */
+  code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    color: #be123c;
+  }
+
+  /* ---- Tag ---- */
+  .tag {
+    display: inline-block;
+    background: var(--tag-bg);
+    color: var(--tag-text);
+    padding: 2px 10px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+
+  /* ---- TOC ---- */
+  .toc {
+    list-style: none;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin: 16px 0 0;
+    padding: 0;
+  }
+  @media (max-width: 600px) { .toc { grid-template-columns: 1fr; } }
+  .toc a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.92rem;
+    display: block;
+    padding: 6px 10px;
+    border-radius: 6px;
+    transition: background 0.15s;
+  }
+  .toc a:hover { background: #eff6ff; }
+
+  /* ---- Comparison ---- */
+  .vs {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 16px;
+    align-items: start;
+    margin: 24px 0;
+  }
+  @media (max-width: 600px) { .vs { grid-template-columns: 1fr; } }
+  .vs-col {
+    background: var(--card-bg);
+    border-radius: 14px;
+    padding: 24px;
+    border: 2px solid var(--border);
+  }
+  .vs-col.left  { border-color: var(--jemalloc); }
+  .vs-col.right { border-color: var(--tcmalloc); }
+  .vs-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #94a3b8;
+    min-width: 40px;
+    text-align: center;
+  }
+  @media (max-width: 600px) { .vs-divider { display: none; } }
+  .vs-col h4 {
+    font-size: 1.05rem;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .vs-col ul {
+    list-style: none;
+    padding: 0;
+  }
+  .vs-col li {
+    padding: 6px 0;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 0.9rem;
+  }
+  .vs-col li::before {
+    content: "";
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;
+  }
+  .vs-col.left  li::before { background: var(--jemalloc); }
+  .vs-col.right li::before { background: var(--tcmalloc); }
+
+  /* ---- Principle section ---- */
+  .principle-step {
+    display: flex;
+    gap: 16px;
+    margin: 16px 0;
+    align-items: flex-start;
+  }
+  .principle-step .step-num {
+    flex-shrink: 0;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.9rem;
+    color: #fff;
+  }
+  .principle-step .step-num.je { background: var(--jemalloc); }
+  .principle-step .step-num.tc { background: var(--tcmalloc); }
+  .principle-step .step-num.go-step { background: var(--go); }
+  .principle-step .step-body { flex: 1; }
+  .principle-step .step-body strong { display: block; margin-bottom: 2px; }
+
+  /* ---- Footer ---- */
+  footer {
+    text-align: center;
+    padding: 40px 24px;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+    margin-top: 60px;
+  }
+
+  /* ---- Print ---- */
+  @media print {
+    .hero { background: #0f172a !important; -webkit-print-color-adjust: exact; }
+    .card { box-shadow: none; border: 1px solid #ddd; }
+    section { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====== HERO ====== -->
+<header class="hero">
+  <h1>jemalloc vs tcmalloc</h1>
+  <p class="subtitle">两大高性能内存分配器的深度对比 —— 从原理到实践，一次讲透</p>
+  <div class="badges">
+    <span class="badge je">jemalloc · FreeBSD / Facebook</span>
+    <span class="badge tc">tcmalloc · Google</span>
+    <span class="badge go-badge">Golang 内存模型</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- ====== TOC ====== -->
+  <section>
+    <div class="card">
+      <h2><span class="icon">📑</span> 目录</h2>
+      <ul class="toc">
+        <li><a href="#s1">一、它们是什么？</a></li>
+        <li><a href="#s2">二、用的是什么编程语言？</a></li>
+        <li><a href="#s3">三、核心实现原理</a></li>
+        <li><a href="#s4">四、关键区别对比</a></li>
+        <li><a href="#s5">五、各自的优劣势</a></li>
+        <li><a href="#s6">六、Go 语言为什么能用 tcmalloc？</a></li>
+        <li><a href="#s7">七、总结 &amp; 选型建议</a></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ====== SECTION 1: What ====== -->
+  <section id="s1">
+    <h2><span class="icon">🧠</span> 一、它们是什么？</h2>
+
+    <div class="split">
+      <div class="card">
+        <h3 style="color:var(--jemalloc);margin-top:0;">jemalloc</h3>
+        <p>
+          <strong>jemalloc</strong> 是由 <strong>Jason Evans</strong> 于 2005 年为 FreeBSD 操作系统开发的通用内存分配器。
+          它以出色的<strong>多线程并发性能</strong>和<strong>内存碎片控制</strong>而闻名，后被 Facebook（Meta）大规模采用并持续优化。
+        </p>
+        <p style="margin-top:12px;">
+          <span class="tag">FreeBSD libc</span>
+          <span class="tag">Facebook / Meta</span>
+          <span class="tag">Redis 默认</span>
+          <span class="tag">Rust 编译器</span>
+          <span class="tag">Android</span>
+        </p>
+        <div class="callout" style="margin-bottom:0;">
+          <strong>一句话：</strong>jemalloc 的目标是<strong>最小化内存碎片</strong>，在长时间运行的多线程服务中保持低且稳定的内存占用。
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="color:var(--tcmalloc);margin-top:0;">tcmalloc</h3>
+        <p>
+          <strong>tcmalloc</strong>（Thread-Caching Malloc）是 <strong>Google</strong> 于 2005 年前后开发的，
+          专为解决大规模多线程 C++ 服务（如 Google Search、Bigtable）中的内存分配瓶颈而设计。
+        </p>
+        <p style="margin-top:12px;">
+          <span class="tag">gperftools</span>
+          <span class="tag">Google 全栈</span>
+          <span class="tag">Golang 灵感来源</span>
+          <span class="tag">Chrome / Android</span>
+        </p>
+        <div class="callout purple" style="margin-bottom:0;">
+          <strong>一句话：</strong>tcmalloc 的核心思想是<strong>线程本地缓存</strong>，让大多数内存分配不涉及全局锁。
+        </div>
+      </div>
+    </div>
+
+    <div class="callout yellow" style="margin-top:20px;">
+      <strong>💡 为什么需要它们？</strong><br>
+      操作系统的默认 <code>malloc</code>（如 glibc 的 ptmalloc）在多线程高并发场景下存在严重的<strong>锁竞争</strong>和<strong>内存碎片</strong>问题。jemalloc 和 tcmalloc 都针对这些问题做了深度优化，是现代高性能服务的事实标准。
+    </div>
+  </section>
+
+  <!-- ====== SECTION 2: Language ====== -->
+  <section id="s2">
+    <h2><span class="icon">🔧</span> 二、用的是什么编程语言？</h2>
+
+    <div class="card">
+      <div class="split" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div style="text-align:center;padding:20px;">
+          <div style="font-size:3rem;margin-bottom:8px;">⚡</div>
+          <strong style="font-size:1.1rem;color:var(--jemalloc);">jemalloc</strong>
+          <p style="margin-top:6px;color:var(--text-secondary);">纯 <code>C 语言</code> 编写<br>（少量 C++ 用于测试）</p>
+        </div>
+        <div style="text-align:center;padding:20px;">
+          <div style="font-size:3rem;margin-bottom:8px;">🔮</div>
+          <strong style="font-size:1.1rem;color:var(--tcmalloc);">tcmalloc</strong>
+          <p style="margin-top:6px;color:var(--text-secondary);">纯 <code>C++ 语言</code> 编写<br>（提供 C 语言 API）</p>
+        </div>
+        <div style="text-align:center;padding:20px;">
+          <div style="font-size:3rem;margin-bottom:8px;">🐹</div>
+          <strong style="font-size:1.1rem;color:var(--go);">Go 内存分配器</strong>
+          <p style="margin-top:6px;color:var(--text-secondary);">纯 <code>Go 语言</code> 编写<br>借鉴 tcmalloc 设计思想</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== SECTION 3: Principles ====== -->
+  <section id="s3">
+    <h2><span class="icon">⚙️</span> 三、核心实现原理</h2>
+
+    <!-- ---- TCMALLOC ---- -->
+    <div class="card">
+      <h3 style="color:var(--tcmalloc);margin-top:0;">tcmalloc 核心原理 —— 三级缓存架构</h3>
+      <p>
+        tcmalloc 的名字（<strong>T</strong>hread-<strong>C</strong>aching <strong>Malloc</strong>）揭示了它的核心：<strong>线程本地缓存</strong>。
+        它通过三级结构来减少锁竞争：
+      </p>
+
+      <div class="principle-step">
+        <div class="step-num tc">1</div>
+        <div class="step-body">
+          <strong>Thread Cache（线程本地缓存）</strong>
+          每个线程拥有独立的本地空闲链表。分配内存时优先从本线程的 cache 取，<strong>完全无锁</strong>。
+          每个线程 cache 维护一个大小类（size class）的链表数组。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num tc">2</div>
+        <div class="step-body">
+          <strong>Central Cache（中央缓存）</strong>
+          当 Thread Cache 不够用时，从 Central Free List 批量补充。Central Cache 按 size class 组织，
+          使用<strong>自旋锁</strong>保护，但由于批量操作，竞争频率已大幅降低。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num tc">3</div>
+        <div class="step-body">
+          <strong>Page Heap（页堆）</strong>
+          当 Central Cache 也不够时，从 Page Heap 申请。Page Heap 管理的是<strong>页（page）</strong>级别的内存，
+          通过 <code>mmap</code> / <code>sbrk</code> 向操作系统申请，并负责归还。
+        </div>
+      </div>
+
+      <div class="diagram">
+<span class="hl-dim">// tcmalloc 分配流程</span>
+<span class="hl-dim">应用线程</span>
+    │
+    ▼
+┌─────────────────┐
+│  <span class="hl-tc">Thread Cache</span>     │  ← 无锁，极快（~10 ns）
+│  (per-thread)    │
+└────────┬────────┘
+         │ 不够
+         ▼
+┌─────────────────┐
+│  <span class="hl-tc">Central Cache</span>    │  ← 自旋锁，批量搬砖
+│  (per-size-class) │
+└────────┬────────┘
+         │ 不够
+         ▼
+┌─────────────────┐
+│  <span class="hl-tc">Page Heap</span>        │  ← 全局锁，向 OS 申请
+│  (global)        │     mmap / sbrk
+└─────────────────┘
+      </div>
+    </div>
+
+    <!-- ---- JEMALLOC ---- -->
+    <div class="card" style="margin-top:20px;">
+      <h3 style="color:var(--jemalloc);margin-top:0;">jemalloc 核心原理 —— Arena 分区架构</h3>
+      <p>
+        jemalloc 的设计哲学是<strong>分区（Partition）</strong>，通过将内存管理分散到多个独立的 Arena 中，
+        减少线程间的竞争，同时精确控制内存碎片。
+      </p>
+
+      <div class="principle-step">
+        <div class="step-num je">1</div>
+        <div class="step-body">
+          <strong>Arena（竞技场）分区</strong>
+          内存被划分成多个独立的 Arena。每个线程被分配到一个 Arena，
+          线程内部的分配先在所属 Arena 中完成。默认 Arena 数量 = 4 × CPU 核心数。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num je">2</div>
+        <div class="step-body">
+          <strong>tcache（线程缓存）+ bin 系统</strong>
+          每个线程有自己的 tcache（类似 tcmalloc 的 Thread Cache），
+          但数据结构是<strong>bins</strong>（按大小分桶）。小对象走 bins，大对象走 runs。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num je">3</div>
+        <div class="step-body">
+          <strong>大小分类（Size Classes）精细划分</strong>
+          jemalloc 定义了 200+ 个 size class，从 8 字节到数 KB，
+          每个 size class 有独立的 bin。这种精细划分极大减少了<strong>内部碎片</strong>。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num je">4</div>
+        <div class="step-body">
+          <strong>Huge 对象独立管理</strong>
+          超大对象（&gt; 几 MB）直接用 <code>mmap</code> 分配，不经过 Arena/bin 系统。
+          释放时立即 <code>munmap</code> 归还 OS。
+        </div>
+      </div>
+
+      <div class="diagram">
+<span class="hl-dim">// jemalloc 分配流程</span>
+<span class="hl-dim">应用线程 → 绑定到某个 Arena</span>
+    │
+    ▼
+┌──────────────────────┐
+│  <span class="hl-je">tcache</span> (per-thread) │  ← 无锁，从所属 Arena 取
+│  线程本地缓存          │
+└──────────┬───────────┘
+           │ 不够
+           ▼
+┌──────────────────────┐
+│  <span class="hl-je">Arena → bins</span>       │  ← per-arena 锁
+│  小对象：bin (slab)   │
+│  中对象：run          │
+│  大对象：chunk → mmap │
+└──────────────────────┘
+
+<span class="hl-dim">// 多个 Arena 并行工作</span>
+Arena 0 ← 线程 A,B     Arena 2 ← 线程 E,F
+Arena 1 ← 线程 C,D     Arena 3 ← 线程 G,H
+   <span class="hl-dim">（线程数多时自动扩展 Arena 数量）</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== SECTION 4: Differences ====== -->
+  <section id="s4">
+    <h2><span class="icon">⚔️</span> 四、关键区别对比</h2>
+
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th style="color:var(--jemalloc);">jemalloc</th>
+            <th style="color:var(--tcmalloc);">tcmalloc</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>设计哲学</strong></td>
+            <td>分区（Arena 独立管理）</td>
+            <td>分层缓存（Thread → Central → Page）</td>
+          </tr>
+          <tr>
+            <td><strong>线程模型</strong></td>
+            <td>线程绑定到 Arena，Arena 内竞争</td>
+            <td>线程各自独立 cache，竞争集中在 Central</td>
+          </tr>
+          <tr>
+            <td><strong>内存碎片</strong></td>
+            <td>⭐ 极低，200+ 精细 size class</td>
+            <td>较低，约 80+ size class</td>
+          </tr>
+          <tr>
+            <td><strong>内存归还 OS</strong></td>
+            <td>主动、激进地释放空闲页</td>
+            <td>较保守，需配合参数调优</td>
+          </tr>
+          <tr>
+            <td><strong>运行时内存</strong></td>
+            <td>长期运行后 RSS 更低、更稳定</td>
+            <td>短期峰值表现更优</td>
+          </tr>
+          <tr>
+            <td><strong>分配/释放速度</strong></td>
+            <td>略慢但极其稳定</td>
+            <td>小对象分配极快（无锁）</td>
+          </tr>
+          <tr>
+            <td><strong>统计分析能力</strong></td>
+            <td>⭐ 极其丰富的统计接口</td>
+            <td>基础统计（搭配 heap profiler）</td>
+          </tr>
+          <tr>
+            <td><strong>内存 profiling</strong></td>
+            <td>内置 <code>malloc_stats_print</code></td>
+            <td>内置 Heap Profiler（pprof）</td>
+          </tr>
+          <tr>
+            <td><strong>实现语言</strong></td>
+            <td>C</td>
+            <td>C++</td>
+          </tr>
+          <tr>
+            <td><strong>代表用户</strong></td>
+            <td>Redis、Rust、FreeBSD、Meta</td>
+            <td>Chrome、Golang、Google 全家桶</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====== SECTION 5: Pros & Cons ====== -->
+  <section id="s5">
+    <h2><span class="icon">📊</span> 五、各自的优劣势</h2>
+
+    <div class="vs">
+      <div class="vs-col left">
+        <h4 style="color:var(--jemalloc);">🟦 jemalloc 优势</h4>
+        <ul>
+          <li>碎片控制业界最佳，长期运行 RSS 极低</li>
+          <li>主动归还 OS 内存，不囤积空闲页</li>
+          <li>200+ 精细 size class，内部碎片最小</li>
+          <li>强大的统计/调试接口，便于排查内存问题</li>
+          <li>Arena 自动扩展，CPU 越多扩展越好</li>
+        </ul>
+        <h4 style="color:var(--jemalloc);margin-top:20px;">🟦 jemalloc 劣势</h4>
+        <ul>
+          <li>配置复杂度较高（Arena 数量、dirty page 衰减等）</li>
+          <li>过于积极的归还策略在某些场景下可能影响性能</li>
+          <li>内存占用统计比 tcmalloc 略高（管理元数据）</li>
+        </ul>
+      </div>
+
+      <div class="vs-divider">VS</div>
+
+      <div class="vs-col right">
+        <h4 style="color:var(--tcmalloc);">🟣 tcmalloc 优势</h4>
+        <ul>
+          <li>线程本地缓存，极速分配（完全无锁）</li>
+          <li>设计简洁，三级结构直观易懂</li>
+          <li>内置 Heap Profiler（搭配 pprof），调试方便</li>
+          <li>Google 生态深度集成</li>
+        </ul>
+        <h4 style="color:var(--tcmalloc);margin-top:20px;">🟣 tcmalloc 劣势</h4>
+        <ul>
+          <li>碎片控制不如 jemalloc 精细</li>
+          <li>内存归还 OS 较保守，长期 RSS 可能偏高</li>
+          <li>线程频繁创建/销毁时 Thread Cache 开销大</li>
+          <li>超大对象分配不如 jemalloc 高效</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout yellow" style="margin-top:16px;">
+      <strong>🔬 实测数据参考（来自公开 benchmark）</strong><br>
+      在 Redis 场景下，jemalloc 的碎片率约 <strong>1.01 - 1.05</strong>（分配 1GB 占用约 1.05GB），
+      而 glibc malloc 可能达到 1.5 - 2.0。tcmalloc 约 <strong>1.05 - 1.15</strong>。
+      jemalloc 的碎片控制是所有主流分配器中最好的。
+    </div>
+  </section>
+
+  <!-- ====== SECTION 6: Go + tcmalloc ====== -->
+  <section id="s6">
+    <h2><span class="icon">🐹</span> 六、Go 语言为什么能用 tcmalloc？（这不是 C 写的吗？）</h2>
+
+    <div class="card">
+      <h3 style="color:var(--go);margin-top:0;">关键澄清：Go 不是"用" tcmalloc，而是"借鉴"了 tcmalloc 的设计思想</h3>
+
+      <p>
+        这是一个非常好的问题，很多初学者都会困惑。核心答案是：
+      </p>
+
+      <div class="callout green">
+        <strong>✅ Go 的内存分配器是用纯 Go 语言重新实现的</strong>，它在<strong>设计思想上借鉴了 tcmalloc</strong>，
+        而不是直接链接 tcmalloc 的 C/C++ 代码。两者是"思想相似、实现独立"的关系。
+      </div>
+
+      <h3>Go 内存分配器（TCMalloc 风格的 Go 实现）</h3>
+
+      <p style="margin-top:16px;">
+        Go runtime 中的内存分配器位于 <code>src/runtime/malloc.go</code>，
+        其设计思路灵感来源就是 tcmalloc。它复用了 tcmalloc 的核心架构，但完全用 Go 语言实现。
+      </p>
+
+      <div class="principle-step">
+        <div class="step-num go-step">1</div>
+        <div class="step-body">
+          <strong>mcache（Go 版 Thread Cache）</strong>
+          每个 P（Go 的调度单元，Processor）绑定的本地缓存。<strong>无锁分配</strong>。
+          Go 不是按线程而是按 P 做缓存，更符合 GMP 调度模型。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num go-step">2</div>
+        <div class="step-body">
+          <strong>mcentral（Go 版 Central Cache）</strong>
+          全局的按 size class 组织的中央缓存。使用<strong>lock</strong>保护。
+          mcache 不够时从这里批量拿。
+        </div>
+      </div>
+      <div class="principle-step">
+        <div class="step-num go-step">3</div>
+        <div class="step-body">
+          <strong>mheap（Go 版 Page Heap）</strong>
+          全局堆，管理所有内存页（spans）。通过 <code>mmap</code> 向 OS 申请。
+          包含 <code>mheap_.arenas</code>（Go 1.11+ 的稀疏 arena 映射）。
+        </div>
+      </div>
+
+      <div class="diagram">
+<span class="hl-dim">// Go 内存分配器架构（借鉴 tcmalloc）</span>
+
+<span class="hl-dim">Goroutine 请求分配内存</span>
+    │
+    ▼
+┌─────────────────────────────────┐
+│  <span class="hl-go">mcache</span> (per-P)             │  ← <span class="hl-go">无锁</span>
+│  Go 版 Thread Cache             │     每个 P 一个，本地分配
+│  对应 tcmalloc Thread Cache     │
+└──────────────┬──────────────────┘
+               │ 不够
+               ▼
+┌─────────────────────────────────┐
+│  <span class="hl-go">mcentral</span> (global × 136)     │  ← <span class="hl-go">有锁</span>
+│  Go 版 Central Cache            │     按 spanClass 分类
+│  对应 tcmalloc Central Cache    │
+└──────────────┬──────────────────┘
+               │ 不够
+               ▼
+┌─────────────────────────────────┐
+│  <span class="hl-go">mheap</span> (global)              │  ← <span class="hl-go">全局锁</span>
+│  Go 版 Page Heap                │     管理 arenas / spans
+│  对应 tcmalloc Page Heap        │     mmap 向 OS 申请
+└──────────────┬──────────────────┘
+               │
+               ▼
+         <span class="hl-dim">操作系统 (mmap / VirtualAlloc)</span>
+
+<span class="hl-dim">// 三者的对应关系</span>
+<span class="hl-hl-dim">tcmalloc</span>          →  <span class="hl-hl-go">Go 内存分配器</span>
+Thread Cache       →  mcache
+Central Cache      →  mcentral
+Page Heap          →  mheap
+              </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <h3 style="color:var(--go);margin-top:0;">那 C 写的 tcmalloc 真的能在 Go 中使用吗？</h3>
+      <p>
+        可以，但方式完全不同：
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>方式</th>
+            <th>原理</th>
+            <th>场景</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>CGO 链接</strong></td>
+            <td>Go 通过 CGO 直接链接 <code>libtcmalloc.so</code>。设置 <code>LD_PRELOAD</code> 或编译时 <code>#cgo LDFLAGS: -ltcmalloc</code></td>
+            <td>CGO 程序需要高性能 C/C++ 内存分配</td>
+          </tr>
+          <tr>
+            <td><strong>LD_PRELOAD</strong></td>
+            <td>启动时 <code>LD_PRELOAD=/usr/lib/libtcmalloc.so ./myapp</code>，替换全局 malloc</td>
+            <td>CGO 密集调用的 Go 程序</td>
+          </tr>
+          <tr>
+            <td><strong>Go 原生（推荐）</strong></td>
+            <td>使用 Go runtime 自带的 tcmalloc 风格分配器，<strong>零成本、零依赖</strong></td>
+            <td>纯 Go 程序 —— 几乎所有 Go 程序都是这种方式</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout purple" style="margin-top:16px;">
+        <strong>🔑 核心理解：</strong><br>
+        ① Go 默认使用的内存分配器<strong>不是</strong> tcmalloc 的 C 代码，而是<strong>用 Go 语言重新实现的、基于 tcmalloc 设计思想的分配器</strong>。<br>
+        ② 对于纯 Go 代码，它走的是 Go runtime 自己的分配器，和 C 写的 tcmalloc 没有直接关系。<br>
+        ③ 对于 Go 调用 C 代码（CGO）的部分，可以通过 LD_PRELOAD 等方式使用真正的 tcmalloc（C 版本）。
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== SECTION 7: Summary ====== -->
+  <section id="s7">
+    <h2><span class="icon">🎯</span> 七、总结 &amp; 选型建议</h2>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>场景</th>
+            <th>推荐</th>
+            <th>原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Redis / 内存数据库</td>
+            <td><strong style="color:var(--jemalloc);">jemalloc</strong></td>
+            <td>极低的碎片率，长期运行 RSS 稳定</td>
+          </tr>
+          <tr>
+            <td>C++ 多线程服务</td>
+            <td><strong style="color:var(--tcmalloc);">tcmalloc</strong></td>
+            <td>无锁线程缓存，分配速度极快</td>
+          </tr>
+          <tr>
+            <td>需要内存 profiling</td>
+            <td><strong style="color:var(--tcmalloc);">tcmalloc</strong></td>
+            <td>pprof 生态成熟，排查内存泄漏方便</td>
+          </tr>
+          <tr>
+            <td>长期运行、内存敏感</td>
+            <td><strong style="color:var(--jemalloc);">jemalloc</strong></td>
+            <td>主动归还 OS，最低碎片率</td>
+          </tr>
+          <tr>
+            <td>Go 程序</td>
+            <td><strong style="color:var(--go);">Go 原生分配器</strong></td>
+            <td>已经是 tcmalloc 风格实现，无需替换</td>
+          </tr>
+          <tr>
+            <td>嵌入式 / 移动端</td>
+            <td><strong style="color:var(--jemalloc);">jemalloc</strong></td>
+            <td>内存开销可控，已在 Android 验证</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <h3 style="margin-top:0;">一句话速记</h3>
+      <div class="split" style="grid-template-columns: 1fr 1fr;">
+        <div class="callout" style="margin:0;">
+          <strong>jemalloc</strong> → 碎片控制之王<br>
+          分区架构 | 200+ size class | 适合长期运行
+        </div>
+        <div class="callout purple" style="margin:0;">
+          <strong>tcmalloc</strong> → 速度之王<br>
+          三级缓存 | 无锁线程缓存 | Google 全栈验证
+        </div>
+      </div>
+      <div style="text-align:center;margin-top:24px;padding:20px;background:var(--tag-bg);border-radius:10px;">
+        <strong>Go 内存分配器</strong> = tcmalloc 设计思想 + Go 语言实现 + GMP 调度优化<br>
+        <span style="color:var(--text-secondary);font-size:0.9rem;">不是直接用 tcmalloc 的 C 代码，而是"取其神，不取其形"</span>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <p>jemalloc vs tcmalloc — 深度对比学习文档 · 2026</p>
+</footer>
+
+</body>
+</html>

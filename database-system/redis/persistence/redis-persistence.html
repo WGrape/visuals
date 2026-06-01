@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 持久化机制详解</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    overflow-x: hidden;
+  }
+
+  /* ===== HERO ===== */
+  .hero {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    padding: 60px 20px 80px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(229,57,53,0.15) 0%, transparent 70%);
+    animation: pulse 4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:0.5} 50%{opacity:1} }
+
+  .redis-logo {
+    font-size: 64px;
+    animation: float 3s ease-in-out infinite;
+    display: inline-block;
+  }
+  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin: 16px 0 12px;
+  }
+  .hero p { color: #94a3b8; font-size: 1.1rem; max-width: 600px; margin: 0 auto; }
+
+  /* ===== NAV ===== */
+  .nav {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(15,17,23,0.95);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 0 20px;
+    display: flex; gap: 4px; justify-content: center; flex-wrap: wrap;
+  }
+  .nav-btn {
+    padding: 14px 20px;
+    background: none; border: none; color: #94a3b8;
+    cursor: pointer; font-size: 0.9rem; font-weight: 500;
+    transition: all 0.2s; border-bottom: 2px solid transparent;
+    white-space: nowrap;
+  }
+  .nav-btn:hover { color: #e2e8f0; }
+  .nav-btn.active { color: #ff6b6b; border-bottom-color: #ff6b6b; }
+
+  /* ===== SECTIONS ===== */
+  .section {
+    display: none;
+    max-width: 1100px; margin: 0 auto;
+    padding: 48px 20px 80px;
+    animation: fadeIn 0.4s ease;
+  }
+  .section.active { display: block; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+
+  /* ===== SECTION TITLE ===== */
+  .sec-title {
+    display: flex; align-items: center; gap: 16px;
+    margin-bottom: 40px;
+  }
+  .sec-icon {
+    width: 56px; height: 56px; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; flex-shrink: 0;
+  }
+  .icon-rdb { background: linear-gradient(135deg,#f093fb,#f5576c); }
+  .icon-aof { background: linear-gradient(135deg,#4facfe,#00f2fe); }
+  .icon-hybrid { background: linear-gradient(135deg,#43e97b,#38f9d7); }
+  .icon-compare { background: linear-gradient(135deg,#fa709a,#fee140); }
+  .icon-scene { background: linear-gradient(135deg,#a18cd1,#fbc2eb); }
+
+  .sec-title h2 { font-size: 2rem; font-weight: 700; }
+  .sec-title p { color: #94a3b8; margin-top: 4px; }
+
+  /* ===== CARDS ===== */
+  .card {
+    background: #1e2130;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 24px;
+    transition: border-color 0.3s, transform 0.2s;
+  }
+  .card:hover { border-color: rgba(255,107,107,0.4); transform: translateY(-2px); }
+  .card h3 { font-size: 1.2rem; font-weight: 600; margin-bottom: 12px; color: #f1f5f9; }
+  .card p { color: #94a3b8; line-height: 1.8; }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 20px; margin-bottom: 28px; }
+
+  /* ===== HIGHLIGHT TAGS ===== */
+  .tag {
+    display: inline-block; padding: 2px 10px;
+    border-radius: 20px; font-size: 0.78rem; font-weight: 600;
+    margin: 2px;
+  }
+  .tag-green  { background: rgba(72,199,142,0.15); color: #48c78e; }
+  .tag-red    { background: rgba(241,70,104,0.15);  color: #f14668; }
+  .tag-blue   { background: rgba(32,156,238,0.15);  color: #209cee; }
+  .tag-yellow { background: rgba(255,221,87,0.15);  color: #ffdd57; }
+  .tag-purple { background: rgba(171,100,255,0.15); color: #ab64ff; }
+
+  /* ===== CODE BLOCK ===== */
+  .code-block {
+    background: #0d1117;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 20px;
+    font-family: 'Fira Code', 'Consolas', monospace;
+    font-size: 0.87rem;
+    line-height: 1.9;
+    overflow-x: auto;
+    margin: 16px 0;
+    position: relative;
+  }
+  .code-block .comment { color: #6a737d; }
+  .code-block .key     { color: #79b8ff; }
+  .code-block .val     { color: #85e89d; }
+  .code-block .str     { color: #f97583; }
+  .code-block .label   { color: #ffab70; }
+
+  /* ===== TIMELINE / FLOW ===== */
+  .flow {
+    display: flex; align-items: flex-start; gap: 0;
+    overflow-x: auto; padding: 10px 0; margin: 24px 0;
+    flex-wrap: wrap;
+  }
+  .flow-step {
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 120px; flex: 1;
+    animation: slideUp 0.5s ease both;
+  }
+  .flow-step:nth-child(1) { animation-delay: 0.1s }
+  .flow-step:nth-child(2) { animation-delay: 0.2s }
+  .flow-step:nth-child(3) { animation-delay: 0.3s }
+  .flow-step:nth-child(4) { animation-delay: 0.4s }
+  .flow-step:nth-child(5) { animation-delay: 0.5s }
+  .flow-step:nth-child(6) { animation-delay: 0.6s }
+  @keyframes slideUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+
+  .flow-box {
+    padding: 12px 16px; border-radius: 12px; text-align: center;
+    font-size: 0.85rem; font-weight: 600; line-height: 1.4;
+    min-height: 60px; display: flex; align-items: center; justify-content: center;
+    width: 90%; cursor: default;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .flow-box:hover { transform: scale(1.05); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+
+  .flow-arrow {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; color: #4a5568; padding: 0 4px; margin-top: 20px;
+    flex-shrink: 0;
+  }
+
+  .rdb-color { background: linear-gradient(135deg, rgba(240,147,251,0.2), rgba(245,87,108,0.2)); border: 1px solid rgba(240,147,251,0.3); color: #f093fb; }
+  .aof-color { background: linear-gradient(135deg, rgba(79,172,254,0.2), rgba(0,242,254,0.2)); border: 1px solid rgba(79,172,254,0.3); color: #4facfe; }
+  .hybrid-color { background: linear-gradient(135deg, rgba(67,233,123,0.2), rgba(56,249,215,0.2)); border: 1px solid rgba(67,233,123,0.3); color: #43e97b; }
+  .warn-color { background: rgba(255,221,87,0.12); border: 1px solid rgba(255,221,87,0.3); color: #ffdd57; }
+  .info-color { background: rgba(99,179,237,0.12); border: 1px solid rgba(99,179,237,0.3); color: #63b3ed; }
+  .err-color  { background: rgba(252,129,74,0.12); border: 1px solid rgba(252,129,74,0.3); color: #fc814a; }
+
+  /* ===== COMPARE TABLE ===== */
+  .compare-table { width: 100%; border-collapse: collapse; margin: 24px 0; }
+  .compare-table th {
+    background: #252836; padding: 14px 20px; text-align: left;
+    font-size: 0.9rem; color: #94a3b8; border-bottom: 2px solid #2d3148;
+  }
+  .compare-table td {
+    padding: 14px 20px; border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-size: 0.9rem; vertical-align: middle;
+  }
+  .compare-table tr:hover td { background: rgba(255,255,255,0.03); }
+  .compare-table .col-label { color: #e2e8f0; font-weight: 600; }
+  .compare-table .col-rdb   { color: #f093fb; }
+  .compare-table .col-aof   { color: #4facfe; }
+  .compare-table .col-hybrid{ color: #43e97b; }
+
+  /* ===== PROGRESS BARS ===== */
+  .metric { margin: 12px 0; }
+  .metric-label { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 0.85rem; }
+  .metric-bar { height: 8px; background: #252836; border-radius: 4px; overflow: hidden; }
+  .metric-fill { height: 100%; border-radius: 4px; transition: width 1.5s cubic-bezier(0.25, 1, 0.5, 1); }
+
+  /* ===== ALERT BOX ===== */
+  .alert {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 16px 20px; border-radius: 12px; margin: 20px 0;
+  }
+  .alert-icon { font-size: 1.3rem; flex-shrink: 0; }
+  .alert-content p { font-size: 0.9rem; line-height: 1.7; }
+  .alert-warn { background: rgba(255,221,87,0.08); border: 1px solid rgba(255,221,87,0.25); }
+  .alert-info { background: rgba(79,172,254,0.08); border: 1px solid rgba(79,172,254,0.25); }
+  .alert-success { background: rgba(67,233,123,0.08); border: 1px solid rgba(67,233,123,0.25); }
+
+  /* ===== MEMORY VISUAL ===== */
+  .memory-visual {
+    background: #0d1117; border-radius: 16px; padding: 24px;
+    margin: 24px 0; position: relative; overflow: hidden;
+  }
+  .mem-row {
+    display: flex; align-items: center; gap: 12px;
+    margin: 8px 0; animation: slideUp 0.4s ease both;
+  }
+  .mem-label { width: 110px; font-size: 0.8rem; color: #94a3b8; text-align: right; flex-shrink: 0; }
+  .mem-blocks { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+  .mem-block {
+    height: 32px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.72rem; font-weight: 600; color: rgba(255,255,255,0.8);
+    transition: transform 0.2s;
+    cursor: default;
+  }
+  .mem-block:hover { transform: scaleY(1.2); }
+
+  /* ===== INTERACTIVE DEMO ===== */
+  .demo-controls { display: flex; gap: 12px; flex-wrap: wrap; margin: 20px 0; }
+  .demo-btn {
+    padding: 10px 20px; border-radius: 10px; border: none;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .demo-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+  .btn-rdb    { background: linear-gradient(135deg,#f093fb,#f5576c); color: #fff; }
+  .btn-aof    { background: linear-gradient(135deg,#4facfe,#00f2fe); color: #0d1117; }
+  .btn-hybrid { background: linear-gradient(135deg,#43e97b,#38f9d7); color: #0d1117; }
+  .btn-reset  { background: #252836; color: #94a3b8; border: 1px solid rgba(255,255,255,0.1); }
+
+  .demo-log {
+    background: #0d1117; border-radius: 12px; padding: 16px;
+    font-family: 'Fira Code', monospace; font-size: 0.82rem; line-height: 1.8;
+    min-height: 120px; max-height: 260px; overflow-y: auto;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .log-rdb    { color: #f093fb; }
+  .log-aof    { color: #4facfe; }
+  .log-hybrid { color: #43e97b; }
+  .log-sys    { color: #94a3b8; }
+  .log-warn   { color: #ffdd57; }
+  .log-err    { color: #f14668; }
+
+  /* ===== SCENE CARDS ===== */
+  .scene-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 20px; }
+  .scene-card {
+    background: #1e2130; border-radius: 16px; padding: 24px;
+    border: 2px solid transparent;
+    transition: all 0.3s;
+    cursor: pointer;
+  }
+  .scene-card:hover { transform: translateY(-4px); box-shadow: 0 12px 32px rgba(0,0,0,0.4); }
+  .scene-card.recommend-rdb    { border-color: rgba(240,147,251,0.5); }
+  .scene-card.recommend-aof    { border-color: rgba(79,172,254,0.5); }
+  .scene-card.recommend-hybrid { border-color: rgba(67,233,123,0.5); }
+  .scene-card .scene-icon { font-size: 2.5rem; margin-bottom: 12px; }
+  .scene-card h4 { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+  .scene-card p  { font-size: 0.85rem; color: #94a3b8; line-height: 1.7; }
+  .scene-badge {
+    display: inline-block; margin-top: 12px; padding: 4px 14px;
+    border-radius: 20px; font-size: 0.78rem; font-weight: 700;
+  }
+
+  /* ===== SCROLL BAR ===== */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0d1117; }
+  ::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 3px; }
+
+  /* ===== RESPONSIVE ===== */
+  @media(max-width:640px) {
+    .hero h1 { font-size: 2rem; }
+    .flow { gap: 0; }
+    .flow-arrow { display: none; }
+    .compare-table { font-size: 0.82rem; }
+  }
+
+  .divider {
+    height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    margin: 36px 0;
+  }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media(max-width:700px) { .two-col { grid-template-columns: 1fr; } }
+
+  .badge-new {
+    display: inline-block; padding: 2px 8px; background: #f5576c;
+    color: #fff; font-size: 0.7rem; font-weight: 700; border-radius: 4px;
+    margin-left: 6px; vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="redis-logo">🔴</div>
+  <h1>Redis 持久化机制详解</h1>
+  <p>深入理解 RDB · AOF · 混合持久化 三种机制的原理、配置与最佳实践</p>
+</div>
+
+<!-- NAV -->
+<nav class="nav">
+  <button class="nav-btn active" onclick="showSection('overview', this)">📖 概览</button>
+  <button class="nav-btn" onclick="showSection('rdb', this)">💾 RDB 快照</button>
+  <button class="nav-btn" onclick="showSection('aof', this)">📝 AOF 日志</button>
+  <button class="nav-btn" onclick="showSection('hybrid', this)">⚡ 混合持久化</button>
+  <button class="nav-btn" onclick="showSection('compare', this)">📊 对比分析</button>
+  <button class="nav-btn" onclick="showSection('demo', this)">🎮 交互演示</button>
+  <button class="nav-btn" onclick="showSection('scene', this)">🎯 场景选型</button>
+</nav>
+
+
+<!-- ============================================================ -->
+<!-- 概览 -->
+<!-- ============================================================ -->
+<div id="sec-overview" class="section active">
+  <div class="sec-title">
+    <div class="sec-icon icon-rdb">📖</div>
+    <div>
+      <h2>Redis 持久化 — 为什么重要？</h2>
+      <p>内存数据库的命脉，灾难恢复的保障</p>
+    </div>
+  </div>
+
+  <div class="alert alert-warn">
+    <span class="alert-icon">⚠️</span>
+    <div class="alert-content">
+      <p><strong>核心问题：</strong>Redis 是纯内存数据库，服务重启或宕机后内存数据会 <strong>全部丢失</strong>。持久化机制就是将内存数据写入磁盘，使 Redis 具备数据恢复能力。</p>
+    </div>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3 style="color:#f093fb">💾 RDB — 快照持久化</h3>
+      <p>在某个时间点对 Redis 数据库做<strong>全量快照</strong>，将内存中的数据以二进制压缩格式保存到 .rdb 文件。</p>
+      <br>
+      <span class="tag tag-green">高压缩比</span>
+      <span class="tag tag-green">恢复速度快</span>
+      <span class="tag tag-red">可能丢失数据</span>
+    </div>
+    <div class="card">
+      <h3 style="color:#4facfe">📝 AOF — 追加日志</h3>
+      <p>将每个写命令以文本格式<strong>追加记录</strong>到 .aof 文件，恢复时重放全部命令。</p>
+      <br>
+      <span class="tag tag-green">数据安全</span>
+      <span class="tag tag-green">可读可编辑</span>
+      <span class="tag tag-red">文件体积大</span>
+    </div>
+    <div class="card">
+      <h3 style="color:#43e97b">⚡ 混合持久化 <span class="badge-new">推荐</span></h3>
+      <p>Redis 4.0+ 新特性，在 AOF 重写时将 <strong>RDB 快照 + AOF 增量</strong>混合写入同一文件，兼顾两者优势。</p>
+      <br>
+      <span class="tag tag-green">最小丢失</span>
+      <span class="tag tag-green">快速恢复</span>
+      <span class="tag tag-green">空间优化</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">三种机制总览流程</h3>
+
+  <div class="memory-visual">
+    <div style="color:#94a3b8;font-size:0.82rem;margin-bottom:16px;">▌ Redis 内存数据库 ↔ 磁盘持久化</div>
+    <div class="mem-row" style="animation-delay:0.1s">
+      <div class="mem-label">内存数据</div>
+      <div class="mem-blocks">
+        <div class="mem-block" style="background:rgba(240,147,251,0.25);width:40px">k1</div>
+        <div class="mem-block" style="background:rgba(240,147,251,0.25);width:60px">k2</div>
+        <div class="mem-block" style="background:rgba(240,147,251,0.25);width:50px">k3</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.25);width:70px">hash1</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.25);width:55px">list1</div>
+        <div class="mem-block" style="background:rgba(67,233,123,0.25);width:45px">set1</div>
+        <div class="mem-block" style="background:rgba(67,233,123,0.25);width:65px">zset1</div>
+      </div>
+    </div>
+    <div style="text-align:center;margin:16px 0;display:flex;justify-content:space-around;">
+      <div style="text-align:center">
+        <div style="color:#f093fb;font-size:1.5rem">↓</div>
+        <div style="color:#f093fb;font-size:0.78rem">全量快照</div>
+      </div>
+      <div style="text-align:center">
+        <div style="color:#4facfe;font-size:1.5rem">↓</div>
+        <div style="color:#4facfe;font-size:0.78rem">逐条追加</div>
+      </div>
+      <div style="text-align:center">
+        <div style="color:#43e97b;font-size:1.5rem">↓</div>
+        <div style="color:#43e97b;font-size:0.78rem">RDB头+AOF尾</div>
+      </div>
+    </div>
+    <div class="mem-row" style="animation-delay:0.3s">
+      <div class="mem-label">RDB 文件</div>
+      <div class="mem-blocks">
+        <div class="mem-block" style="background:linear-gradient(90deg,rgba(240,147,251,0.3),rgba(245,87,108,0.3));width:220px;border-radius:8px">dump.rdb（二进制压缩）</div>
+      </div>
+    </div>
+    <div class="mem-row" style="animation-delay:0.4s">
+      <div class="mem-label">AOF 文件</div>
+      <div class="mem-blocks">
+        <div class="mem-block" style="background:rgba(79,172,254,0.15);width:40px;border:1px solid rgba(79,172,254,0.3)">SET</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.15);width:40px;border:1px solid rgba(79,172,254,0.3)">SET</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.15);width:50px;border:1px solid rgba(79,172,254,0.3)">HSET</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.15);width:50px;border:1px solid rgba(79,172,254,0.3)">LPUSH</div>
+        <div class="mem-block" style="background:rgba(79,172,254,0.15);width:40px;border:1px solid rgba(79,172,254,0.3)">DEL</div>
+        <div style="color:#94a3b8;display:flex;align-items:center;font-size:0.8rem;margin-left:4px">... appendonly.aof</div>
+      </div>
+    </div>
+    <div class="mem-row" style="animation-delay:0.5s">
+      <div class="mem-label">混合文件</div>
+      <div class="mem-blocks">
+        <div class="mem-block" style="background:linear-gradient(90deg,rgba(240,147,251,0.3),rgba(245,87,108,0.3));width:130px;border-radius:8px 0 0 8px">RDB 快照头部</div>
+        <div class="mem-block" style="background:linear-gradient(90deg,rgba(79,172,254,0.2),rgba(67,233,123,0.2));width:150px;border-radius:0 8px 8px 0">+ AOF 增量尾部</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="alert alert-info">
+    <span class="alert-icon">💡</span>
+    <div class="alert-content">
+      <p>三种模式 <strong>可共存</strong>：如果同时开启 RDB 和 AOF，Redis 重启时 <strong>优先使用 AOF</strong> 文件恢复（因为数据更完整）。只有当 AOF 不存在时才用 RDB。</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- RDB -->
+<!-- ============================================================ -->
+<div id="sec-rdb" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-rdb">💾</div>
+    <div>
+      <h2>RDB — 快照持久化</h2>
+      <p>Redis Database Backup，内存快照存档</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🧠 核心原理</h3>
+    <p>RDB 在指定时间点对 Redis 内存做<strong>全量快照</strong>，以紧凑的二进制格式（经过 LZF 压缩）保存到磁盘 <code style="color:#f093fb">dump.rdb</code> 文件中。</p>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">⚙️ 触发方式</h3>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>🤖 自动触发 (save 策略)</h3>
+      <div class="code-block">
+<span class="comment"># redis.conf 配置</span>
+<span class="key">save</span> <span class="val">900 1</span>   <span class="comment"># 900s内有≥1次写</span>
+<span class="key">save</span> <span class="val">300 10</span>  <span class="comment"># 300s内有≥10次写</span>
+<span class="key">save</span> <span class="val">60 10000</span> <span class="comment"># 60s内有≥10000次写</span>
+
+<span class="comment"># 禁用 RDB：</span>
+<span class="key">save</span> <span class="str">""</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>👤 手动触发</h3>
+      <div class="code-block">
+<span class="comment"># 同步阻塞（主进程，生产慎用）</span>
+<span class="label">SAVE</span>
+
+<span class="comment"># 异步非阻塞（推荐 ✓）</span>
+<span class="label">BGSAVE</span>
+
+<span class="comment"># 主从复制时自动触发</span>
+<span class="label">BGREWRITEAOF</span>
+
+<span class="comment"># 关闭 Redis 前自动保存</span>
+<span class="key">shutdown save</span>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">🔄 BGSAVE 执行流程</h3>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-box rdb-color">① Redis<br>主进程</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box rdb-color">② fork()<br>子进程</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box rdb-color">③ 子进程扫描<br>内存数据</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box rdb-color">④ 序列化压缩<br>写入临时文件</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box rdb-color">⑤ 原子替换<br>dump.rdb</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box rdb-color">⑥ 子进程<br>退出</div>
+    </div>
+  </div>
+
+  <div class="alert alert-info">
+    <span class="alert-icon">🍴</span>
+    <div class="alert-content">
+      <p><strong>Copy-On-Write (COW) 机制：</strong>fork() 后父子进程共享内存页。主进程继续处理请求时若修改某页数据，OS 会复制该页给父进程独用。子进程始终遍历的是 fork 时刻的内存快照，不受后续写入干扰。</p>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">📄 RDB 文件格式</h3>
+  <div class="memory-visual">
+    <div style="display:flex;gap:0;align-items:stretch;overflow-x:auto">
+      <div style="background:rgba(240,147,251,0.2);border:1px solid rgba(240,147,251,0.4);padding:12px 16px;border-radius:8px 0 0 8px;text-align:center;min-width:80px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">REDIS</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">魔数</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.15);border:1px solid rgba(240,147,251,0.3);border-left:none;padding:12px 16px;text-align:center;min-width:80px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">0009</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">版本号</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.12);border:1px solid rgba(240,147,251,0.25);border-left:none;padding:12px 16px;text-align:center;min-width:100px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">辅助字段</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">redis-ver/os 等</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.1);border:1px solid rgba(240,147,251,0.2);border-left:none;padding:12px 16px;text-align:center;min-width:80px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">SELECT DB</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">数据库序号</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.08);border:1px solid rgba(240,147,251,0.15);border-left:none;padding:12px 16px;text-align:center;flex:1;min-width:140px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">Key-Value 数据</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">类型 + 过期 + 值（LZF压缩）</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.15);border:1px solid rgba(240,147,251,0.3);border-left:none;padding:12px 16px;text-align:center;min-width:80px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">0xFF</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">EOF 标志</div>
+      </div>
+      <div style="background:rgba(240,147,251,0.2);border:1px solid rgba(240,147,251,0.4);border-left:none;padding:12px 16px;border-radius:0 8px 8px 0;text-align:center;min-width:80px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.82rem">CRC64</div>
+        <div style="color:#94a3b8;font-size:0.72rem;margin-top:4px">校验和</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="two-col">
+    <div class="card">
+      <h3 style="color:#48c78e">✅ RDB 优点</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li>文件紧凑，体积小，传输方便</li>
+        <li>恢复速度极快（直接加载二进制）</li>
+        <li>对 Redis 性能影响极小（fork子进程）</li>
+        <li>适合全量备份与容灾迁移</li>
+        <li>支持多版本数据对比</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:#f14668">❌ RDB 缺点</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li><strong>数据丢失风险</strong>：两次快照之间宕机会丢数据</li>
+        <li>数据量大时 fork() 耗时，可能阻塞主线程</li>
+        <li>频繁快照消耗大量 CPU 和 I/O</li>
+        <li>不可读，难以手动修复数据</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- AOF -->
+<!-- ============================================================ -->
+<div id="sec-aof" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-aof">📝</div>
+    <div>
+      <h2>AOF — 追加日志持久化</h2>
+      <p>Append Only File，命令级别的持久化记录</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🧠 核心原理</h3>
+    <p>Redis 每次执行写命令（SET / DEL / LPUSH...）后，将命令以 <strong>RESP 协议文本格式</strong>追加到 <code style="color:#4facfe">appendonly.aof</code> 文件末尾。数据恢复时逐条重放命令，还原内存状态。</p>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">⚙️ 三种 fsync 刷盘策略</h3>
+
+  <div class="card-grid">
+    <div class="card" style="border-color:rgba(241,70,104,0.3)">
+      <h3 style="color:#f14668">🔥 always</h3>
+      <div class="code-block" style="margin:8px 0"><span class="key">appendfsync</span> <span class="str">always</span></div>
+      <p>每次写命令立即 fsync 到磁盘。<br><strong style="color:#48c78e">数据零丢失</strong>，但性能最差，每秒写入受 I/O 限制（约几百次/秒）。</p>
+    </div>
+    <div class="card" style="border-color:rgba(255,221,87,0.3)">
+      <h3 style="color:#ffdd57">⚖️ everysec（推荐）</h3>
+      <div class="code-block" style="margin:8px 0"><span class="key">appendfsync</span> <span class="str">everysec</span></div>
+      <p>后台线程每秒执行一次 fsync。<br>宕机最多丢失 <strong style="color:#ffdd57">1 秒</strong> 数据，性能与安全的最佳平衡点。</p>
+    </div>
+    <div class="card" style="border-color:rgba(72,199,142,0.3)">
+      <h3 style="color:#48c78e">🚀 no</h3>
+      <div class="code-block" style="margin:8px 0"><span class="key">appendfsync</span> <span class="str">no</span></div>
+      <p>由 OS 决定何时刷盘（通常 30s）。<br>性能最好，但宕机可能丢失数十秒数据，<strong style="color:#f14668">不推荐生产使用</strong>。</p>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">🔄 AOF 写入流程</h3>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-box aof-color">① 客户端<br>发送命令</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">② Redis 执行<br>写命令</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">③ 命令追加到<br>AOF 缓冲区</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">④ 按策略<br>fsync 刷盘</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">⑤ 写入<br>appendonly.aof</div>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">📄 AOF 文件内容（RESP 协议）</h3>
+
+  <div class="code-block">
+<span class="comment"># 执行：SET user:1 "alice"  EXPIRE user:1 3600</span>
+<span class="comment"># AOF 文件内容如下：</span>
+
+<span class="label">*3</span>          <span class="comment"># 命令有3个参数</span>
+<span class="label">$3</span>
+<span class="val">SET</span>
+<span class="label">$6</span>
+<span class="val">user:1</span>
+<span class="label">$5</span>
+<span class="val">alice</span>
+
+<span class="label">*3</span>
+<span class="label">$6</span>
+<span class="val">EXPIRE</span>
+<span class="label">$6</span>
+<span class="val">user:1</span>
+<span class="label">$4</span>
+<span class="val">3600</span>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">🗜️ AOF 重写 (Rewrite) — 瘦身机制</h3>
+
+  <div class="alert alert-warn">
+    <span class="alert-icon">📈</span>
+    <div class="alert-content">
+      <p><strong>问题：</strong>AOF 文件只追加不删除，同一个 Key 被多次修改会产生大量冗余命令，文件越来越大。<br>
+      例如：<code style="color:#4facfe">SET k 1 → SET k 2 → SET k 3</code>，AOF 有 3 条命令，但实际只需 <code style="color:#4facfe">SET k 3</code> 即可。</p>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-box aof-color">① BGREWRITEAOF<br>触发</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">② fork()<br>子进程</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">③ 子进程扫描<br>内存当前状态</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">④ 生成最小化<br>命令集</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">⑤ 追加重写期间<br>增量命令</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box aof-color">⑥ 原子替换<br>新 AOF 文件</div>
+    </div>
+  </div>
+
+  <div class="code-block">
+<span class="comment"># 自动重写触发条件（redis.conf）</span>
+<span class="key">auto-aof-rewrite-percentage</span> <span class="val">100</span>   <span class="comment"># AOF 文件比上次重写后增长 100% 时触发</span>
+<span class="key">auto-aof-rewrite-min-size</span>   <span class="val">64mb</span>  <span class="comment"># AOF 文件至少 64MB 才触发</span>
+
+<span class="comment"># 手动触发</span>
+<span class="label">BGREWRITEAOF</span>
+  </div>
+
+  <div class="divider"></div>
+  <div class="two-col">
+    <div class="card">
+      <h3 style="color:#48c78e">✅ AOF 优点</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li>数据安全性高，最多丢失 1 秒数据</li>
+        <li>文件可读，可手动修改修复误操作</li>
+        <li>支持 FLUSHALL 等误操作回滚</li>
+        <li>不影响主进程写入（缓冲区异步）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:#f14668">❌ AOF 缺点</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li>文件体积远大于 RDB（相同数据量）</li>
+        <li>恢复速度慢（需逐条重放命令）</li>
+        <li>always 模式下写入性能大幅下降</li>
+        <li>重写期间消耗额外内存（COW 原理）</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- 混合持久化 -->
+<!-- ============================================================ -->
+<div id="sec-hybrid" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-hybrid">⚡</div>
+    <div>
+      <h2>混合持久化 <span class="badge-new">Redis 4.0+</span></h2>
+      <p>鱼与熊掌兼得：RDB 的快速恢复 + AOF 的数据安全</p>
+    </div>
+  </div>
+
+  <div class="alert alert-success">
+    <span class="alert-icon">🎯</span>
+    <div class="alert-content">
+      <p><strong>设计目标：</strong>解决 AOF 重写文件仍然很大、恢复慢的问题，同时保留 AOF 的低数据丢失特性。混合持久化是目前 Redis <strong>官方推荐的生产配置</strong>。</p>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">⚙️ 开启配置</h3>
+
+  <div class="code-block">
+<span class="comment"># redis.conf</span>
+<span class="key">appendonly</span>             <span class="val">yes</span>       <span class="comment"># 必须先开启 AOF</span>
+<span class="key">aof-use-rdb-preamble</span>  <span class="val">yes</span>       <span class="comment"># 开启混合持久化（默认开启）</span>
+<span class="key">appendfsync</span>            <span class="val">everysec</span>  <span class="comment"># 推荐策略</span>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">📦 混合文件结构</h3>
+
+  <div class="memory-visual">
+    <div style="font-size:0.85rem;color:#94a3b8;margin-bottom:16px">混合持久化文件 = appendonly.aof（AOF 重写时产生）</div>
+    <div style="display:flex;gap:0;align-items:stretch;min-height:80px;overflow-x:auto">
+      <div style="background:linear-gradient(135deg,rgba(240,147,251,0.25),rgba(245,87,108,0.2));border:2px solid rgba(240,147,251,0.5);padding:20px 24px;border-radius:12px 0 0 12px;flex:2;min-width:200px">
+        <div style="color:#f093fb;font-weight:700;font-size:0.95rem;margin-bottom:8px">🗂️ RDB 格式头部</div>
+        <div style="color:#94a3b8;font-size:0.82rem;line-height:1.8">
+          ✓ AOF 重写时刻的全量快照<br>
+          ✓ 二进制压缩，体积小<br>
+          ✓ 包含所有 Key-Value 数据
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,rgba(79,172,254,0.2),rgba(67,233,123,0.15));border:2px solid rgba(67,233,123,0.5);border-left:none;padding:20px 24px;border-radius:0 12px 12px 0;flex:1.5;min-width:180px">
+        <div style="color:#43e97b;font-weight:700;font-size:0.95rem;margin-bottom:8px">📝 AOF 格式尾部</div>
+        <div style="color:#94a3b8;font-size:0.82rem;line-height:1.8">
+          ✓ 重写完成后的增量命令<br>
+          ✓ RESP 文本格式<br>
+          ✓ 持续追加新写命令
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:12px;display:flex;justify-content:space-between;font-size:0.75rem;color:#4a5568">
+      <span>← 体积小，加载快（毫秒级）</span>
+      <span>最多丢失 1 秒增量 →</span>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">🔄 混合持久化重写流程</h3>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">① 触发<br>AOF 重写</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">② fork()<br>子进程</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">③ 子进程将内存<br>以 RDB 格式写入</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">④ 主进程增量命令<br>写入 AOF 缓冲区</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">⑤ 缓冲区追加到<br>RDB 数据后面</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">⑥ 原子替换<br>appendonly.aof</div>
+    </div>
+  </div>
+
+  <h3 style="margin:28px 0 16px;color:#e2e8f0">⚡ 混合持久化恢复流程</h3>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">① Redis 启动<br>读取 AOF 文件</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">② 识别文件头<br>是 RDB 格式</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">③ 快速加载<br>RDB 头部数据</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">④ 重放 AOF<br>尾部增量命令</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-box hybrid-color">⑤ 数据恢复<br>完成 🎉</div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">📊 恢复时间对比（同等数据量）</h3>
+
+  <div class="card">
+    <div class="metric">
+      <div class="metric-label">
+        <span style="color:#4facfe">AOF 纯文本恢复</span>
+        <span style="color:#4facfe">~120s（10GB 数据）</span>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-fill" id="bar-aof" style="width:0;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div>
+      </div>
+    </div>
+    <div class="metric" style="margin-top:20px">
+      <div class="metric-label">
+        <span style="color:#43e97b">混合持久化恢复</span>
+        <span style="color:#43e97b">~8s（10GB 数据）</span>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-fill" id="bar-hybrid" style="width:0;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div>
+      </div>
+    </div>
+    <div class="metric" style="margin-top:20px">
+      <div class="metric-label">
+        <span style="color:#f093fb">RDB 纯快照恢复</span>
+        <span style="color:#f093fb">~5s（但数据可能更旧）</span>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-fill" id="bar-rdb" style="width:0;background:linear-gradient(90deg,#f093fb,#f5576c)"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="two-col">
+    <div class="card">
+      <h3 style="color:#48c78e">✅ 混合持久化优点</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li>恢复速度接近 RDB（数倍提升）</li>
+        <li>数据丢失风险接近 AOF（最多 1s）</li>
+        <li>AOF 文件体积大幅缩小</li>
+        <li>自动兼容旧版 AOF 文件</li>
+        <li>Redis 官方推荐，稳定可靠</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:#f14668">⚠️ 注意事项</h3>
+      <ul style="color:#94a3b8;line-height:2;padding-left:20px;margin-top:8px">
+        <li>需要 Redis 4.0+</li>
+        <li>混合格式文件 <strong>不向下兼容</strong>（旧版无法解析 RDB 头）</li>
+        <li>若需要手动修复 AOF，需跳过 RDB 头部分</li>
+        <li>需同时开启 appendonly yes</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- 对比分析 -->
+<!-- ============================================================ -->
+<div id="sec-compare" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-compare">📊</div>
+    <div>
+      <h2>三种机制横向对比</h2>
+      <p>多维度全面分析，快速选型参考</p>
+    </div>
+  </div>
+
+  <div style="overflow-x:auto">
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>对比维度</th>
+          <th style="color:#f093fb">💾 RDB</th>
+          <th style="color:#4facfe">📝 AOF</th>
+          <th style="color:#43e97b">⚡ 混合持久化</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="col-label">持久化方式</td>
+          <td class="col-rdb">全量内存快照</td>
+          <td class="col-aof">写命令追加日志</td>
+          <td class="col-hybrid">RDB快照 + AOF增量</td>
+        </tr>
+        <tr>
+          <td class="col-label">数据安全性</td>
+          <td class="col-rdb"><span class="tag tag-red">较低</span> 最多丢失几分钟</td>
+          <td class="col-aof"><span class="tag tag-green">高</span> 最多丢失 1s</td>
+          <td class="col-hybrid"><span class="tag tag-green">高</span> 最多丢失 1s</td>
+        </tr>
+        <tr>
+          <td class="col-label">恢复速度</td>
+          <td class="col-rdb"><span class="tag tag-green">极快</span> 直接加载二进制</td>
+          <td class="col-aof"><span class="tag tag-red">慢</span> 逐条重放命令</td>
+          <td class="col-hybrid"><span class="tag tag-green">快</span> 近似 RDB 速度</td>
+        </tr>
+        <tr>
+          <td class="col-label">文件大小</td>
+          <td class="col-rdb"><span class="tag tag-green">小</span> 压缩二进制</td>
+          <td class="col-aof"><span class="tag tag-red">大</span> 文本格式冗余</td>
+          <td class="col-hybrid"><span class="tag tag-yellow">中</span> 比纯 AOF 小很多</td>
+        </tr>
+        <tr>
+          <td class="col-label">写入性能影响</td>
+          <td class="col-rdb"><span class="tag tag-green">小</span> 定时快照，影响低</td>
+          <td class="col-aof"><span class="tag tag-yellow">中</span> everysec 影响较低</td>
+          <td class="col-hybrid"><span class="tag tag-yellow">中</span> 同 AOF everysec</td>
+        </tr>
+        <tr>
+          <td class="col-label">CPU 消耗</td>
+          <td class="col-rdb">fork + 压缩，偶发高峰</td>
+          <td class="col-aof">持续写入，总量大</td>
+          <td class="col-hybrid">重写时较高，日常同 AOF</td>
+        </tr>
+        <tr>
+          <td class="col-label">可读性</td>
+          <td class="col-rdb"><span class="tag tag-red">不可读</span> 二进制格式</td>
+          <td class="col-aof"><span class="tag tag-green">可读</span> RESP 文本</td>
+          <td class="col-hybrid">尾部 AOF 部分可读</td>
+        </tr>
+        <tr>
+          <td class="col-label">适用版本</td>
+          <td class="col-rdb">所有版本</td>
+          <td class="col-aof">所有版本</td>
+          <td class="col-hybrid">Redis 4.0+</td>
+        </tr>
+        <tr>
+          <td class="col-label">推荐场景</td>
+          <td class="col-rdb">冷备、迁移、允许少量丢失</td>
+          <td class="col-aof">高安全要求、可人工修复</td>
+          <td class="col-hybrid"><span class="tag tag-green">生产环境首选</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">📈 性能雷达对比</h3>
+
+  <div class="card-grid">
+    <div class="card" style="background:rgba(240,147,251,0.05);border-color:rgba(240,147,251,0.2)">
+      <h3 style="color:#f093fb">💾 RDB</h3>
+      <div class="metric">
+        <div class="metric-label"><span>数据安全</span><span>★★☆☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:40%;background:linear-gradient(90deg,#f093fb,#f5576c)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>恢复速度</span><span>★★★★★</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:100%;background:linear-gradient(90deg,#f093fb,#f5576c)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>写入性能</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:80%;background:linear-gradient(90deg,#f093fb,#f5576c)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>空间效率</span><span>★★★★★</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:100%;background:linear-gradient(90deg,#f093fb,#f5576c)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>可维护性</span><span>★★☆☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:40%;background:linear-gradient(90deg,#f093fb,#f5576c)"></div></div>
+      </div>
+    </div>
+
+    <div class="card" style="background:rgba(79,172,254,0.05);border-color:rgba(79,172,254,0.2)">
+      <h3 style="color:#4facfe">📝 AOF</h3>
+      <div class="metric">
+        <div class="metric-label"><span>数据安全</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:80%;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>恢复速度</span><span>★★☆☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:40%;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>写入性能</span><span>★★★☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:60%;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>空间效率</span><span>★★☆☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:40%;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>可维护性</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:80%;background:linear-gradient(90deg,#4facfe,#00f2fe)"></div></div>
+      </div>
+    </div>
+
+    <div class="card" style="background:rgba(67,233,123,0.05);border-color:rgba(67,233,123,0.2)">
+      <h3 style="color:#43e97b">⚡ 混合持久化</h3>
+      <div class="metric">
+        <div class="metric-label"><span>数据安全</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:80%;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>恢复速度</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:85%;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>写入性能</span><span>★★★☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:60%;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>空间效率</span><span>★★★★☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:75%;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label"><span>可维护性</span><span>★★★☆☆</span></div>
+        <div class="metric-bar"><div class="metric-fill" style="width:65%;background:linear-gradient(90deg,#43e97b,#38f9d7)"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- 交互演示 -->
+<!-- ============================================================ -->
+<div id="sec-demo" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-hybrid">🎮</div>
+    <div>
+      <h2>持久化流程演示</h2>
+      <p>点击按钮，模拟三种持久化机制的执行过程</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <p style="color:#94a3b8;margin-bottom:16px">模拟 Redis 实例运行中，分别触发不同持久化模式的执行过程。观察日志输出了解各机制的工作步骤。</p>
+    <div class="demo-controls">
+      <button class="demo-btn btn-rdb" onclick="simulateRDB()">💾 触发 BGSAVE (RDB)</button>
+      <button class="demo-btn btn-aof" onclick="simulateAOF()">📝 模拟 AOF 写入</button>
+      <button class="demo-btn btn-aof" onclick="simulateRewrite()">🗜️ AOF 重写</button>
+      <button class="demo-btn btn-hybrid" onclick="simulateHybrid()">⚡ 混合持久化重写</button>
+      <button class="demo-btn btn-reset" onclick="clearLog()">🗑️ 清空日志</button>
+    </div>
+    <div class="demo-log" id="demoLog">
+      <span class="log-sys">▌ 等待操作... 点击上方按钮开始演示</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">⚙️ 完整生产环境配置参考</h3>
+
+  <div class="code-block">
+<span class="comment">################################</span>
+<span class="comment"># Redis 生产环境持久化配置最佳实践</span>
+<span class="comment">################################</span>
+
+<span class="comment"># === RDB 配置 ===</span>
+<span class="key">save</span> <span class="val">3600 1</span>       <span class="comment"># 1h 内有 1 次写，做快照（作为备份）</span>
+<span class="key">save</span> <span class="val">300 100</span>     <span class="comment"># 5min 内 100 次写</span>
+<span class="key">save</span> <span class="val">60 10000</span>    <span class="comment"># 1min 内 10000 次写</span>
+<span class="key">dbfilename</span>       <span class="val">dump.rdb</span>
+<span class="key">dir</span>              <span class="str">/data/redis</span>
+<span class="key">rdbcompression</span>  <span class="val">yes</span>
+<span class="key">rdbchecksum</span>     <span class="val">yes</span>
+
+<span class="comment"># === AOF 配置 ===</span>
+<span class="key">appendonly</span>              <span class="val">yes</span>
+<span class="key">appendfilename</span>          <span class="str">"appendonly.aof"</span>
+<span class="key">appendfsync</span>             <span class="val">everysec</span>   <span class="comment"># 推荐：每秒刷盘</span>
+<span class="key">no-appendfsync-on-rewrite</span> <span class="val">yes</span>      <span class="comment"># 重写期间不强制 fsync</span>
+<span class="key">auto-aof-rewrite-percentage</span> <span class="val">100</span>
+<span class="key">auto-aof-rewrite-min-size</span>   <span class="val">64mb</span>
+
+<span class="comment"># === 混合持久化（Redis 4.0+）===</span>
+<span class="key">aof-use-rdb-preamble</span>    <span class="val">yes</span>        <span class="comment"># ✓ 开启混合持久化</span>
+
+<span class="comment"># === 恢复优先级（Redis 自动处理）===</span>
+<span class="comment"># AOF 存在 → 优先用 AOF 恢复</span>
+<span class="comment"># AOF 不存在 → 用 RDB 恢复</span>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- 场景选型 -->
+<!-- ============================================================ -->
+<div id="sec-scene" class="section">
+  <div class="sec-title">
+    <div class="sec-icon icon-scene">🎯</div>
+    <div>
+      <h2>场景选型指南</h2>
+      <p>根据业务需求，快速确定最适合的持久化方案</p>
+    </div>
+  </div>
+
+  <div class="scene-cards">
+    <div class="scene-card recommend-hybrid">
+      <div class="scene-icon">🏦</div>
+      <h4>金融 / 支付系统</h4>
+      <p>数据不能丢失，同时需要快速灾难恢复。混合持久化同时满足安全性与恢复速度。</p>
+      <div class="scene-badge" style="background:rgba(67,233,123,0.15);color:#43e97b">推荐：混合持久化</div>
+    </div>
+
+    <div class="scene-card recommend-hybrid">
+      <div class="scene-icon">🛒</div>
+      <h4>电商秒杀 / 库存</h4>
+      <p>写入频繁，数据不能丢，需高可用。混合持久化 + everysec 是标准配置。</p>
+      <div class="scene-badge" style="background:rgba(67,233,123,0.15);color:#43e97b">推荐：混合持久化</div>
+    </div>
+
+    <div class="scene-card recommend-rdb">
+      <div class="scene-icon">📊</div>
+      <h4>报表 / 统计缓存</h4>
+      <p>数据可以从 DB 重新生成，丢失部分数据可接受，重点是恢复快、性能高。</p>
+      <div class="scene-badge" style="background:rgba(240,147,251,0.15);color:#f093fb">推荐：仅 RDB</div>
+    </div>
+
+    <div class="scene-card recommend-rdb">
+      <div class="scene-icon">🎮</div>
+      <h4>游戏排行榜</h4>
+      <p>允许短暂数据不一致，对恢复速度要求高，RDB 即可满足需求。</p>
+      <div class="scene-badge" style="background:rgba(240,147,251,0.15);color:#f093fb">推荐：仅 RDB</div>
+    </div>
+
+    <div class="scene-card recommend-aof">
+      <div class="scene-icon">📩</div>
+      <h4>消息队列 / 任务队列</h4>
+      <p>消息不能丢失，但数据量大，需要人工可检查日志。纯 AOF 更易排查问题。</p>
+      <div class="scene-badge" style="background:rgba(79,172,254,0.15);color:#4facfe">推荐：纯 AOF</div>
+    </div>
+
+    <div class="scene-card recommend-hybrid">
+      <div class="scene-icon">🌐</div>
+      <h4>用户 Session / Token</h4>
+      <p>Session 丢失影响用户体验，需要高可用。混合持久化是最佳选择。</p>
+      <div class="scene-badge" style="background:rgba(67,233,123,0.15);color:#43e97b">推荐：混合持久化</div>
+    </div>
+
+    <div class="scene-card recommend-rdb">
+      <div class="scene-icon">🔄</div>
+      <h4>数据迁移 / 全量同步</h4>
+      <p>需要将某一时刻完整数据迁移到另一实例，RDB 的全量快照特性天然适合。</p>
+      <div class="scene-badge" style="background:rgba(240,147,251,0.15);color:#f093fb">推荐：RDB</div>
+    </div>
+
+    <div class="scene-card recommend-aof">
+      <div class="scene-icon">🔧</div>
+      <h4>误操作回滚场景</h4>
+      <p>执行了错误的 FLUSHALL 或 DEL 操作，需要回滚数据，AOF 日志可以手动编辑恢复。</p>
+      <div class="scene-badge" style="background:rgba(79,172,254,0.15);color:#4facfe">推荐：纯 AOF</div>
+    </div>
+
+    <div class="scene-card" style="border-color:rgba(255,221,87,0.3)">
+      <div class="scene-icon">❌</div>
+      <h4>纯缓存场景</h4>
+      <p>Redis 仅用作缓存层，所有数据都可从数据库重建，无需任何持久化。</p>
+      <div class="scene-badge" style="background:rgba(255,221,87,0.12);color:#ffdd57">不需要持久化</div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:20px;color:#e2e8f0">🌳 选型决策树</h3>
+  <div class="card">
+    <div style="font-family:'Fira Code',monospace;font-size:0.9rem;line-height:2.2;color:#94a3b8">
+      <div>数据能否从其他地方重建？</div>
+      <div style="padding-left:20px">├── <span style="color:#ffdd57">能（纯缓存）</span> → <strong style="color:#ffdd57">关闭所有持久化</strong>，性能最佳</div>
+      <div style="padding-left:20px">└── <span style="color:#e2e8f0">不能</span> → 继续判断...</div>
+      <div style="padding-left:40px;margin-top:4px">数据丢失 1-5 分钟是否可接受？</div>
+      <div style="padding-left:60px">├── <span style="color:#ffdd57">可接受</span> → 仅用 <strong style="color:#f093fb">RDB</strong>（save 策略），简单高效</div>
+      <div style="padding-left:60px">└── <span style="color:#e2e8f0">不可接受</span> → 继续判断...</div>
+      <div style="padding-left:80px;margin-top:4px">Redis 版本 ≥ 4.0 且需要快速恢复？</div>
+      <div style="padding-left:100px">├── <span style="color:#43e97b">是</span> → <strong style="color:#43e97b">混合持久化</strong>（首选生产配置 ✓）</div>
+      <div style="padding-left:100px">└── <span style="color:#e2e8f0">否</span> → <strong style="color:#4facfe">纯 AOF + everysec</strong></div>
+    </div>
+  </div>
+
+  <div class="alert alert-success" style="margin-top:32px">
+    <span class="alert-icon">🏆</span>
+    <div class="alert-content">
+      <p><strong>生产环境最佳实践：</strong>开启 <strong>混合持久化</strong>（aof-use-rdb-preamble yes），同时保留 <strong>RDB 定时快照</strong>作为额外备份副本，放到不同存储介质或远程对象存储（OSS/S3）。这样既有高安全的实时 AOF，又有易迁移的 RDB 冷备。</p>
+    </div>
+  </div>
+</div>
+
+
+<script>
+// ===== NAV =====
+function showSection(id, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('sec-' + id).classList.add('active');
+  btn.classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  if (id === 'hybrid') {
+    setTimeout(() => {
+      document.getElementById('bar-aof').style.width = '100%';
+      document.getElementById('bar-hybrid').style.width = '6.7%';
+      document.getElementById('bar-rdb').style.width = '4.2%';
+    }, 300);
+  }
+}
+
+// ===== DEMO LOG =====
+let logEl;
+function getLog() { return document.getElementById('demoLog'); }
+
+function log(msg, cls, delay) {
+  return new Promise(resolve => {
+    setTimeout(() => {
+      const el = getLog();
+      const line = document.createElement('div');
+      line.className = cls || 'log-sys';
+      line.textContent = msg;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+      resolve();
+    }, delay || 0);
+  });
+}
+
+function clearLog() {
+  getLog().innerHTML = '<span class="log-sys">▌ 日志已清空，等待操作...</span>';
+}
+
+async function simulateRDB() {
+  const el = getLog();
+  el.innerHTML = '';
+  const msgs = [
+    ['[RDB] ▶ 客户端执行 BGSAVE 命令', 'log-rdb', 0],
+    ['[RDB] 主进程检查是否有子进程在运行...', 'log-sys', 400],
+    ['[RDB] 没有子进程，开始 fork()...', 'log-sys', 900],
+    ['[RDB] ✓ fork() 成功，子进程 PID: 12847', 'log-rdb', 1400],
+    ['[RDB] 主进程继续处理客户端请求（非阻塞）', 'log-sys', 1600],
+    ['[RDB] 子进程开始扫描内存数据...', 'log-rdb', 2000],
+    ['[RDB]   - 数据库 0: 扫描 15,432 个 key', 'log-rdb', 2500],
+    ['[RDB]   - 数据库 1: 扫描 3,218 个 key', 'log-rdb', 3000],
+    ['[RDB]   - LZF 压缩中...', 'log-rdb', 3500],
+    ['[RDB] 写入临时文件 temp-12847.rdb', 'log-rdb', 4200],
+    ['[RDB] 临时文件写入完成，大小: 48.3 MB', 'log-rdb', 5000],
+    ['[RDB] 原子替换 dump.rdb ✓', 'log-rdb', 5400],
+    ['[RDB] 子进程退出，耗时: 1.24s', 'log-sys', 5700],
+    ['[RDB] ✅ RDB 快照保存成功！Background saving terminated with success', 'log-rdb', 6000],
+  ];
+  for (const [m, c, d] of msgs) await log(m, c, d);
+}
+
+async function simulateAOF() {
+  const el = getLog();
+  el.innerHTML = '';
+  const cmds = [
+    { cmd: 'SET user:1001 "alice"', resp: '*3\r\n$3\r\nSET\r\n$8\r\nuser:1001\r\n$5\r\nalice' },
+    { cmd: 'EXPIRE user:1001 3600', resp: '*3\r\n$6\r\nEXPIRE\r\n$8\r\nuser:1001\r\n$4\r\n3600' },
+    { cmd: 'HSET order:99 status paid amount 299.00', resp: '*6\r\n$4\r\nHSET\r\n...' },
+    { cmd: 'LPUSH queue:email "welcome@example.com"', resp: '*3\r\n$5\r\nLPUSH\r\n...' },
+  ];
+  await log('[AOF] ▶ 模拟写命令 → AOF 持久化流程', 'log-aof', 0);
+  await log('[AOF] appendonly yes, appendfsync everysec', 'log-sys', 400);
+  let delay = 800;
+  for (const c of cmds) {
+    await log(`[AOF] → 命令: ${c.cmd}`, 'log-aof', delay);
+    await log(`[AOF]   追加到 AOF 缓冲区: ${c.resp}`, 'log-sys', delay + 300);
+    delay += 700;
+  }
+  await log('[AOF] 后台线程执行 fsync()... 刷盘到 appendonly.aof', 'log-aof', delay + 200);
+  await log('[AOF] ✓ fsync 完成，4 条命令已持久化', 'log-aof', delay + 700);
+  await log('[AOF] 当前 AOF 文件大小: 2.1 MB (累计 8,432 条命令)', 'log-sys', delay + 1100);
+}
+
+async function simulateRewrite() {
+  const el = getLog();
+  el.innerHTML = '';
+  const msgs = [
+    ['[AOF重写] ▶ 触发条件满足，开始 BGREWRITEAOF', 'log-aof', 0],
+    ['[AOF重写] AOF 文件当前大小: 256 MB (已超 64MB×2)', 'log-warn', 400],
+    ['[AOF重写] fork() 子进程...', 'log-sys', 900],
+    ['[AOF重写] ✓ 子进程 PID: 14923', 'log-aof', 1300],
+    ['[AOF重写] 子进程扫描内存生成最小化命令集...', 'log-aof', 1700],
+    ['[AOF重写]   SET key1 val1    (合并历史 12 次修改)', 'log-sys', 2200],
+    ['[AOF重写]   SET key2 val2    (合并历史 8 次修改)', 'log-sys', 2500],
+    ['[AOF重写]   HSET hash1 f1 v1 f2 v2  (合并 HSET 操作)', 'log-sys', 2800],
+    ['[AOF重写] 主进程期间新增命令写入 AOF 重写缓冲区', 'log-warn', 3200],
+    ['[AOF重写] 子进程写入新 AOF 文件完成', 'log-aof', 4000],
+    ['[AOF重写] 将重写缓冲区增量追加到新 AOF 文件', 'log-aof', 4400],
+    ['[AOF重写] 原子替换 appendonly.aof ✓', 'log-aof', 4800],
+    ['[AOF重写] ✅ AOF 重写完成！文件从 256MB 压缩到 31MB (-88%)', 'log-aof', 5200],
+  ];
+  for (const [m, c, d] of msgs) await log(m, c, d);
+}
+
+async function simulateHybrid() {
+  const el = getLog();
+  el.innerHTML = '';
+  const msgs = [
+    ['[混合] ▶ 触发 AOF 重写（aof-use-rdb-preamble yes）', 'log-hybrid', 0],
+    ['[混合] fork() 子进程 PID: 15512', 'log-sys', 500],
+    ['[混合] 子进程以 RDB 格式写入内存快照（头部）...', 'log-hybrid', 1000],
+    ['[混合]   魔数 REDIS0009 + 辅助字段...', 'log-sys', 1400],
+    ['[混合]   扫描 DB0: 18,000 keys → 序列化 + LZF 压缩', 'log-hybrid', 1900],
+    ['[混合]   RDB 头部写入完成，大小: 42 MB', 'log-hybrid', 2800],
+    ['[混合] 主进程期间新增命令写入 AOF 重写缓冲区', 'log-warn', 3100],
+    ['[混合] 将 AOF 格式增量命令追加到 RDB 头部之后（尾部）', 'log-hybrid', 3500],
+    ['[混合]   *3\\r\\n$3\\r\\nSET\\r\\n...（增量 RESP 格式）', 'log-sys', 3900],
+    ['[混合] 原子替换 appendonly.aof ✓', 'log-hybrid', 4400],
+    ['[混合] ✅ 混合持久化重写完成！', 'log-hybrid', 4900],
+    ['[混合] 文件结构: [RDB快照 42MB] + [AOF增量 0.8MB] = 42.8MB', 'log-hybrid', 5200],
+    ['[混合] 对比纯 AOF: 256MB → 42.8MB，恢复速度提升约 15x 🚀', 'log-hybrid', 5600],
+  ];
+  for (const [m, c, d] of msgs) await log(m, c, d);
+}
+</script>
+
+</body>
+</html>

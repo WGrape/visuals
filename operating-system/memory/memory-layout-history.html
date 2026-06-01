@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>进程内存布局：历史起源与设计哲学</title>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --card: #131829;
+    --card-hover: #1a2035;
+    --border: #2a3555;
+    --text: #e0e6f0;
+    --text-dim: #8892aa;
+    --accent: #4d9fff;
+    --code: #3dd9a0;
+    --heap: #a855f7;
+    --stack: #f43f5e;
+    --data: #22c55e;
+    --bss: #f59e0b;
+    --mmap: #06b6d4;
+    --text-seg: #6366f1;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, 'SF Pro', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* Hero Section */
+  .hero {
+    text-align: center;
+    padding: 80px 20px 60px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(77,159,255,0.12) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 50%, rgba(168,85,247,0.08) 0%, transparent 50%);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .hero h1 {
+    font-size: clamp(28px, 5vw, 48px);
+    font-weight: 800;
+    background: linear-gradient(135deg, #4d9fff, #a855f7, #f43f5e);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 16px;
+    letter-spacing: -0.02em;
+  }
+
+  .hero .subtitle {
+    font-size: 18px;
+    color: var(--text-dim);
+    max-width: 650px;
+    margin: 0 auto;
+  }
+
+  .hero .tagline {
+    display: inline-block;
+    margin-top: 24px;
+    padding: 8px 20px;
+    background: rgba(77,159,255,0.1);
+    border: 1px solid rgba(77,159,255,0.25);
+    border-radius: 100px;
+    font-size: 14px;
+    color: var(--accent);
+  }
+
+  /* Main Content */
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  .section {
+    margin-bottom: 60px;
+  }
+
+  .section-title {
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .section-title .num {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+
+  /* Memory Diagram */
+  .memory-diagram {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    flex-wrap: wrap;
+    margin: 30px 0;
+    align-items: flex-start;
+  }
+
+  .mem-layout {
+    border: 2px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    background: var(--card);
+    position: relative;
+    min-width: 300px;
+  }
+
+  .mem-layout::before {
+    content: '虚拟地址空间';
+    position: absolute;
+    top: -12px;
+    left: 20px;
+    background: var(--bg);
+    padding: 0 12px;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .mem-region {
+    border: 2px solid;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+    position: relative;
+  }
+
+  .mem-region:hover {
+    transform: translateX(4px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  }
+
+  .mem-region.active {
+    animation: pulse-border 1.5s ease infinite;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+    50% { box-shadow: 0 0 15px 3px currentColor; }
+  }
+
+  .mem-region .name {
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+
+  .mem-region .desc {
+    font-size: 12px;
+    opacity: 0.75;
+  }
+
+  .mem-region .addr {
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    opacity: 0.6;
+  }
+
+  .region-text { border-color: var(--text-seg); color: var(--text-seg); background: rgba(99,102,241,0.08); }
+  .region-data { border-color: var(--data); color: var(--data); background: rgba(34,197,94,0.08); }
+  .region-bss { border-color: var(--bss); color: var(--bss); background: rgba(245,158,11,0.08); }
+  .region-heap { border-color: var(--heap); color: var(--heap); background: rgba(168,85,247,0.08); }
+  .region-mmap { border-color: var(--mmap); color: var(--mmap); background: rgba(6,182,212,0.08); }
+  .region-stack { border-color: var(--stack); color: var(--stack); background: rgba(244,63,94,0.08); }
+
+  /* Detail Panel */
+  .detail-panel {
+    max-width: 400px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--card);
+    padding: 24px;
+    position: sticky;
+    top: 20px;
+  }
+
+  .detail-panel h3 {
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+
+  .detail-panel p {
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  .detail-panel .example {
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    color: var(--code);
+    margin-top: 8px;
+  }
+
+  /* Timeline */
+  .timeline {
+    position: relative;
+    padding-left: 40px;
+  }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent), var(--heap), var(--stack));
+  }
+
+  .timeline-item {
+    position: relative;
+    margin-bottom: 32px;
+    padding: 20px 24px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    transition: border-color 0.3s, transform 0.3s;
+  }
+
+  .timeline-item:hover {
+    border-color: var(--accent);
+    transform: translateX(4px);
+  }
+
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -33px;
+    top: 24px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 3px solid var(--accent);
+  }
+
+  .timeline-item .year {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  .timeline-item .title {
+    font-size: 17px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .timeline-item .content {
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+
+  /* Comparison Table */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .compare-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: transform 0.2s;
+  }
+
+  .compare-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent);
+  }
+
+  .compare-card h4 {
+    font-size: 15px;
+    margin-bottom: 10px;
+    color: var(--accent);
+  }
+
+  .compare-card ul {
+    list-style: none;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .compare-card li {
+    padding: 4px 0;
+    padding-left: 16px;
+    position: relative;
+  }
+
+  .compare-card li::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: var(--code);
+  }
+
+  /* Key Insight Box */
+  .insight-box {
+    background: linear-gradient(135deg, rgba(77,159,255,0.08), rgba(168,85,247,0.08));
+    border: 1px solid rgba(77,159,255,0.2);
+    border-radius: 16px;
+    padding: 28px 32px;
+    margin: 40px 0;
+  }
+
+  .insight-box h3 {
+    font-size: 20px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .insight-box p {
+    font-size: 15px;
+    color: var(--text-dim);
+    line-height: 1.8;
+  }
+
+  /* Architecture Diagram */
+  .arch-visual {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 30px;
+    margin: 24px 0;
+    overflow-x: auto;
+  }
+
+  /* Arrow indicator */
+  .arrow-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 4px 0;
+  }
+
+  .arrow-indicator .arrow {
+    font-size: 18px;
+  }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 40px 20px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .memory-diagram { flex-direction: column; align-items: center; }
+    .detail-panel { position: static; max-width: 100%; }
+    .timeline { padding-left: 30px; }
+  }
+
+  /* Animation for scroll reveal */
+  .fade-in {
+    opacity: 0;
+    transform: translateY(20px);
+    animation: fadeInUp 0.6s ease forwards;
+  }
+
+  @keyframes fadeInUp {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .delay-1 { animation-delay: 0.1s; }
+  .delay-2 { animation-delay: 0.2s; }
+  .delay-3 { animation-delay: 0.3s; }
+  .delay-4 { animation-delay: 0.4s; }
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>🧠 进程内存布局</h1>
+  <p class="subtitle">为什么所有编程语言的内存结构都长得差不多？<br>从冯·诺依曼到现代操作系统的设计演进史</p>
+  <span class="tagline">📖 一篇文章讲清楚栈、堆、数据段、代码段的前世今生</span>
+</div>
+
+<div class="container">
+
+<!-- ==================== 第一部分：先看懂布局 ==================== -->
+<div class="section fade-in">
+  <h2 class="section-title">
+    <span class="num" style="background:rgba(77,159,255,0.2);color:var(--accent)">1</span>
+    先看懂这张图
+  </h2>
+  <p style="color:var(--text-dim);margin-bottom:20px;">
+    你截图中的是 Linux/Unix 下一个典型进程的<strong>虚拟地址空间</strong>布局。从低地址到高地址依次排列着不同的区域，每个区域都有其存在的理由。点击每个区域查看详情 👇
+  </p>
+
+  <div class="memory-diagram">
+    <div class="mem-layout" id="memLayout">
+      <!-- 高地址在上方，符合图示习惯 -->
+      <div class="mem-region region-text" onclick="showDetail('text')">
+        <div class="name">📜 代码段 (Text Segment)</div>
+        <div class="desc">只读 · 可执行 | 存放编译后的机器指令</div>
+        <div class="addr">0x400000</div>
+      </div>
+      <div class="mem-region region-data" onclick="showDetail('data')">
+        <div class="name">📊 数据段 (Data)</div>
+        <div class="desc">已初始化的全局变量 & 静态变量</div>
+        <div class="addr">0x600000</div>
+      </div>
+      <div class="mem-region region-bss" onclick="showDetail('bss')">
+        <div class="name">🔶 BSS 段</div>
+        <div class="desc">未初始化全局变量（自动清零）</div>
+        <div class="addr"></div>
+      </div>
+      <div class="mem-region region-heap" onclick="showDetail('heap')">
+        <div class="name">🔺 堆 (Heap) ↑</div>
+        <div class="desc">动态分配 (malloc / new)<br>向高地址增长</div>
+        <div class="addr">brk: 0x1000000</div>
+      </div>
+      <div class="arrow-indicator"><span class="arrow">↕</span> 自由空间（可扩展）</div>
+      <div class="mem-region region-mmap" onclick="showDetail('mmap')">
+        <div class="name">🗺️ 内存映射区 (mmap)</div>
+        <div class="desc">文件映射 / 共享库 / 匿名映射</div>
+        <div class="addr">0x7f0000000000</div>
+      </div>
+      <div class="mem-region region-stack" onclick="showDetail('stack')">
+        <div class="name">🔻 栈 (Stack) ↓</div>
+        <div class="desc">局部变量 / 函数调用<br>向低地址增长</div>
+        <div class="addr">rsp: 0x7fff_ffff_ffff</div>
+      </div>
+      <div style="text-align:center;padding:8px;font-size:12px;color:var(--text-dim)">
+        内核空间（高地址）— 用户程序不可访问
+      </div>
+    </div>
+
+    <div class="detail-panel" id="detailPanel">
+      <h3 id="detailTitle">👆 点击左侧任意区域</h3>
+      <p id="detailDesc">选择一个内存区域查看它的用途、设计原因和代码示例。</p>
+      <div id="detailExample" class="example" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第二部分：历史起源 ==================== -->
+<div class="section fade-in delay-1">
+  <h2 class="section-title">
+    <span class="num" style="background:rgba(168,85,247,0.2);color:var(--heap)">2</span>
+    谁发明了这种布局？—— 历史溯源
+  </h2>
+
+  <div class="insight-box">
+    <h3>💡 核心答案</h3>
+    <p>
+      这个布局并非某一个人发明的，而是<strong>近70年计算机科学演进的结晶</strong>。它的核心思想可以追溯到 <strong>1945年冯·诺依曼的存储程序体系结构</strong>，然后在 1960-70 年代由 Multics、Unix 等先驱操作系统逐步定型，最终在 1980 年代随着 POSIX 标准和 x86 架构的普及成为业界共识。
+    </p>
+  </div>
+
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="year">1945 年</div>
+      <div class="title">⚡ 冯·诺依曼提出「存储程序计算机」</div>
+      <div class="content">
+        <strong>John von Neumann</strong> 在 EDVAC 报告草案中提出：<strong>指令和数据存放在同一个内存中</strong>，用地址来区分它们。这是"代码段"和"数据段"分离的思想源头——虽然当时还没有分段，但"程序即数据"的概念诞生了。
+        <br><br>
+        📍 关键影响：代码和数据共享同一地址空间 → 为后来的 Text/Data 段分离埋下伏笔
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="year">1950s 后期 ~ 1960s 初</div>
+      <div class="title">🏗️ IBM OS/360 引入「控制段」概念</div>
+      <div class="content">
+        IBM 在 System/360 大型机上首次系统性地引入了<strong>控制段(Control Sections)</strong>的概念：将程序划分为代码区、数据区、公共区等不同段落。链接器(Linker)开始出现，负责把多个段拼装到一起。<br><br>
+        📍 关键影响：<strong>Segmentation（分段）思想的工程化实践</strong>；链接器成为标准工具链的一部分
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="year">1964 ~ 1969 年</div>
+      <div class="title">🌟 Multics：现代内存管理的真正鼻祖</div>
+      <div class="content">
+        MIT、贝尔实验室、GE 联合开发的 Multics 是<strong>第一个真正意义上的分时操作系统</strong>。它引入了革命性的概念：
+        <ul style="margin-top:8px;padding-left:20px;color:var(--text-dim)">
+          <li><strong>虚拟内存(Virtual Memory)</strong>：每个进程有独立的地址空间</li>
+          <li><strong>段(Segment)</strong>作为地址空间的基本组织单位</li>
+          <li><strong>保护位</strong>：不同段的读写执行权限不同</li>
+          <li><strong>堆(heap)</strong> 和 <strong>栈(stack)</strong> 作为动态区域的正式划分</li>
+        </ul>
+        📍 关键影响：<strong>"段 + 保护权限 + 动态区域"的三元组模型</strong>直接奠定了现代内存布局的基础
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="year">1969 ~ 1973 年</div>
+      <div class="title">🐚 Unix 的诞生与简化定型</div>
+      <div class="content">
+        Ken Thompson 和 Dennis Ritchie 在 PDP-11 上创造了 Unix。他们<strong>简化了 Multics 的复杂设计</strong>，但保留了核心精华：
+        <ul style="margin-top:8px;padding-left:20px;color:var(--text-dim)">
+          <li>PDP-11 的地址空间分为 8 个<strong>段寄存器</strong>(Segment Registers)</li>
+          <li><strong>a.out 可执行格式</strong>定义了 Text/Data/BSS/Stack 的标准布局</li>
+          <li>C 语言诞生，<code>malloc()</code> 和函数调用约定固化了 Heap/Stack 的用法</li>
+        </ul>
+        📍 关键影响：<strong>a.out 格式成为事实标准</strong>，Text/Data/BSS/Stack 四段式布局从此被刻入 DNA
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="year">1980s ~ 1990s</div>
+      <div class="title">📦 ELF 格式 & POSIX 标准 — 统一江湖</div>
+      <div class="content">
+        AT&T System V 发布 <strong>ELF(Executable and Linkable Format)</strong>，取代 a.out 成为 Unix 世界的新标准。同时 POSIX 标准化 API (<code>mmap</code>, <code>brk</code>, <code>sbrk</code>) 让所有 Unix 系统的行为一致。
+        <br><br>
+        Windows 用 PE(Portable Executable)，macOS 用 Mach-O ——<strong>格式不同但段的概念一致</strong>：Code、Data、BSS、Import、Export...
+        <br><br>
+        📍 关键影响：<strong>跨平台统一的段语义</strong>，所有主流语言(C/C++/Rust/Go/Java/Python...)都遵循这套模型
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="year">1990s 至今</div>
+      <div class="title">🔄 现代演变：ASLR、NX、更复杂的映射</div>
+      <div class="content">
+        安全性需求催生了新的变化：<strong>ASLR(地址随机布局)</strong>让固定地址不再可预测；<strong>NX bit(禁止执行)</strong>防止栈溢出攻击；mmap 区域变得更大以容纳动态库和内存映射文件。但<strong>基本格局从未改变</strong>。
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第三部分：为什么这样设计 ==================== -->
+<div class="section fade-in delay-2">
+  <h2 class="section-title">
+    <span class="num" style="background:rgba(244,63,94,0.2);color:var(--stack)">3</span>
+    每个区域为什么在那儿？—— 设计哲学
+  </h2>
+
+  <div class="arch-visual">
+    <h3 style="margin-bottom:20px;text-align:center;font-size:18px;">🏗️ 三大核心设计原则</h3>
+    
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;">
+      <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:12px;padding:20px;">
+        <h4 style="color:var(--text-seg);font-size:16px;margin-bottom:12px;">🛡️ 原则一：保护与隔离</h4>
+        <p style="font-size:13px;color:var(--text-dim);">
+          不同区域设置<strong>不同权限</strong>：代码段只读+可执行、数据段读写不可执行、栈可读写... 
+          这不是多此一举！如果代码段能被修改，病毒就能篡改程序逻辑；如果栈能被执行，缓冲区漏洞就能注入 shellcode。
+        </p>
+        <pre class="example" style="margin-top:10px;font-size:12px;">
+// 代码段：r-x (读+执行)
+int add(int a, int b) { return a+b; }
+// 你不能在运行时修改 add 函数的机器码
+
+// 数据段：rw- (读写)
+int global_counter = 0;  
+// 可以读写，但不能当作代码执行
+        </pre>
+      </div>
+
+      <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:12px;padding:20px;">
+        <h4 style="color:var(--data);font-size:16px;margin-bottom:12px;">⚡ 原则二：效率与局部性</h4>
+        <p style="font-size:13px;color:var(--text-dim);">
+          <strong>栈向下增长，堆向上增长</strong>，中间留出自由空间供双方扩展——这是一个精妙的设计！两个最常用的动态区域从两端向中间生长，最大化利用地址空间。同时栈的<strong>LIFO 特性</strong>完美匹配 CPU 缓存的局部性原理。
+        </p>
+        <pre class="example" style="margin-top:10px;font-size:12px;">
+// 栈：连续紧凑，CPU 缓存友好
+void foo() {
+  int a = 1;   // push 到栈顶
+  int b = 2;   // 再 push
+  bar();       // 调用函数
+  // return 时自动弹出 a,b — O(1)!
+}
+
+// 堆：灵活分配，可能碎片化
+int* p = malloc(1024); // 可能 anywhere
+free(p);               // 需要管理器协调
+        </pre>
+      </div>
+
+      <div style="background:rgba(168,85,247,0.1);border:1px solid rgba(168,85,247,0.3);border-radius:12px;padding:20px;">
+        <h4 style="color:var(--heap);font-size:16px;margin-bottom:12px;">📦 原则三：生命周期管理</h4>
+        <p style="font-size:13px;color:var(--text-dim);">
+          <strong>静态 vs 动态 vs 自动</strong>三种生命周期的变量需要不同的存储策略。编译器在编译时就决定了哪些放数据段(整个程序期间存活)、哪些放栈(函数返回就销毁)、哪些放堆(手动/自动释放)。这种分类让<strong>运行时开销最小化</strong>。
+        </p>
+        <pre class="example" style="margin-top:10px;font-size:12px;">
+static int config = 42;     // Data段: 程序启动→结束
+int* data = new int[100];   // Heap: 手动 delete 才销毁
+void work() {
+  int temp = 0;             // Stack: 函数退出即消失
+}
+        </pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第四部分：各语言对比 ==================== -->
+<div class="section fade-in delay-3">
+  <h2 class="section-title">
+    <span class="num" style="background:rgba(6,182,212,0.2);color:var(--mmap)">4</span>
+    各语言的内存模型对比
+  </h2>
+  <p style="color:var(--text-dim);margin-bottom:16px;">
+    不同语言在这个基础布局上做了不同程度的抽象，但<strong>底层物理布局完全相同</strong>：
+  </p>
+
+  <div class="compare-grid">
+    <div class="compare-card">
+      <h4>⚙️ C / C++ / Rust</h4>
+      <ul>
+        <li>直接暴露底层布局，零抽象</li>
+        <li>程序员手动管理堆(malloc/free / new/delete)</li>
+        <li>栈帧结构完全透明可控</li>
+        <li>Rust 通过所有权规则安全地保留了这个能力</li>
+      </ul>
+    </div>
+    <div class="compare-card">
+      <h4>☕ Java / C# / Go</h4>
+      <ul>
+        <li>有 GC(Garbage Collector) 自动管理堆</li>
+        <li>栈上存放基本类型和对象引用</li>
+        <li>堆上存放实际的对象实例</li>
+        <li>JVM/CLR/Go Runtime 封装了 mmap/brk</li>
+      </ul>
+    </div>
+    <div class="compare-card">
+      <h4>🐍 Python / JavaScript / Ruby</h4>
+      <ul>
+        <li>一切皆对象，全部在堆上</li>
+        <li>栈上只有解释器的内部指针</li>
+        <li>GC + 引用计数 双重回收机制</li>
+        <li>程序员几乎感觉不到内存的存在</li>
+      </ul>
+    </div>
+    <div class="compare-card">
+      <h4>⬇️ 为什么看起来一样？</h4>
+      <ul>
+        <li>它们都运行在同一操作系统上！</li>
+        <li>OS 提供的系统调用(brk/mmap/mprotect)一样</li>
+        <li>CPU 的 MMU(内存管理单元)工作方式一样</li>
+        <li>只是高层封装程度不同而已</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第五部分：总结 ==================== -->
+<div class="section fade-in delay-4">
+  <h2 class="section-title">
+    <span class="num" style="background:rgba(245,158,11,0.2);color:var(--bss)">5</span>
+    一句话总结
+  </h2>
+
+  <div class="insight-box">
+    <h3>🎯 本质</h3>
+    <p>
+      进程内存布局不是某个语言设计师拍脑袋想出来的，而是<strong>操作系统内核 + CPU硬件 + 编译器链</strong>三者长期博弈后形成的<strong>最优妥协方案</strong>。
+    </p>
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0;">
+    <p style="font-size:14px;line-height:2;">
+      📌 <strong>冯·诺依曼(1945)</strong> 给出了「程序=指令+数据」的理论框架 →<br>
+      📌 <strong>Multics(1964)</strong> 工程化了分段和保护机制 →<br>
+      📌 <strong>Unix/C(1969)</strong> 将四段式布局写入了 a.out 格式和编译器 →<br>
+      📌 <strong>ELF+POSIX(1980s)</strong> 让它成为所有系统的通用契约 →<br>
+      📌 <strong>今天</strong>，无论你用任何编程语言，底层的虚拟地址空间都是这个样子。
+    </p>
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0;">
+    <p style="font-size:14px;">
+      💭 所以当你看到 <strong>Stack / Heap / Data / BSS / Text</strong> 这些词时，
+      你看到的不是一个语言特性，而是一段 <strong>横跨80年的计算机科学进化史</strong>。
+    </p>
+  </div>
+</div>
+
+</div>
+
+<footer>
+  <p>🧠 进程内存布局：历史起源与设计哲学 | 基于 Linux x86-64 虚拟地址空间</p>
+  <p style="margin-top:8px;opacity:0.6;">从冯·诺依曼到你的 IDE — 计算机架构的传承之旅</p>
+</footer>
+
+<script>
+const details = {
+  text: {
+    title: '📜 代码段 (Text Segment)',
+    desc: '也称为 "文本段"，存放程序的机器码指令。这个段通常是<strong>只读(Read-Only)</strong>且<strong>可执行(eXecute)</strong>的。只读是为了防止程序意外或恶意修改自己的代码；可执行是因为 CPU 需要从中取指执行。',
+    example: `// 这些代码编译后进入 Text 段
+int main() {
+    printf("Hello World\\n");
+    return 0;
+}
+// 编译后的机器码类似:
+// 55              push   rbp
+// 48 89 e5        mov    rbp,rsp
+// ... (一堆指令)
+
+// 权限: r-x (读 + 执行)
+// 不能写入! 尝试修改会导致 SIGSEGV`
+  },
+  data: {
+    title: '📊 数据段 (Data Segment)',
+    desc: '<strong>已初始化</strong>的全局变量和静态(static)变量存放在这里。因为它们的初始值需要在程序启动前就被设定好，所以编译器把这些值连同程序本身一起打包进可执行文件中。',
+    example: `// 这些变量进入 Data 段
+int global_flag = 1;
+static char* msg = "hello";
+double pi = 3.14159;
+
+// 特点:
+// ✅ 程序启动时就有确定的值
+// ✅ 整个程序运行期间一直存在
+// ✅ 可以读写(rw-)
+// ❌ 不在栈上，没有函数作用域限制
+
+// 权限: rw- (读 + 写)`
+  },
+  bss: {
+    title: '🔶 BSS 段 (Block Started by Symbol)',
+    desc: '名字来源于早期 IBM 704 汇编器的伪指令 "Block Started by Symbol"。存放<strong>未初始化</strong>或<strong>初始化为0</strong>的全局/静态变量。<strong>为什么不放在 Data 段?</strong> 因为全零的数据没必要占用磁盘空间——只需记录大小，程序加载时一次性清零即可。',
+    example: `// 这些变量进入 BSS 段
+int uninitialized_global;     // 未初始化 → 默认 0
+static int buffer[10000];     // 全部为 0
+char big_array[1<<20];        // 1MB 全零
+
+// 💡 聪明之处:
+// 如果这 1MB 放进 Data 段,
+// 你的可执行文件会大 1MB!
+// 但放在 BSS 段,
+// 文件只多记录 "这里要清零 1MB"
+// 实际内存分配发生在加载时
+
+// 权限: rw- (读 + 写)`
+  },
+  heap: {
+    title: '🔺 堆 (Heap)',
+    desc: '用于<strong>动态内存分配</strong>的区域。当你在 C 中调用 malloc() 或在 C++ 中使用 new，或者在 Java/Python 中创建对象时，内存就从这里分配。堆向<strong>高地址方向</strong>增长，由 brk/sbrk 系统调用或 mmap 来扩展。堆的管理需要<strong>分配器</strong>(如 glibc ptmalloc2)来维护空闲块列表。',
+    example: `// C: 手动管理
+int* arr = (int*)malloc(sizeof(int) * 100);
+arr[0] = 42;
+free(arr);   // 忘记 free = 内存泄漏!
+
+// C++: new/delete
+auto obj = new MyClass();
+delete obj;
+
+// Java: GC 自动管理 (但仍在堆上)
+MyClass obj = new MyClass();
+// 不用手动 free, GC 会回收
+
+// Python: 一切皆对象, 全在堆上
+x = [1, 2, 3]  // 列表对象在堆上
+
+// ⚠️ 常见问题:
+// • 内存泄漏 (忘记释放)
+// • 碎片化 (反复分配不同大小)
+// • 悬垂指针 (释放后继续使用)`
+  },
+  mmap: {
+    title: '🗺️ 内存映射区 (Memory Mapping)',
+    desc: '由 mmap() 系统调用创建的映射区域。主要用于：(1) <strong>加载动态共享库</strong>(.so/.dll/.dylib)；(2) <strong>内存映射文件</strong>(如数据库将文件映射到内存)；(3) <strong>大块匿名内存分配</strong>(通常 >128KB 的 malloc 会走 mmap 而非 brk)。这块区域位于栈下方。',
+    example: `// 映射文件到内存 (零拷贝读取!)
+int fd = open("data.bin", O_RDONLY);
+void* mapped = mmap(NULL, file_size,
+                    PROT_READ, MAP_PRIVATE, fd, 0);
+// 现在 mapped 直接指向文件内容
+printf("%c", ((char*)mapped)[0]);  // 无需 read()
+
+// 加载共享库 (系统自动完成)
+// dlopen("libxxx.so") 底层就是 mmap
+// 把 .so 文件映射到这个区域
+
+// 大块内存 (glibc malloc 默认 >128KB)
+// 内部调用 mmap(MAP_ANONYMOUS)
+// 而不是 sbrk(), 方便单独 munmap 归还`
+  },
+  stack: {
+    title: '🔻 栈 (Stack)',
+    desc: '用于管理<strong>函数调用</strong>和<strong>局部变量</strong>。栈向<strong>低地址方向</strong>增长(在 x86 上)。每次函数调用都会创建一个新的<strong>栈帧(Stack Frame)</strong>，包含：返回地址、保存的寄存器、局部参数、临时变量。函数返回后栈帧自动弹出——这就是为什么局部变量离开作用域就失效的原因。',
+    example: `void function_a() {
+    int x = 10;           // 局部变量 → 入栈
+    function_b(x);        // 调用 → 新栈帧
+    // 返回后 x 还在栈上
+}  // ← function_a 返回, 整个栈帧弹出!
+
+// 栈帧内部结构 (简化):
+// ┌──────────────┐ ← 高地址
+// │  参数 arg1    │
+// │  参数 arg2    │
+// │  返回地址     │  ret addr (调用者的下条指令)
+// │  旧的 rbp     │  saved frame pointer
+// ├──────────────┤ ← rbp 指向这里
+// │  局部变量 x  │
+// │  局部变量 y  │
+// └──────────────┤ ← rsp 指向这里 (栈顶)
+
+// ⚡ 栈的优势:
+// • 分配/释放: O(1) (移动指针而已)
+// • CPU 缓存友好: 连续紧凑
+// • 自动清理: 函数返回就没了
+
+// ⚠️ 栈的限制:
+// • 通常只有 1~8MB (ulimit -s 查看)
+// • 深层递归 → Stack Overflow!`
+  }
+};
+
+function showDetail(key) {
+  const d = details[key];
+  document.getElementById('detailTitle').textContent = d.title;
+  document.getElementById('detailDesc').innerHTML = d.desc;
+  const ex = document.getElementById('detailExample');
+  ex.textContent = d.example;
+  ex.style.display = 'block';
+
+  // highlight active
+  document.querySelectorAll('.mem-region').forEach(el => el.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+}
+</script>
+
+</body>
+</html>

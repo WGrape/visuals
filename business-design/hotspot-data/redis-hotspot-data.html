@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 热点数据淘汰策略 — 2000w vs 20w の生存指南</title>
+<style>
+  :root {
+    --bg: #faf9f6;
+    --card-bg: #ffffff;
+    --text: #2c3e50;
+    --text-light: #555;
+    --accent: #d44;
+    --accent2: #e67e22;
+    --accent3: #2980b9;
+    --accent4: #27ae60;
+    --border: #e8e4dd;
+    --shadow: 0 2px 12px rgba(0,0,0,.06);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+  }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    color: #fff;
+    padding: 60px 24px 50px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 20% 50%, rgba(212,68,68,.15) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 30%, rgba(230,126,34,.12) 0%, transparent 50%);
+  }
+  .hero h1 { font-size: clamp(28px,5vw,48px); font-weight:800; position:relative; z-index:1; }
+  .hero h1 .emoji { font-size: 1.2em; }
+  .hero .subtitle { font-size: 18px; opacity: .85; margin-top: 12px; position:relative; z-index:1; }
+  .hero .stats { display:flex; justify-content:center; gap:40px; margin-top:32px; flex-wrap:wrap; position:relative; z-index:1; }
+  .hero .stat { text-align:center; }
+  .hero .stat .num { font-size: 42px; font-weight:900; }
+  .hero .stat .label { font-size: 14px; opacity:.7; margin-top:4px; }
+  .stat.mysql .num { color: #3498db; }
+  .stat.redis .num { color: #e74c3c; }
+  .stat.vs .num { font-size: 32px; color: #f39c12; }
+
+  /* Container */
+  .container { max-width: 860px; margin: 0 auto; padding: 32px 20px 60px; }
+
+  /* Section */
+  .section { margin-bottom: 40px; }
+  .section h2 {
+    font-size: 24px; font-weight:700; margin-bottom: 16px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .section h2 .badge {
+    font-size: 12px; font-weight:600; padding:3px 10px; border-radius:99px;
+    background: var(--accent); color:#fff; white-space:nowrap;
+  }
+  .section h2 .badge.green { background: var(--accent4); }
+  .section h2 .badge.blue { background: var(--accent3); }
+  .section h2 .badge.orange { background: var(--accent2); }
+
+  .card {
+    background: var(--card-bg); border-radius: 12px;
+    padding: 24px 28px; box-shadow: var(--shadow);
+    border: 1px solid var(--border); margin-bottom: 20px;
+  }
+  .card p { color: var(--text-light); margin-bottom: 12px; }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* Highlight box */
+  .box {
+    border-radius: 10px; padding: 18px 22px; margin: 16px 0;
+    border-left: 4px solid;
+  }
+  .box.red { background: #fef2f2; border-color: var(--accent); }
+  .box.green { background: #f0fdf4; border-color: var(--accent4); }
+  .box.blue { background: #eff6ff; border-color: var(--accent3); }
+  .box.orange { background: #fff7ed; border-color: var(--accent2); }
+  .box strong { display:block; margin-bottom:6px; font-size:16px; }
+
+  /* Strategy table */
+  .strategy-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px; margin-top: 16px;
+  }
+  .strategy-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 16px;
+    transition: transform .15s, box-shadow .15s;
+  }
+  .strategy-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.08); }
+  .strategy-card .tag {
+    display:inline-block; font-size:11px; font-weight:700; padding:2px 10px;
+    border-radius:99px; margin-bottom:8px; color:#fff;
+  }
+  .tag.keep { background: var(--accent4); }
+  .tag.kill { background: var(--accent); }
+  .strategy-card h4 { font-size:15px; margin-bottom:6px; }
+  .strategy-card p { font-size:13px; color: var(--text-light); }
+
+  /* Steps */
+  .steps { counter-reset:step; list-style:none; }
+  .steps li {
+    counter-increment:step; position:relative;
+    padding: 16px 16px 16px 56px; margin-bottom: 12px;
+    background: var(--card-bg); border-radius: 10px;
+    border: 1px solid var(--border); box-shadow: var(--shadow);
+  }
+  .steps li::before {
+    content: counter(step);
+    position:absolute; left:14px; top:14px;
+    width:28px; height:28px; border-radius:50%;
+    background: var(--accent3); color:#fff;
+    font-weight:700; font-size:14px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .steps li strong { display:block; font-size:15px; margin-bottom:4px; }
+
+  /* Code block */
+  pre {
+    background: #1e293b; color: #e2e8f0; border-radius: 8px;
+    padding: 16px 20px; overflow-x: auto; font-size: 14px;
+    line-height: 1.6; margin: 12px 0;
+  }
+  pre .c { color: #64748b; }
+  pre .k { color: #c084fc; }
+  pre .v { color: #fbbf24; }
+
+  /* Flow */
+  .flow {
+    display:flex; align-items:center; justify-content:center;
+    gap:6px; flex-wrap:wrap; padding: 20px 0; font-size:14px; font-weight:600;
+  }
+  .flow .node {
+    background: var(--card-bg); border:2px solid var(--border);
+    border-radius:10px; padding:12px 18px; box-shadow: var(--shadow);
+  }
+  .flow .arrow { color: var(--accent2); font-size:20px; }
+  .flow .node.db { border-color: #3498db; }
+  .flow .node.cache { border-color: var(--accent); }
+  .flow .node.user { border-color: var(--accent4); }
+
+  /* Quote */
+  blockquote {
+    background: #fdf8f0; border-left:4px solid var(--accent2);
+    padding: 14px 20px; border-radius: 0 8px 8px 0; margin: 16px 0;
+    font-style: italic; color: #7c5e2a;
+  }
+
+  /* Compare */
+  .compare { display:flex; gap:16px; flex-wrap:wrap; margin-top:16px; }
+  .compare .col {
+    flex:1; min-width:200px; padding:16px;
+    border-radius:10px; border:1px solid var(--border);
+  }
+  .compare .col.win { background: #f0fdf4; border-color: var(--accent4); }
+  .compare .col.lose { background: #fef2f2; border-color: var(--accent); }
+  .compare .col h4 { margin-bottom:8px; }
+
+  footer {
+    text-align:center; padding:30px 20px; color:#999; font-size:13px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width:600px) {
+    .hero .stats { gap:20px; }
+    .hero .stat .num { font-size:28px; }
+    .strategy-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ HERO ============ -->
+<div class="hero">
+  <h1><span class="emoji">🔥</span> 2000w vs 20w：Redis 热点数据の生存锦标赛</h1>
+  <p class="subtitle">MySQL 里有 2000w 条数据，但 Redis 内存只够存 20w — 谁是赢家？你说了算。</p>
+  <div class="stats">
+    <div class="stat mysql">
+      <div class="num">2000w</div>
+      <div class="label">MySQL 存量数据</div>
+    </div>
+    <div class="stat vs">
+      <div class="num">⚡</div>
+      <div class="label">淘汰博弈</div>
+    </div>
+    <div class="stat redis">
+      <div class="num">20w</div>
+      <div class="label">Redis 内存上限</div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ============ PROBLEM ============ -->
+<div class="section">
+  <h2>🎯 问题拆解 <span class="badge">灵魂拷问</span></h2>
+  <div class="card">
+    <p style="font-size:17px; font-weight:600; color:var(--text);">
+      当你只有 20w 的「座位」，但有 2000w 「乘客」想进来 —— 你怎么办？
+    </p>
+    <p>翻译成人话：Redis 内存就那么大，MySQL 里 2000w 条数据不可能全塞进去。你要是硬塞，Redis 脸一黑直接 OOM 给你看。</p>
+    <p><strong>所以核心问题是：怎么让 Redis 里只留"最热"的 20w 条？</strong></p>
+  </div>
+</div>
+
+<!-- ============ ARCH ============ -->
+<div class="section">
+  <h2>🏗️ 经典架构 <span class="badge green">三层缓冲区</span></h2>
+  <div class="flow">
+    <div class="node user">👤 用户请求</div>
+    <span class="arrow">→</span>
+    <div class="node cache">🔴 Redis<br><small>热点数据 20w</small></div>
+    <span class="arrow">miss →</span>
+    <div class="node db">🔵 MySQL<br><small>全量数据 2000w</small></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <p><strong>读流程：</strong></p>
+    <ol>
+      <li>请求先打 Redis — <span style="color:var(--accent4);font-weight:700;">命中 → 直接返回，极速！</span></li>
+      <li>Redis 没命中 — 去 MySQL 查</li>
+      <li>MySQL 查到后 — <span style="color:var(--accent2);font-weight:700;">顺手写回 Redis</span>（设置合理的过期时间）</li>
+    </ol>
+    <p style="margin-top:10px;color:var(--accent);font-weight:600;">
+      ⚠️ 关键：第三步「写回 Redis」如果内存满了，就会触发淘汰策略 — 这才是今天的重点！
+    </p>
+  </div>
+</div>
+
+<!-- ============ 6 STRATEGIES ============ -->
+<div class="section">
+  <h2>🃏 Redis 6 种淘汰策略「全家桶」 <span class="badge orange">速查表</span></h2>
+  <p style="margin-bottom:12px;color:var(--text-light);">Redis 4.0 以前只有 6 种，4.0 之后多了 LFU（后面会说）。先看这 6 个老伙计：</p>
+  <div class="strategy-grid">
+
+    <div class="strategy-card">
+      <span class="tag keep">volatile</span>
+      <h4>volatile-lru</h4>
+      <p>从「设了过期时间」的 key 里，踢掉最久没用的那个</p>
+    </div>
+    <div class="strategy-card">
+      <span class="tag keep">volatile</span>
+      <h4>volatile-ttl</h4>
+      <p>从「设了过期时间」的 key 里，踢掉 TTL 最短的那个</p>
+    </div>
+    <div class="strategy-card">
+      <span class="tag keep">volatile</span>
+      <h4>volatile-random</h4>
+      <p>从「设了过期时间」的 key 里，闭眼随机踢一个 — 佛系淘汰</p>
+    </div>
+    <div class="strategy-card">
+      <span class="tag kill">allkeys</span>
+      <h4>allkeys-lru</h4>
+      <p>从「所有 key」里挑最久没用的踢掉 — 不管你有没有过期时间</p>
+    </div>
+    <div class="strategy-card">
+      <span class="tag kill">allkeys</span>
+      <h4>allkeys-random</h4>
+      <p>从「所有 key」里随机踢 — 听天由命流</p>
+    </div>
+    <div class="strategy-card">
+      <span class="tag kill">驱逐禁令</span>
+      <h4>no-eviction</h4>
+      <p>一个都不踢！内存满了就报错 — 你写不进来关我屁事</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ RECOMMENDED ============ -->
+<div class="section">
+  <h2>✅ 正确答案 <span class="badge green">抄作业</span></h2>
+
+  <div class="box green">
+    <strong>🏆 首选方案：allkeys-lru</strong>
+    把不常访问的数据自动踢出，热数据自然留存。这是 Redis 为「缓存场景」量身定做的策略。
+  </div>
+
+  <div class="compare">
+    <div class="col win">
+      <h4>✅ allkeys-lru 为什么对？</h4>
+      <ul style="padding-left:18px;font-size:14px;">
+        <li>自动淘汰冷数据，热数据赖着不走</li>
+        <li>不需要手动设置每个 key 的过期时间</li>
+        <li>符合「二八定律」：80% 请求打在 20% 数据上</li>
+        <li>Redis 官方推荐作为缓存使用时的默认策略</li>
+      </ul>
+    </div>
+    <div class="col lose">
+      <h4>❌ 其他策略为什么不对？</h4>
+      <ul style="padding-left:18px;font-size:14px;">
+        <li><strong>volatile 系列</strong>：只踢设过期时间的 key，不设过期时间的热数据也会霸占内存</li>
+        <li><strong>no-eviction</strong>：内存满了直接拒绝写入，线上直接爆炸 💣</li>
+        <li><strong>random 系列</strong>：可能把热数据随机踢掉，命中率暴跌</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============ LFU ============ -->
+<div class="section">
+  <h2>🚀 进阶升级：Redis 4.0+ 的 allkeys-lfu <span class="badge blue">黑科技</span></h2>
+  <div class="card">
+    <p style="font-size:16px;font-weight:600;color:var(--text);">LRU 的致命弱点：只看「最近有没有用」，不看「用的频率」</p>
+    <p>举个栗子 🌰：某个 key 一小时前被狂刷 10000 次、但最近 5 分钟没人访问 — LRU 可能把它淘汰掉。但 LFU 知道它是高频热点，会手下留情。</p>
+    <table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:14px;">
+      <thead>
+        <tr style="background:#f1f5f9;">
+          <th style="padding:10px 12px;text-align:left;border-bottom:2px solid var(--border);">维度</th>
+          <th style="padding:10px 12px;text-align:left;border-bottom:2px solid var(--border);">LRU</th>
+          <th style="padding:10px 12px;text-align:left;border-bottom:2px solid var(--border);">LFU</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);font-weight:600;">判断依据</td>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);">最近访问时间</td>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);">访问频率 + 时间衰减</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);font-weight:600;">适用场景</td>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);">常规缓存，无明显冷热分化</td>
+          <td style="padding:10px 12px;border-bottom:1px solid var(--border);">热点集中，二八分布明显 ✅</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 12px;font-weight:600;">对本题适用性</td>
+          <td style="padding:10px 12px;">✅ 基本够用</td>
+          <td style="padding:10px 12px;color:var(--accent4);font-weight:700;">🏆 最佳选择!</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ============ HOW TO CONFIG ============ -->
+<div class="section">
+  <h2>⚙️ 实操配置 <span class="badge blue">上手指南</span></h2>
+  <div class="card">
+    <p><strong>Step 1：设置最大内存</strong></p>
+    <pre><span class="c"># redis.conf</span>
+<span class="k">maxmemory</span> <span class="v">2gb</span>          <span class="c"># 根据你的 20w 数据量估算</span></pre>
+
+    <p style="margin-top:16px;"><strong>Step 2：设置淘汰策略</strong></p>
+    <pre><span class="c"># redis.conf — 推荐 allkeys-lfu (4.0+)</span>
+<span class="k">maxmemory-policy</span> <span class="v">allkeys-lfu</span>
+
+<span class="c"># 或者降级到 allkeys-lru (更早版本)</span>
+<span class="k">maxmemory-policy</span> <span class="v">allkeys-lru</span></pre>
+
+    <p style="margin-top:16px;"><strong>Step 3：运行时动态修改（无需重启）</strong></p>
+    <pre><span class="c"># 命令行直接改</span>
+<span class="v">CONFIG SET</span> <span class="k">maxmemory</span> <span class="v">2gb</span>
+<span class="v">CONFIG SET</span> <span class="k">maxmemory-policy</span> <span class="v">allkeys-lfu</span></pre>
+  </div>
+</div>
+
+<!-- ============ COMPLETE SOLUTION ============ -->
+<div class="section">
+  <h2>🧩 完整方案 <span class="badge green">一句话总结</span></h2>
+
+  <ol class="steps">
+    <li>
+      <strong>设置 maxmemory</strong>
+      根据 20w 条数据的实际大小（业务数据大小 × 20w × 1.5 倍冗余），配置 Redis 最大内存上限。别让它无限制吃内存，也别设太小浪费机器。
+    </li>
+    <li>
+      <strong>选 allkeys-lfu（或 allkeys-lru）</strong>
+      启用全局淘汰，让 Redis 自动把低频冷数据踢出去。热数据自然留下来了，不需要你手工管理。
+    </li>
+    <li>
+      <strong>设置合理的过期时间</strong>
+      写回 Redis 时，根据业务场景设 TTL（比如热门文章 1 小时、冷门商品 30 分钟）。作为 LRU/LFU 的双保险。
+    </li>
+    <li>
+      <strong>兜底：缓存穿透保护</strong>
+      对于 MySQL 里查不到的数据，也往 Redis 写一个空值（过期时间短一点），防止恶意请求把 MySQL 打穿。
+    </li>
+  </ol>
+
+  <blockquote>
+    💡 核心思想就一句话：<strong>别手动管 Redis 里该留啥、该踢啥 — 让 allkeys-lfu 自己算。你只管设好内存上限和过期时间，剩下的交给算法。</strong>
+  </blockquote>
+</div>
+
+<!-- ============ TL;DR ============ -->
+<div class="section">
+  <h2>📋 太长不看版 <span class="badge orange">TL;DR</span></h2>
+  <div class="card" style="background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border-color: var(--accent2);">
+    <p style="font-size:18px; line-height:2;">
+      🔴 Redis 设 <code style="background:#fde68a;padding:2px 8px;border-radius:4px;">maxmemory 2gb</code><br>
+      🔴 淘汰策略选 <code style="background:#fde68a;padding:2px 8px;border-radius:4px;">allkeys-lfu</code><br>
+      🔴 写缓存时加 <code style="background:#fde68a;padding:2px 8px;border-radius:4px;">TTL 过期时间</code><br>
+      🔴 冷数据自动滚蛋，热数据自动留下<br>
+      🔴 你唯一要做的：<strong style="font-size:20px;">躺着看命中率蹭蹭涨 📈</strong>
+    </p>
+  </div>
+</div>
+
+<!-- ============ DECISION TREE ============ -->
+<div class="section">
+  <h2>🌲 策略选择决策树 <span class="badge blue">一图流</span></h2>
+  <div class="card">
+    <div style="font-family:monospace;font-size:14px;line-height:2.2;padding:10px 0;">
+      <div>🔴 Redis 是纯缓存？</div>
+      <div style="padding-left:24px;">├── <strong style="color:var(--accent4);">是</strong> → allkeys-lfu / allkeys-lru ✅</div>
+      <div style="padding-left:24px;">└── <strong style="color:var(--accent);">否</strong>（部分数据不能丢）</div>
+      <div style="padding-left:48px;">├── 不能丢的数据别设过期 → 不用 volatile 系列 ❌</div>
+      <div style="padding-left:48px;">├── 缓存部分设过期 → volatile-lru / volatile-lfu</div>
+      <div style="padding-left:48px;">└── 实在内存不够 → 加机器、分片集群</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<footer>
+  Redis 热点数据淘汰策略 · Made with ❤️ and a lot of caffeine · 2026
+</footer>
+
+</body>
+</html>

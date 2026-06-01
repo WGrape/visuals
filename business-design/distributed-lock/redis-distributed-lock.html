@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 分布式锁深度解析</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --danger: #f85149;
+    --warning: #d29922;
+    --success: #3fb950;
+    --code-bg: #1c2128;
+    --highlight-bg: #1a2332;
+    --tag-bg: #21262d;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    font-size: 15px;
+  }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 60px 0;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(ellipse at 50% 50%, rgba(88, 166, 255, 0.06) 0%, transparent 70%);
+    animation: pulse 6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  .hero-content { position: relative; z-index: 1; }
+  .hero h1 {
+    font-size: 2.8em;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #58a6ff, #a371f7, #f778ba);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 16px;
+  }
+  .hero p { color: var(--text-muted); font-size: 1.15em; max-width: 700px; margin: 0 auto; }
+
+  /* Container */
+  .container { max-width: 920px; margin: 0 auto; padding: 40px 24px 60px; }
+
+  /* Sections */
+  section { margin-bottom: 48px; }
+  h2 {
+    font-size: 1.6em;
+    font-weight: 700;
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    width: 32px; height: 32px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 0.75em;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 28px 0 12px;
+    color: var(--accent);
+  }
+  h4 {
+    font-size: 1.05em;
+    font-weight: 600;
+    margin: 20px 0 10px;
+    color: var(--text);
+  }
+
+  /* Cards */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 20px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .card:hover { border-color: #484f58; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+  .card.danger { border-left: 4px solid var(--danger); }
+  .card.success { border-left: 4px solid var(--success); }
+  .card.warning { border-left: 4px solid var(--warning); }
+  .card.info { border-left: 4px solid var(--accent); }
+
+  /* Flow chart */
+  .flow {
+    display: flex; align-items: center; justify-content: center;
+    flex-wrap: wrap; gap: 12px; margin: 24px 0;
+    overflow-x: auto; padding: 10px 0;
+  }
+  .flow-node {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 22px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.9em;
+    white-space: nowrap;
+    min-width: 100px;
+  }
+  .flow-node.bad { border-color: var(--danger); color: var(--danger); }
+  .flow-node.good { border-color: var(--success); color: var(--success); }
+  .flow-arrow {
+    font-size: 1.5em;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  /* Code blocks */
+  .code-block {
+    position: relative;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 16px 0;
+    overflow: hidden;
+  }
+  .code-block .lang-tag {
+    position: absolute; top: 0; right: 0;
+    background: var(--tag-bg);
+    color: var(--text-muted);
+    padding: 4px 12px;
+    font-size: 0.75em;
+    border-radius: 0 8px 0 8px;
+    font-weight: 500;
+  }
+  .code-block pre {
+    padding: 20px 24px;
+    overflow-x: auto;
+    margin: 0;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", Menlo, monospace;
+    font-size: 0.88em;
+    line-height: 1.7;
+  }
+  .code-block code { color: #c9d1d9; }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .num { color: #79c0ff; }
+  .cmt { color: #8b949e; font-style: italic; }
+  .op { color: #ff7b72; }
+
+  /* Problem / Solution pairs */
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+  }
+  @media (max-width: 700px) { .pair { grid-template-columns: 1fr; } }
+  .pair-box {
+    border-radius: 10px;
+    padding: 20px;
+    border: 1px solid;
+  }
+  .pair-box.problem {
+    background: rgba(248, 81, 73, 0.06);
+    border-color: rgba(248, 81, 73, 0.25);
+  }
+  .pair-box.solution {
+    background: rgba(63, 185, 80, 0.06);
+    border-color: rgba(63, 185, 80, 0.25);
+  }
+  .pair-box .label {
+    font-size: 0.78em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+  }
+  .pair-box.problem .label { color: var(--danger); }
+  .pair-box.solution .label { color: var(--success); }
+
+  /* Problem list */
+  .problem-list { counter-reset: prob; list-style: none; padding: 0; }
+  .problem-list li {
+    counter-increment: prob;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+    position: relative;
+  }
+  .problem-list li::before {
+    content: "问题 " counter(prob);
+    position: absolute;
+    top: -12px;
+    left: 20px;
+    background: var(--warning);
+    color: #0d1117;
+    font-size: 0.75em;
+    font-weight: 700;
+    padding: 3px 12px;
+    border-radius: 6px;
+  }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    font-weight: 600;
+    margin-right: 6px;
+    margin-bottom: 4px;
+  }
+  .tag.red { background: rgba(248,81,73,0.15); color: var(--danger); }
+  .tag.green { background: rgba(63,185,80,0.15); color: var(--success); }
+  .tag.blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag.yellow { background: rgba(210,153,34,0.15); color: var(--warning); }
+
+  /* Conclusion */
+  .conclusion-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin-top: 24px;
+  }
+  .conclusion-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px;
+    text-align: center;
+  }
+  .conclusion-card .icon { font-size: 2em; margin-bottom: 8px; }
+  .conclusion-card h4 { margin: 8px 0; }
+  .conclusion-card p { color: var(--text-muted); font-size: 0.9em; }
+
+  /* Table */
+  table {
+    width: 100%; border-collapse: collapse;
+    margin: 20px 0; font-size: 0.9em;
+  }
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--card-bg);
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tr:hover td { background: rgba(88,166,255,0.04); }
+
+  /* Inline code */
+  :not(pre) > code {
+    background: var(--code-bg);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    color: #d2a8ff;
+  }
+
+  /* Divider */
+  .divider {
+    border: none; border-top: 1px solid var(--border);
+    margin: 40px 0;
+  }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 30px;
+    color: var(--text-muted);
+    font-size: 0.85em;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Highlight box */
+  .highlight-box {
+    background: var(--highlight-bg);
+    border: 1px solid rgba(88,166,255,0.2);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 20px 0;
+  }
+  .highlight-box p { margin: 0; }
+  .highlight-box .icon { font-size: 1.2em; margin-right: 8px; }
+
+  /* Interview Q */
+  .interview-qa {
+    background: linear-gradient(135deg, #1a2332 0%, #0d1117 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin: 24px 0;
+    position: relative;
+  }
+  .interview-qa::before {
+    content: '💬 面试对话';
+    position: absolute;
+    top: -12px;
+    left: 24px;
+    background: #1a2332;
+    color: var(--accent);
+    font-size: 0.78em;
+    font-weight: 700;
+    padding: 3px 14px;
+    border: 1px solid rgba(88,166,255,0.3);
+    border-radius: 6px;
+  }
+  .interview-qa .q { color: var(--text); margin: 12px 0 8px; font-weight: 500; }
+  .interview-qa .q::before { content: '面试官：'; color: var(--danger); }
+  .interview-qa .a { color: var(--text-muted); margin: 8px 0 12px 16px; }
+  .interview-qa .a::before { content: '你：'; color: var(--accent); }
+  .interview-qa .a-think { color: var(--text-muted); margin: 8px 0 12px 16px; font-style: italic; }
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="hero-content">
+    <h1>Redis 分布式锁深度解析</h1>
+    <p>从面试经典场景出发，彻底搞懂 Redis 分布式锁的原理、坑点和最佳实践</p>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Section 0: Interview Scenario -->
+  <section>
+    <h2><span class="num">0</span> 经典面试开场</h2>
+
+    <div class="interview-qa">
+      <p class="q">你用过 Redis 分布式锁吗？说说它是怎么回事？</p>
+      <p class="a">用过。基本思路是先拿 <code>SETNX</code> 来争抢锁，抢到之后，再用 <code>EXPIRE</code> 给锁加一个过期时间防止锁忘记释放。</p>
+    </div>
+
+    <div class="interview-qa">
+      <p class="q">嗯，回答得不错。那我问你：如果在 <code>SETNX</code> 执行之后、<code>EXPIRE</code> 执行之前，进程意外 crash 了，或者要重启维护了，那会怎么样？</p>
+      <p class="a-think">（愣了一下）</p>
+      <p class="a">唉，是喔……这样的话，这个锁就永远得不到释放了，其他客户端永远拿不到锁，就死锁了！</p>
+      <p class="a-think">（抓抓脑袋，思考片刻……）</p>
+      <p class="a">等一下！我记得 Redis 的 <code>SET</code> 指令有非常复杂的参数，应该可以同时把 <code>SETNX</code> 和 <code>EXPIRE</code> 合成一条指令来用！</p>
+    </div>
+
+    <div class="card success">
+      <h4>✅ 正确答案</h4>
+      <p style="color:var(--text-muted);margin-bottom:12px;">
+        Redis 2.6.12 开始，<code>SET</code> 命令支持 <code>NX</code>（不存在才设置）和 <code>EX</code>/<code>PX</code>（过期时间）参数，一条命令原子性地完成「加锁 + 设过期」。
+      </p>
+      <div class="code-block">
+        <span class="lang-tag">正确的加锁方式</span>
+<pre><code><span class="cmt"># 一条命令：原子性地完成 加锁 + 设置过期时间</span>
+<span class="fn">SET</span> lock_key unique_value <span class="kw">NX EX</span> <span class="num">30</span>
+
+<span class="cmt"># 参数说明：</span>
+<span class="cmt">#   NX  — 只在 key 不存在时才设置（Not eXists）</span>
+<span class="cmt">#   EX  — 过期时间，单位秒（PX 是毫秒）</span>
+<span class="cmt">#   unique_value — 唯一标识（用于安全释放锁）</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 1: What -->
+  <section>
+    <h2><span class="num">1</span> 什么是分布式锁？为什么用 Redis？</h2>
+
+    <div class="card info">
+      <p><strong>分布式锁</strong>是在分布式系统中，用来控制<strong>不同节点上的进程</strong>对共享资源的互斥访问的一种机制。当多个服务实例同时操作同一份数据（如扣减库存、更新账户余额），必须保证同一时刻只有一个实例在操作。</p>
+    </div>
+
+    <h3>为什么选择 Redis 做分布式锁？</h3>
+    <table>
+      <tr><th>原因</th><th>说明</th></tr>
+      <tr>
+        <td><strong>单线程模型</strong></td>
+        <td>Redis 命令执行是串行化的，天然不存在并发竞争，保证互斥</td>
+      </tr>
+      <tr>
+        <td><strong>高性能</strong></td>
+        <td>内存操作，微秒级响应，适合高并发场景</td>
+      </tr>
+      <tr>
+        <td><strong>原生原子命令</strong></td>
+        <td><code>SETNX</code>、<code>SET NX EX</code>、Lua 脚本都是原子的</td>
+      </tr>
+      <tr>
+        <td><strong>生态成熟</strong></td>
+        <td>Redisson、Jedis、Lettuce 等客户端都有成熟的封装</td>
+      </tr>
+    </table>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 2: Basic Implementation -->
+  <section>
+    <h2><span class="num">2</span> 基础实现与致命缺陷</h2>
+
+    <h3>2.1 错误姿势：SETNX + EXPIRE（非原子）</h3>
+
+    <div class="card danger">
+      <h4>⚠️ 这是错误的！</h4>
+      <div class="code-block">
+        <span class="lang-tag">Java — 错误示范</span>
+<pre><code><span class="cmt">// ❌ 两步操作不是原子的，中间可能 crash</span>
+<span class="kw">Boolean</span> locked = jedis.<span class="fn">setnx</span>(<span class="str">"lock:order:1001"</span>, <span class="str">"1"</span>);
+<span class="kw">if</span> (locked) {
+    <span class="cmt">// ⚡ 如果这里进程 crash 了，锁永远不会释放！</span>
+    jedis.<span class="fn">expire</span>(<span class="str">"lock:order:1001"</span>, <span class="num">30</span>);
+    <span class="cmt">// 执行业务逻辑...</span>
+    jedis.<span class="fn">del</span>(<span class="str">"lock:order:1001"</span>);
+}</code></pre>
+      </div>
+
+      <div class="flow">
+        <div class="flow-node bad">SETNX 成功</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="border-color:var(--warning);color:var(--warning);">💥 进程 Crash</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node bad">EXPIRE 未执行</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node bad">🔒 死锁!</div>
+      </div>
+    </div>
+
+    <h3>2.2 正确姿势：SET NX EX（原子操作）</h3>
+
+    <div class="card success">
+      <h4>✅ 这才是正确的！</h4>
+      <div class="code-block">
+        <span class="lang-tag">Java (Jedis)</span>
+<pre><code><span class="cmt">// ✅ 一条命令原子完成，不会有中间状态</span>
+<span class="kw">String</span> result = jedis.<span class="fn">set</span>(
+    <span class="str">"lock:order:1001"</span>,      <span class="cmt">// key</span>
+    <span class="str">"550e8400-e29b-41d4-a716"</span>, <span class="cmt">// value = 唯一标识</span>
+    <span class="str">"NX"</span>,                     <span class="cmt">// 不存在才设置</span>
+    <span class="str">"EX"</span>,                     <span class="cmt">// 过期时间单位：秒</span>
+    <span class="num">30</span>                        <span class="cmt">// 30 秒超时</span>
+);
+<span class="kw">if</span> (<span class="str">"OK"</span>.equals(result)) {
+    <span class="cmt">// 获取锁成功</span>
+}
+
+<span class="cmt">// 或者用更简洁的 SetParams（Jedis 3.0+）</span>
+<span class="kw">String</span> result = jedis.<span class="fn">set</span>(
+    <span class="str">"lock:order:1001"</span>,
+    <span class="str">"550e8400-e29b-41d4-a716"</span>,
+    SetParams.<span class="fn">setParams</span>().<span class="fn">nx</span>().<span class="fn">ex</span>(<span class="num">30</span>)
+);</code></pre>
+      </div>
+
+      <div class="code-block">
+        <span class="lang-tag">Go (go-redis)</span>
+<pre><code><span class="cmt">// ✅ Go 版本</span>
+ok, err := rdb.<span class="fn">SetNX</span>(ctx, <span class="str">"lock:order:1001"</span>, uniqueID, <span class="num">30</span>*time.Second).<span class="fn">Result</span>()
+<span class="kw">if</span> ok {
+    <span class="cmt">// 获取锁成功</span>
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="highlight-box">
+      <p><span class="icon">💡</span> <strong>关键点：</strong>以上只是解决了「加锁原子性」这一个问题。但分布式锁还有更多的坑等着你……</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 3: All Problems -->
+  <section>
+    <h2><span class="num">3</span> Redis 分布式锁的五大核心问题</h2>
+
+    <p style="color:var(--text-muted);margin-bottom:24px;">
+      即使用了 <code>SET NX EX</code>，Redis 分布式锁在实际生产中仍然面临以下问题。每个问题都可能造成严重的线上事故。
+    </p>
+
+    <!-- Problem 1 -->
+    <ul class="problem-list">
+      <li>
+        <h3>问题一：误解锁 — 把别人的锁释放了</h3>
+
+        <div class="pair">
+          <div class="pair-box problem">
+            <div class="label">问题场景</div>
+            <p>客户端 A 拿到了锁，但业务执行时间超过了锁的过期时间，锁自动释放了。此时客户端 B 拿到了锁，结果 A 执行完业务后去释放锁，把 <strong>B 持有的锁给释放了</strong>。</p>
+          </div>
+          <div class="pair-box solution">
+            <div class="label">解决方案</div>
+            <p>加锁时设置一个<strong>唯一标识</strong>（如 UUID），释放锁时先判断是不是自己加的锁，是才释放。<strong>判断 + 释放必须用 Lua 脚本保证原子性</strong>。</p>
+          </div>
+        </div>
+
+        <div class="flow">
+          <div class="flow-node">A 拿到锁</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node bad">A 超时，锁过期释放</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node">B 拿到锁</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node bad">A 把 B 的锁删了!</div>
+        </div>
+
+        <div class="code-block">
+          <span class="lang-tag">Lua 原子释放锁</span>
+<pre><code><span class="cmt">-- Lua 脚本：原子性地判断 + 释放</span>
+<span class="kw">if</span> redis.<span class="fn">call</span>(<span class="str">"get"</span>, KEYS[<span class="num">1</span>]) == ARGV[<span class="num">1</span>]
+<span class="kw">then</span>
+    <span class="kw">return</span> redis.<span class="fn">call</span>(<span class="str">"del"</span>, KEYS[<span class="num">1</span>])
+<span class="kw">else</span>
+    <span class="kw">return</span> <span class="num">0</span>
+<span class="kw">end</span></code></pre>
+        </div>
+
+        <div class="highlight-box">
+          <p><span class="icon">🔑</span> <strong>为什么用 Lua？</strong> Redis 执行 Lua 脚本期间，其他命令无法插入执行，保证了 <code>GET + DEL</code> 的原子性。</p>
+          <p style="margin-top:8px"><span class="icon">🔑</span> <strong>为什么要唯一标识？</strong> 不能用 PID 或 Thread ID，因为不同 JVM / 容器的 PID 可能重复。用 <code>UUID + 线程ID</code> 的组合最可靠。</p>
+        </div>
+      </li>
+
+      <!-- Problem 2 -->
+      <li>
+        <h3>问题二：锁过期，业务没执行完</h3>
+
+        <div class="pair">
+          <div class="pair-box problem">
+            <div class="label">问题场景</div>
+            <p>设置锁过期 30 秒，但业务逻辑因为 GC 停顿、网络延迟、数据库慢查询等原因执行了 35 秒。在第 30 秒时锁自动释放，另一个线程进来，<strong>两个线程同时执行</strong>，数据就乱了。</p>
+          </div>
+          <div class="pair-box solution">
+            <div class="label">解决方案</div>
+            <p><strong>看门狗机制（Watchdog）</strong>：获取锁后启动一个后台线程，定期（如每 10 秒）检查锁是否还被当前线程持有，如果是就<strong>自动续期</strong>（延长过期时间）。Redisson 内置了这一机制。</p>
+          </div>
+        </div>
+
+        <div class="code-block">
+          <span class="lang-tag">Java — Redisson 看门狗</span>
+<pre><code><span class="cmt">// Redisson 默认开启看门狗机制</span>
+<span class="cmt">// lockWatchdogTimeout 默认 30 秒，每 10 秒续期一次</span>
+RLock lock = redissonClient.<span class="fn">getLock</span>(<span class="str">"lock:order:1001"</span>);
+
+<span class="cmt">// 方式1：不传超时时间 → 启动看门狗，默认30s看门狗</span>
+lock.<span class="fn">lock</span>();
+
+<span class="cmt">// 方式2：传超时时间 → 不启动看门狗，到期自动释放</span>
+lock.<span class="fn">lock</span>(<span class="num">30</span>, TimeUnit.SECONDS);
+
+<span class="cmt">// 正确姿势：用 tryLock 带超时</span>
+<span class="kw">boolean</span> locked = lock.<span class="fn">tryLock</span>(
+    <span class="num">10</span>,                    <span class="cmt">// waitTime：最多等 10 秒拿锁</span>
+    <span class="num">30</span>,                    <span class="cmt">// leaseTime：锁 30 秒后自动释放</span>
+    TimeUnit.SECONDS
+);</code></pre>
+        </div>
+
+        <table>
+          <tr><th>参数</th><th>看门狗行为</th></tr>
+          <tr>
+            <td><code>lock()</code> 不传 leaseTime</td>
+            <td>✅ 启动看门狗，默认 30 秒，每 10 秒续期</td>
+          </tr>
+          <tr>
+            <td><code>lock(30, SECONDS)</code></td>
+            <td>❌ 不启动看门狗，30 秒后自动释放，不续期</td>
+          </tr>
+          <tr>
+            <td><code>tryLock(waitTime, leaseTime, unit)</code></td>
+            <td>❌ 指定了 leaseTime 不启动看门狗</td>
+          </tr>
+        </table>
+      </li>
+
+      <!-- Problem 3 -->
+      <li>
+        <h3>问题三：主从切换导致锁丢失</h3>
+
+        <div class="pair">
+          <div class="pair-box problem">
+            <div class="label">问题场景</div>
+            <p>客户端 A 在 Master 上拿到了锁，还没来得及同步到 Slave，Master 宕机了。Slave 被提升为新 Master，但<strong>锁数据丢失了</strong>。此时客户端 B 在新 Master 上拿同一把锁，就会成功 — 两个客户端同时持有锁！</p>
+          </div>
+          <div class="pair-box solution">
+            <div class="label">解决方案</div>
+            <p><strong>RedLock（红锁）算法</strong>：不在单个 Redis 实例上加锁，而是<strong>向 N 个独立的 Redis 实例</strong>（通常是 5 个）同时请求加锁。只有在<strong>大多数实例（N/2+1）上成功</strong>，且总耗时小于锁的有效时间，才算获取锁成功。</p>
+          </div>
+        </div>
+
+        <div class="flow">
+          <div class="flow-node">A → Master 拿到锁</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node bad">Master 宕机</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node">Slave → 新 Master</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node bad">锁数据丢失</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node bad">B 也拿到锁!</div>
+        </div>
+
+        <div class="highlight-box">
+          <p><span class="icon">⚡</span> <strong>RedLock 核心：</strong>向 N 个独立 Redis 节点（建议 5 个）依次请求加锁 → 计算总耗时 → 拿到 N/2+1 个节点（即多数）的锁 且 总耗时 &lt; 锁有效期 → 才算成功。释放时向所有节点发释放命令。</p>
+        </div>
+
+        <div class="code-block">
+          <span class="lang-tag">Java — Redisson RedLock</span>
+<pre><code><span class="cmt">// 三个独立的 Redis 实例（不要用同一集群的主从）</span>
+RLock lock1 = redissonClient1.<span class="fn">getLock</span>(<span class="str">"lock:order:1001"</span>);
+RLock lock2 = redissonClient2.<span class="fn">getLock</span>(<span class="str">"lock:order:1001"</span>);
+RLock lock3 = redissonClient3.<span class="fn">getLock</span>(<span class="str">"lock:order:1001"</span>);
+
+<span class="cmt">// 红锁 = 多数派投票</span>
+RLock redLock = redissonClient1.<span class="fn">getRedLock</span>(lock1, lock2, lock3);
+
+<span class="cmt">// 使用和普通锁一样</span>
+redLock.<span class="fn">lock</span>();
+<span class="kw">try</span> {
+    <span class="cmt">// 业务逻辑</span>
+} <span class="kw">finally</span> {
+    redLock.<span class="fn">unlock</span>();
+}</code></pre>
+        </div>
+
+        <div class="card warning" style="margin-top:16px;">
+          <h4>🤔 RedLock 的争议</h4>
+          <p style="color:var(--text-muted);">
+            Redis 作者 Antirez 提出了 RedLock 算法，但分布式系统专家 Martin Kleppmann 提出了反对意见，认为 RedLock 在时钟跳跃、GC 停顿等场景下仍有安全问题。如果你的业务对一致性要求极高（如金融扣款），建议使用 <strong>ZooKeeper</strong> 或 <strong>etcd</strong> 这类基于共识协议的方案。
+          </p>
+          <p style="color:var(--text-muted);margin-top:8px;">
+            <strong>实用建议：</strong>绝大多数互联网业务场景，单节点 Redis + 看门狗 + Lua 释放已经足够。真正需要 RedLock 的场景很少。
+          </p>
+        </div>
+      </li>
+
+      <!-- Problem 4 -->
+      <li>
+        <h3>问题四：可重入性问题</h3>
+
+        <div class="pair">
+          <div class="pair-box problem">
+            <div class="label">问题场景</div>
+            <p>同一个线程如果递归调用或调用链中有同一把锁的方法，第二次获取锁时会失败——因为 <strong>SET NX 发现 key 已经存在</strong>，返回失败，导致线程自己阻塞自己。</p>
+          </div>
+          <div class="pair-box solution">
+            <div class="label">解决方案</div>
+            <p>在锁的 value 中维护一个<strong>计数器</strong>（或使用 Hash 结构）。加锁时判断是否是同一个客户端（通过唯一标识），如果是则计数器 +1；释放时计数器 -1，到 0 才真正删除 key。<strong>Redisson 的 RLock 天然支持可重入</strong>。</p>
+          </div>
+        </div>
+
+        <div class="code-block">
+          <span class="lang-tag">Redisson 可重入原理（简化版 Lua）</span>
+<pre><code><span class="cmt">-- 加锁脚本（简化）</span>
+<span class="kw">if</span> redis.<span class="fn">call</span>(<span class="str">'exists'</span>, KEYS[<span class="num">1</span>]) == <span class="num">0</span> <span class="kw">then</span>
+    redis.<span class="fn">call</span>(<span class="str">'hincrby'</span>, KEYS[<span class="num">1</span>], ARGV[<span class="num">2</span>], <span class="num">1</span>);      <span class="cmt">-- 首次加锁，计数=1</span>
+    redis.<span class="fn">call</span>(<span class="str">'pexpire'</span>, KEYS[<span class="num">1</span>], ARGV[<span class="num">1</span>]);
+    <span class="kw">return</span> <span class="kw">nil</span>;  <span class="cmt">-- 成功</span>
+<span class="kw">end</span>;
+<span class="kw">if</span> redis.<span class="fn">call</span>(<span class="str">'hexists'</span>, KEYS[<span class="num">1</span>], ARGV[<span class="num">2</span>]) == <span class="num">1</span> <span class="kw">then</span>
+    redis.<span class="fn">call</span>(<span class="str">'hincrby'</span>, KEYS[<span class="num">1</span>], ARGV[<span class="num">2</span>], <span class="num">1</span>);  <span class="cmt">-- 重入，计数+1</span>
+    redis.<span class="fn">call</span>(<span class="str">'pexpire'</span>, KEYS[<span class="num">1</span>], ARGV[<span class="num">1</span>]);
+    <span class="kw">return</span> <span class="kw">nil</span>;  <span class="cmt">-- 成功</span>
+<span class="kw">end</span>;
+<span class="kw">return</span> redis.<span class="fn">call</span>(<span class="str">'pttl'</span>, KEYS[<span class="num">1</span>]);  <span class="cmt">-- 失败，返回剩余时间</span></code></pre>
+        </div>
+      </li>
+
+      <!-- Problem 5 -->
+      <li>
+        <h3>问题五：锁竞争与性能</h3>
+
+        <div class="pair">
+          <div class="pair-box problem">
+            <div class="label">问题场景</div>
+            <p>高并发下大量线程自旋重试获取锁（while true 循环 + sleep），CPU 空转、Redis 压力增大、无效网络请求增多。</p>
+          </div>
+          <div class="pair-box solution">
+            <div class="label">解决方案</div>
+            <p>使用 <strong>发布/订阅 + 信号量</strong>：锁释放时发布消息通知等待的线程，而不是轮询。Redisson 的 <code>RLock</code> 底层使用了 Redis 的 Pub/Sub 机制来实现高效的等待唤醒。</p>
+          </div>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 4: Summary -->
+  <section>
+    <h2><span class="num">4</span> 问题总结对照表</h2>
+
+    <table>
+      <tr>
+        <th>#</th>
+        <th>问题</th>
+        <th>原因</th>
+        <th>解决方案</th>
+        <th>实现方式</th>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td><strong>死锁</strong></td>
+        <td>SETNX 和 EXPIRE 非原子，中间 crash</td>
+        <td>原子加锁</td>
+        <td><code>SET key value NX EX seconds</code></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>误解锁</strong></td>
+        <td>业务超时后锁被他人持有，释放了别人的锁</td>
+        <td>唯一标识 + Lua 原子释放</td>
+        <td>UUID + Lua: <code>if get == id then del</code></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>锁早释</strong></td>
+        <td>业务还没执行完锁就过期</td>
+        <td>看门狗自动续期</td>
+        <td>Redisson 内置 Watchdog</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>锁丢失</strong></td>
+        <td>主从异步复制，Master 宕机锁丢失</td>
+        <td>RedLock 红锁</td>
+        <td>向 N 个独立节点多数派加锁</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><strong>不可重入</strong></td>
+        <td>同一线程无法再次获取已持有的锁</td>
+        <td>Hash + 计数器</td>
+        <td>Redisson RLock 内置支持</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td><strong>自旋消耗</strong></td>
+        <td>大量线程不断重试，CPU 和网络浪费</td>
+        <td>Pub/Sub 通知</td>
+        <td>Redisson 信号量 + Pub/Sub</td>
+      </tr>
+    </table>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 5: Best Practice -->
+  <section>
+    <h2><span class="num">5</span> 生产环境最佳实践</h2>
+
+    <div class="conclusion-grid">
+      <div class="conclusion-card">
+        <div class="icon">🥇</div>
+        <h4>优先用 Redisson</h4>
+        <p>不要自己造轮子。Redisson 已经解决了可重入、看门狗、Pub/Sub 等待等所有问题。</p>
+      </div>
+      <div class="conclusion-card">
+        <div class="icon">🔐</div>
+        <h4>加锁必须设过期</h4>
+        <p>永远不要创建「永久锁」。即使有看门狗，也要设置兜底的过期时间防止看门狗线程挂掉。</p>
+      </div>
+      <div class="conclusion-card">
+        <div class="icon">🎯</div>
+        <h4>锁粒度要细</h4>
+        <p>锁商品 ID 而不是锁整个商品表。<code>lock:product:12345</code> 而不是 <code>lock:product</code>，减少锁竞争。</p>
+      </div>
+      <div class="conclusion-card">
+        <div class="icon">📊</div>
+        <h4>评估一致性需求</h4>
+        <p>普通业务用 Redisson 单节点即可。金融级强一致性用 ZooKeeper / etcd，或者干脆用数据库乐观锁。</p>
+      </div>
+      <div class="conclusion-card">
+        <div class="icon">🔄</div>
+        <h4>finally 中释放</h4>
+        <p>锁的释放必须放在 finally 块中，确保异常时也能释放，避免死锁。</p>
+      </div>
+      <div class="conclusion-card">
+        <div class="icon">⏱️</div>
+        <h4>合理设置超时</h4>
+        <p>等锁时间不宜过长（建议 3-10 秒），锁持有时间要覆盖业务 99 分位的耗时。</p>
+      </div>
+    </div>
+
+    <div class="card success" style="margin-top:24px;">
+      <h4>✅ 生产级 Redis 分布式锁模板（Redisson）</h4>
+      <div class="code-block">
+        <span class="lang-tag">Java — 生产级模板</span>
+<pre><code><span class="kw">public void</span> <span class="fn">processOrder</span>(String orderId) {
+    RLock lock = redissonClient.<span class="fn">getLock</span>(<span class="str">"lock:order:"</span> + orderId);
+    <span class="kw">boolean</span> locked = <span class="kw">false</span>;
+    <span class="kw">try</span> {
+        <span class="cmt">// 最多等 5 秒，拿到锁后 30 秒自动释放</span>
+        locked = lock.<span class="fn">tryLock</span>(<span class="num">5</span>, <span class="num">30</span>, TimeUnit.SECONDS);
+        <span class="kw">if</span> (!locked) {
+            <span class="kw">throw new</span> <span class="fn">RuntimeException</span>(<span class="str">"获取锁超时"</span>);
+        }
+        <span class="cmt">// === 业务逻辑 ===</span>
+        doBusinessLogic(orderId);
+    } <span class="kw">catch</span> (InterruptedException e) {
+        Thread.<span class="fn">currentThread</span>().<span class="fn">interrupt</span>();
+    } <span class="kw">finally</span> {
+        <span class="kw">if</span> (locked && lock.<span class="fn">isHeldByCurrentThread</span>()) {
+            lock.<span class="fn">unlock</span>();  <span class="cmt">// 安全释放</span>
+        }
+    }
+}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Section 6: vs Others -->
+  <section>
+    <h2><span class="num">6</span> Redis vs ZooKeeper vs etcd 分布式锁对比</h2>
+
+    <table>
+      <tr>
+        <th>特性</th>
+        <th><strong>Redis</strong></th>
+        <th><strong>ZooKeeper</strong></th>
+        <th><strong>etcd</strong></th>
+      </tr>
+      <tr>
+        <td>一致性模型</td>
+        <td><span class="tag yellow">最终一致</span></td>
+        <td><span class="tag green">强一致 (ZAB)</span></td>
+        <td><span class="tag green">强一致 (Raft)</span></td>
+      </tr>
+      <tr>
+        <td>性能</td>
+        <td><span class="tag green">极高</span>（内存，微秒级）</td>
+        <td><span class="tag yellow">中等</span></td>
+        <td><span class="tag yellow">中等</span></td>
+      </tr>
+      <tr>
+        <td>实现复杂度</td>
+        <td><span class="tag yellow">中等</span></td>
+        <td><span class="tag red">较高</span></td>
+        <td><span class="tag red">较高</span></td>
+      </tr>
+      <tr>
+        <td>客户端成熟度</td>
+        <td><span class="tag green">Redisson 非常成熟</span></td>
+        <td><span class="tag green">Curator 非常成熟</span></td>
+        <td><span class="tag yellow">jetcd 可用</span></td>
+      </tr>
+      <tr>
+        <td>锁释放机制</td>
+        <td>过期时间 + 看门狗</td>
+        <td>临时节点 + Session 心跳</td>
+        <td>Lease 租约</td>
+      </tr>
+      <tr>
+        <td>适合场景</td>
+        <td><strong>高性能、可容忍低概率不一致</strong></td>
+        <td><strong>强一致性要求（如金融）</strong></td>
+        <td><strong>云原生、K8s 环境</strong></td>
+      </tr>
+    </table>
+
+    <div class="highlight-box">
+      <p><span class="icon">🎯</span> <strong>选型建议：</strong>大多数互联网业务场景，Redis 分布式锁足够了。如果你的业务是「扣了钱不能多扣也不能少扣」级别的强一致性，请选择 ZooKeeper 或 etcd。</p>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <p>Redis 分布式锁深度解析 · 2026 · 面试必备知识</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,568 @@
+<h2 class="sr-only">Redis 内存淘汰策略交互式讲解</h2>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    font-weight: 400;
+    color: #2c2c2a;
+    background: #fff;
+    padding: 24px 32px;
+  }
+  h2 { font-size: 15px; font-weight: 500; margin: 0 0 8px 0; }
+  h3 { font-size: 13px; font-weight: 500; margin: 0 0 6px 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  .layout { display: grid; grid-template-columns: 1fr 380px; gap: 32px; max-width: 1200px; }
+
+  .panel { background: #f7f7f5; border-radius: 12px; padding: 20px; border: 0.5px solid rgba(0,0,0,0.15); }
+
+  .memory-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin: 16px 0; }
+  .mem-slot {
+    aspect-ratio: 1;
+    border-radius: 8px;
+    border: 0.5px solid rgba(0,0,0,0.15);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 500;
+    transition: transform 0.3s, opacity 0.3s, background 0.3s;
+    cursor: pointer; position: relative;
+    min-height: 54px;
+  }
+  .mem-slot.empty { background: #fff; color: #888780; }
+  .mem-slot.volatile { background: #E6F1FB; color: #185FA5; }
+  .mem-slot.non-volatile { background: #E1F5EE; color: #0F6E56; }
+  .mem-slot.evicted {
+    animation: evictPulse 0.6s ease-out;
+    opacity: 0.2;
+    transform: scale(0.8);
+  }
+  .mem-slot.access-highlight { box-shadow: 0 0 0 2px #534AB7; }
+  @keyframes evictPulse {
+    0% { transform: scale(1); opacity: 1; background: #FCEBEB; }
+    50% { transform: scale(1.15); opacity: 0.5; }
+    100% { transform: scale(0.8); opacity: 0.2; }
+  }
+
+  .stat-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .stat-chip {
+    background: #fff; border-radius: 8px; padding: 6px 12px;
+    border: 0.5px solid rgba(0,0,0,0.1); font-size: 12px;
+  }
+  .stat-chip strong { font-weight: 500; }
+
+  .policy-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .policy-btn {
+    background: #fff; border: 0.5px solid rgba(0,0,0,0.15);
+    border-radius: 8px; padding: 8px 14px; font-size: 12px;
+    cursor: pointer; transition: all 0.2s;
+    font-family: inherit; text-align: left;
+  }
+  .policy-btn:hover { border-color: rgba(0,0,0,0.3); }
+  .policy-btn.active { background: #EEEDFE; border-color: #534AB7; color: #26215C; }
+  .policy-btn .family { font-size: 10px; color: #888780; display: block; margin-top: 2px; }
+
+  .btn {
+    background: #fff; border: 0.5px solid rgba(0,0,0,0.2);
+    border-radius: 8px; padding: 8px 16px; font-size: 13px;
+    cursor: pointer; font-family: inherit;
+    transition: all 0.15s;
+  }
+  .btn:hover { border-color: rgba(0,0,0,0.4); }
+  .btn.primary { background: #534AB7; color: #fff; border-color: #534AB7; }
+  .btn.primary:hover { background: #3C3489; }
+  .btn.danger { background: #E24B4A; color: #fff; border-color: #E24B4A; }
+
+  .legend { display: flex; gap: 16px; font-size: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .legend .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .dot.v { background: #B5D4F4; }
+  .dot.nv { background: #9FE1CB; }
+
+  .info-card {
+    background: #fff; border-radius: 8px; padding: 12px 16px;
+    border: 0.5px solid rgba(0,0,0,0.1); margin-bottom: 12px;
+  }
+  .info-card p { font-size: 12px; color: #5F5E5A; }
+  .info-card h4 { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+
+  .log-area {
+    background: #fff; border-radius: 8px; padding: 10px 14px;
+    border: 0.5px solid rgba(0,0,0,0.1); min-height: 100px;
+    max-height: 200px; overflow-y: auto; font-size: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    color: #5F5E5A;
+  }
+  .log-entry { padding: 2px 0; border-bottom: 0.5px solid rgba(0,0,0,0.05); }
+  .log-entry.highlight { color: #E24B4A; font-weight: 500; }
+  .log-entry.info { color: #534AB7; }
+
+  .flow-step { display: none; }
+  .flow-step.active { display: block; }
+  .stepper { display: flex; gap: 4px; margin-bottom: 16px; }
+  .step-dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(0,0,0,0.15); transition: background 0.3s; }
+  .step-dot.active { background: #534AB7; }
+
+  .comparison-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+  .comparison-table th { text-align: left; padding: 8px 10px; font-weight: 500; border-bottom: 0.5px solid rgba(0,0,0,0.15); background: #f7f7f5; }
+  .comparison-table td { padding: 8px 10px; border-bottom: 0.5px solid rgba(0,0,0,0.08); }
+  .comparison-table tr.highlight-row { background: #EEEDFE; }
+  .comparison-table .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 500; }
+  .tag.all { background: #E1F5EE; color: #0F6E56; }
+  .tag.volatile { background: #E6F1FB; color: #185FA5; }
+
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+</style>
+
+<div class="layout">
+  <div>
+    <h2>Redis 内存淘汰策略</h2>
+    <p style="color: #888780; margin-bottom: 16px;">当 Redis 内存使用达到 maxmemory 上限时，需要选择一种策略来腾出空间。以下是 8 种内置策略的交互式演示。</p>
+
+    <div class="panel">
+      <h3>内存块可视化（共 32 个槽位）</h3>
+      <div class="legend">
+        <span><span class="dot v"></span> 带 TTL 的键（volatile）</span>
+        <span><span class="dot nv"></span> 不带 TTL 的键（non-volatile）</span>
+      </div>
+      <div class="memory-grid" id="memoryGrid"></div>
+
+      <div class="stat-row">
+        <div class="stat-chip">已用: <strong id="usedCount">0</strong>/32</div>
+        <div class="stat-chip">Volatile: <strong id="volatileCount">0</strong></div>
+        <div class="stat-chip">淘汰次数: <strong id="evictCount">0</strong></div>
+        <div class="stat-chip" id="ratioChip" style="display:none">命中率: <strong id="hitRatio">-</strong></div>
+      </div>
+
+      <div style="display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap;">
+        <button class="btn primary" onclick="addKeys(4)">放入 4 个键</button>
+        <button class="btn" onclick="accessRandom()">随机访问</button>
+        <button class="btn" onclick="addKeys(8)">放入 8 个键</button>
+        <button class="btn danger" onclick="fillToMax()">填满内存</button>
+        <button class="btn" onclick="resetAll()">重置</button>
+      </div>
+
+      <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;">
+        <span style="font-size: 12px; color: #888780;">模拟速度:</span>
+        <button class="btn" style="padding:4px 10px;font-size:11px" onclick="mode='manual'; updateModeUI()">手动</button>
+        <button class="btn" style="padding:4px 10px;font-size:11px" id="autoBtn" onclick="mode='auto'; updateModeUI(); autoSim()">自动</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h3>事件日志</h3>
+      <div class="log-area" id="logArea">
+        <div class="log-entry info">等待操作…</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h3>淘汰过程演示</h3>
+      <div class="stepper" id="stepper"><span class="step-dot active"></span><span class="step-dot"></span><span class="step-dot"></span><span class="step-dot"></span></div>
+      <div id="flowContainer">
+        <div class="flow-step active" id="step1">
+          <div class="info-card">
+            <h4>第 1 步：内存检测</h4>
+            <p>每次写入操作前，Redis 检查 used_memory 是否超过 maxmemory。如果未超限，正常写入。</p>
+          </div>
+        </div>
+        <div class="flow-step" id="step2">
+          <div class="info-card">
+            <h4>第 2 步：选择候选集</h4>
+            <p id="step2Candidate">根据当前选中的策略，从候选键集合中筛选可淘汰的键。</p>
+          </div>
+        </div>
+        <div class="flow-step" id="step3">
+          <div class="info-card">
+            <h4>第 3 步：排序与淘汰</h4>
+            <p id="step3Sort">按照策略定义的排序规则，选出最应该被淘汰的键并删除。</p>
+          </div>
+        </div>
+        <div class="flow-step" id="step4">
+          <div class="info-card">
+            <h4>第 4 步：写入新值</h4>
+            <p>释放足够空间后，新的键值对被写入内存。如果空间仍然不足，重复第 2-4 步。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h3>策略选择</h3>
+      <div class="policy-grid" id="policyGrid"></div>
+
+      <div class="info-card" style="margin-top: 12px;">
+        <h4 id="policyName">noeviction</h4>
+        <p id="policyDesc">不淘汰任何键。当内存满时，所有写入操作（SET、LPUSH 等）返回错误，只允许读操作和 DEL 等删除操作。</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h3>策略速查表</h3>
+      <table class="comparison-table">
+        <thead><tr><th>策略</th><th>范围</th><th>算法</th><th>适用场景</th></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h3>LRU vs LFU 原理</h3>
+      <div class="info-card">
+        <h4>LRU（Least Recently Used）</h4>
+        <p>每个键记录最后一次被访问的时间戳。淘汰时选择最近最少使用的键。Redis 采用近似 LRU，随机采样 N 个键，选其中最久未被访问的。</p>
+      </div>
+      <div class="info-card" style="margin-top: 8px;">
+        <h4>LFU（Least Frequently Used）</h4>
+        <p>每个键维护一个访问频率计数器。淘汰时选择访问频率最低的键。频率计数器会随时间衰减，保证热度时效性。</p>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h3>选型建议</h3>
+      <div class="info-card">
+        <h4>缓存场景</h4>
+        <p>allkeys-lru（通用）或 allkeys-lfu（热点数据场景）</p>
+      </div>
+      <div class="info-card">
+        <h4>会话存储</h4>
+        <p>volatile-ttl 或 volatile-lru，避免淘汰持久化数据</p>
+      </div>
+      <div class="info-card">
+        <h4>纯内存数据库</h4>
+        <p>noeviction，搭配监控告警做容量规划</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const POLICIES = [
+    { id: 'noeviction',   name: 'noeviction',     family: '禁止淘汰',   desc: '不淘汰任何键。当内存满时写入操作返回错误。', range: '不淘汰', algo: '无' },
+    { id: 'allkeys-lru',  name: 'allkeys-lru',    family: 'allkeys',   desc: '从所有键中淘汰最近最少使用（LRU）的键。', range: '全部键', algo: 'LRU' },
+    { id: 'volatile-lru', name: 'volatile-lru',   family: 'volatile',  desc: '仅从设置了过期时间（TTL）的键中淘汰 LRU 键。', range: 'TTL键', algo: 'LRU' },
+    { id: 'allkeys-lfu',  name: 'allkeys-lfu',    family: 'allkeys',   desc: '从所有键中淘汰最不经常使用（LFU）的键。', range: '全部键', algo: 'LFU' },
+    { id: 'volatile-lfu', name: 'volatile-lfu',   family: 'volatile',  desc: '仅从设置了 TTL 的键中淘汰 LFU 键。', range: 'TTL键', algo: 'LFU' },
+    { id: 'allkeys-random',name: 'allkeys-random', family: 'allkeys',   desc: '从所有键中随机淘汰。', range: '全部键', algo: '随机' },
+    { id: 'volatile-random',name:'volatile-random',family: 'volatile',  desc: '仅从设置了 TTL 的键中随机淘汰。', range: 'TTL键', algo: '随机' },
+    { id: 'volatile-ttl', name: 'volatile-ttl',   family: 'volatile',  desc: '从设置了 TTL 的键中，淘汰剩余生存时间最短的键。', range: 'TTL键', algo: 'TTL排序' },
+  ];
+
+  let policyId = 'noeviction';
+  let keys = [];
+  let nextId = 1;
+  let evictCount = 0;
+  let accessCount = 0;
+  let hits = 0;
+  let mode = 'manual';
+  let autoTimer = null;
+
+  const MAX_SLOTS = 32;
+  const MAX_VOLATILE_RATIO = 0.6;
+
+  function createKey() {
+    const isVolatile = Math.random() < MAX_VOLATILE_RATIO;
+    const ttl = isVolatile ? Math.floor(Math.random() * 120) + 10 : null;
+    const id = nextId++;
+    return {
+      id,
+      name: 'key:' + String(id).padStart(2,'0'),
+      isVolatile,
+      ttl,
+      accessTime: Date.now(),
+      freq: 1,
+      accessCount: 1
+    };
+  }
+
+  function evictOne() {
+    const policy = POLICIES.find(p => p.id === policyId);
+    if (policyId === 'noeviction') return null;
+
+    let candidates;
+    if (policy.family === 'allkeys') {
+      candidates = [...keys];
+    } else {
+      candidates = keys.filter(k => k.isVolatile);
+    }
+    if (candidates.length === 0) return null;
+
+    let victim;
+    switch (policyId) {
+      case 'allkeys-lru':
+      case 'volatile-lru':
+        candidates.sort((a, b) => a.accessTime - b.accessTime);
+        victim = candidates[0];
+        break;
+      case 'allkeys-lfu':
+      case 'volatile-lfu':
+        candidates.sort((a, b) => a.freq - b.freq);
+        victim = candidates[0];
+        break;
+      case 'allkeys-random':
+      case 'volatile-random':
+        victim = candidates[Math.floor(Math.random() * candidates.length)];
+        break;
+      case 'volatile-ttl':
+        candidates.sort((a, b) => (a.ttl || Infinity) - (b.ttl || Infinity));
+        victim = candidates[0];
+        break;
+      default:
+        return null;
+    }
+    return victim;
+  }
+
+  function addKeys(n) {
+    for (let i = 0; i < n; i++) {
+      if (keys.length >= MAX_SLOTS) {
+        const victim = evictOne();
+        if (!victim) {
+          log('写入被拒绝：内存已满且 noeviction 策略不允许淘汰', 'highlight');
+          render();
+          return;
+        }
+        evictCount++;
+        log('淘汰 ' + victim.name + '（释放空间）', 'highlight');
+        keys = keys.filter(k => k.id !== victim.id);
+      }
+      const k = createKey();
+      keys.push(k);
+      log('写入 ' + k.name + (k.isVolatile ? ' 【TTL:' + k.ttl + 's】' : ' 【持久】'), 'info');
+    }
+    render();
+    updateFlow();
+  }
+
+  function accessRandom() {
+    if (keys.length === 0) return;
+    accessCount++;
+    const idx = Math.floor(Math.random() * keys.length);
+    const k = keys[idx];
+    k.accessTime = Date.now();
+    k.freq = Math.min(k.freq + 1, 255);
+    k.accessCount++;
+    hits++;
+    log('访问 ' + k.name + ' | freq:' + k.freq + ' | 命中!');
+    highlightSlot(k.id);
+    render();
+  }
+
+  function highlightSlot(id) {
+    const el = document.getElementById('slot-' + id);
+    if (!el) return;
+    el.classList.add('access-highlight');
+    setTimeout(() => el.classList.remove('access-highlight'), 600);
+  }
+
+  function fillToMax() {
+    const needed = MAX_SLOTS - keys.length;
+    if (needed <= 0) {
+      addKeys(1);
+      return;
+    }
+    addKeys(needed);
+  }
+
+  function resetAll() {
+    keys = [];
+    nextId = 1;
+    evictCount = 0;
+    accessCount = 0;
+    hits = 0;
+    document.getElementById('logArea').innerHTML = '<div class="log-entry info">已重置，等待操作…</div>';
+    render();
+    updateFlow();
+  }
+
+  function log(msg, cls) {
+    const area = document.getElementById('logArea');
+    const div = document.createElement('div');
+    div.className = 'log-entry' + (cls ? ' ' + cls : '');
+    div.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    area.prepend(div);
+    if (area.children.length > 50) area.removeChild(area.lastChild);
+  }
+
+  function render() {
+    const grid = document.getElementById('memoryGrid');
+    grid.innerHTML = '';
+
+    for (let i = 0; i < MAX_SLOTS; i++) {
+      const slot = document.createElement('div');
+      slot.className = 'mem-slot';
+      if (i < keys.length) {
+        const k = keys[i];
+        slot.id = 'slot-' + k.id;
+        slot.classList.add(k.isVolatile ? 'volatile' : 'non-volatile');
+        let label = k.name.replace('key:', '');
+        let sub = '';
+        if (k.isVolatile) {
+          sub = k.ttl + 's';
+        } else {
+          sub = '-';
+        }
+        if (policyId.includes('lfu')) {
+          sub = 'f:' + k.freq;
+        } else if (policyId.includes('lru')) {
+          const age = Math.round((Date.now() - k.accessTime) / 1000);
+          sub = age + 's ago';
+        }
+        slot.innerHTML = '<span style="font-size:13px">' + label + '</span><span style="font-size:9px;opacity:0.7">' + sub + '</span>';
+        slot.onclick = function() {
+          k.accessTime = Date.now();
+          k.freq = Math.min(k.freq + 1, 255);
+          k.accessCount++;
+          accessCount++;
+          hits++;
+          log('手动访问 ' + k.name + ' | freq:' + k.freq);
+          highlightSlot(k.id);
+          render();
+        };
+      } else {
+        slot.classList.add('empty');
+        slot.textContent = '空';
+      }
+      grid.appendChild(slot);
+    }
+
+    document.getElementById('usedCount').textContent = keys.length;
+    document.getElementById('volatileCount').textContent = keys.filter(k => k.isVolatile).length;
+    document.getElementById('evictCount').textContent = evictCount;
+
+    const rc = document.getElementById('ratioChip');
+    if (accessCount > 0) {
+      rc.style.display = '';
+      document.getElementById('hitRatio').textContent = Math.round(hits / accessCount * 100) + '%';
+    } else {
+      rc.style.display = 'none';
+    }
+  }
+
+  function selectPolicy(id) {
+    policyId = id;
+    const p = POLICIES.find(x => x.id === id);
+    document.getElementById('policyName').textContent = p.name;
+    document.getElementById('policyDesc').textContent = p.desc;
+    render();
+    renderPolicyBtns();
+    renderTable();
+    updateFlow();
+  }
+
+  function renderPolicyBtns() {
+    const container = document.getElementById('policyGrid');
+    container.innerHTML = '';
+    const families = { '禁止淘汰': [], 'allkeys': [], 'volatile': [] };
+    POLICIES.forEach(p => families[p.family].push(p));
+    let html = '';
+    for (const [fam, items] of Object.entries(families)) {
+      html += '<div style="width:100%;font-size:11px;color:#888780;margin-top:8px;margin-bottom:2px">' + fam + '</div>';
+      items.forEach(p => {
+        html += '<button class="policy-btn' + (policyId === p.id ? ' active' : '') + '" onclick="selectPolicy(\'' + p.id + '\')">' + p.name + '</button>';
+      });
+    }
+    container.innerHTML = html;
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('tableBody');
+    let html = '';
+    POLICIES.forEach(p => {
+      const isActive = policyId === p.id;
+      const tagCls = p.family === 'allkeys' ? 'all' : (p.family === 'volatile' ? 'volatile' : '');
+      const tagText = p.family === 'allkeys' ? '全部键' : (p.family === 'volatile' ? 'TTL键' : '不淘汰');
+      html += '<tr class="' + (isActive ? 'highlight-row' : '') + '">';
+      html += '<td>' + (isActive ? '<strong>' : '') + p.name + (isActive ? '</strong>' : '') + '</td>';
+      html += '<td><span class="tag ' + tagCls + '">' + tagText + '</span></td>';
+      html += '<td>' + p.algo + '</td>';
+      const scenes = {
+        'noeviction': '纯存储',
+        'allkeys-lru': '通用缓存',
+        'volatile-lru': '混合存储',
+        'allkeys-lfu': '热点缓存',
+        'volatile-lfu': '混合+热度',
+        'allkeys-random': '均匀分布',
+        'volatile-random': '简单淘汰',
+        'volatile-ttl': '会话/令牌',
+      };
+      html += '<td>' + (scenes[p.id] || '') + '</td>';
+      html += '</tr>';
+    });
+    tbody.innerHTML = html;
+  }
+
+  function updateFlow() {
+    const p = POLICIES.find(x => x.id === policyId);
+    let candText, sortText;
+    switch (policyId) {
+      case 'noeviction':
+        candText = 'noeviction 不进行淘汰，直接返回写入错误。';
+        sortText = '无需排序，所有写入操作被拒绝。';
+        break;
+      case 'allkeys-lru':
+      case 'volatile-lru':
+        candText = p.family === 'allkeys' ? '从所有键中采样，构成候选淘汰集。' : '仅从设置了 TTL 的键中采样，构成候选淘汰集。';
+        sortText = '按最近访问时间排序（最久未用的优先淘汰）。Redis 默认采样 5 个键，选其中最久未被访问的。';
+        break;
+      case 'allkeys-lfu':
+      case 'volatile-lfu':
+        candText = p.family === 'allkeys' ? '从所有键中采样，构成候选淘汰集。' : '仅从设置了 TTL 的键中采样，构成候选淘汰集。';
+        sortText = '按访问频率计数器排序（频率最低的优先淘汰）。计数器会随时间衰减（lfu-decay-time），保证新鲜度。';
+        break;
+      case 'allkeys-random':
+      case 'volatile-random':
+        candText = p.family === 'allkeys' ? '从所有键中随机选择一个。' : '仅从设置了 TTL 的键中随机选择一个。';
+        sortText = '随机淘汰，不排序。实现最简单，CPU 开销最低。';
+        break;
+      case 'volatile-ttl':
+        candText = '仅从设置了 TTL 的键中筛选。';
+        sortText = '按剩余生存时间（TTL）升序排列，即将过期的键最优先被淘汰。';
+        break;
+    }
+    document.getElementById('step2Candidate').textContent = candText;
+    document.getElementById('step3Sort').textContent = sortText;
+  }
+
+  function updateModeUI() {
+    const btn = document.getElementById('autoBtn');
+    if (mode === 'auto') {
+      btn.style.background = '#534AB7';
+      btn.style.color = '#fff';
+      btn.style.borderColor = '#534AB7';
+    } else {
+      btn.style.background = '#fff';
+      btn.style.color = '#2c2c2a';
+      btn.style.borderColor = 'rgba(0,0,0,0.15)';
+    }
+  }
+
+  function autoSim() {
+    if (mode !== 'auto') return;
+    if (keys.length >= MAX_SLOTS) {
+      addKeys(2);
+    } else {
+      addKeys(2);
+    }
+    if (keys.length > 4) accessRandom();
+    autoTimer = setTimeout(autoSim, 1500);
+  }
+
+  function stopAuto() {
+    clearTimeout(autoTimer);
+    autoTimer = null;
+  }
+
+  // init
+  renderPolicyBtns();
+  renderTable();
+  render();
+  updateFlow();
+  updateModeUI();
+
+  // seed with initial keys
+  addKeys(12);
+</script>

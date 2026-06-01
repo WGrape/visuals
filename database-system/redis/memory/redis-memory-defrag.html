@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis 内存碎片整理 — 深度解析</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-secondary: #f8f9fa;
+    --text: #2c3e50;
+    --text-secondary: #5a6c7d;
+    --accent: #dc382d;
+    --accent-light: #fef0ef;
+    --code-bg: #1e1e2e;
+    --code-text: #cdd6f4;
+    --border: #e2e8f0;
+    --shadow: 0 4px 24px rgba(0,0,0,.08);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.8;
+  }
+  /* ── Nav ── */
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(255,255,255,.85); backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border); padding: 0 2rem;
+    display: flex; align-items: center; justify-content: space-between; height: 56px;
+  }
+  .nav-logo { font-weight: 800; font-size: 1.1rem; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .nav-logo svg { width: 28px; height: 28px; }
+  .nav-toc { display: flex; gap: 1.5rem; font-size: .88rem; }
+  .nav-toc a { color: var(--text-secondary); text-decoration: none; transition: color .2s; }
+  .nav-toc a:hover { color: var(--accent); }
+
+  /* ── Hero ── */
+  .hero {
+    margin-top: 56px; padding: 4rem 2rem 3rem;
+    background: linear-gradient(135deg, #fff5f5 0%, #fef0ef 40%, #fff 100%);
+    text-align: center; border-bottom: 1px solid var(--border);
+  }
+  .hero h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -.03em; margin-bottom: .5rem; }
+  .hero h1 span { color: var(--accent); }
+  .hero .sub { color: var(--text-secondary); font-size: 1.1rem; max-width: 600px; margin: 0 auto 1.5rem; }
+  .badge-row { display: flex; gap: .6rem; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    padding: 4px 14px; border-radius: 20px; font-size: .8rem; font-weight: 600;
+    background: #fff; border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .badge.hot { background: var(--accent-light); color: var(--accent); border-color: #fecaca; }
+
+  /* ── Container ── */
+  .container { max-width: 860px; margin: 0 auto; padding: 2rem; }
+
+  /* ── Sections ── */
+  section { margin-bottom: 3rem; }
+  h2 {
+    font-size: 1.6rem; font-weight: 700; margin-bottom: 1rem; padding-bottom: .5rem;
+    border-bottom: 2px solid var(--accent); display: inline-block;
+  }
+  h3 { font-size: 1.2rem; font-weight: 700; margin: 1.5rem 0 .6rem; }
+  p { margin-bottom: 1rem; color: var(--text-secondary); }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 1.5rem; margin: 1.2rem 0;
+    box-shadow: var(--shadow);
+  }
+  .card.warn { border-left: 4px solid #f59e0b; }
+  .card.tip  { border-left: 4px solid #10b981; }
+  .card.info { border-left: 4px solid #3b82f6; }
+  .card .icon { font-size: 1.3rem; margin-right: .5rem; }
+
+  /* ── Code ── */
+  .code-block {
+    background: var(--code-bg); color: var(--code-text);
+    border-radius: var(--radius-sm); padding: 1.2rem 1.5rem; overflow-x: auto;
+    font-family: var(--mono); font-size: .88rem; line-height: 1.7;
+    margin: 1rem 0; position: relative;
+  }
+  .code-block .lang {
+    position: absolute; top: 10px; right: 16px; font-size: .7rem;
+    color: #6c7086; text-transform: uppercase; font-weight: 600;
+  }
+  .code-block .kw  { color: #cba6f7; }
+  .code-block .str { color: #a6e3a1; }
+  .code-block .cmt { color: #6c7086; font-style: italic; }
+  .code-block .num { color: #fab387; }
+  .code-block .fn  { color: #89b4fa; }
+  .code-block .prop{ color: #f9e2af; }
+
+  /* ── SVG Diag Containers ── */
+  .diagram {
+    display: flex; justify-content: center; margin: 2rem 0;
+    background: var(--bg-secondary); border-radius: var(--radius);
+    padding: 1.5rem; border: 1px solid var(--border);
+  }
+  .diagram svg { max-width: 100%; height: auto; }
+
+  /* ── Table ── */
+  .tbl-wrap { overflow-x: auto; margin: 1.2rem 0; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th { background: var(--bg-secondary); text-align: left; padding: 12px 16px; font-weight: 700; border-bottom: 2px solid var(--border); }
+  td { padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── Steps ── */
+  .steps { counter-reset: step; list-style: none; }
+  .steps li {
+    counter-increment: step; position: relative; padding-left: 3rem; margin-bottom: 1.2rem;
+  }
+  .steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 0;
+    width: 32px; height: 32px; border-radius: 50%; background: var(--accent);
+    color: #fff; font-weight: 700; font-size: .9rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* ── Accordion ── */
+  .acc { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 1rem 0; overflow: hidden; }
+  .acc-head {
+    background: var(--bg-secondary); padding: 14px 20px; cursor: pointer;
+    font-weight: 700; display: flex; justify-content: space-between; align-items: center;
+    user-select: none; transition: background .2s;
+  }
+  .acc-head:hover { background: #eef0f3; }
+  .acc-head::after { content: "▸"; font-size: .9rem; transition: transform .3s; color: var(--text-secondary); }
+  .acc.open .acc-head::after { transform: rotate(90deg); }
+  .acc-body { max-height: 0; overflow: hidden; transition: max-height .4s ease; }
+  .acc.open .acc-body { max-height: 2000px; }
+  .acc-body-inner { padding: 16px 20px; }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center; padding: 2rem; color: var(--text-secondary);
+    font-size: .85rem; border-top: 1px solid var(--border);
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .nav-toc { display: none; }
+    .hero h1 { font-size: 1.6rem; }
+    .container { padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ========== NAV ========== -->
+<nav class="nav">
+  <div class="nav-logo">
+    <svg viewBox="0 0 32 32"><rect x="2" y="6" width="28" height="20" rx="3" fill="#dc382d"/><rect x="6" y="10" width="20" height="3" rx="1" fill="#fff" opacity=".9"/><rect x="6" y="15" width="14" height="3" rx="1" fill="#fff" opacity=".6"/><rect x="6" y="20" width="18" height="3" rx="1" fill="#fff" opacity=".4"/></svg>
+    Redis 深度解析
+  </div>
+  <div class="nav-toc">
+    <a href="#what">什么是碎片</a>
+    <a href="#why">为什么会发生</a>
+    <a href="#how">如何实现</a>
+    <a href="#config">配置指南</a>
+    <a href="#practice">实战建议</a>
+  </div>
+</nav>
+
+<!-- ========== HERO ========== -->
+<div class="hero">
+  <h1>Redis <span>内存碎片整理</span> 深度解析</h1>
+  <p class="sub">从 jemalloc 的 slab 分配器到 active-defrag 核心机制，一篇文章带你彻底搞懂内存碎片整理。</p>
+  <div class="badge-row">
+    <span class="badge hot">Redis 7.x</span>
+    <span class="badge">jemalloc</span>
+    <span class="badge">active-defrag</span>
+    <span class="badge">内存管理</span>
+  </div>
+</div>
+
+<!-- ========== MAIN ========== -->
+<div class="container">
+
+<!-- ══════════ Section 1 ══════════ -->
+<section id="what">
+  <h2>一、什么是内存碎片？</h2>
+
+  <p>
+    在 Redis 运行过程中，你可能会观察到一个奇怪的现象：<strong>Redis 的 <code>used_memory</code> 显示只用了 2GB，
+    但操作系统报告的 <code>used_memory_rss</code> 却高达 4GB</strong>。多出来的 2GB 哪去了？答案就是——<strong>内存碎片</strong>。
+  </p>
+
+  <div class="card info">
+    <strong>💡 关键指标：碎片率</strong><br>
+    <code>mem_fragmentation_ratio = used_memory_rss / used_memory</code><br>
+    碎片率 &gt; 1.5 时，说明碎片问题需要关注；如果接近 2.0 甚至更高，说明有大量内存被浪费。
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 320">
+      <defs>
+        <pattern id="used" patternUnits="userSpaceOnUse" width="20" height="28"><rect x="0" y="0" width="20" height="28" fill="#dc382d" rx="3"/></pattern>
+        <pattern id="free" patternUnits="userSpaceOnUse" width="20" height="28"><rect x="0" y="0" width="20" height="28" fill="#e2e8f0" rx="3"/></pattern>
+        <pattern id="hole" patternUnits="userSpaceOnUse" width="20" height="28"><rect x="0" y="0" width="20" height="28" fill="#fef08a" rx="3"/><text x="10" y="19" font-size="10" text-anchor="middle">✕</text></pattern>
+        <filter id="shadow1"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.1"/></filter>
+      </defs>
+
+      <!-- Before -->
+      <text x="100" y="30" font-weight="700" font-size="15" fill="#2c3e50" text-anchor="middle">整理前 — 碎片化严重</text>
+      <rect x="10" y="48" width="180" height="220" fill="url(#used)" rx="6" filter="url(#shadow1)"/>
+      <rect x="12" y="55" width="20" height="28" fill="url(#hole)"/>
+      <rect x="68" y="80" width="20" height="28" fill="url(#hole)"/>
+      <rect x="120" y="130" width="20" height="28" fill="url(#hole)"/>
+      <rect x="40" y="175" width="20" height="28" fill="url(#hole)"/>
+      <rect x="100" y="210" width="20" height="28" fill="url(#hole)"/>
+      <text x="100" y="290" font-size="13" fill="#64748b" text-anchor="middle">used_memory_rss = 3GB</text>
+      <text x="100" y="308" font-size="13" fill="#64748b" text-anchor="middle">used_memory = 2GB</text>
+
+      <!-- Arrow -->
+      <text x="330" y="170" font-size="28" fill="#dc382d" text-anchor="middle">→</text>
+      <text x="330" y="195" font-size="12" fill="#64748b" text-anchor="middle">active-defrag</text>
+
+      <!-- After -->
+      <text x="510" y="30" font-weight="700" font-size="15" fill="#2c3e50" text-anchor="middle">整理后 — 紧凑连续</text>
+      <rect x="400" y="48" width="180" height="160" fill="url(#used)" rx="6" filter="url(#shadow1)"/>
+      <rect x="400" y="220" width="180" height="48" fill="#e2e8f0" rx="6"/>
+      <text x="490" y="290" font-size="13" fill="#64748b" text-anchor="middle">used_memory_rss ≈ 2.1GB</text>
+    </svg>
+  </div>
+
+  <p>
+    看上图：左边是整理前的内存——数据之间散布着大量"空洞"（已释放但无法被系统回收的内存页），导致 RSS 远大于实际使用量。
+    右边是整理后的效果——数据被紧凑排列，空闲空间被合并成大块还给操作系统。
+  </p>
+
+  <div class="acc" onclick="this.classList.toggle('open')">
+    <div class="acc-head">🔍 怎么判断自己有没有碎片问题？</div>
+    <div class="acc-body"><div class="acc-body-inner">
+      <div class="code-block">
+# 连接 Redis 执行
+<span class="cmt">redis-cli</span> INFO memory
+
+<span class="cmt"># 关注这几个字段：</span>
+<span class="cmt"># used_memory_human          — Redis 实际存储数据使用的内存</span>
+<span class="cmt"># used_memory_rss_human      — 操作系统分配给 Redis 进程的物理内存</span>
+<span class="cmt"># mem_fragmentation_ratio    — 碎片率 (rss / used)</span>
+<span class="cmt"># allocator_frag_ratio       — jemalloc 内部碎片率</span>
+<span class="cmt"># allocator_rss_ratio        — jemalloc RSS 与实际分配的比例</span>
+<span class="cmt"># active_defrag_running      — 当前是否正在执行碎片整理</span>
+      </div>
+      <p>
+        <strong>判断标准</strong>：<code>mem_fragmentation_ratio &gt; 1.5</code> —— 建议开启碎片整理；
+        <code>mem_fragmentation_ratio &lt; 1.0</code> —— 可能开启了 swap，内存不够用了。
+      </p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ══════════ Section 2 ══════════ -->
+<section id="why">
+  <h2>二、碎片为什么会发生？</h2>
+
+  <p>
+    要理解碎片，必须先理解 Redis 使用的内存分配器——<strong>jemalloc</strong>。
+    jemalloc 不是简单地 "要多少给多少"，而是采用了 <strong>slab（大小类）分配机制</strong>。
+  </p>
+
+  <h3>2.1 jemalloc 的 slab 分配器</h3>
+
+  <p>
+    jemalloc 预定义了若干个 <strong>大小类（size class）</strong>，比如 8B、16B、32B、64B、128B、256B……一直到几 KB。
+    当你申请一块内存时，jemalloc 会找到 ≥ 请求大小的最小 size class 来分配。
+    例如：申请 10 字节 → 分配 16 字节的 slab；申请 100 字节 → 分配 128 字节的 slab。
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 200">
+      <text x="340" y="28" font-weight="700" font-size="14" fill="#2c3e50" text-anchor="middle">jemalloc Slab 分配示意</text>
+      <!-- Request row -->
+      <text x="40" y="58" font-size="13" fill="#64748b">请求大小:</text>
+      <rect x="140" y="44" width="48" height="22" rx="4" fill="#e2e8f0"/>
+      <text x="164" y="60" font-size="12" fill="#2c3e50" text-anchor="middle">10B</text>
+      <text x="210" y="60" font-size="12" fill="#64748b">→</text>
+      <rect x="230" y="44" width="48" height="22" rx="4" fill="#e2e8f0"/>
+      <text x="254" y="60" font-size="12" fill="#2c3e50" text-anchor="middle">55B</text>
+      <text x="300" y="60" font-size="12" fill="#64748b">→</text>
+      <rect x="320" y="44" width="48" height="22" rx="4" fill="#e2e8f0"/>
+      <text x="344" y="60" font-size="12" fill="#2c3e50" text-anchor="middle">90B</text>
+      <text x="390" y="60" font-size="12" fill="#64748b">→</text>
+      <rect x="410" y="44" width="48" height="22" rx="4" fill="#e2e8f0"/>
+      <text x="434" y="60" font-size="12" fill="#2c3e50" text-anchor="middle">200B</text>
+
+      <!-- Allocated row -->
+      <text x="40" y="100" font-size="13" fill="#64748b">实际分配:</text>
+      <rect x="140" y="86" width="48" height="22" rx="4" fill="#dc382d" opacity=".15"/>
+      <text x="164" y="102" font-size="12" fill="#dc382d" text-anchor="middle" font-weight="600">16B</text>
+      <rect x="230" y="86" width="48" height="22" rx="4" fill="#dc382d" opacity=".15"/>
+      <text x="254" y="102" font-size="12" fill="#dc382d" text-anchor="middle" font-weight="600">64B</text>
+      <rect x="320" y="86" width="48" height="22" rx="4" fill="#dc382d" opacity=".15"/>
+      <text x="344" y="102" font-size="12" fill="#dc382d" text-anchor="middle" font-weight="600">128B</text>
+      <rect x="410" y="86" width="48" height="22" rx="4" fill="#dc382d" opacity=".15"/>
+      <text x="434" y="102" font-size="12" fill="#dc382d" text-anchor="middle" font-weight="600">256B</text>
+
+      <!-- Waste row -->
+      <text x="40" y="142" font-size="13" fill="#64748b">内部浪费:</text>
+      <rect x="140" y="128" width="72" height="22" rx="4" fill="#fef08a"/>
+      <text x="176" y="144" font-size="12" fill="#92400e" text-anchor="middle">6B 浪费</text>
+      <rect x="230" y="128" width="72" height="22" rx="4" fill="#fef08a"/>
+      <text x="266" y="144" font-size="12" fill="#92400e" text-anchor="middle">9B 浪费</text>
+      <rect x="320" y="128" width="84" height="22" rx="4" fill="#fef08a"/>
+      <text x="362" y="144" font-size="12" fill="#92400e" text-anchor="middle">38B 浪费</text>
+      <rect x="410" y="128" width="84" height="22" rx="4" fill="#fef08a"/>
+      <text x="452" y="144" font-size="12" fill="#92400e" text-anchor="middle">56B 浪费</text>
+
+      <!-- Summary -->
+      <rect x="140" y="168" width="400" height="24" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+      <text x="340" y="185" font-size="12" fill="#64748b" text-anchor="middle">内部碎片：分配与请求的差值，在单个 slab 内部浪费的空间</text>
+    </svg>
+  </div>
+
+  <h3>2.2 外部碎片才是大问题</h3>
+
+  <p>
+    上面说的是<strong>内部碎片</strong>——单个分配块内部的浪费，这个通常还好。真正让人头疼的是<strong>外部碎片</strong>：
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 280">
+      <text x="340" y="24" font-weight="700" font-size="13" fill="#2c3e50" text-anchor="middle">外部碎片形成过程</text>
+
+      <!-- Step 1 -->
+      <text x="16" y="56" font-size="11" fill="#94a3b8">① 初始：连续分配 3 个大小不同的 key</text>
+      <rect x="16" y="64" width="200" height="40" fill="#bfdbfe" rx="4"/>
+      <text x="116" y="89" font-size="12" fill="#1e40af" text-anchor="middle">Key A (2KB)</text>
+      <rect x="220" y="64" width="200" height="40" fill="#bbf7d0" rx="4"/>
+      <text x="320" y="89" font-size="12" fill="#166534" text-anchor="middle">Key B (2KB)</text>
+      <rect x="424" y="64" width="240" height="40" fill="#fde68a" rx="4"/>
+      <text x="544" y="89" font-size="12" fill="#92400e" text-anchor="middle">Key C (3KB)</text>
+
+      <!-- Step 2 -->
+      <text x="16" y="132" font-size="11" fill="#94a3b8">② Key B 过期被删除，中间出现 2KB 空洞</text>
+      <rect x="16" y="140" width="200" height="40" fill="#bfdbfe" rx="4"/>
+      <text x="116" y="165" font-size="12" fill="#1e40af" text-anchor="middle">Key A (2KB)</text>
+      <rect x="220" y="140" width="200" height="40" fill="#e2e8f0" rx="4" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,2"/>
+      <text x="320" y="165" font-size="12" fill="#f59e0b" text-anchor="middle">空洞 (2KB)</text>
+      <rect x="424" y="140" width="240" height="40" fill="#fde68a" rx="4"/>
+      <text x="544" y="165" font-size="12" fill="#92400e" text-anchor="middle">Key C (3KB)</text>
+
+      <!-- Step 3 -->
+      <text x="16" y="208" font-size="11" fill="#94a3b8">③ 新写入 3KB Key D → 空洞太小装不下，只能分配到末尾，浪费更多</text>
+      <rect x="16" y="216" width="200" height="40" fill="#bfdbfe" rx="4"/>
+      <text x="116" y="241" font-size="12" fill="#1e40af" text-anchor="middle">Key A (2KB)</text>
+      <rect x="220" y="216" width="200" height="40" fill="#e2e8f0" rx="4" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,2"/>
+      <text x="320" y="241" font-size="12" fill="#ef4444" text-anchor="middle">装不下 3KB！</text>
+      <rect x="424" y="216" width="240" height="40" fill="#fde68a" rx="4"/>
+      <text x="544" y="241" font-size="12" fill="#92400e" text-anchor="middle">Key C (3KB)</text>
+      <text x="16" y="270" font-size="12" fill="#ef4444">→ Key D (3KB) 只能追加到末尾，空洞永远无法复用 → 碎片越来越多！</text>
+    </svg>
+  </div>
+
+  <div class="card warn">
+    <strong>⚠️ 外部碎片的本质</strong><br>
+    Redis 中的数据大小千差万别——有的 key 只存 50 字节的字符串，有的存 10MB 的大对象。
+    当各种大小的 key 不断被创建和删除时，内存中就会散布大量大小不同的"空洞"。
+    这些空洞单独看不大，但加起来就是巨大的浪费。更糟糕的是，新分配的大块内存找不到合适的空洞放下，
+    只能追加到末尾，导致整体内存占用越来越大。
+  </div>
+</section>
+
+<!-- ══════════ Section 3 ══════════ -->
+<section id="how">
+  <h2>三、碎片整理如何实现？（核心机制）</h2>
+
+  <p>
+    Redis 4.0 引入了 <strong>Active Defrag（主动碎片整理）</strong> 功能，它是一项精巧的设计：
+    在 Redis 正常运行的同时，<strong>不阻塞主线程地</strong>搬运数据、合并空洞、归还内存给操作系统。
+  </p>
+
+  <h3>3.1 核心思路：给 key "搬家"</h3>
+
+  <p>
+    碎片整理的本质上就是对内存中的 value 进行 <strong>"重新分配 + 拷贝 + 释放旧位置"</strong>：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>扫描内存</strong>：遍历 Redis 的所有 key，找到那些可以搬迁的数据（value 存储在独立内存块中的类型）
+    </li>
+    <li>
+      <strong>计算碎片收益</strong>：判断搬家后能释放多少内存，收益不够就不搬（避免做无用功）
+    </li>
+    <li>
+      <strong>分配新内存</strong>：在新的、更紧凑的位置分配一块大小相同的内存
+    </li>
+    <li>
+      <strong>拷贝数据</strong>：将 value 的内容拷贝到新位置
+    </li>
+    <li>
+      <strong>更新指针</strong>：让 key 对象指向新的 value 地址
+    </li>
+    <li>
+      <strong>释放旧内存</strong>：归还旧的内存块，空洞消失！
+    </li>
+  </ol>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 380">
+      <defs>
+        <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#dc382d"/></marker>
+        <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#10b981"/></marker>
+      </defs>
+
+      <text x="340" y="22" font-weight="700" font-size="14" fill="#2c3e50" text-anchor="middle">Active Defrag — Key 搬迁过程</text>
+
+      <!-- Before -->
+      <text x="170" y="54" font-size="13" fill="#64748b" text-anchor="middle">搬迁前</text>
+
+      <!-- Memory layout before -->
+      <rect x="20" y="64" width="150" height="38" fill="#bfdbfe" rx="4"/>
+      <text x="95" y="88" font-size="12" fill="#1e40af" text-anchor="middle">Key A (已用)</text>
+      <rect x="174" y="64" width="150" height="38" fill="#fca5a5" rx="4" stroke="#dc382d" stroke-width="2"/>
+      <text x="249" y="88" font-size="12" fill="#991b1b" text-anchor="middle">Key B (旧位置)</text>
+
+      <!-- Key struct pointing -->
+      <rect x="220" y="128" width="80" height="30" rx="4" fill="#dc382d" opacity=".1" stroke="#dc382d" stroke-width="1"/>
+      <text x="260" y="148" font-size="11" fill="#dc382d" text-anchor="middle">key "b"</text>
+      <line x1="260" y1="158" x2="260" y2="178" stroke="#dc382d" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <text x="260" y="174" font-size="10" fill="#dc382d" text-anchor="middle">ptr</text>
+      <line x1="260" y1="144" x2="249" y2="104" stroke="#dc382d" stroke-width="1" marker-end="url(#arrowRed)"/>
+
+      <text x="340" y="148" font-size="20">→</text>
+
+      <!-- After -->
+      <text x="510" y="54" font-size="13" fill="#64748b" text-anchor="middle">搬迁后</text>
+
+      <!-- Memory layout after -->
+      <rect x="360" y="64" width="150" height="38" fill="#bfdbfe" rx="4"/>
+      <text x="435" y="88" font-size="12" fill="#1e40af" text-anchor="middle">Key A (已用)</text>
+      <rect x="514" y="64" width="150" height="38" fill="#bbf7d0" rx="4" stroke="#10b981" stroke-width="2"/>
+      <text x="589" y="88" font-size="12" fill="#166534" text-anchor="middle">Key B (新位置)</text>
+
+      <!-- Old slot freed -->
+      <text x="249" y="120" font-size="11" fill="#6b7280" text-anchor="middle">← 归还给 OS</text>
+
+      <!-- Key struct after -->
+      <rect x="560" y="128" width="80" height="30" rx="4" fill="#10b981" opacity=".1" stroke="#10b981" stroke-width="1"/>
+      <text x="600" y="148" font-size="11" fill="#10b981" text-anchor="middle">key "b"</text>
+      <line x1="600" y1="144" x2="589" y2="104" stroke="#10b981" stroke-width="1" marker-end="url(#arrowGreen)"/>
+
+      <!-- Phase explanation -->
+      <line x1="340" y1="190" x2="340" y2="380" stroke="#e2e8f0" stroke-width="1"/>
+      <rect x="30" y="195" width="620" height="175" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+      <text x="50" y="222" font-size="13" fill="#2c3e50">
+        <tspan font-weight="700">阶段 ① 扫描：</tspan><tspan fill="#64748b">defrag 游标扫描键空间，检查每个 key 的 value 是否可以 "搬家"</tspan>
+      </text>
+      <text x="50" y="250" font-size="13" fill="#2c3e50">
+        <tspan font-weight="700">阶段 ② 评估：</tspan><tspan fill="#64748b">计算搬家能释放的碎片大小，低于阈值就跳过（避免无意义搬动）</tspan>
+      </text>
+      <text x="50" y="278" font-size="13" fill="#2c3e50">
+        <tspan font-weight="700">阶段 ③ 搬迁：</tspan><tspan fill="#64748b">jemalloc 分配新内存块 → memcpy 拷贝数据 → 更新指针 → free 旧块</tspan>
+      </text>
+      <text x="50" y="306" font-size="13" fill="#2c3e50">
+        <tspan font-weight="700">阶段 ④ 节流：</tspan><tspan fill="#64748b">每轮搬迁后计算 CPU 耗时，超过限制就 sleep 一下，绝不阻塞主线程</tspan>
+      </text>
+      <text x="50" y="334" font-size="13" fill="#2c3e50">
+        <tspan font-weight="700">阶段 ⑤ 继续：</tspan><tspan fill="#64748b">游标往下走，下一轮继续，形成渐进式清理的循环</tspan>
+      </text>
+    </svg>
+  </div>
+
+  <h3>3.2 渐进式设计：不阻塞服务</h3>
+
+  <p>
+    这是整个设计最精妙的地方。如果一口气把所有 key 都搬完，Redis 会长时间阻塞，客户端请求全部超时。
+    所以 Redis 采用了<strong>渐进式 + CPU 时间片</strong>的策略：
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 170">
+      <text x="340" y="22" font-weight="700" font-size="13" fill="#2c3e50" text-anchor="middle">渐进式整理的时间片模型</text>
+
+      <!-- CPU time line -->
+      <rect x="20" y="45" width="640" height="8" rx="4" fill="#e2e8f0"/>
+      <rect x="20" y="45" width="150" height="8" rx="4" fill="#dc382d"/>
+      <rect x="200" y="45" width="150" height="8" rx="4" fill="#dc382d"/>
+      <rect x="380" y="45" width="150" height="8" rx="4" fill="#dc382d"/>
+      <rect x="560" y="45" width="100" height="8" rx="4" fill="#dc382d"/>
+
+      <!-- Labels -->
+      <text x="95" y="78" font-size="12" fill="#64748b" text-anchor="middle">整理 ①</text>
+      <text x="170" y="78" font-size="10" fill="#94a3b8" text-anchor="middle">sleep</text>
+      <text x="275" y="78" font-size="12" fill="#64748b" text-anchor="middle">整理 ②</text>
+      <text x="350" y="78" font-size="10" fill="#94a3b8" text-anchor="middle">sleep</text>
+      <text x="455" y="78" font-size="12" fill="#64748b" text-anchor="middle">整理 ③</text>
+      <text x="530" y="78" font-size="10" fill="#94a3b8" text-anchor="middle">sleep</text>
+      <text x="610" y="78" font-size="12" fill="#64748b" text-anchor="middle">整理 ④</text>
+
+      <!-- Normal requests -->
+      <rect x="20" y="100" width="640" height="28" rx="6" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1"/>
+      <text x="340" y="120" font-size="12" fill="#166534" text-anchor="middle">在此期间，正常客户端请求不受影响，Redis 持续对外提供服务</text>
+
+      <!-- Detail -->
+      <text x="340" y="162" font-size="12" fill="#64748b" text-anchor="middle">每轮整理时间不超过 CPU 时间片限制（默认 25%），确保请求延迟不受明显影响</text>
+    </svg>
+  </div>
+
+  <div class="card tip">
+    <strong>🟢 时间片控制机制</strong><br>
+    Redis 在每轮碎片处理中会统计 CPU 耗时。如果本轮耗时超过了 <code>active-defrag-cycle-max</code> 的 25%，就 sleep 等待下一轮。
+    这样即使碎片严重，也能在几分钟到几十分钟内渐进式完成整理，用户完全无感知。
+  </div>
+
+  <h3>3.3 哪些数据支持搬？哪些不行？</h3>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>数据类型</th><th>是否支持搬迁</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td><strong>String</strong> (SDS)</td><td>✅ 支持</td><td>value 是独立内存块，搬迁完全安全</td></tr>
+        <tr><td><strong>Hash</strong></td><td>✅ 支持</td><td>ziplist/listpack 可整体搬迁；hashtable 可逐元素搬迁</td></tr>
+        <tr><td><strong>List</strong></td><td>✅ 支持</td><td>quicklist 节点可逐个搬迁</td></tr>
+        <tr><td><strong>Set</strong></td><td>✅ 支持</td><td>intset/listpack 可整体搬迁；hashtable 逐个搬迁</td></tr>
+        <tr><td><strong>Sorted Set</strong></td><td>✅ 支持</td><td>skiplist + dict 结构，可逐个节点搬迁</td></tr>
+        <tr><td><strong>Stream</strong></td><td>✅ 支持</td><td>rax 树节点可搬迁</td></tr>
+        <tr><td><strong>Module 类型</strong></td><td>⚠️ 部分支持</td><td>需要模块实现 <code>RM_Defrag</code> 回调</td></tr>
+        <tr><td><strong>共享对象</strong> (0-9999 整数)</td><td>❌ 不支持</td><td>被多处引用，搬迁需要改所有引用方，代价太高</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>3.4 defrag 游标机制</h3>
+
+  <p>
+    碎片整理使用一个内部游标来遍历整个键空间，这个游标类似 <code>SCAN</code> 命令使用的机制。
+    每次整理从上次停下的位置继续，一轮一轮地推进，最终覆盖所有数据库。
+  </p>
+
+  <div class="code-block">
+<span class="cmt"># Redis 源码中 activeDefragCycle() 的核心逻辑 (简化版)</span>
+
+<span class="kw">void</span> <span class="fn">activeDefragCycle</span>(<span class="kw">void</span>) {
+    <span class="cmt">// 计算本轮允许的 CPU 时间上限 (微秒)</span>
+    start = <span class="fn">ustime</span>();
+    timelimit = <span class="num">1000000</span> * server.active_defrag_running / <span class="num">100</span>;
+
+    <span class="kw">do</span> {
+        <span class="cmt">// 1. 扫描键空间，找到可以 defrag 的 key</span>
+        <span class="kw">while</span> (cursor &amp;&amp; (ustime() - start) &lt; timelimit) {
+            <span class="fn">scanCallback</span>();
+            <span class="fn">activeDefragCycle</span>();  <span class="cmt">// 递归搬迁</span>
+            cursor++;
+        }
+
+        <span class="cmt">// 2. 搬迁 key 的 value</span>
+        <span class="kw">if</span> (hasActiveChildProcess()) <span class="kw">break</span>;  <span class="cmt">// 有 BGSAVE/BGREWRITE 则暂停</span>
+
+        <span class="cmt">// 3. 如果一整个数据库扫完了，切到下一个 db</span>
+        <span class="kw">if</span> (!cursor) dbid = (dbid + <span class="num">1</span>) % server.dbnum;
+
+        <span class="cmt">// 4. 计算本轮耗时，决定是否继续</span>
+    } <span class="kw">while</span> (elapsed &lt; timelimit);
+}
+  </div>
+</section>
+
+<!-- ══════════ Section 4 ══════════ -->
+<section id="config">
+  <h2>四、配置参数详解</h2>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>参数</th><th>默认值</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>activedefrag yes</code></td>
+          <td>no</td>
+          <td>总开关，设为 yes 激活整个碎片整理机制</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-ignore-bytes 100mb</code></td>
+          <td>100mb</td>
+          <td>碎片总大小低于该值就不整理，避免小题大做</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-threshold-lower 10</code></td>
+          <td>10</td>
+          <td>碎片率 &gt; 110% 时开始整理（即碎片占 10% 以上）</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-threshold-upper 100</code></td>
+          <td>100</td>
+          <td>碎片率达到 200% 时，全力整理（最大 CPU 占用）</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-cycle-min 1</code></td>
+          <td>1</td>
+          <td>最少每轮耗费 CPU 1% 的时间来整理</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-cycle-max 25</code></td>
+          <td>25</td>
+          <td>最多每轮耗费 CPU 25% 的时间来整理（软上限）</td>
+        </tr>
+        <tr>
+          <td><code>active-defrag-max-scan-fields 1000</code></td>
+          <td>1000</td>
+          <td>每轮最多扫描的 hash/list/set/zset 字段数</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>4.1 CPU 占用自适应调节</h3>
+
+  <p>
+    Redis 不会固定使用一个 CPU 占比来整理，而是根据<strong>当前碎片率</strong>在 min 和 max 之间做线性插值：
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 220">
+      <text x="340" y="22" font-weight="700" font-size="13" fill="#2c3e50" text-anchor="middle">CPU 占用自适应调节</text>
+
+      <!-- Axes -->
+      <line x1="60" y1="180" x2="640" y2="180" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="60" y1="180" x2="60" y2="40" stroke="#cbd5e1" stroke-width="1"/>
+
+      <!-- Y labels -->
+      <text x="50" y="184" font-size="11" fill="#94a3b8" text-anchor="end">0</text>
+      <text x="50" y="144" font-size="11" fill="#94a3b8" text-anchor="end">1%</text>
+      <text x="50" y="84" font-size="11" fill="#94a3b8" text-anchor="end">25%</text>
+      <text x="50" y="50" font-size="11" fill="#94a3b8" text-anchor="end">max</text>
+
+      <!-- X labels -->
+      <text x="160" y="198" font-size="11" fill="#94a3b8" text-anchor="middle">110%</text>
+      <text x="340" y="198" font-size="11" fill="#94a3b8" text-anchor="middle">155%</text>
+      <text x="540" y="198" font-size="11" fill="#94a3b8" text-anchor="middle">200%</text>
+
+      <text x="340" y="215" font-size="12" fill="#64748b" text-anchor="middle">碎片率 →</text>
+
+      <!-- Line -->
+      <line x1="160" y1="144" x2="540" y2="84" stroke="#dc382d" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="160" cy="144" r="4" fill="#dc382d"/>
+      <circle cx="540" cy="84" r="4" fill="#dc382d"/>
+
+      <!-- Annotations -->
+      <text x="160" y="136" font-size="11" fill="#dc382d" text-anchor="middle">1%</text>
+      <text x="540" y="76" font-size="11" fill="#dc382d" text-anchor="middle">25%</text>
+      <text x="400" y="110" font-size="11" fill="#64748b">碎片越严重 → 投入更多 CPU</text>
+    </svg>
+  </div>
+
+  <div class="code-block">
+<span class="cmt"># 推荐配置：redis.conf 中这样写</span>
+
+<span class="prop">activedefrag</span> <span class="str">yes</span>
+
+<span class="cmt"># 碎片 &gt; 100MB 且碎片率 &gt; 110% 时才启动整理</span>
+<span class="prop">active-defrag-ignore-bytes</span> <span class="num">100mb</span>
+<span class="prop">active-defrag-threshold-lower</span> <span class="num">10</span>
+
+<span class="cmt"># 碎片率越高，投入越多 CPU（1% ~ 25%）</span>
+<span class="prop">active-defrag-cycle-min</span> <span class="num">1</span>
+<span class="prop">active-defrag-cycle-max</span> <span class="num">25</span>
+
+<span class="cmt"># 温柔一点的配置 (适合延迟敏感场景)</span>
+<span class="cmt"># active-defrag-cycle-max 5</span>
+  </div>
+
+  <div class="card warn">
+    <strong>⚠️ 几个重要注意事项</strong>
+    <ol style="margin: .5rem 0 0 1.2rem; color: var(--text-secondary);">
+      <li><strong>BGSAVE / BGREWRITEAOF 期间自动暂停</strong>：有子进程在 fork 时，defrag 会暂时停止，避免 COW 导致内存翻倍</li>
+      <li><strong>jemalloc 是前提</strong>：active-defrag 深度依赖 jemalloc 的内存分配信息，如果编译时没开启 jemalloc，功能不会生效</li>
+      <li><strong>可以通过 CONFIG SET 在线调整</strong>：不需要重启，适合根据监控动态调整</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ══════════ Section 5 ══════════ -->
+<section id="practice">
+  <h2>五、实战建议与最佳实践</h2>
+
+  <h3>5.1 什么时候该开？什么时候不该开？</h3>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>场景</th><th>建议</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td>碎片率 1.0 ~ 1.2</td><td>❌ 不开</td><td>碎片不严重，开启反而浪费 CPU</td></tr>
+        <tr><td>碎片率 1.2 ~ 1.5</td><td>⚠️ 可选</td><td>如果内存充裕，可以先观察；内存紧张就开</td></tr>
+        <tr><td>碎片率 &gt; 1.5</td><td>✅ 建议开</td><td>有显著内存浪费，整理收益明显</td></tr>
+        <tr><td>碎片率 &gt; 2.0</td><td>🔥 必须开</td><td>一半内存被浪费，不开就是扔钱</td></tr>
+        <tr><td>高写入 / 大 key 频繁创建删除</td><td>✅ 建议开</td><td>这种场景最容易产生碎片</td></tr>
+        <tr><td>纯缓存 / 全部设置 TTL</td><td>✅ 建议开</td><td>key 过期释放产生大量空洞</td></tr>
+        <tr><td>延迟极度敏感 (如交易系统)</td><td>⚠️ 谨慎</td><td>把 cycle-max 降到 3~5，减少对主线程的影响</td></tr>
+        <tr><td>内存本身就充足</td><td>❌ 不需要</td><td>碎片不造成实际问题，没必要消耗 CPU</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>5.2 监控指标</h3>
+
+  <div class="code-block">
+<span class="cmt"># 一键查看碎片整理状态</span>
+redis-cli INFO memory | grep -E <span class="str">"frag|defrag"</span>
+
+<span class="cmt"># 输出解读：</span>
+<span class="cmt"># mem_fragmentation_ratio:2.15        ← 碎片率 215%，问题严重！</span>
+<span class="cmt"># mem_fragmentation_bytes:2415919104  ← 碎片浪费了约 2.3GB</span>
+<span class="cmt"># active_defrag_running:1             ← 正在进行碎片整理</span>
+<span class="cmt"># active_defrag_key_hits:1038421      ← 累计搬迁成功的 key 数量</span>
+<span class="cmt"># active_defrag_key_misses:50012      ← 跳过（收益不够）的 key 数量</span>
+<span class="cmt"># active_defrag_misses:182            ← 无法搬迁的操作次数</span>
+  </div>
+
+  <h3>5.3 一个完整的监控脚本</h3>
+
+  <div class="code-block">
+<span class="cmt">#!/bin/bash</span>
+<span class="cmt"># redis_defrag_monitor.sh — 持续监控碎片情况</span>
+
+<span class="kw">while</span> true; <span class="kw">do</span>
+  <span class="fn">redis-cli</span> INFO memory | awk <span class="str">'
+    /used_memory_human/       { printf "实际使用: %-12s", $NF }
+    /used_memory_rss_human/   { printf "RSS占用:  %-12s", $NF }
+    /mem_fragmentation_ratio/ { printf "碎片率:    %-8s",  $NF }
+    /active_defrag_running/   { printf "整理中:    %-8s\n", $NF }
+  '</span>
+  sleep <span class="num">10</span>
+<span class="kw">done</span>
+  </div>
+
+  <h3>5.4 如果你不想用自动整理……</h3>
+
+  <div class="card info">
+    <strong>🔄 终极方案：重启</strong><br>
+    如果碎片已经到了无法忍受的地步，而 active-defrag 又因为各种原因不能开（比如 Redis 版本 &lt; 4.0），
+    那<strong>重启 Redis</strong>是最简单粗暴的碎片清除方式。重启后内存从零开始分配，完全没有碎片。<br><br>
+    但重启意味着数据从 RDB/AOF 加载，有不可用时间。如果用了 Redis Sentinel / Cluster，可以通过主从切换来实现"滚动重启"。
+  </div>
+</section>
+
+<!-- ══════════ Summary ══════════ -->
+<section>
+  <h2>总结</h2>
+
+  <div class="card tip">
+    <table style="margin:0">
+      <tr><td style="font-weight:700;white-space:nowrap">🔧 问题</td><td>Redis 运行一段时间后，used_memory_rss 远大于 used_memory，内存被碎片浪费</td></tr>
+      <tr><td style="font-weight:700;white-space:nowrap">🎯 根因</td><td>jemalloc slab 分配 + 大小不一的 key 反复创建删除，形成无法复用的大小各异的"空洞"</td></tr>
+      <tr><td style="font-weight:700;white-space:nowrap">🛠️ 方案</td><td>Active Defrag：渐进式地搬迁 value 到紧凑区域，合并空洞归还给 OS</td></tr>
+      <tr><td style="font-weight:700;white-space:nowrap">⚡ 特点</td><td>不阻塞主线程、CPU 占用自适应、支持几乎所有数据类型</td></tr>
+      <tr><td style="font-weight:700;white-space:nowrap">📊 监控</td><td><code>mem_fragmentation_ratio</code> &gt; 1.5 就需要注意，&gt; 2.0 必须行动</td></tr>
+    </table>
+  </div>
+
+  <p style="text-align:center; margin-top:1rem;">
+    一句话记住：<strong>Active Defrag 就是给 Redis 的数据"搬家"，把散落各地的数据搬到一起，把空出来的房间还给房东（操作系统）。</strong>
+  </p>
+</section>
+
+</div>
+
+<footer>
+  本文基于 Redis 7.x 源码与官方文档整理 · 聚焦核心原理 · 面向实战
+</footer>
+
+<!-- Accordion toggle script -->
+<script>
+document.querySelectorAll('.acc').forEach(el => {
+  el.addEventListener('click', function(e) {
+    // Don't toggle if selecting text inside code blocks
+    if (window.getSelection().toString()) return;
+  });
+});
+</script>
+
+</body>
+</html>
