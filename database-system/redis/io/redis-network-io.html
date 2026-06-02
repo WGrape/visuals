@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 网络 IO 设计原理</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-card: #1c2128;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-red: #ff6b6b;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-purple: #a371f7;
+            --accent-orange: #f0883e;
+            --accent-cyan: #39c5cf;
+            --accent-yellow: #e3b341;
+            --border-color: #30363d;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+
+        /* NAV */
+        .nav {
+            position: sticky; top: 0;
+            background: rgba(22,27,34,0.95);
+            border-bottom: 1px solid var(--border-color);
+            padding: 14px 0; z-index: 200;
+            backdrop-filter: blur(10px);
+        }
+        .nav-content {
+            max-width: 1100px; margin: 0 auto; padding: 0 20px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .nav-back { color: var(--accent-blue); text-decoration: none; font-size: 14px; }
+        .nav-back:hover { text-decoration: underline; }
+        .nav-title { font-size: 15px; font-weight: 600; color: var(--accent-red); }
+
+        /* CONTAINER */
+        .container { max-width: 1100px; margin: 0 auto; padding: 40px 20px 80px; }
+
+        /* HERO */
+        .hero {
+            text-align: center; padding: 50px 20px 40px;
+            background: linear-gradient(135deg, #0d1117 0%, #1a1f2e 50%, #0d1117 100%);
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 50px;
+        }
+        .hero h1 { font-size: 2.4rem; font-weight: 700; margin-bottom: 12px; }
+        .hero h1 span { color: var(--accent-red); }
+        .hero p { color: var(--text-secondary); font-size: 1.05rem; max-width: 600px; margin: 0 auto; }
+
+        /* SECTION */
+        .section { margin-bottom: 60px; }
+        .section-title {
+            font-size: 1.4rem; font-weight: 700;
+            color: var(--accent-cyan); margin-bottom: 20px;
+            padding-bottom: 10px; border-bottom: 1px solid var(--border-color);
+            display: flex; align-items: center; gap: 10px;
+        }
+
+        /* CARDS */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 24px;
+            margin-bottom: 20px;
+        }
+        .card h3 { font-size: 1.1rem; margin-bottom: 12px; color: var(--accent-yellow); }
+        .card p { color: var(--text-secondary); font-size: 0.95rem; line-height: 1.8; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+
+        /* BADGE */
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 20px;
+            font-size: 0.75rem; font-weight: 600; margin-right: 6px;
+        }
+        .badge-red { background: rgba(255,107,107,0.15); color: var(--accent-red); border: 1px solid rgba(255,107,107,0.3); }
+        .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+        .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+        .badge-purple { background: rgba(163,113,247,0.15); color: var(--accent-purple); border: 1px solid rgba(163,113,247,0.3); }
+        .badge-cyan { background: rgba(57,197,207,0.15); color: var(--accent-cyan); border: 1px solid rgba(57,197,207,0.3); }
+        .badge-orange { background: rgba(240,136,62,0.15); color: var(--accent-orange); border: 1px solid rgba(240,136,62,0.3); }
+
+        /* HIGHLIGHT BOX */
+        .highlight-box {
+            border-left: 3px solid var(--accent-red);
+            background: rgba(255,107,107,0.05);
+            padding: 16px 20px; border-radius: 0 8px 8px 0;
+            margin: 16px 0; font-size: 0.92rem; color: var(--text-secondary);
+        }
+        .highlight-box strong { color: var(--text-primary); }
+
+        /* ============================================
+           SECTION 1: IO 模型对比动画
+        ============================================ */
+        .io-comparison {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+            margin-top: 16px;
+        }
+        @media (max-width: 700px) { .io-comparison { grid-template-columns: 1fr; } }
+
+        .io-box {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 20px; position: relative;
+        }
+        .io-box h4 { font-size: 0.95rem; margin-bottom: 14px; text-align: center; }
+        .io-box.active-box { border-color: var(--accent-red); }
+
+        .thread-row {
+            display: flex; align-items: center; gap: 8px;
+            margin-bottom: 8px; font-size: 0.8rem;
+        }
+        .thread-label {
+            width: 60px; flex-shrink: 0;
+            color: var(--text-secondary); font-size: 0.75rem;
+        }
+        .thread-bar {
+            height: 22px; border-radius: 4px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.7rem; font-weight: 600; transition: width 0.6s ease;
+            white-space: nowrap; overflow: hidden; padding: 0 6px;
+        }
+        .bar-work { background: rgba(63,185,80,0.3); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.4); }
+        .bar-wait { background: rgba(139,148,158,0.15); color: var(--text-secondary); border: 1px solid rgba(139,148,158,0.2); }
+        .bar-epoll { background: rgba(255,107,107,0.25); color: var(--accent-red); border: 1px solid rgba(255,107,107,0.4); }
+
+        /* ============================================
+           SECTION 2: 事件循环动画
+        ============================================ */
+        #eventLoopCanvas {
+            width: 100%; max-width: 750px; display: block;
+            margin: 0 auto; border-radius: 10px;
+        }
+
+        /* ============================================
+           SECTION 3: 完整请求流程动画
+        ============================================ */
+        .flow-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 24px; margin-top: 16px;
+        }
+        .flow-steps {
+            display: flex; flex-direction: column; gap: 0;
+        }
+        .flow-step {
+            display: flex; align-items: flex-start; gap: 16px;
+            padding: 16px 0; border-bottom: 1px solid rgba(48,54,61,0.5);
+            opacity: 0.3; transition: opacity 0.5s, transform 0.4s;
+            transform: translateX(-10px);
+        }
+        .flow-step.active {
+            opacity: 1; transform: translateX(0);
+        }
+        .flow-step:last-child { border-bottom: none; }
+        .step-num {
+            width: 32px; height: 32px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.8rem; font-weight: 700; flex-shrink: 0;
+            background: var(--bg-tertiary); border: 2px solid var(--border-color);
+            transition: background 0.4s, border-color 0.4s;
+        }
+        .flow-step.active .step-num {
+            background: rgba(255,107,107,0.2); border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
+        .step-content h5 { font-size: 0.9rem; margin-bottom: 4px; }
+        .step-content p { font-size: 0.8rem; color: var(--text-secondary); }
+
+        /* progress indicator */
+        .packet-indicator {
+            height: 3px; background: var(--bg-tertiary);
+            border-radius: 2px; margin: 16px 0; overflow: hidden;
+        }
+        .packet-bar {
+            height: 100%; background: linear-gradient(90deg, var(--accent-red), var(--accent-orange));
+            border-radius: 2px; width: 0%;
+            transition: width 0.5s ease;
+        }
+
+        /* ============================================
+           SECTION 4: epoll 工作原理动画
+        ============================================ */
+        #epollCanvas {
+            width: 100%; max-width: 750px; display: block;
+            margin: 0 auto; border-radius: 10px;
+        }
+
+        /* ============================================
+           SECTION 5: 多线程IO演示
+        ============================================ */
+        .mt-demo {
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 24px; margin-top: 16px;
+        }
+        .mt-phases {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+            margin-top: 16px;
+        }
+        @media (max-width: 600px) { .mt-phases { grid-template-columns: 1fr; } }
+        .mt-phase {
+            border: 1px solid var(--border-color); border-radius: 8px;
+            padding: 14px; text-align: center; font-size: 0.82rem;
+            transition: border-color 0.4s, background 0.4s;
+        }
+        .mt-phase.lit {
+            border-color: var(--accent-cyan);
+            background: rgba(57,197,207,0.08);
+        }
+        .mt-phase .ph-icon { font-size: 1.6rem; margin-bottom: 6px; }
+        .mt-phase .ph-title { font-weight: 600; margin-bottom: 4px; color: var(--accent-cyan); font-size: 0.85rem; }
+        .mt-phase .ph-desc { color: var(--text-secondary); font-size: 0.75rem; }
+        .mt-thread-badge {
+            margin-top: 8px; font-size: 0.7rem; font-weight: 600;
+            padding: 2px 8px; border-radius: 10px;
+            background: rgba(88,166,255,0.15); color: var(--accent-blue);
+            border: 1px solid rgba(88,166,255,0.3); display: inline-block;
+        }
+
+        /* CONTROLS */
+        .ctrl-bar {
+            display: flex; gap: 10px; flex-wrap: wrap;
+            margin-bottom: 16px; align-items: center;
+        }
+        .btn {
+            padding: 8px 18px; border-radius: 6px; border: none;
+            cursor: pointer; font-size: 0.85rem; font-weight: 600;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-red { background: rgba(255,107,107,0.2); color: var(--accent-red); border: 1px solid rgba(255,107,107,0.4); }
+        .btn-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+        .btn-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+        .btn:hover { opacity: 0.8; }
+
+        /* STATUS LOG */
+        .log-box {
+            background: #0d1117; border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 14px; font-family: 'Courier New', monospace;
+            font-size: 0.8rem; height: 140px; overflow-y: auto;
+            margin-top: 12px;
+        }
+        .log-line { margin-bottom: 4px; }
+        .log-time { color: var(--text-secondary); margin-right: 8px; }
+        .log-red { color: var(--accent-red); }
+        .log-green { color: var(--accent-green); }
+        .log-blue { color: var(--accent-blue); }
+        .log-cyan { color: var(--accent-cyan); }
+        .log-yellow { color: var(--accent-yellow); }
+
+        /* KEY POINTS */
+        .keypoint-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+        @media (max-width: 700px) { .keypoint-grid { grid-template-columns: 1fr; } }
+        .keypoint {
+            background: var(--bg-card); border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 20px; text-align: center;
+        }
+        .keypoint .kp-icon { font-size: 2rem; margin-bottom: 10px; }
+        .keypoint h4 { font-size: 0.95rem; margin-bottom: 8px; color: var(--accent-orange); }
+        .keypoint p { font-size: 0.8rem; color: var(--text-secondary); }
+
+        /* VERSION TIMELINE */
+        .timeline { position: relative; padding-left: 28px; }
+        .timeline::before {
+            content: ''; position: absolute; left: 8px; top: 0; bottom: 0;
+            width: 2px; background: var(--border-color);
+        }
+        .tl-item { position: relative; margin-bottom: 24px; }
+        .tl-dot {
+            position: absolute; left: -24px; top: 4px;
+            width: 12px; height: 12px; border-radius: 50%;
+            border: 2px solid var(--accent-red); background: var(--bg-primary);
+        }
+        .tl-item h4 { font-size: 0.95rem; color: var(--accent-yellow); margin-bottom: 4px; }
+        .tl-item p { font-size: 0.85rem; color: var(--text-secondary); }
+
+        code {
+            background: var(--bg-tertiary); color: var(--accent-cyan);
+            padding: 1px 6px; border-radius: 4px; font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+    <div class="nav-content">
+        <a href="../../index.html" class="nav-back">← 数据库系统</a>
+        <span class="nav-title">Redis 网络 IO 设计原理</span>
+        <span class="badge badge-red">Interactive</span>
+    </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+    <h1>Redis <span>网络 IO</span> 设计原理</h1>
+    <p>从单线程到多线程 IO，深度解析 Redis 如何用极简设计支撑百万并发</p>
+</div>
+
+<div class="container">
+
+    <!-- ===== SECTION 0: 核心思路 ===== -->
+    <div class="section">
+        <div class="section-title">⚡ 核心设计思路</div>
+        <div class="grid-2">
+            <div class="card">
+                <h3>🤔 为什么 Redis 不用多线程处理请求？</h3>
+                <p>Redis 处理命令的瓶颈从来不是 CPU，而是<strong>网络 IO</strong>。多线程引入锁竞争、上下文切换开销反而降低吞吐。单线程 + <strong>IO 多路复用</strong> 才是最优解。</p>
+            </div>
+            <div class="card">
+                <h3>🎯 核心公式</h3>
+                <p style="margin-bottom:10px;">Redis 的高性能 = <strong style="color:var(--accent-red)">单线程命令执行</strong> + <strong style="color:var(--accent-cyan)">epoll IO 多路复用</strong> + <strong style="color:var(--accent-green)">非阻塞网络</strong></p>
+                <p>Redis 6.0+ 额外引入多线程专门处理<strong>网络读写</strong>，但命令执行仍是单线程。</p>
+            </div>
+        </div>
+        <div class="keypoint-grid" style="margin-top:20px;">
+            <div class="keypoint">
+                <div class="kp-icon">🔄</div>
+                <h4>事件驱动</h4>
+                <p>基于 <code>ae</code> 事件库，封装 epoll/kqueue/select，统一处理 IO 与时间事件</p>
+            </div>
+            <div class="keypoint">
+                <div class="kp-icon">📡</div>
+                <h4>非阻塞 Socket</h4>
+                <p>所有客户端连接均设为非阻塞模式，读写不会挂起主线程</p>
+            </div>
+            <div class="keypoint">
+                <div class="kp-icon">🗂️</div>
+                <h4>文件事件 + 时间事件</h4>
+                <p>两种事件类型，文件事件处理网络 IO，时间事件处理定时任务</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SECTION 1: IO 模型对比 ===== -->
+    <div class="section">
+        <div class="section-title">📊 IO 模型对比</div>
+        <div class="card">
+            <h3>阻塞 IO vs 非阻塞 IO vs IO 多路复用</h3>
+            <p style="margin-bottom:16px;">下方演示三种模型在处理多个客户端时线程的工作状态。<span style="color:var(--accent-green)">绿色</span>= 有效工作，<span style="color:var(--text-secondary)">灰色</span>= 阻塞等待，<span style="color:var(--accent-red)">红色</span>= epoll 监听</p>
+            <div class="io-comparison" id="ioComparison">
+                <!-- 阻塞 IO -->
+                <div class="io-box">
+                    <h4>🐌 阻塞 IO（每连接一线程）</h4>
+                    <div id="blockingIO">
+                        <div class="thread-row">
+                            <span class="thread-label">线程1 (C1)</span>
+                            <div class="thread-bar bar-wait" style="width:30%">等待数据</div>
+                            <div class="thread-bar bar-work" style="width:20%">处理</div>
+                            <div class="thread-bar bar-wait" style="width:30%">等待</div>
+                        </div>
+                        <div class="thread-row">
+                            <span class="thread-label">线程2 (C2)</span>
+                            <div class="thread-bar bar-wait" style="width:50%">等待数据</div>
+                            <div class="thread-bar bar-work" style="width:15%">处理</div>
+                        </div>
+                        <div class="thread-row">
+                            <span class="thread-label">线程3 (C3)</span>
+                            <div class="thread-bar bar-wait" style="width:20%">等待</div>
+                            <div class="thread-bar bar-work" style="width:25%">处理</div>
+                            <div class="thread-bar bar-wait" style="width:25%">等待</div>
+                        </div>
+                        <div class="thread-row">
+                            <span class="thread-label">线程4 (C4)</span>
+                            <div class="thread-bar bar-wait" style="width:60%">等待数据</div>
+                            <div class="thread-bar bar-work" style="width:10%">处理</div>
+                        </div>
+                    </div>
+                    <div class="highlight-box" style="margin-top:14px;border-left-color:var(--accent-orange)">
+                        ⚠️ N个客户端需要N个线程，大量线程在<strong>阻塞等待</strong>，内存与上下文切换开销极大
+                    </div>
+                </div>
+
+                <!-- IO 多路复用 -->
+                <div class="io-box active-box">
+                    <h4>🚀 IO 多路复用（Redis 的方式）</h4>
+                    <div id="muxIO">
+                        <div class="thread-row">
+                            <span class="thread-label" style="width:70px">epoll</span>
+                            <div class="thread-bar bar-epoll" style="width:85%">监听 C1,C2,C3,C4...所有连接就绪事件</div>
+                        </div>
+                        <div class="thread-row" style="margin-top:8px">
+                            <span class="thread-label">主线程</span>
+                            <div class="thread-bar bar-work" id="mainWork" style="width:75%">依次处理就绪事件 → 命令执行 → 回包</div>
+                        </div>
+                    </div>
+                    <div class="highlight-box" style="margin-top:14px;">
+                        ✅ <strong>1个线程</strong>管理所有连接，CPU 始终在有效工作，零阻塞等待
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SECTION 2: 事件循环 ===== -->
+    <div class="section">
+        <div class="section-title">🔁 事件循环 (aeMain) 动画</div>
+        <div class="card">
+            <p style="margin-bottom:16px;">Redis 主循环 <code>aeMain()</code> 不断执行一个 tick，每个 tick 分三步：</p>
+            <div class="ctrl-bar">
+                <button class="btn btn-red" onclick="startEventLoop()">▶ 开始循环</button>
+                <button class="btn btn-blue" onclick="pauseEventLoop()">⏸ 暂停</button>
+                <button class="btn btn-green" onclick="resetEventLoop()">↩ 重置</button>
+                <span id="elTick" style="font-size:0.85rem; color:var(--text-secondary)">Tick: 0</span>
+            </div>
+            <canvas id="eventLoopCanvas" height="320"></canvas>
+            <div class="log-box" id="elLog"></div>
+        </div>
+    </div>
+
+    <!-- ===== SECTION 3: 完整请求流程 ===== -->
+    <div class="section">
+        <div class="section-title">📨 完整请求处理流程</div>
+        <div class="flow-container">
+            <div class="ctrl-bar">
+                <button class="btn btn-red" onclick="startFlow()">▶ 模拟一次请求</button>
+                <button class="btn btn-blue" onclick="resetFlow()">↩ 重置</button>
+                <span id="flowStatus" style="font-size:0.85rem; color:var(--accent-green)"></span>
+            </div>
+            <div class="packet-indicator"><div class="packet-bar" id="packetBar"></div></div>
+            <div class="flow-steps" id="flowSteps">
+                <div class="flow-step" data-step="0">
+                    <div class="step-num">1</div>
+                    <div class="step-content">
+                        <h5>客户端发起 TCP 连接</h5>
+                        <p>client <code>connect()</code> → server 监听 socket 触发 <code>AE_READABLE</code> 事件</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="1">
+                    <div class="step-num">2</div>
+                    <div class="step-content">
+                        <h5>acceptHandler 接受连接</h5>
+                        <p>调用 <code>accept()</code> 得到新 fd，设为<strong>非阻塞</strong>，注册读事件到 epoll</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="2">
+                    <div class="step-num">3</div>
+                    <div class="step-content">
+                        <h5>客户端发送命令</h5>
+                        <p>如 <code>SET key value</code>，数据到达内核缓冲区，对应 fd 变为可读</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="3">
+                    <div class="step-num">4</div>
+                    <div class="step-content">
+                        <h5>epoll_wait 返回就绪事件</h5>
+                        <p>epoll 通知主线程：fd 可读，加入待处理队列</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="4">
+                    <div class="step-num">5</div>
+                    <div class="step-content">
+                        <h5>readQueryFromClient 读取数据</h5>
+                        <p>从 socket 读取字节流到 <code>querybuf</code>，调用 <code>processInputBuffer()</code> 解析 RESP 协议</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="5">
+                    <div class="step-num">6</div>
+                    <div class="step-content">
+                        <h5>命令查找与执行</h5>
+                        <p>在命令表 <code>redisCommandTable</code> 查找 SET，调用 <code>setCommand()</code> 写入内存数据库</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="6">
+                    <div class="step-num">7</div>
+                    <div class="step-content">
+                        <h5>addReply 写入输出缓冲区</h5>
+                        <p>执行结果 <code>+OK\r\n</code> 写入 client 的 <code>buf</code> 或 <code>reply</code> 链表</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="7">
+                    <div class="step-num">8</div>
+                    <div class="step-content">
+                        <h5>注册写事件，回写响应</h5>
+                        <p>注册 <code>AE_WRITABLE</code>，下次事件循环调用 <code>sendReplyToClient()</code> 发送响应</p>
+                    </div>
+                </div>
+                <div class="flow-step" data-step="8">
+                    <div class="step-num">9</div>
+                    <div class="step-content">
+                        <h5>回写完成，注销写事件</h5>
+                        <p>响应发送完毕，删除 <code>AE_WRITABLE</code> 注册，等待下一个命令</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SECTION 4: epoll 原理 ===== -->
+    <div class="section">
+        <div class="section-title">🔍 epoll 工作原理动画</div>
+        <div class="card">
+            <p style="margin-bottom:16px;">epoll 是 Linux 内核提供的高效 IO 多路复用机制，Redis 在 Linux 下默认使用它。</p>
+            <div class="ctrl-bar">
+                <button class="btn btn-red" onclick="startEpoll()">▶ 模拟 epoll 就绪</button>
+                <button class="btn btn-blue" onclick="resetEpoll()">↩ 重置</button>
+                <span id="epollStatus" style="font-size:0.85rem; color:var(--text-secondary)"></span>
+            </div>
+            <canvas id="epollCanvas" height="340"></canvas>
+            <div class="log-box" id="epollLog"></div>
+        </div>
+        <div class="grid-2" style="margin-top:20px">
+            <div class="card">
+                <h3>三个核心系统调用</h3>
+                <p><code>epoll_create()</code> 创建 epoll 实例，返回 epfd</p>
+                <br>
+                <p><code>epoll_ctl(epfd, op, fd, event)</code> 注册 / 修改 / 删除监听的 fd</p>
+                <br>
+                <p><code>epoll_wait(epfd, events, maxevents, timeout)</code> 阻塞等待，返回就绪 fd 列表</p>
+            </div>
+            <div class="card">
+                <h3>红黑树 + 就绪链表</h3>
+                <p>内核维护一棵<strong>红黑树</strong>存储所有监听的 fd，当 fd 就绪时，内核将其加入<strong>就绪链表</strong>。</p>
+                <br>
+                <p><code>epoll_wait</code> 只需遍历就绪链表，时间复杂度 <strong>O(就绪数)</strong>，而非 <strong>O(总连接数)</strong>。这是 epoll 比 select/poll 快的根本原因。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SECTION 5: Redis 6.0 多线程 IO ===== -->
+    <div class="section">
+        <div class="section-title">🧵 Redis 6.0 多线程 IO</div>
+        <div class="mt-demo">
+            <p style="margin-bottom:4px;color:var(--text-secondary);font-size:0.9rem;">
+                Redis 6.0 引入多线程处理网络读写，但<strong style="color:var(--accent-red)">命令执行仍是单线程</strong>，保证线程安全。
+            </p>
+            <div class="ctrl-bar" style="margin-top:16px">
+                <button class="btn btn-red" onclick="startMT()">▶ 演示多线程 IO 流程</button>
+                <button class="btn btn-blue" onclick="resetMT()">↩ 重置</button>
+            </div>
+            <div class="mt-phases">
+                <div class="mt-phase" id="mt-phase-0">
+                    <div class="ph-icon">📥</div>
+                    <div class="ph-title">Phase 1: 并行读取</div>
+                    <div class="ph-desc">多个 IO 线程并发从 socket 读取数据到各客户端 querybuf</div>
+                    <div class="mt-thread-badge">IO Thread × N</div>
+                </div>
+                <div class="mt-phase" id="mt-phase-1">
+                    <div class="ph-icon">⚙️</div>
+                    <div class="ph-title">Phase 2: 串行执行</div>
+                    <div class="ph-desc">主线程单独顺序执行所有命令，操作内存数据库，零竞争</div>
+                    <div class="mt-thread-badge">Main Thread × 1</div>
+                </div>
+                <div class="mt-phase" id="mt-phase-2">
+                    <div class="ph-icon">📤</div>
+                    <div class="ph-title">Phase 3: 并行写回</div>
+                    <div class="ph-desc">多个 IO 线程并发将响应数据写回各客户端 socket</div>
+                    <div class="mt-thread-badge">IO Thread × N</div>
+                </div>
+            </div>
+            <div class="log-box" id="mtLog"></div>
+        </div>
+        <div class="highlight-box" style="margin-top:20px;border-left-color:var(--accent-purple)">
+            💡 <strong>配置方式：</strong><code>io-threads 4</code>（线程数建议为 CPU 核心数）+ <code>io-threads-do-reads yes</code>（开启读线程）。测试表明多线程 IO 可将 Redis 吞吐提升约 <strong>1.5 ~ 2x</strong>。
+        </div>
+    </div>
+
+    <!-- ===== SECTION 6: 版本演进 ===== -->
+    <div class="section">
+        <div class="section-title">📅 Redis 网络 IO 演进历史</div>
+        <div class="card">
+            <div class="timeline">
+                <div class="tl-item">
+                    <div class="tl-dot"></div>
+                    <h4>Redis 1.0 — 单线程 + select</h4>
+                    <p>使用 POSIX <code>select()</code>，最多监听 1024 个 fd，足够早期场景</p>
+                </div>
+                <div class="tl-item">
+                    <div class="tl-dot"></div>
+                    <h4>Redis 2.x — ae 事件库 + epoll/kqueue</h4>
+                    <p>抽象 <code>ae</code> 事件库，Linux 用 epoll，macOS 用 kqueue，突破 fd 数量限制，支持数万并发连接</p>
+                </div>
+                <div class="tl-item">
+                    <div class="tl-dot"></div>
+                    <h4>Redis 4.0 — 部分异步操作</h4>
+                    <p>引入 BIO 后台线程处理耗时操作（<code>UNLINK</code>、<code>FLUSHDB ASYNC</code>），主线程仍同步处理 IO</p>
+                </div>
+                <div class="tl-item">
+                    <div class="tl-dot"></div>
+                    <h4>Redis 6.0 — 多线程网络 IO</h4>
+                    <p>正式引入多线程处理网络读写，命令执行保持单线程，性能大幅提升</p>
+                </div>
+                <div class="tl-item">
+                    <div class="tl-dot" style="border-color:var(--accent-green)"></div>
+                    <h4>Redis 7.x — 持续优化</h4>
+                    <p>引入 <code>io_uring</code> 实验性支持（部分版本），进一步降低系统调用开销</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div><!-- /container -->
+
+<script>
+// =============================================
+// SECTION 2: 事件循环动画
+// =============================================
+const elCanvas = document.getElementById('eventLoopCanvas');
+const elCtx = elCanvas.getContext('2d');
+let elAnimId = null, elTick = 0, elRunning = false, elPhase = 0;
+
+function resizeCanvas(canvas) {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const w = Math.min(rect.width - 48, 750);
+    canvas.width = w;
+}
+
+resizeCanvas(elCanvas);
+
+const EL_PHASES = [
+    { name: 'aeProcessEvents 开始', color: '#58a6ff', desc: '进入新一轮事件循环' },
+    { name: 'beforeSleep()', color: '#a371f7', desc: '执行睡前钩子（如刷新输出缓冲区）' },
+    { name: 'epoll_wait()', color: '#ff6b6b', desc: '阻塞等待就绪 fd（超时=最近定时任务时间）' },
+    { name: '处理文件事件', color: '#3fb950', desc: '遍历就绪列表，调用对应读/写 handler' },
+    { name: '处理时间事件', color: '#e3b341', desc: '执行过期 key 清理、serverCron 等定时任务' },
+];
+
+function drawEventLoop() {
+    const W = elCanvas.width, H = elCanvas.height;
+    elCtx.clearRect(0, 0, W, H);
+
+    const cx = W / 2, cy = H / 2 - 10;
+    const R = Math.min(W, H) * 0.32;
+
+    // 背景
+    elCtx.fillStyle = '#161b22';
+    elCtx.fillRect(0, 0, W, H);
+
+    // 中心圆
+    elCtx.beginPath();
+    elCtx.arc(cx, cy, 38, 0, Math.PI * 2);
+    elCtx.fillStyle = 'rgba(255,107,107,0.12)';
+    elCtx.fill();
+    elCtx.strokeStyle = 'rgba(255,107,107,0.5)';
+    elCtx.lineWidth = 2;
+    elCtx.stroke();
+    elCtx.fillStyle = '#e6edf3';
+    elCtx.font = 'bold 11px sans-serif';
+    elCtx.textAlign = 'center';
+    elCtx.fillText('aeMain', cx, cy - 5);
+    elCtx.fillStyle = '#8b949e';
+    elCtx.font = '10px sans-serif';
+    elCtx.fillText('Loop', cx, cy + 10);
+
+    // 画各阶段节点
+    EL_PHASES.forEach((ph, i) => {
+        const angle = (i / EL_PHASES.length) * Math.PI * 2 - Math.PI / 2;
+        const nx = cx + R * Math.cos(angle);
+        const ny = cy + R * Math.sin(angle);
+
+        const isActive = (i === elPhase % EL_PHASES.length);
+        const isPast = (i < elPhase % EL_PHASES.length) || (elPhase >= EL_PHASES.length && i < elPhase % EL_PHASES.length);
+
+        // 连线
+        elCtx.beginPath();
+        elCtx.moveTo(cx, cy);
+        elCtx.lineTo(nx, ny);
+        elCtx.strokeStyle = isActive ? ph.color : 'rgba(48,54,61,0.8)';
+        elCtx.lineWidth = isActive ? 2.5 : 1;
+        elCtx.stroke();
+
+        // 节点圆
+        elCtx.beginPath();
+        elCtx.arc(nx, ny, isActive ? 26 : 22, 0, Math.PI * 2);
+        elCtx.fillStyle = isActive ? `${ph.color}22` : 'rgba(33,38,45,0.9)';
+        elCtx.fill();
+        elCtx.strokeStyle = isActive ? ph.color : 'rgba(48,54,61,0.9)';
+        elCtx.lineWidth = isActive ? 2.5 : 1;
+        elCtx.stroke();
+
+        // 节点文字
+        elCtx.fillStyle = isActive ? ph.color : '#8b949e';
+        elCtx.font = `${isActive ? 'bold ' : ''}10px sans-serif`;
+        elCtx.textAlign = 'center';
+        const words = ph.name.split('(');
+        if (words.length > 1) {
+            elCtx.fillText(words[0], nx, ny - 3);
+            elCtx.fillText('(' + words[1], nx, ny + 10);
+        } else {
+            const parts = ph.name.split(' ');
+            elCtx.fillText(parts.slice(0, Math.ceil(parts.length / 2)).join(' '), nx, ny - 3);
+            elCtx.fillText(parts.slice(Math.ceil(parts.length / 2)).join(' '), nx, ny + 10);
+        }
+    });
+
+    // 底部描述
+    if (elRunning) {
+        const cur = EL_PHASES[elPhase % EL_PHASES.length];
+        elCtx.fillStyle = cur.color;
+        elCtx.font = 'bold 12px sans-serif';
+        elCtx.textAlign = 'center';
+        elCtx.fillText(`▶ ${cur.name}`, cx, H - 28);
+        elCtx.fillStyle = '#8b949e';
+        elCtx.font = '11px sans-serif';
+        elCtx.fillText(cur.desc, cx, H - 12);
+    }
+}
+
+function elLog(msg, cls = 'log-blue') {
+    const box = document.getElementById('elLog');
+    const now = new Date().toLocaleTimeString('zh', { hour12: false });
+    box.innerHTML += `<div class="log-line"><span class="log-time">${now}</span><span class="${cls}">${msg}</span></div>`;
+    box.scrollTop = box.scrollHeight;
+}
+
+function startEventLoop() {
+    if (elRunning) return;
+    elRunning = true;
+    elLog('aeMain() 启动...', 'log-red');
+    runElTick();
+}
+
+function runElTick() {
+    if (!elRunning) return;
+    const ph = EL_PHASES[elPhase % EL_PHASES.length];
+    if (elPhase % EL_PHASES.length === 0) {
+        elTick++;
+        document.getElementById('elTick').textContent = `Tick: ${elTick}`;
+        elLog(`━━━ Tick #${elTick} 开始 ━━━`, 'log-yellow');
+    }
+    elLog(`  → ${ph.name}：${ph.desc}`, elPhase % 2 === 0 ? 'log-green' : 'log-cyan');
+    drawEventLoop();
+    elPhase++;
+    elAnimId = setTimeout(runElTick, 900);
+}
+
+function pauseEventLoop() {
+    elRunning = false;
+    clearTimeout(elAnimId);
+    elLog('⏸ 暂停', 'log-yellow');
+}
+
+function resetEventLoop() {
+    pauseEventLoop();
+    elPhase = 0; elTick = 0;
+    document.getElementById('elTick').textContent = 'Tick: 0';
+    document.getElementById('elLog').innerHTML = '';
+    drawEventLoop();
+}
+
+drawEventLoop();
+window.addEventListener('resize', () => { resizeCanvas(elCanvas); drawEventLoop(); });
+
+// =============================================
+// SECTION 3: 请求流程
+// =============================================
+let flowTimer = null;
+const FLOW_STEPS = document.querySelectorAll('.flow-step');
+const FLOW_MSGS = [
+    ['客户端发起 TCP 三次握手...', 'log-blue'],
+    ['accept() 返回新 fd=12，设置 O_NONBLOCK', 'log-cyan'],
+    ['SET mykey hello 数据到达内核缓冲区', 'log-green'],
+    ['epoll_wait 返回：fd=12 可读', 'log-red'],
+    ['读取 23 字节，解析 RESP: *3\\r\\n$3\\r\\nSET...', 'log-cyan'],
+    ['查找命令表: SET → setCommand()，写入 dictEntry', 'log-green'],
+    ['addReply: 写入 +OK\\r\\n 到输出缓冲区', 'log-yellow'],
+    ['注册 AE_WRITABLE，发送 5 字节响应', 'log-blue'],
+    ['响应发送完毕，注销写事件，等待下一命令 ✅', 'log-green'],
+];
+
+function flowLog(msg, cls) {
+    const box = document.getElementById('elLog'); // reuse? no, flow doesn't have log — add one? Actually let's just update status
+}
+
+function startFlow() {
+    resetFlow();
+    let step = 0;
+    const bar = document.getElementById('packetBar');
+    const status = document.getElementById('flowStatus');
+
+    function nextStep() {
+        if (step >= FLOW_STEPS.length) { status.textContent = '✅ 请求处理完成！'; return; }
+        FLOW_STEPS[step].classList.add('active');
+        bar.style.width = `${((step + 1) / FLOW_STEPS.length) * 100}%`;
+        status.textContent = `步骤 ${step + 1} / ${FLOW_STEPS.length}`;
+        step++;
+        flowTimer = setTimeout(nextStep, 700);
+    }
+    nextStep();
+}
+
+function resetFlow() {
+    clearTimeout(flowTimer);
+    FLOW_STEPS.forEach(s => s.classList.remove('active'));
+    document.getElementById('packetBar').style.width = '0%';
+    document.getElementById('flowStatus').textContent = '';
+}
+
+// =============================================
+// SECTION 4: epoll 动画
+// =============================================
+const epCanvas = document.getElementById('epollCanvas');
+const epCtx = epCanvas.getContext('2d');
+let epAnimId = null, epRunning = false, epStep = 0;
+let epFds = [];
+let epReadyFds = [];
+
+resizeCanvas(epCanvas);
+
+function initEpollFds() {
+    epFds = [];
+    const W = epCanvas.width;
+    const count = 8;
+    for (let i = 0; i < count; i++) {
+        epFds.push({
+            id: i + 3,
+            label: `fd${i + 3}`,
+            ready: false,
+            highlight: false,
+            x: 60 + (i % 4) * ((W - 120) / 3),
+            y: i < 4 ? 60 : 130,
+        });
+    }
+    epReadyFds = [1, 4, 6]; // indices that will become ready
+}
+
+function drawEpoll() {
+    const W = epCanvas.width, H = epCanvas.height;
+    epCtx.clearRect(0, 0, W, H);
+    epCtx.fillStyle = '#161b22';
+    epCtx.fillRect(0, 0, W, H);
+
+    // Title row
+    epCtx.fillStyle = '#8b949e';
+    epCtx.font = '11px sans-serif';
+    epCtx.textAlign = 'left';
+    epCtx.fillText('红黑树（所有监听 fd）', 16, 20);
+
+    // Draw fds
+    epFds.forEach(fd => {
+        const r = 22;
+        epCtx.beginPath();
+        epCtx.arc(fd.x, fd.y, r, 0, Math.PI * 2);
+        let fill = 'rgba(33,38,45,0.9)';
+        let stroke = '#30363d';
+        let textColor = '#8b949e';
+        if (fd.ready) { fill = 'rgba(255,107,107,0.2)'; stroke = '#ff6b6b'; textColor = '#ff6b6b'; }
+        if (fd.highlight) { fill = 'rgba(63,185,80,0.2)'; stroke = '#3fb950'; textColor = '#3fb950'; }
+        epCtx.fillStyle = fill;
+        epCtx.fill();
+        epCtx.strokeStyle = stroke;
+        epCtx.lineWidth = 2;
+        epCtx.stroke();
+        epCtx.fillStyle = textColor;
+        epCtx.font = 'bold 10px sans-serif';
+        epCtx.textAlign = 'center';
+        epCtx.fillText(fd.label, fd.x, fd.y + 4);
+    });
+
+    // epoll_wait arrow down
+    const arrowY = 175;
+    epCtx.strokeStyle = '#58a6ff';
+    epCtx.lineWidth = 2;
+    epCtx.setLineDash([5, 3]);
+    epCtx.beginPath();
+    epCtx.moveTo(W / 2, arrowY);
+    epCtx.lineTo(W / 2, arrowY + 28);
+    epCtx.stroke();
+    epCtx.setLineDash([]);
+    // arrowhead
+    epCtx.beginPath();
+    epCtx.moveTo(W / 2 - 8, arrowY + 22);
+    epCtx.lineTo(W / 2, arrowY + 30);
+    epCtx.lineTo(W / 2 + 8, arrowY + 22);
+    epCtx.strokeStyle = '#58a6ff';
+    epCtx.stroke();
+    epCtx.fillStyle = '#58a6ff';
+    epCtx.font = 'bold 11px sans-serif';
+    epCtx.textAlign = 'center';
+    epCtx.fillText('就绪事件通知 ↓', W / 2, arrowY + 16);
+
+    // Ready list box
+    const rlY = 210;
+    const rlH = 60;
+    epCtx.strokeStyle = '#3fb950';
+    epCtx.lineWidth = 1.5;
+    epCtx.strokeRect(30, rlY, W - 60, rlH);
+    epCtx.fillStyle = 'rgba(63,185,80,0.05)';
+    epCtx.fillRect(30, rlY, W - 60, rlH);
+    epCtx.fillStyle = '#3fb950';
+    epCtx.font = 'bold 11px sans-serif';
+    epCtx.textAlign = 'left';
+    epCtx.fillText('就绪链表:', 44, rlY + 22);
+
+    const readyLabels = epFds.filter(f => f.ready || f.highlight).map(f => f.label);
+    epCtx.fillStyle = '#e6edf3';
+    epCtx.font = '12px monospace';
+    epCtx.fillText(readyLabels.length ? `[ ${readyLabels.join(', ')} ]` : '(空)', 130, rlY + 22);
+
+    epCtx.fillStyle = '#8b949e';
+    epCtx.font = '10px sans-serif';
+    epCtx.fillText(`epoll_wait 返回 ${readyLabels.length} 个就绪 fd，O(就绪数) 而非 O(总连接数)`, 44, rlY + 46);
+
+    // Bottom: main thread processing
+    if (epStep >= 3) {
+        epCtx.fillStyle = '#a371f7';
+        epCtx.font = 'bold 11px sans-serif';
+        epCtx.textAlign = 'center';
+        epCtx.fillText('主线程依次调用就绪 fd 的 handler → 读取数据 / 执行命令 / 回包', W / 2, H - 10);
+    }
+}
+
+function epLog(msg, cls = 'log-blue') {
+    const box = document.getElementById('epollLog');
+    const now = new Date().toLocaleTimeString('zh', { hour12: false });
+    box.innerHTML += `<div class="log-line"><span class="log-time">${now}</span><span class="${cls}">${msg}</span></div>`;
+    box.scrollTop = box.scrollHeight;
+}
+
+async function startEpoll() {
+    resetEpoll();
+    epRunning = true;
+    initEpollFds();
+    drawEpoll();
+
+    const status = document.getElementById('epollStatus');
+
+    const delay = ms => new Promise(r => { epAnimId = setTimeout(r, ms); });
+
+    status.textContent = 'epoll_wait() 阻塞中...';
+    epLog('epoll_wait() 调用，阻塞等待 fd 就绪...', 'log-blue');
+    await delay(800);
+
+    // Mark ready fds
+    epLog('内核检测到 3 个 fd 有数据可读', 'log-yellow');
+    for (const idx of epReadyFds) {
+        epFds[idx].ready = true;
+        drawEpoll();
+        await delay(350);
+    }
+    epStep = 1;
+    epLog('epoll_wait() 返回，就绪 fd 数量: 3', 'log-red');
+    status.textContent = `epoll_wait 返回 ${epReadyFds.length} 个就绪 fd`;
+    await delay(500);
+
+    // Highlight as processed
+    epStep = 2;
+    for (const idx of epReadyFds) {
+        epFds[idx].ready = false;
+        epFds[idx].highlight = true;
+        epLog(`  处理 ${epFds[idx].label}：调用 readQueryFromClient()`, 'log-green');
+        drawEpoll();
+        await delay(500);
+    }
+    epStep = 3;
+    drawEpoll();
+    epLog('所有就绪事件处理完毕，重新进入 epoll_wait()', 'log-cyan');
+    status.textContent = '✅ 完成一轮事件处理';
+}
+
+function resetEpoll() {
+    clearTimeout(epAnimId);
+    epRunning = false; epStep = 0;
+    initEpollFds();
+    drawEpoll();
+    document.getElementById('epollLog').innerHTML = '';
+    document.getElementById('epollStatus').textContent = '';
+}
+
+initEpollFds();
+drawEpoll();
+window.addEventListener('resize', () => {
+    resizeCanvas(epCanvas);
+    initEpollFds();
+    drawEpoll();
+});
+
+// =============================================
+// SECTION 5: 多线程 IO
+// =============================================
+let mtTimer = null;
+
+function mtLog(msg, cls = 'log-blue') {
+    const box = document.getElementById('mtLog');
+    const now = new Date().toLocaleTimeString('zh', { hour12: false });
+    box.innerHTML += `<div class="log-line"><span class="log-time">${now}</span><span class="${cls}">${msg}</span></div>`;
+    box.scrollTop = box.scrollHeight;
+}
+
+async function startMT() {
+    resetMT();
+    const delay = ms => new Promise(r => { mtTimer = setTimeout(r, ms); });
+
+    // Phase 0: parallel read
+    document.getElementById('mt-phase-0').classList.add('lit');
+    mtLog('IO 线程池启动，分配客户端到各线程...', 'log-blue');
+    await delay(400);
+    mtLog('  IO-Thread-1: 读取 client[0] querybuf (SET a 1)', 'log-cyan');
+    await delay(300);
+    mtLog('  IO-Thread-2: 读取 client[1] querybuf (GET b)', 'log-cyan');
+    await delay(300);
+    mtLog('  IO-Thread-3: 读取 client[2] querybuf (INCR c)', 'log-cyan');
+    await delay(500);
+    mtLog('✅ Phase 1 完成：所有客户端数据已读入 querybuf', 'log-green');
+    await delay(400);
+
+    // Phase 1: serial execute
+    document.getElementById('mt-phase-1').classList.add('lit');
+    mtLog('━━ 主线程开始串行执行命令 ━━', 'log-yellow');
+    await delay(300);
+    mtLog('  执行 SET a 1 → OK', 'log-green');
+    await delay(350);
+    mtLog('  执行 GET b → "hello"', 'log-green');
+    await delay(350);
+    mtLog('  执行 INCR c → 42', 'log-green');
+    await delay(400);
+    mtLog('✅ Phase 2 完成：命令执行完毕，响应写入 reply 缓冲区', 'log-green');
+    await delay(400);
+
+    // Phase 2: parallel write
+    document.getElementById('mt-phase-2').classList.add('lit');
+    mtLog('IO 线程池分配写任务...', 'log-blue');
+    await delay(400);
+    mtLog('  IO-Thread-1: 回写 client[0] → +OK\\r\\n', 'log-cyan');
+    await delay(300);
+    mtLog('  IO-Thread-2: 回写 client[1] → $5\\r\\nhello\\r\\n', 'log-cyan');
+    await delay(300);
+    mtLog('  IO-Thread-3: 回写 client[2] → :42\\r\\n', 'log-cyan');
+    await delay(400);
+    mtLog('✅ Phase 3 完成：所有响应已发送 🎉', 'log-green');
+}
+
+function resetMT() {
+    clearTimeout(mtTimer);
+    [0, 1, 2].forEach(i => document.getElementById(`mt-phase-${i}`).classList.remove('lit'));
+    document.getElementById('mtLog').innerHTML = '';
+}
+</script>
+</body>
+</html>

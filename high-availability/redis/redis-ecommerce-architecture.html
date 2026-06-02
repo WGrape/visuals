@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>电商大促场景下的 Redis 架构设计</title>
+    <style>
+        :root {
+            --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --bg4: #1c2128;
+            --txt: #e6edf3; --txt2: #8b949e;
+            --red: #ff6b6b; --blue: #58a6ff; --green: #3fb950;
+            --purple: #a371f7; --orange: #f0883e; --cyan: #39c5cf; --yellow: #e3b341;
+            --border: #30363d;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; background:var(--bg); color:var(--txt); line-height:1.7; }
+
+        /* NAV */
+        .nav { position:sticky; top:0; background:rgba(22,27,34,.96); border-bottom:1px solid var(--border); padding:13px 0; z-index:200; backdrop-filter:blur(10px); }
+        .nav-c { max-width:1100px; margin:0 auto; padding:0 20px; display:flex; justify-content:space-between; align-items:center; }
+        .nav-back { color:var(--blue); text-decoration:none; font-size:13px; }
+        .nav-title { font-size:14px; font-weight:700; color:var(--red); }
+
+        /* HERO */
+        .hero { text-align:center; padding:56px 20px 40px; background:linear-gradient(135deg,#0d1117 0%,#1f1228 50%,#0d1117 100%); border-bottom:1px solid var(--border); position:relative; overflow:hidden; }
+        .hero-bg { position:absolute; inset:0; opacity:.04; font-size:120px; display:flex; align-items:center; justify-content:center; pointer-events:none; user-select:none; }
+        .hero h1 { font-size:2.2rem; font-weight:800; margin-bottom:10px; position:relative; }
+        .hero h1 em { color:var(--red); font-style:normal; }
+        .hero .subtitle { color:var(--txt2); font-size:.95rem; max-width:620px; margin:0 auto 20px; position:relative; }
+        .hero-tags { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; position:relative; }
+        .htag { padding:4px 12px; border-radius:16px; font-size:.75rem; font-weight:700; }
+        .htag-red { background:rgba(255,107,107,.15); color:var(--red); border:1px solid rgba(255,107,107,.35); }
+        .htag-orange { background:rgba(240,136,62,.15); color:var(--orange); border:1px solid rgba(240,136,62,.35); }
+        .htag-green { background:rgba(63,185,80,.15); color:var(--green); border:1px solid rgba(63,185,80,.35); }
+        .htag-blue { background:rgba(88,166,255,.15); color:var(--blue); border:1px solid rgba(88,166,255,.35); }
+        .htag-purple { background:rgba(163,113,247,.15); color:var(--purple); border:1px solid rgba(163,113,247,.35); }
+
+        /* TOC */
+        .toc { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; padding:16px 20px; border-bottom:1px solid var(--border); background:var(--bg2); }
+        .toc a { padding:5px 14px; border-radius:20px; font-size:.78rem; font-weight:600; text-decoration:none; border:1px solid var(--border); color:var(--txt2); transition:all .2s; }
+        .toc a:hover { border-color:var(--red); color:var(--red); }
+
+        /* CONTAINER */
+        .container { max-width:1100px; margin:0 auto; padding:44px 20px 80px; }
+        .section { margin-bottom:64px; scroll-margin-top:70px; }
+        .sec-title { font-size:1.3rem; font-weight:700; margin-bottom:22px; padding-bottom:10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
+        .sec-num { width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; flex-shrink:0; }
+
+        /* CARDS */
+        .card { background:var(--bg4); border:1px solid var(--border); border-radius:12px; padding:22px; margin-bottom:18px; }
+        .card h3 { font-size:1rem; margin-bottom:12px; }
+        .card p, .card li { color:var(--txt2); font-size:.9rem; line-height:1.85; }
+        .card ul { padding-left:18px; }
+        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+        .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+        @media(max-width:700px){ .grid2,.grid3{ grid-template-columns:1fr; } }
+
+        /* CALLOUT */
+        .callout { border-left:3px solid var(--red); background:rgba(255,107,107,.05); padding:14px 18px; border-radius:0 8px 8px 0; margin:14px 0; font-size:.88rem; color:var(--txt2); }
+        .callout.blue { border-left-color:var(--blue); background:rgba(88,166,255,.05); }
+        .callout.green { border-left-color:var(--green); background:rgba(63,185,80,.05); }
+        .callout.orange { border-left-color:var(--orange); background:rgba(240,136,62,.05); }
+        .callout.purple { border-left-color:var(--purple); background:rgba(163,113,247,.05); }
+        .callout strong { color:var(--txt); }
+
+        code { background:var(--bg3); color:var(--cyan); padding:1px 6px; border-radius:4px; font-size:.82em; }
+        pre { background:#0a0d12; border:1px solid var(--border); border-radius:8px; padding:16px; overflow-x:auto; font-size:.8rem; line-height:1.7; margin:10px 0; }
+        pre .k { color:var(--purple); } pre .c { color:var(--txt2); font-style:italic; }
+        pre .s { color:var(--green); } pre .n { color:var(--orange); } pre .m { color:var(--red); }
+
+        /* BTN */
+        .btn { padding:8px 18px; border-radius:6px; border:none; cursor:pointer; font-size:.84rem; font-weight:600; transition:opacity .2s,transform .1s; }
+        .btn:active { transform:scale(.97); }
+        .btn-red { background:rgba(255,107,107,.18); color:var(--red); border:1px solid rgba(255,107,107,.4); }
+        .btn-blue { background:rgba(88,166,255,.15); color:var(--blue); border:1px solid rgba(88,166,255,.3); }
+        .btn-green { background:rgba(63,185,80,.15); color:var(--green); border:1px solid rgba(63,185,80,.3); }
+        .btn-orange { background:rgba(240,136,62,.15); color:var(--orange); border:1px solid rgba(240,136,62,.35); }
+        .btn:hover { opacity:.8; }
+        .ctrl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+
+        /* LOG */
+        .log { background:#0a0d12; border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:'Courier New',monospace; font-size:.78rem; height:130px; overflow-y:auto; margin-top:10px; }
+        .ll { margin-bottom:3px; } .lt { color:var(--txt2); margin-right:8px; }
+        .lr { color:var(--red); } .lg { color:var(--green); } .lb { color:var(--blue); }
+        .lc { color:var(--cyan); } .ly { color:var(--yellow); } .lp { color:var(--purple); } .lo { color:var(--orange); }
+
+        /* ===================== SECTION 0: 架构总览 canvas ===================== */
+        #archCanvas { width:100%; max-width:900px; display:block; margin:0 auto; border-radius:10px; }
+
+        /* ===================== SECTION 1: 缓存预热 ===================== */
+        .warm-wrap { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px; }
+        .warm-items { display:flex; flex-direction:column; gap:10px; margin-top:14px; }
+        .warm-item { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--bg3); border:1px solid var(--border); border-radius:8px; font-size:.85rem; transition:all .4s; }
+        .warm-item.loaded { border-color:var(--green); background:rgba(63,185,80,.07); }
+        .warm-key { font-family:monospace; color:var(--cyan); min-width:180px; }
+        .warm-status { margin-left:auto; font-size:.75rem; font-weight:700; }
+        .warm-bar-wrap { flex:1; background:var(--bg2); border-radius:4px; height:8px; overflow:hidden; border:1px solid var(--border); }
+        .warm-bar { height:100%; border-radius:4px; width:0; transition:width .6s ease; background:linear-gradient(90deg,var(--green),var(--cyan)); }
+
+        /* ===================== SECTION 2: 热点数据 ===================== */
+        .hotkey-sim { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px; }
+        .hk-keys { display:flex; gap:10px; flex-wrap:wrap; margin:14px 0; }
+        .hk-key { padding:8px 16px; border-radius:8px; border:1px solid var(--border); background:var(--bg3); font-family:monospace; font-size:.82rem; cursor:pointer; transition:all .25s; }
+        .hk-key:hover { border-color:var(--red); }
+        .hk-key.hot { border-color:var(--red); background:rgba(255,107,107,.1); color:var(--red); }
+        .hk-split-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; min-height:34px; }
+        .hk-shard { padding:6px 12px; border-radius:6px; background:rgba(88,166,255,.1); border:1px solid rgba(88,166,255,.3); color:var(--blue); font-family:monospace; font-size:.78rem; animation:fadeIn .4s ease; }
+        @keyframes fadeIn { from{opacity:0;transform:scale(.8)} to{opacity:1;transform:scale(1)} }
+        .hk-counter { font-size:1.8rem; font-weight:800; color:var(--red); text-align:center; min-width:60px; }
+
+        /* ===================== SECTION 3: 集群 canvas ===================== */
+        #clusterCanvas { width:100%; max-width:900px; display:block; margin:0 auto; border-radius:10px; }
+
+        /* ===================== SECTION 4: 性能优化 pipeline ===================== */
+        .pipeline-demo { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px; }
+        .pipe-compare { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:14px; }
+        @media(max-width:650px){ .pipe-compare{grid-template-columns:1fr;} }
+        .pipe-box { border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+        .pipe-header { padding:10px 14px; font-size:.82rem; font-weight:700; }
+        .ph-normal { background:rgba(139,148,158,.1); color:var(--txt2); }
+        .ph-pipe { background:rgba(63,185,80,.1); color:var(--green); }
+        .pipe-timeline { padding:14px; display:flex; flex-direction:column; gap:5px; min-height:200px; }
+        .pipe-cmd { display:flex; gap:8px; align-items:center; font-size:.76rem; font-family:monospace; }
+        .pipe-cmd-label { min-width:90px; color:var(--orange); }
+        .pipe-seg { height:18px; border-radius:3px; display:flex; align-items:center; justify-content:center; font-size:.66rem; white-space:nowrap; padding:0 5px; }
+        .seg-net { background:rgba(255,107,107,.2); border:1px solid rgba(255,107,107,.4); color:var(--red); }
+        .seg-exec { background:rgba(63,185,80,.2); border:1px solid rgba(63,185,80,.4); color:var(--green); }
+        .seg-wait { background:rgba(139,148,158,.08); border:1px dashed var(--border); color:var(--txt2); }
+        .pipe-total { padding:8px 14px; font-size:.8rem; font-weight:700; border-top:1px solid var(--border); }
+
+        /* ===================== SECTION 5: 熔断降级 ===================== */
+        .circuit-wrap { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px; }
+        .circuit-state { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin:16px 0; }
+        .cs-box { padding:16px 20px; border-radius:10px; border:2px solid var(--border); text-align:center; min-width:120px; transition:all .4s; cursor:pointer; }
+        .cs-box .cs-icon { font-size:1.8rem; display:block; margin-bottom:6px; }
+        .cs-box .cs-name { font-weight:700; font-size:.85rem; color:var(--txt2); }
+        .cs-box .cs-desc { font-size:.72rem; color:var(--txt2); margin-top:4px; }
+        .cs-box.active { border-color:var(--red); background:rgba(255,107,107,.1); }
+        .cs-box.active .cs-name { color:var(--red); }
+        .cs-box[data-state="half"].active { border-color:var(--yellow); background:rgba(227,179,65,.1); }
+        .cs-box[data-state="half"].active .cs-name { color:var(--yellow); }
+        .cs-box[data-state="closed"].active { border-color:var(--green); background:rgba(63,185,80,.1); }
+        .cs-box[data-state="closed"].active .cs-name { color:var(--green); }
+        .cb-arrow { color:var(--txt2); font-size:1.2rem; align-self:center; padding-top:10px; }
+        .cs-desc-box { text-align:center; min-height:30px; font-size:.85rem; color:var(--txt2); margin-top:8px; transition:opacity .3s; }
+
+        /* ===================== SECTION 6: 监控大盘 ===================== */
+        .monitor-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+        @media(max-width:700px){ .monitor-grid{grid-template-columns:repeat(2,1fr);} }
+        .metric-card { background:var(--bg3); border:1px solid var(--border); border-radius:10px; padding:16px; text-align:center; transition:border-color .3s; }
+        .metric-card.alert { border-color:var(--red); }
+        .metric-card .m-label { font-size:.72rem; color:var(--txt2); margin-bottom:6px; }
+        .metric-card .m-val { font-size:1.8rem; font-weight:800; margin-bottom:4px; }
+        .metric-card .m-bar-wrap { background:var(--bg2); border-radius:4px; height:6px; overflow:hidden; }
+        .metric-card .m-bar { height:100%; border-radius:4px; transition:width .6s ease, background .4s; }
+        #canvas-qps { width:100%; max-width:900px; display:block; margin:16px auto 0; border-radius:10px; }
+
+        /* QUIZ */
+        .quiz-card { background:var(--bg4); border:1px solid var(--border); border-radius:10px; padding:22px; margin-bottom:16px; }
+        .q-text { font-size:.92rem; font-weight:600; margin-bottom:14px; }
+        .qopts { display:flex; flex-direction:column; gap:8px; }
+        .qopt { padding:10px 14px; border-radius:6px; border:1px solid var(--border); background:var(--bg3); cursor:pointer; font-size:.84rem; color:var(--txt2); transition:all .2s; display:flex; gap:8px; align-items:center; }
+        .qopt:hover { border-color:var(--blue); color:var(--txt); }
+        .qopt.correct { border-color:var(--green); background:rgba(63,185,80,.1); color:var(--green); }
+        .qopt.wrong { border-color:var(--red); background:rgba(255,107,107,.1); color:var(--red); }
+        .q-fb { margin-top:10px; font-size:.82rem; min-height:18px; }
+
+        /* SUMMARY PILLARS */
+        .pillars { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+        @media(max-width:600px){ .pillars{grid-template-columns:1fr;} }
+        .pillar { border:1px solid var(--border); border-radius:10px; padding:18px; text-align:center; }
+        .pillar .p-icon { font-size:2rem; margin-bottom:8px; }
+        .pillar h4 { font-size:.92rem; margin-bottom:6px; }
+        .pillar p { font-size:.78rem; color:var(--txt2); }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <div class="nav-c">
+        <a href="../index.html" class="nav-back">← 高可用</a>
+        <span class="nav-title">电商大促 Redis 架构设计</span>
+        <span style="font-size:.75rem;background:rgba(255,107,107,.15);color:var(--red);border:1px solid rgba(255,107,107,.3);border-radius:12px;padding:2px 10px;font-weight:700;">面试题 10</span>
+    </div>
+</nav>
+
+<div class="hero">
+    <div class="hero-bg">🛒</div>
+    <h1>电商大促场景下，<em>如何设计 Redis 架构</em>？</h1>
+    <p class="subtitle">高并发、热点数据、高可用三大挑战 — 预防 + 容错 + 优化，一图一动画讲透</p>
+    <div class="hero-tags">
+        <span class="htag htag-orange">缓存预热</span>
+        <span class="htag htag-red">热点数据</span>
+        <span class="htag htag-blue">集群高可用</span>
+        <span class="htag htag-green">性能优化</span>
+        <span class="htag htag-purple">熔断降级</span>
+        <span class="htag htag-orange">监控告警</span>
+    </div>
+</div>
+
+<div class="toc">
+    <a href="#s0">① 架构总览</a>
+    <a href="#s1">② 缓存预热</a>
+    <a href="#s2">③ 热点数据</a>
+    <a href="#s3">④ 集群高可用</a>
+    <a href="#s4">⑤ 性能优化</a>
+    <a href="#s5">⑥ 熔断降级</a>
+    <a href="#s6">⑦ 监控告警</a>
+    <a href="#s7">⑧ 测一测</a>
+</div>
+
+<div class="container">
+
+<!-- ======================================================
+     SECTION 0: 架构总览
+====================================================== -->
+<div class="section" id="s0">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(255,107,107,.15);color:var(--red);border:1px solid rgba(255,107,107,.3)">总</span>
+        <span style="color:var(--cyan)">架构总览 — 大促 Redis 全景图</span>
+    </div>
+    <div class="callout orange">
+        大促架构的核心公式：<strong>预防（预热 + 本地缓存）</strong> + <strong>容错（集群 + 熔断）</strong> + <strong>优化（Pipeline + 拆 Key）</strong> = 撑住百万 QPS
+    </div>
+    <div class="card" style="padding:16px">
+        <canvas id="archCanvas" height="380"></canvas>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 1: 缓存预热
+====================================================== -->
+<div class="section" id="s1">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(240,136,62,.15);color:var(--orange);border:1px solid rgba(240,136,62,.3)">1</span>
+        <span style="color:var(--orange)">缓存预热 — 大促前把数据搬进 Redis</span>
+    </div>
+    <div class="callout orange">
+        <strong>核心思想：</strong>大促开始前，提前将热点商品数据批量写入 Redis。若不预热，大量请求会在活动瞬间<strong>穿透</strong>到数据库，造成雪崩。
+    </div>
+    <div class="grid2">
+        <div class="card">
+            <h3>🌡️ 为什么需要预热？</h3>
+            <ul>
+                <li>冷启动时 Redis 命中率为 0，所有请求打到 DB</li>
+                <li>DB 瞬时压力是平时的 10~100 倍，极易宕机</li>
+                <li>预热后命中率可达 <strong style="color:var(--green)">95%+</strong></li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>📋 预热策略</h3>
+            <ul>
+                <li><strong>提前 1~2h</strong> 跑预热脚本，批量 SET 热点商品</li>
+                <li>按历史访问量排序，优先预热 Top N</li>
+                <li>分批次预热，避免 Redis 瞬时写压力</li>
+                <li>设置合理 TTL，活动结束自动失效</li>
+            </ul>
+        </div>
+    </div>
+    <div class="warm-wrap">
+        <div class="ctrl">
+            <button class="btn btn-orange" onclick="warmStart()">🔥 开始预热（模拟）</button>
+            <button class="btn btn-blue" onclick="warmReset()">↩ 重置</button>
+            <span id="warmProgress" style="font-size:.82rem;color:var(--txt2)"></span>
+        </div>
+        <div class="warm-items" id="warmItems"></div>
+        <div class="log" id="warmLog"></div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 2: 热点数据处理
+====================================================== -->
+<div class="section" id="s2">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(255,107,107,.15);color:var(--red);border:1px solid rgba(255,107,107,.3)">2</span>
+        <span style="color:var(--red)">热点数据处理 — 三把刀</span>
+    </div>
+    <div class="grid3">
+        <div class="card">
+            <h3>🔪 刀1：拆分热点 Key</h3>
+            <p>大 Key 请求全打到同一个 Redis 节点，单节点成瓶颈。</p>
+            <p style="margin-top:8px;color:var(--cyan)">rank:hot → rank:1 ~ rank:N</p>
+            <p style="margin-top:4px">读时随机选一个分片，写时广播更新所有分片</p>
+        </div>
+        <div class="card">
+            <h3>🛡️ 刀2：本地缓存</h3>
+            <p>应用层加 <strong style="color:var(--yellow)">Guava Cache / Caffeine</strong>，热点数据缓存在 JVM 内存。</p>
+            <p style="margin-top:8px">访问链路：本地缓存 → Redis → DB，大幅减少 Redis QPS</p>
+        </div>
+        <div class="card">
+            <h3>🔒 刀3：互斥锁</h3>
+            <p>热点 Key 更新时，用 <code>SETNX</code> 加锁，只让一个线程去更新缓存，其余等待或返回旧值。</p>
+            <p style="margin-top:8px">避免缓存击穿（Key 过期瞬间大量请求打 DB）</p>
+        </div>
+    </div>
+
+    <div class="hotkey-sim">
+        <h3 style="color:var(--yellow);margin-bottom:12px">🔥 热点 Key 拆分演示</h3>
+        <div class="callout blue" style="margin-bottom:14px">点击 Key 发送请求，观察热点 Key 自动拆分到多个分片</div>
+        <div class="hk-keys" id="hkKeys">
+            <div class="hk-key" onclick="hkRequest('rank:top100')">rank:top100</div>
+            <div class="hk-key" onclick="hkRequest('product:flash')">product:flash</div>
+            <div class="hk-key" onclick="hkRequest('coupon:pool')">coupon:pool</div>
+            <div class="hk-key" onclick="hkRequest('user:hot:001')">user:hot:001</div>
+        </div>
+        <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-top:8px">
+            <div>
+                <div style="font-size:.78rem;color:var(--txt2);margin-bottom:4px">拆分后的分片 Keys:</div>
+                <div class="hk-split-row" id="hkSplits"></div>
+            </div>
+            <div style="text-align:center">
+                <div style="font-size:.72rem;color:var(--txt2)">请求次数</div>
+                <div class="hk-counter" id="hkCount">0</div>
+            </div>
+        </div>
+        <div class="log" id="hkLog"></div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 3: 集群与高可用
+====================================================== -->
+<div class="section" id="s3">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)">3</span>
+        <span style="color:var(--blue)">集群与高可用 — 三重保障</span>
+    </div>
+    <div class="grid3">
+        <div class="card">
+            <h3>🌐 Redis Cluster</h3>
+            <ul>
+                <li>16384 个 slot 分配给多个主节点</li>
+                <li>水平扩展，存储和写入线性增长</li>
+                <li>节点间 Gossip 协议互相探活</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>👮 Sentinel 哨兵</h3>
+            <ul>
+                <li>持续监控主从节点状态</li>
+                <li>主节点故障时自动选举新主</li>
+                <li>客户端通过哨兵获取最新主节点地址</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>🏢 多机房部署</h3>
+            <ul>
+                <li>跨机房主从同步，避免单机房故障</li>
+                <li>同机房读，异机房做灾备</li>
+                <li>网络分区时优先保证可用性</li>
+            </ul>
+        </div>
+    </div>
+    <div class="card" style="padding:14px">
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="clusterFailover()">💥 模拟主节点故障</button>
+            <button class="btn btn-green" onclick="clusterRecover()">✅ 故障转移完成</button>
+            <button class="btn btn-blue" onclick="clusterReset()">↩ 重置</button>
+            <span id="clusterStatus" style="font-size:.82rem;color:var(--txt2)"></span>
+        </div>
+        <canvas id="clusterCanvas" height="300"></canvas>
+        <div class="log" id="clusterLog"></div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 4: 性能优化
+====================================================== -->
+<div class="section" id="s4">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)">4</span>
+        <span style="color:var(--green)">性能优化 — Pipeline / 大 Key / 持久化</span>
+    </div>
+
+    <!-- Pipeline -->
+    <div class="pipeline-demo">
+        <h3 style="color:var(--yellow);margin-bottom:12px">⚡ Pipeline 对比：批量发命令 vs 逐条发</h3>
+        <div class="callout blue" style="margin-bottom:14px">
+            Pipeline 把多条命令打包一次性发给 Redis，减少 RTT（Round-Trip Time），<strong>吞吐提升 5~10x</strong>。
+        </div>
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="pipeStart()">▶ 发送 5 条命令</button>
+            <button class="btn btn-blue" onclick="pipeReset()">↩ 重置</button>
+        </div>
+        <div class="pipe-compare" id="pipeCompare">
+            <div class="pipe-box">
+                <div class="pipe-header ph-normal">❌ 逐条发送（无 Pipeline）</div>
+                <div class="pipe-timeline" id="pipeNormal"></div>
+                <div class="pipe-total" id="pipeNormalTotal" style="color:var(--txt2)"></div>
+            </div>
+            <div class="pipe-box">
+                <div class="pipe-header ph-pipe">✅ Pipeline 批量发送</div>
+                <div class="pipe-timeline" id="pipeBatch"></div>
+                <div class="pipe-total" id="pipeBatchTotal" style="color:var(--green)"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid2" style="margin-top:18px">
+        <div class="card">
+            <h3 style="color:var(--red)">🚫 避免大 Key</h3>
+            <p>大 Key（如 Hash 里有百万字段）会导致：</p>
+            <ul style="margin-top:8px">
+                <li>单次操作耗时长，阻塞其他命令</li>
+                <li>序列化/反序列化慢，内存不连续</li>
+                <li>迁移、持久化时产生巨大 IO 压力</li>
+            </ul>
+            <div class="callout" style="margin-top:12px">方案：<code>HGETALL</code> → <code>HSCAN</code> 分批读；大 Hash 拆成多个小 Hash</div>
+        </div>
+        <div class="card">
+            <h3 style="color:var(--purple)">💾 持久化调优</h3>
+            <ul>
+                <li><strong>AOF everysec</strong>：每秒 fsync，最多丢 1s 数据，性能影响小</li>
+                <li><strong>关闭 RDB</strong>（或低频触发）：大促期间 RDB fork 子进程会产生 Copy-on-Write 压力</li>
+                <li>内存充足时开 <strong>no-appendfsync-on-rewrite yes</strong>，AOF 重写时不阻塞主线程</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 5: 熔断降级
+====================================================== -->
+<div class="section" id="s5">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(163,113,247,.15);color:var(--purple);border:1px solid rgba(163,113,247,.3)">5</span>
+        <span style="color:var(--purple)">熔断与降级 — Redis 挂了怎么办？</span>
+    </div>
+    <div class="grid2">
+        <div class="card">
+            <h3 style="color:var(--red)">⚡ 熔断（Circuit Breaker）</h3>
+            <p>Redis 异常率超过阈值时，<strong>立即断开对 Redis 的请求</strong>，直接返回兜底数据或报错，避免大量请求堆积引发<strong>雪崩</strong>。</p>
+            <p style="margin-top:8px">常用框架：Sentinel（阿里）、Hystrix（Netflix）、Resilience4j</p>
+        </div>
+        <div class="card">
+            <h3 style="color:var(--orange)">🪂 降级（Fallback）</h3>
+            <p>Redis 不可用时，按优先级降级：</p>
+            <ul style="margin-top:8px">
+                <li>1️⃣ 本地缓存（Guava Cache / Caffeine）</li>
+                <li>2️⃣ 返回默认值或空数据</li>
+                <li>3️⃣ 降级到数据库（加限流保护）</li>
+                <li>4️⃣ 降级到静态页面 / CDN</li>
+            </ul>
+        </div>
+    </div>
+    <div class="circuit-wrap">
+        <h3 style="color:var(--yellow);margin-bottom:4px">🔌 熔断器状态机演示</h3>
+        <p style="font-size:.83rem;color:var(--txt2);margin-bottom:14px">点击状态切换，了解熔断器三态转换</p>
+        <div class="circuit-state">
+            <div class="cs-box active" data-state="closed" id="cs-closed" onclick="setCB('closed')">
+                <span class="cs-icon">✅</span>
+                <div class="cs-name">CLOSED（正常）</div>
+                <div class="cs-desc">请求正常通过 Redis</div>
+            </div>
+            <div class="cb-arrow">→</div>
+            <div class="cs-box" data-state="open" id="cs-open" onclick="setCB('open')">
+                <span class="cs-icon">🚨</span>
+                <div class="cs-name">OPEN（熔断）</div>
+                <div class="cs-desc">直接拒绝，走降级逻辑</div>
+            </div>
+            <div class="cb-arrow">→</div>
+            <div class="cs-box" data-state="half" id="cs-half" onclick="setCB('half')">
+                <span class="cs-icon">🔶</span>
+                <div class="cs-name">HALF-OPEN（探测）</div>
+                <div class="cs-desc">放少量请求试探 Redis</div>
+            </div>
+        </div>
+        <div class="cs-desc-box" id="cbDesc">当前：CLOSED 状态 — Redis 正常服务，所有请求通过</div>
+        <div class="ctrl" style="margin-top:14px;justify-content:center">
+            <button class="btn btn-red" onclick="cbSimFail()">💥 模拟 Redis 故障（触发熔断）</button>
+            <button class="btn btn-green" onclick="cbSimRecover()">✅ 模拟 Redis 恢复</button>
+        </div>
+        <div class="log" id="cbLog"></div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 6: 监控告警
+====================================================== -->
+<div class="section" id="s6">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(57,197,207,.15);color:var(--cyan);border:1px solid rgba(57,197,207,.3)">6</span>
+        <span style="color:var(--cyan)">监控与日志 — 大促期间的眼睛</span>
+    </div>
+    <div class="monitor-grid" id="metricGrid"></div>
+    <div class="ctrl" style="margin-top:16px">
+        <button class="btn btn-red" onclick="monStart()">▶ 开始模拟大促流量</button>
+        <button class="btn btn-blue" onclick="monStop()">⏸ 暂停</button>
+        <button class="btn btn-green" onclick="monReset()">↩ 重置</button>
+        <span id="monStatus" style="font-size:.82rem;color:var(--txt2)"></span>
+    </div>
+    <canvas id="canvas-qps" height="120"></canvas>
+    <div class="callout blue" style="margin-top:16px">
+        <strong>慢查询日志：</strong>开启 <code>slowlog-log-slower-than 10000</code>（单位微秒），记录超过 10ms 的命令。
+        重点排查 <code>HGETALL</code>、<code>SMEMBERS</code>、<code>SORT</code> 等全量操作，用 <code>HSCAN</code>/<code>SSCAN</code> 替代。
+    </div>
+    <div class="grid2" style="margin-top:18px">
+        <div class="card">
+            <h3>📊 必监控指标</h3>
+            <ul>
+                <li>QPS（命令/秒）— 告警阈值：&gt; 80% 峰值容量</li>
+                <li>内存使用率 — 告警阈值：&gt; 80%</li>
+                <li>命中率（hit_rate）— 告警阈值：&lt; 90%</li>
+                <li>连接数 — 告警阈值：&gt; maxclients × 80%</li>
+                <li>主从复制延迟（replication_lag）</li>
+                <li>慢查询数量（slowlog_len 变化速率）</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>🚨 告警分级</h3>
+            <ul>
+                <li><strong style="color:var(--yellow)">P2 警告：</strong>内存 &gt; 70%，QPS &gt; 70% 峰值容量</li>
+                <li><strong style="color:var(--orange)">P1 严重：</strong>主从延迟 &gt; 10s，命中率 &lt; 85%</li>
+                <li><strong style="color:var(--red)">P0 紧急：</strong>主节点不可用，内存 OOM，熔断触发</li>
+            </ul>
+            <p style="margin-top:12px">工具栈：Prometheus + Grafana + Redis Exporter + PagerDuty</p>
+        </div>
+    </div>
+</div>
+
+<!-- ======================================================
+     SECTION 7: 测一测
+====================================================== -->
+<div class="section" id="s7">
+    <div class="sec-title">
+        <span class="sec-num" style="background:rgba(227,179,65,.15);color:var(--yellow);border:1px solid rgba(227,179,65,.3)">测</span>
+        <span style="color:var(--yellow)">测一测，你学会了吗？</span>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q1. 大促前缓存预热的核心目的是什么？</div>
+        <div class="qopts">
+            <div class="qopt" onclick="qa(this,'q1',false)"><span>A</span>减少 Redis 内存占用</div>
+            <div class="qopt" onclick="qa(this,'q1',true)"><span>B</span>提前加载热点数据，避免大量请求穿透到数据库造成雪崩</div>
+            <div class="qopt" onclick="qa(this,'q1',false)"><span>C</span>给 Redis 集群做数据均衡</div>
+        </div>
+        <div class="q-fb" id="fb-q1"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q2. 热点 Key 拆分后，<strong>写操作</strong>应该怎么处理？</div>
+        <div class="qopts">
+            <div class="qopt" onclick="qa(this,'q2',false)"><span>A</span>随机写一个分片，其他分片靠过期自动失效</div>
+            <div class="qopt" onclick="qa(this,'q2',true)"><span>B</span>广播更新所有分片，保证一致性</div>
+            <div class="qopt" onclick="qa(this,'q2',false)"><span>C</span>只写原始 Key，分片只读不写</div>
+        </div>
+        <div class="q-fb" id="fb-q2"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q3. 大促期间为什么建议关闭 RDB 或降低 RDB 频率？</div>
+        <div class="qopts">
+            <div class="qopt" onclick="qa(this,'q3',false)"><span>A</span>RDB 会清空内存中的数据</div>
+            <div class="qopt" onclick="qa(this,'q3',false)"><span>B</span>RDB 不支持大促场景</div>
+            <div class="qopt" onclick="qa(this,'q3',true)"><span>C</span>RDB fork 子进程产生 Copy-on-Write，大促高写入时 COW 内存翻倍，影响主进程性能</div>
+        </div>
+        <div class="q-fb" id="fb-q3"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q4. 熔断器从 OPEN 状态变为 CLOSED 状态，需要经过哪个中间状态？</div>
+        <div class="qopts">
+            <div class="qopt" onclick="qa(this,'q4',false)"><span>A</span>PAUSED（暂停）</div>
+            <div class="qopt" onclick="qa(this,'q4',true)"><span>B</span>HALF-OPEN（半开）</div>
+            <div class="qopt" onclick="qa(this,'q4',false)"><span>C</span>STANDBY（待机）</div>
+        </div>
+        <div class="q-fb" id="fb-q4"></div>
+    </div>
+
+    <!-- 总结 -->
+    <div class="callout green" style="margin-top:28px">
+        <strong>面试一句话总结：</strong>大促 Redis 架构 = <strong>预防</strong>（缓存预热 + 本地缓存）+ <strong>容错</strong>（Cluster + Sentinel + 熔断降级）+ <strong>优化</strong>（Pipeline + 拆 Key + 持久化调优）+ <strong>可观测</strong>（QPS/内存/命中率监控）
+    </div>
+
+    <div class="pillars" style="margin-top:20px">
+        <div class="pillar" style="border-color:rgba(240,136,62,.4)">
+            <div class="p-icon">🔥</div>
+            <h4 style="color:var(--orange)">预防</h4>
+            <p>缓存预热 + 本地缓存 + 互斥锁，防止缓存穿透/击穿/雪崩</p>
+        </div>
+        <div class="pillar" style="border-color:rgba(88,166,255,.4)">
+            <div class="p-icon">🛡️</div>
+            <h4 style="color:var(--blue)">容错</h4>
+            <p>Redis Cluster + Sentinel + 多机房 + 熔断降级，保证高可用</p>
+        </div>
+        <div class="pillar" style="border-color:rgba(63,185,80,.4)">
+            <div class="p-icon">⚡</div>
+            <h4 style="color:var(--green)">优化</h4>
+            <p>Pipeline + 避免大 Key + AOF everysec，压榨每一毫秒性能</p>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<script>
+// ============================================================
+// ARCH CANVAS
+// ============================================================
+(function(){
+    const c=document.getElementById('archCanvas');
+    function draw(){
+        const W=Math.min(c.parentElement.clientWidth-32,900);
+        c.width=W; c.height=380;
+        const ctx=c.getContext('2d');
+        ctx.fillStyle='#0d1117'; ctx.fillRect(0,0,W,c.height);
+
+        const layers=[
+            { y:20, h:44, label:'用户请求 (QPS 峰值：百万级)', color:'#58a6ff', icon:'👥' },
+            { y:82, h:44, label:'应用层本地缓存 (Guava Cache / Caffeine) + 熔断降级 (Sentinel)', color:'#a371f7', icon:'🛡️' },
+            { y:144, h:44, label:'Redis Cluster (16384 slots × 3主3从) + Sentinel 哨兵', color:'#ff6b6b', icon:'🔴' },
+            { y:206, h:44, label:'Redis 主从复制 + 多机房同步 (跨 AZ 灾备)', color:'#3fb950', icon:'🌐' },
+            { y:268, h:44, label:'持久化层：AOF everysec + RDB 低频 (或关闭)', color:'#e3b341', icon:'💾' },
+            { y:330, h:44, label:'数据库兜底 (限流保护，仅降级时使用)', color:'#30363d', icon:'🗄️' },
+        ];
+
+        layers.forEach((l,i)=>{
+            const pad=20;
+            ctx.beginPath(); ctx.roundRect(pad,l.y,W-pad*2,l.h,6);
+            ctx.fillStyle=l.color+'18'; ctx.fill();
+            ctx.strokeStyle=l.color; ctx.lineWidth=1.5; ctx.stroke();
+            ctx.fillStyle=l.color; ctx.font='bold 12px sans-serif'; ctx.textAlign='left';
+            ctx.fillText(l.icon+' '+l.label, pad+14, l.y+l.h/2+4);
+            if(i<layers.length-1){
+                const ax=W/2, ay=l.y+l.h+1;
+                ctx.strokeStyle='#30363d'; ctx.lineWidth=1;
+                ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(ax,ay+13); ctx.stroke();
+                ctx.fillStyle='#30363d'; ctx.beginPath();
+                ctx.moveTo(ax-5,ay+10); ctx.lineTo(ax,ay+14); ctx.lineTo(ax+5,ay+10); ctx.fill();
+            }
+        });
+    }
+    draw(); window.addEventListener('resize',draw);
+})();
+
+// ============================================================
+// SECTION 1: 缓存预热
+// ============================================================
+const WARM_KEYS=[
+    { key:'product:flash:001', size:'12KB', category:'闪购商品' },
+    { key:'product:flash:002', size:'8KB',  category:'闪购商品' },
+    { key:'rank:top100',       size:'45KB', category:'排行榜' },
+    { key:'coupon:pool:2024',  size:'32KB', category:'优惠券池' },
+    { key:'category:hot:list', size:'6KB',  category:'分类热榜' },
+    { key:'banner:homepage',   size:'3KB',  category:'首页 Banner' },
+];
+(function buildWarm(){
+    const el=document.getElementById('warmItems');
+    el.innerHTML=WARM_KEYS.map((k,i)=>`
+    <div class="warm-item" id="wi-${i}">
+        <span class="warm-key">${k.key}</span>
+        <span style="font-size:.72rem;color:var(--txt2);min-width:60px">${k.size}</span>
+        <span style="font-size:.72rem;color:var(--txt2);min-width:80px">${k.category}</span>
+        <div class="warm-bar-wrap"><div class="warm-bar" id="wb-${i}"></div></div>
+        <span class="warm-status" id="ws-${i}" style="color:var(--txt2)">待预热</span>
+    </div>`).join('');
+})();
+let warmTimer=null;
+function warmLog(msg,cls='lb'){ const b=document.getElementById('warmLog'); const t=new Date().toLocaleTimeString('zh',{hour12:false}); b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`; b.scrollTop=b.scrollHeight; }
+async function warmStart(){
+    warmReset();
+    const delay=ms=>new Promise(r=>{warmTimer=setTimeout(r,ms);});
+    warmLog('🔥 缓存预热脚本启动，开始批量写入热点数据...','lo');
+    for(let i=0;i<WARM_KEYS.length;i++){
+        const k=WARM_KEYS[i];
+        warmLog(`  SET ${k.key} ← 从 DB 读取 ${k.size}...`,'lb');
+        // animate bar
+        let p=0; const bar=document.getElementById(`wb-${i}`);
+        const doc=document.getElementById(`ws-${i}`);
+        doc.textContent='预热中...'; doc.style.color='var(--yellow)';
+        await new Promise(r=>{
+            const id=setInterval(()=>{
+                p+=20; bar.style.width=Math.min(p,100)+'%';
+                if(p>=100){clearInterval(id);r();}
+            },80);
+        });
+        document.getElementById(`wi-${i}`).classList.add('loaded');
+        doc.textContent='✅ 已缓存'; doc.style.color='var(--green)';
+        warmLog(`  ✅ ${k.key} 写入 Redis 完成`,'lg');
+        document.getElementById('warmProgress').textContent=`进度 ${i+1}/${WARM_KEYS.length}`;
+        await delay(200);
+    }
+    warmLog('🎉 全部热点数据预热完成！Redis 命中率：98.3%','lg');
+    document.getElementById('warmProgress').textContent='✅ 预热完成';
+}
+function warmReset(){
+    clearTimeout(warmTimer);
+    WARM_KEYS.forEach((_,i)=>{
+        document.getElementById(`wi-${i}`).classList.remove('loaded');
+        document.getElementById(`wb-${i}`).style.width='0';
+        const ws=document.getElementById(`ws-${i}`);
+        ws.textContent='待预热'; ws.style.color='var(--txt2)';
+    });
+    document.getElementById('warmLog').innerHTML='';
+    document.getElementById('warmProgress').textContent='';
+}
+
+// ============================================================
+// SECTION 2: 热点 Key 拆分
+// ============================================================
+let hkCount=0;
+const HK_SHARDS=6;
+function hkLog(msg,cls='lb'){ const b=document.getElementById('hkLog'); const t=new Date().toLocaleTimeString('zh',{hour12:false}); b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`; b.scrollTop=b.scrollHeight; }
+function hkRequest(key){
+    hkCount++;
+    document.getElementById('hkCount').textContent=hkCount;
+    // mark key
+    document.querySelectorAll('.hk-key').forEach(el=>el.classList.toggle('hot', el.textContent===key));
+    // generate shards
+    const splits=document.getElementById('hkSplits');
+    splits.innerHTML='';
+    const isHot=hkCount>3;
+    if(isHot){
+        const n=Math.min(2+Math.floor(hkCount/2),HK_SHARDS);
+        const shardIdx=Math.floor(Math.random()*n);
+        for(let i=0;i<n;i++){
+            const el=document.createElement('div');
+            el.className='hk-shard';
+            el.textContent=`${key}:${i+1}`;
+            if(i===shardIdx) el.style.borderColor='var(--green)';
+            splits.appendChild(el);
+        }
+        hkLog(`🔥 热点检测！${key} 请求数=${hkCount}，拆分为 ${Math.min(2+Math.floor(hkCount/2),HK_SHARDS)} 个分片，命中 :${shardIdx+1}`,'lr');
+    } else {
+        const el=document.createElement('div');
+        el.className='hk-shard'; el.textContent=key;
+        splits.appendChild(el);
+        hkLog(`  ${key} 请求 → 直接路由到单 Key（请求数较少）`,'lb');
+    }
+}
+
+// ============================================================
+// SECTION 3: CLUSTER CANVAS
+// ============================================================
+const clc=document.getElementById('clusterCanvas');
+const clctx=clc.getContext('2d');
+let clNodes=[]; let clState='normal';
+function resizeCl(){ clc.width=Math.min(clc.parentElement.clientWidth-44,900); }
+resizeCl();
+
+function buildClNodes(){
+    const W=clc.width, H=clc.height;
+    const masters=[
+        {id:'M1',x:W*.18,y:H*.3,role:'master',slots:'0-5460',state:'ok'},
+        {id:'M2',x:W*.5,y:H*.3,role:'master',slots:'5461-10922',state:'ok'},
+        {id:'M3',x:W*.82,y:H*.3,role:'master',slots:'10923-16383',state:'ok'},
+    ];
+    const slaves=[
+        {id:'S1',x:W*.18,y:H*.72,role:'slave',of:'M1',state:'ok'},
+        {id:'S2',x:W*.5,y:H*.72,role:'slave',of:'M2',state:'ok'},
+        {id:'S3',x:W*.82,y:H*.72,role:'slave',of:'M3',state:'ok'},
+    ];
+    clNodes=[...masters,...slaves];
+}
+
+function drawCluster(){
+    buildClNodes();
+    const W=clc.width, H=clc.height;
+    clctx.clearRect(0,0,W,H);
+    clctx.fillStyle='#161b22'; clctx.fillRect(0,0,W,H);
+
+    const masters=clNodes.filter(n=>n.role==='master');
+    const slaves=clNodes.filter(n=>n.role==='slave');
+
+    // Gossip lines between masters
+    masters.forEach((a,i)=>masters.forEach((b,j)=>{
+        if(i<j){
+            clctx.beginPath(); clctx.moveTo(a.x,a.y); clctx.lineTo(b.x,b.y);
+            clctx.strokeStyle='rgba(48,54,61,.6)'; clctx.lineWidth=1; clctx.setLineDash([4,4]);
+            clctx.stroke(); clctx.setLineDash([]);
+        }
+    }));
+
+    // master-slave lines
+    slaves.forEach(s=>{
+        const m=masters.find(m=>m.id===s.of);
+        if(!m) return;
+        clctx.beginPath(); clctx.moveTo(m.x,m.y); clctx.lineTo(s.x,s.y);
+        clctx.strokeStyle=s.state==='promoting'?'rgba(227,179,65,.7)':'rgba(88,166,255,.5)';
+        clctx.lineWidth=2; clctx.setLineDash(s.state==='promoting'?[6,3]:[]); clctx.stroke(); clctx.setLineDash([]);
+    });
+
+    // Sentinel label
+    clctx.fillStyle='rgba(163,113,247,.7)'; clctx.font='bold 10px sans-serif'; clctx.textAlign='center';
+    clctx.fillText('👮 Sentinel Cluster', W/2, 18);
+
+    // draw nodes
+    clNodes.forEach(n=>{
+        const r=n.role==='master'?26:20;
+        let fill='#1c2128', stroke='#30363d', textCol='#8b949e';
+        if(n.state==='ok'&&n.role==='master'){ fill='rgba(255,107,107,.12)'; stroke='#ff6b6b'; textCol='#ff6b6b'; }
+        if(n.state==='ok'&&n.role==='slave'){ fill='rgba(88,166,255,.1)'; stroke='#58a6ff'; textCol='#58a6ff'; }
+        if(n.state==='fail'){ fill='rgba(139,148,158,.1)'; stroke='#8b949e'; textCol='#8b949e'; }
+        if(n.state==='promoting'){ fill='rgba(227,179,65,.15)'; stroke='#e3b341'; textCol='#e3b341'; }
+        if(n.state==='new-master'){ fill='rgba(255,107,107,.2)'; stroke='#ff6b6b'; textCol='#ff6b6b'; }
+
+        clctx.beginPath(); clctx.arc(n.x,n.y,r,0,Math.PI*2);
+        clctx.fillStyle=fill; clctx.fill(); clctx.strokeStyle=stroke; clctx.lineWidth=2; clctx.stroke();
+        clctx.fillStyle=textCol; clctx.font=`bold ${n.role==='master'?11:10}px sans-serif`; clctx.textAlign='center';
+        clctx.fillText(n.id, n.x, n.y-3);
+        if(n.slots){ clctx.font='8px sans-serif'; clctx.fillStyle='#8b949e'; clctx.fillText(n.slots, n.x, n.y+8); }
+        if(n.state==='fail') clctx.fillText('💀 FAIL', n.x, n.y+20);
+        if(n.state==='promoting') clctx.fillText('⬆️ 选举中', n.x, n.y+20);
+        if(n.state==='new-master') clctx.fillText('👑 新主', n.x, n.y+20);
+
+        const roleLabel=n.role==='master'?'主节点':'从节点';
+        clctx.fillStyle='#30363d'; clctx.font='9px sans-serif';
+        clctx.fillText(roleLabel, n.x, n.y+(n.role==='master'?40:34));
+    });
+}
+drawCluster();
+window.addEventListener('resize',()=>{ resizeCl(); drawCluster(); });
+
+function clLog(msg,cls='lb'){ const b=document.getElementById('clusterLog'); const t=new Date().toLocaleTimeString('zh',{hour12:false}); b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`; b.scrollTop=b.scrollHeight; }
+
+function clusterFailover(){
+    const n=clNodes.find(n=>n.id==='M1'); if(!n) return;
+    n.state='fail';
+    const s=clNodes.find(n=>n.id==='S1'); if(s) s.state='promoting';
+    drawCluster();
+    document.getElementById('clusterStatus').textContent='⚠️ M1 故障，Sentinel 检测中...';
+    document.getElementById('clusterStatus').style.color='var(--red)';
+    clLog('🚨 M1 主节点不可达，Sentinel 触发主观下线 (SDOWN)','lr');
+    setTimeout(()=>{ clLog('  多数 Sentinel 确认：M1 客观下线 (ODOWN)','ly'); },1000);
+    setTimeout(()=>{ clLog('  开始选举新主节点，S1 成为候选...','lb'); },2000);
+}
+function clusterRecover(){
+    const n=clNodes.find(n=>n.id==='M1'); if(n) n.state='fail';
+    const s=clNodes.find(n=>n.id==='S1'); if(s){ s.state='new-master'; s.role='master'; s.slots='0-5460'; }
+    drawCluster();
+    document.getElementById('clusterStatus').textContent='✅ 故障转移完成，S1 升为新主';
+    document.getElementById('clusterStatus').style.color='var(--green)';
+    clLog('✅ S1 完成 SLAVE OF NO ONE，升为新主节点 (slots: 0-5460)','lg');
+    clLog('  客户端通过 Sentinel 获取新主地址，自动重连','lc');
+}
+function clusterReset(){
+    document.getElementById('clusterLog').innerHTML='';
+    document.getElementById('clusterStatus').textContent='';
+    drawCluster();
+}
+
+// ============================================================
+// SECTION 4: PIPELINE
+// ============================================================
+const CMDS=['SET order:001 {...}','SET order:002 {...}','INCR stock:flash','HSET user:101 ...','EXPIRE order:001 3600'];
+function pipeLog(msg,cls='lb'){}
+async function pipeStart(){
+    document.getElementById('pipeNormal').innerHTML='';
+    document.getElementById('pipeBatch').innerHTML='';
+    document.getElementById('pipeNormalTotal').textContent='';
+    document.getElementById('pipeBatchTotal').textContent='';
+    const delay=ms=>new Promise(r=>setTimeout(r,ms));
+    // Normal: sequential, each cmd = net(send)+exec+net(recv)
+    for(let i=0;i<CMDS.length;i++){
+        await delay(250);
+        const row=document.createElement('div'); row.className='pipe-cmd';
+        row.innerHTML=`<span class="pipe-cmd-label">${CMDS[i].split(' ')[0]}</span>
+            <div class="pipe-seg seg-net" style="width:60px">→ 发送</div>
+            <div class="pipe-seg seg-exec" style="width:36px">执行</div>
+            <div class="pipe-seg seg-net" style="width:60px">← 接收</div>`;
+        document.getElementById('pipeNormal').appendChild(row);
+    }
+    document.getElementById('pipeNormalTotal').textContent=`总耗时：~${CMDS.length * 12}ms（每条命令 1 RTT）`;
+    document.getElementById('pipeNormalTotal').style.color='var(--red)';
+
+    // Pipeline: all cmds sent together
+    await delay(300);
+    const bRow=document.createElement('div'); bRow.className='pipe-cmd';
+    bRow.innerHTML=`<span class="pipe-cmd-label">批量发送</span>
+        <div class="pipe-seg seg-net" style="width:60px">→ 全部发</div>`;
+    document.getElementById('pipeBatch').appendChild(bRow);
+    for(let i=0;i<CMDS.length;i++){
+        await delay(120);
+        const row=document.createElement('div'); row.className='pipe-cmd';
+        row.innerHTML=`<span class="pipe-cmd-label" style="font-size:.7rem">${CMDS[i].split(' ')[0]}</span>
+            <div class="pipe-seg seg-exec" style="width:36px">执行</div>`;
+        document.getElementById('pipeBatch').appendChild(row);
+    }
+    await delay(150);
+    const rRow=document.createElement('div'); rRow.className='pipe-cmd';
+    rRow.innerHTML=`<span class="pipe-cmd-label">批量接收</span>
+        <div class="pipe-seg seg-net" style="width:60px">← 全部收</div>`;
+    document.getElementById('pipeBatch').appendChild(rRow);
+    document.getElementById('pipeBatchTotal').textContent=`总耗时：~${Math.ceil(CMDS.length*1.5)+10}ms（仅 1 RTT）`;
+}
+function pipeReset(){
+    document.getElementById('pipeNormal').innerHTML='';
+    document.getElementById('pipeBatch').innerHTML='';
+    document.getElementById('pipeNormalTotal').textContent='';
+    document.getElementById('pipeBatchTotal').textContent='';
+}
+
+// ============================================================
+// SECTION 5: CIRCUIT BREAKER
+// ============================================================
+let cbState='closed';
+const CB_INFO={
+    closed:{ desc:'CLOSED 状态 — Redis 正常服务，所有请求通过，熔断器透明工作', color:'var(--green)' },
+    open:{ desc:'OPEN 状态 — Redis 异常率超过阈值！熔断器打开，请求直接走降级逻辑（本地缓存/默认值），不再访问 Redis', color:'var(--red)' },
+    half:{ desc:'HALF-OPEN 状态 — 熔断器放少量探测请求到 Redis，若成功率达标则关闭熔断；若仍失败则保持 OPEN', color:'var(--yellow)' },
+};
+function setCB(state){
+    cbState=state;
+    ['closed','open','half'].forEach(s=>document.getElementById('cs-'+s).classList.remove('active'));
+    document.getElementById('cs-'+state).classList.add('active');
+    document.getElementById('cbDesc').textContent=CB_INFO[state].desc;
+    document.getElementById('cbDesc').style.color=CB_INFO[state].color;
+}
+function cbLog(msg,cls='lb'){ const b=document.getElementById('cbLog'); const t=new Date().toLocaleTimeString('zh',{hour12:false}); b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`; b.scrollTop=b.scrollHeight; }
+async function cbSimFail(){
+    const delay=ms=>new Promise(r=>setTimeout(r,ms));
+    cbLog('Redis 响应超时...错误率开始上升','lr');
+    await delay(600);
+    cbLog('错误率 > 50%，Sentinel 触发熔断！','lr');
+    setCB('open');
+    await delay(800);
+    cbLog('熔断器 OPEN：所有 Redis 请求被拦截，走降级逻辑','lo');
+    cbLog('  → 降级到本地 Guava Cache，命中率 72%','ly');
+    await delay(1000);
+    cbLog('30s 后尝试半开探测...','lb');
+    setCB('half');
+    cbLog('熔断器 HALF-OPEN：发送探测请求...','lc');
+}
+async function cbSimRecover(){
+    const delay=ms=>new Promise(r=>setTimeout(r,ms));
+    cbLog('探测请求成功！Redis 响应正常','lg');
+    await delay(600);
+    cbLog('连续 5 次探测成功，关闭熔断器','lg');
+    setCB('closed');
+    cbLog('熔断器 CLOSED：恢复正常服务 ✅','lg');
+}
+
+// ============================================================
+// SECTION 6: MONITOR
+// ============================================================
+const METRICS=[
+    { id:'m-qps',label:'QPS (命令/s)',unit:'',color:'#ff6b6b',base:40000,peak:120000,alert:100000 },
+    { id:'m-mem',label:'内存使用率',unit:'%',color:'#e3b341',base:45,peak:82,alert:80 },
+    { id:'m-hit',label:'缓存命中率',unit:'%',color:'#3fb950',base:98,peak:91,alert:90,invert:true },
+    { id:'m-conn',label:'连接数',unit:'',color:'#58a6ff',base:1200,peak:8500,alert:8000 },
+];
+function buildMetricGrid(){
+    document.getElementById('metricGrid').innerHTML=METRICS.map(m=>`
+    <div class="metric-card" id="${m.id}-card">
+        <div class="m-label">${m.label}</div>
+        <div class="m-val" id="${m.id}-val" style="color:${m.color}">${m.base.toLocaleString()}${m.unit}</div>
+        <div class="m-bar-wrap"><div class="m-bar" id="${m.id}-bar" style="width:${m.invert?100:30}%;background:${m.color}"></div></div>
+    </div>`).join('');
+}
+buildMetricGrid();
+
+let monRunning=false, monRafId=null, monT=0, monLastTs=null;
+const monQpsHistory=[];
+const monCanvas=document.getElementById('canvas-qps');
+const monCtx=monCanvas.getContext('2d');
+function resizeMon(){ monCanvas.width=Math.min(monCanvas.parentElement.clientWidth-0,900); }
+resizeMon(); window.addEventListener('resize',resizeMon);
+
+function monTick(ts){
+    if(!monRunning) return;
+    if(monLastTs===null) monLastTs=ts;
+    const delta=(ts-monLastTs)/1000;
+    monLastTs=ts;
+    monT+=delta;
+
+    const progress=Math.min(monT/30,1);
+    const wave=Math.sin(monT*0.8)*0.15+Math.sin(monT*1.3)*0.1;
+
+    METRICS.forEach(m=>{
+        const raw=m.base+(m.peak-m.base)*progress+wave*(m.peak-m.base)*0.2;
+        const v=Math.round(Math.max(m.base*0.9, Math.min(m.peak*1.05, raw)));
+        const el=document.getElementById(`${m.id}-val`);
+        const bar=document.getElementById(`${m.id}-bar`);
+        const card=document.getElementById(`${m.id}-card`);
+        if(el) el.textContent=v.toLocaleString()+m.unit;
+        const pct=m.invert ? Math.max(5,(v/100)*100) : Math.min(95,(v/m.peak)*100);
+        if(bar){ bar.style.width=pct+'%'; bar.style.background=(m.invert?(v<m.alert):(v>m.alert))?'var(--red)':m.color; }
+        if(card) card.classList.toggle('alert', m.invert?(v<m.alert):(v>m.alert));
+    });
+
+    const qpsM=METRICS[0];
+    const qpsRaw=qpsM.base+(qpsM.peak-qpsM.base)*progress+wave*(qpsM.peak-qpsM.base)*0.2;
+    monQpsHistory.push(Math.round(qpsRaw));
+    if(monQpsHistory.length>120) monQpsHistory.shift();
+    drawQpsChart();
+
+    if(progress>0.5) document.getElementById('monStatus').textContent='⚠️ QPS 飙升，注意内存告警！';
+    if(progress>0.8) document.getElementById('monStatus').textContent='🚨 内存使用率 > 80%，触发告警！';
+    monRafId=requestAnimationFrame(monTick);
+}
+function drawQpsChart(){
+    const W=monCanvas.width, H=monCanvas.height;
+    monCtx.clearRect(0,0,W,H);
+    monCtx.fillStyle='#0a0d12'; monCtx.fillRect(0,0,W,H);
+    if(monQpsHistory.length<2) return;
+    const max=Math.max(...monQpsHistory)*1.1;
+    monCtx.strokeStyle='rgba(255,107,107,.6)'; monCtx.lineWidth=2;
+    monCtx.beginPath();
+    monQpsHistory.forEach((v,i)=>{
+        const x=(i/(monQpsHistory.length-1))*W;
+        const y=H-(v/max)*(H-20)-10;
+        i===0?monCtx.moveTo(x,y):monCtx.lineTo(x,y);
+    });
+    monCtx.stroke();
+    // fill
+    monCtx.lineTo(W,H); monCtx.lineTo(0,H); monCtx.closePath();
+    monCtx.fillStyle='rgba(255,107,107,.06)'; monCtx.fill();
+    // label
+    monCtx.fillStyle='#8b949e'; monCtx.font='10px sans-serif'; monCtx.textAlign='left';
+    monCtx.fillText('QPS 趋势（大促流量模拟）', 10, 14);
+    monCtx.textAlign='right';
+    monCtx.fillText(Math.round(monQpsHistory[monQpsHistory.length-1]).toLocaleString()+' cmd/s', W-10, 14);
+}
+function monStart(){ if(monRunning)return; monRunning=true; monLastTs=null; monRafId=requestAnimationFrame(monTick); }
+function monStop(){ monRunning=false; cancelAnimationFrame(monRafId); }
+function monReset(){ monStop(); monT=0; monLastTs=null; monQpsHistory.length=0; buildMetricGrid(); monCtx.clearRect(0,0,monCanvas.width,monCanvas.height); document.getElementById('monStatus').textContent=''; }
+
+// ============================================================
+// QUIZ
+// ============================================================
+const QA={
+    q1:'✅ 正确！预热的核心是提前把热点数据搬进 Redis，避免大促开始时缓存为空，请求穿透到 DB 引发雪崩。',
+    q2:'✅ 正确！拆分 Key 后写操作必须广播到所有分片，否则各分片数据不一致，读到的是脏数据。',
+    q3:'✅ 正确！RDB 通过 fork 子进程实现，大促期间大量写操作触发 Copy-on-Write，内存可能翻倍，严重影响主进程性能。',
+    q4:'✅ 正确！OPEN → HALF-OPEN（等一段时间后尝试探测）→ CLOSED（探测成功恢复正常）这是熔断器的标准三态转换。',
+};
+const QW={
+    q1:'❌ 错误。预热不是为了省内存，而是为了在大促开始时保证缓存有数据，防止穿透。',
+    q2:'❌ 错误。如果只写一个分片，其他分片会持有过期数据，读请求随机命中不同分片会读到旧值。',
+    q3:'❌ 错误。RDB 不会清空数据，它通过 fork 生成子进程做快照，问题在于大促期间 COW 内存压力极大。',
+    q4:'❌ 错误。熔断器没有 PAUSED 或 STANDBY 状态，标准三态是 CLOSED → OPEN → HALF-OPEN → CLOSED。',
+};
+const answered={};
+function qa(el,qid,correct){
+    if(answered[qid]) return; answered[qid]=true;
+    el.classList.add(correct?'correct':'wrong');
+    const fb=document.getElementById('fb-'+qid);
+    fb.textContent=correct?QA[qid]:QW[qid];
+    fb.style.color=correct?'var(--green)':'var(--red)';
+}
+</script>
+</body>
+</html>

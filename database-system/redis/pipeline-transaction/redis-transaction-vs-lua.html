@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 事务 vs Lua脚本 - 深度解析</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: white;
+            padding: 50px 40px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,100,100,0.08) 0%, transparent 60%);
+            animation: pulse 4s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 1; }
+        }
+
+        .header h1 {
+            font-size: 2.4em;
+            font-weight: 700;
+            margin-bottom: 12px;
+            position: relative;
+        }
+
+        .header .subtitle {
+            font-size: 1.1em;
+            opacity: 0.75;
+            position: relative;
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(255,100,100,0.2);
+            border: 1px solid rgba(255,100,100,0.4);
+            color: #ff9090;
+            padding: 4px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            margin-top: 14px;
+            position: relative;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        /* Section */
+        .section {
+            margin-bottom: 50px;
+        }
+
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 700;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #1a1a2e;
+        }
+
+        .section-title .icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1em;
+            flex-shrink: 0;
+        }
+
+        /* Cards */
+        .cards-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .card {
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+
+        .card-header {
+            padding: 20px 24px 16px;
+            color: white;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .card-header .emoji {
+            font-size: 1.6em;
+        }
+
+        .card-header h3 {
+            font-size: 1.25em;
+            font-weight: 700;
+        }
+
+        .card-header .tag {
+            margin-left: auto;
+            background: rgba(255,255,255,0.2);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.78em;
+        }
+
+        .card-body {
+            padding: 20px 24px 24px;
+            background: white;
+        }
+
+        .card-body .desc {
+            font-size: 0.95em;
+            color: #555;
+            margin-bottom: 16px;
+            line-height: 1.7;
+        }
+
+        /* Transaction card colors */
+        .card-tx .card-header { background: linear-gradient(135deg, #4776e6, #8e54e9); }
+        .card-lua .card-header { background: linear-gradient(135deg, #f7971e, #ffd200); }
+        .card-lua .card-header { color: #333; }
+        .card-lua .card-header .tag { background: rgba(0,0,0,0.12); color: #333; }
+
+        /* Feature list */
+        .feature-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .feature-list li {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            font-size: 0.93em;
+            color: #444;
+        }
+
+        .feature-list li .dot {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75em;
+            flex-shrink: 0;
+            margin-top: 1px;
+            color: white;
+            font-weight: 700;
+        }
+
+        .dot-blue { background: #4776e6; }
+        .dot-orange { background: #f7971e; }
+        .dot-green { background: #27ae60; }
+        .dot-red { background: #e74c3c; }
+
+        /* Flow diagram */
+        .flow-section {
+            background: #f8f9fd;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 40px;
+        }
+
+        .flow-title {
+            font-size: 1.1em;
+            font-weight: 700;
+            color: #1a1a2e;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .flows-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        .flow {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+        }
+
+        .flow h4 {
+            font-size: 0.95em;
+            font-weight: 700;
+            margin-bottom: 16px;
+            text-align: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .flow-tx h4 { color: #4776e6; border-color: #dce8ff; }
+        .flow-lua h4 { color: #f7971e; border-color: #fff3d6; }
+
+        .flow-steps {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+        }
+
+        .flow-step {
+            width: 100%;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.88em;
+            text-align: center;
+            font-weight: 500;
+            position: relative;
+        }
+
+        .flow-step-tx { background: #eef2ff; color: #4776e6; border: 1px solid #c5d3f8; }
+        .flow-step-lua { background: #fff8e6; color: #c07800; border: 1px solid #ffe0a0; }
+        .flow-step-server { background: #e8f8f0; color: #1a7a45; border: 1px solid #a8e6c3; }
+        .flow-step-done { background: #f0f0f0; color: #666; border: 1px solid #ddd; }
+
+        .flow-arrow {
+            font-size: 1.2em;
+            color: #bbb;
+            line-height: 1.2;
+            margin: 3px 0;
+        }
+
+        .flow-note {
+            margin-top: 12px;
+            font-size: 0.8em;
+            color: #888;
+            text-align: center;
+            font-style: italic;
+        }
+
+        /* Comparison table */
+        .compare-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            margin-bottom: 40px;
+        }
+
+        .compare-table thead tr {
+            background: linear-gradient(135deg, #1a1a2e, #0f3460);
+            color: white;
+        }
+
+        .compare-table th {
+            padding: 16px 20px;
+            font-size: 1em;
+            font-weight: 700;
+            text-align: left;
+        }
+
+        .compare-table th:first-child { border-radius: 12px 0 0 0; }
+        .compare-table th:last-child { border-radius: 0 12px 0 0; }
+
+        .compare-table tbody tr {
+            transition: background 0.15s;
+        }
+
+        .compare-table tbody tr:nth-child(even) { background: #fafbff; }
+        .compare-table tbody tr:nth-child(odd) { background: white; }
+        .compare-table tbody tr:hover { background: #f0f4ff; }
+
+        .compare-table td {
+            padding: 15px 20px;
+            font-size: 0.93em;
+            color: #444;
+            border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+        }
+
+        .compare-table td:first-child {
+            font-weight: 600;
+            color: #1a1a2e;
+            width: 160px;
+        }
+
+        .tag-good {
+            display: inline-block;
+            background: #e8f8f0;
+            color: #1a7a45;
+            border: 1px solid #a8e6c3;
+            border-radius: 6px;
+            padding: 2px 10px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .tag-bad {
+            display: inline-block;
+            background: #fdecea;
+            color: #c0392b;
+            border: 1px solid #f5b7b1;
+            border-radius: 6px;
+            padding: 2px 10px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .tag-neutral {
+            display: inline-block;
+            background: #f0f0f0;
+            color: #555;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 2px 10px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        /* Code block */
+        .code-blocks {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .code-block {
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+        }
+
+        .code-block-header {
+            padding: 12px 18px;
+            font-size: 0.9em;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: white;
+        }
+
+        .code-block-header-tx { background: #4776e6; }
+        .code-block-header-lua { background: #e67e22; }
+
+        .code-block pre {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 18px 20px;
+            font-size: 0.85em;
+            line-height: 1.65;
+            overflow-x: auto;
+            font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+        }
+
+        .code-comment { color: #6c7086; }
+        .code-cmd { color: #89b4fa; font-weight: 600; }
+        .code-key { color: #a6e3a1; }
+        .code-val { color: #fab387; }
+        .code-kw { color: #cba6f7; }
+        .code-str { color: #a6e3a1; }
+        .code-num { color: #fab387; }
+        .code-fn { color: #89dceb; }
+
+        /* Scenarios */
+        .scenarios {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+
+        .scenario-card {
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+        }
+
+        .scenario-header {
+            padding: 16px 20px;
+            color: white;
+            font-weight: 700;
+            font-size: 1em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .scenario-header-tx { background: linear-gradient(135deg, #4776e6, #8e54e9); }
+        .scenario-header-lua { background: linear-gradient(135deg, #f7971e, #ffd200); color: #333 !important; }
+
+        .scenario-body {
+            background: white;
+            padding: 18px 20px;
+        }
+
+        .scenario-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 0.92em;
+            color: #444;
+        }
+
+        .scenario-item:last-child { border-bottom: none; }
+
+        .scenario-item .num {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75em;
+            font-weight: 700;
+            color: white;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .num-blue { background: #4776e6; }
+        .num-orange { background: #f7971e; }
+
+        /* Decision guide */
+        .decision {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border-radius: 16px;
+            padding: 32px;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        .decision h3 {
+            font-size: 1.3em;
+            margin-bottom: 22px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .decision-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .decision-box {
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .decision-box h4 {
+            font-size: 1em;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .decision-box ul {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .decision-box ul li {
+            font-size: 0.88em;
+            opacity: 0.85;
+            padding-left: 16px;
+            position: relative;
+            line-height: 1.5;
+        }
+
+        .decision-box ul li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            opacity: 0.6;
+        }
+
+        /* Summary box */
+        .summary {
+            background: linear-gradient(135deg, #f8f9fd, #eef2ff);
+            border: 2px solid #c5d3f8;
+            border-radius: 16px;
+            padding: 28px 32px;
+        }
+
+        .summary h3 {
+            font-size: 1.15em;
+            font-weight: 700;
+            color: #1a1a2e;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .summary p {
+            font-size: 0.95em;
+            color: #555;
+            line-height: 1.8;
+        }
+
+        .summary strong { color: #4776e6; }
+
+        /* Divider */
+        .divider {
+            height: 2px;
+            background: linear-gradient(to right, transparent, #e0e0f0, transparent);
+            margin: 40px 0;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .cards-row, .flows-grid, .code-blocks, .scenarios, .decision-grid { grid-template-columns: 1fr; }
+            .content { padding: 24px; }
+            .header { padding: 36px 24px; }
+            .header h1 { font-size: 1.7em; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- Header -->
+    <div class="header">
+        <h1>🔴 Redis 事务 vs Lua 脚本</h1>
+        <p class="subtitle">原子性保证的两种方式 · 深度对比与适用场景</p>
+        <div class="badge">面试题 8 · 高频考点</div>
+    </div>
+
+    <div class="content">
+
+        <!-- Overview -->
+        <div class="section">
+            <div class="section-title">
+                <div class="icon" style="background:#eef2ff;">📋</div>
+                概念概览
+            </div>
+            <div class="cards-row">
+                <!-- Transaction -->
+                <div class="card card-tx">
+                    <div class="card-header">
+                        <span class="emoji">📦</span>
+                        <div>
+                            <h3>事务（Transaction）</h3>
+                            <div style="font-size:0.82em;opacity:0.85;margin-top:2px;">MULTI / EXEC 命令组</div>
+                        </div>
+                        <span class="tag">内置机制</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="desc">
+                            Redis 原生支持的批量命令执行机制。通过 <code>MULTI</code> 开启事务，将命令依次入队，最终通过 <code>EXEC</code> 一次性批量执行，保证这批命令不会被其他客户端打断。
+                        </p>
+                        <ul class="feature-list">
+                            <li>
+                                <span class="dot dot-blue">✓</span>
+                                <span><strong>原子性（部分）</strong>：命令整体执行，不会被插队；但单条命令出错不回滚</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-blue">✓</span>
+                                <span><strong>简单易用</strong>：无需编写脚本，支持所有 Redis 命令</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-red">✗</span>
+                                <span><strong>不支持回滚</strong>：运行时错误不回滚，只跳过出错命令</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-red">✗</span>
+                                <span><strong>不支持条件逻辑</strong>：无法根据前一条命令的结果决定后续操作</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Lua -->
+                <div class="card card-lua">
+                    <div class="card-header">
+                        <span class="emoji">🌙</span>
+                        <div>
+                            <h3>Lua 脚本</h3>
+                            <div style="font-size:0.82em;opacity:0.75;margin-top:2px;">EVAL / EVALSHA 命令</div>
+                        </div>
+                        <span class="tag">脚本引擎</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="desc">
+                            通过 <code>EVAL</code> 将 Lua 脚本发送到 Redis 服务端执行。脚本在服务端单线程原子运行，可调用 <code>redis.call()</code> 执行任意 Redis 命令，并根据结果编写条件/循环逻辑。
+                        </p>
+                        <ul class="feature-list">
+                            <li>
+                                <span class="dot dot-orange">✓</span>
+                                <span><strong>真正的原子性</strong>：脚本执行期间不会切换到其他命令</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-orange">✓</span>
+                                <span><strong>支持复杂逻辑</strong>：条件判断、循环、错误处理均可实现</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-green">✓</span>
+                                <span><strong>网络开销小</strong>：一次 RTT 传输，减少多次网络往返</span>
+                            </li>
+                            <li>
+                                <span class="dot dot-red">✗</span>
+                                <span><strong>调试难度高</strong>：脚本报错信息较简略，排查成本高</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Execution Flow -->
+        <div class="section">
+            <div class="section-title">
+                <div class="icon" style="background:#fff3d6;">🔄</div>
+                执行流程对比
+            </div>
+            <div class="flow-section">
+                <div class="flows-grid">
+                    <!-- Transaction flow -->
+                    <div class="flow flow-tx">
+                        <h4>📦 事务执行流程</h4>
+                        <div class="flow-steps">
+                            <div class="flow-step flow-step-tx">① 客户端发送 <strong>MULTI</strong></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-tx">② 发送命令 SET key1 val1<br><span style="font-size:0.85em;opacity:0.8">（命令入队，暂不执行）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-tx">③ 发送命令 SET key2 val2<br><span style="font-size:0.85em;opacity:0.8">（继续入队）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-tx">④ 客户端发送 <strong>EXEC</strong></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-server">⑤ Redis 顺序执行所有队列命令<br><span style="font-size:0.85em;opacity:0.8">（原子执行，不插队）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-done">⑥ 返回每条命令的执行结果数组</div>
+                        </div>
+                        <div class="flow-note">⚠️ 共 N+3 次网络往返（MULTI、N条命令、EXEC）</div>
+                    </div>
+
+                    <!-- Lua flow -->
+                    <div class="flow flow-lua">
+                        <h4>🌙 Lua脚本执行流程</h4>
+                        <div class="flow-steps">
+                            <div class="flow-step flow-step-lua">① 客户端编写完整 Lua 脚本<br><span style="font-size:0.85em;opacity:0.8">（含逻辑判断）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-lua">② 发送 <strong>EVAL</strong> script numkeys keys args<br><span style="font-size:0.85em;opacity:0.8">（一次网络请求）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-server">③ Redis 服务端加载 Lua 脚本</div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-server">④ 单线程原子执行脚本<br><span style="font-size:0.85em;opacity:0.8">（可调用 redis.call，有条件逻辑）</span></div>
+                            <div class="flow-arrow">↓</div>
+                            <div class="flow-step flow-step-done">⑤ 返回脚本最终结果</div>
+                        </div>
+                        <div class="flow-note">✅ 仅 1 次网络往返，效率更高</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Comparison Table -->
+        <div class="section">
+            <div class="section-title">
+                <div class="icon" style="background:#e8f8f0;">📊</div>
+                核心维度对比
+            </div>
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th>维度</th>
+                        <th>📦 事务（Transaction）</th>
+                        <th>🌙 Lua 脚本</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>原子性</td>
+                        <td><span class="tag-neutral">部分原子</span> 整体不被插队，但单条出错不回滚</td>
+                        <td><span class="tag-good">完全原子</span> 脚本执行期间服务端不处理其他命令</td>
+                    </tr>
+                    <tr>
+                        <td>逻辑复杂度</td>
+                        <td><span class="tag-bad">简单</span> 仅支持顺序执行，无条件判断</td>
+                        <td><span class="tag-good">复杂</span> 支持 if/for/while 等完整编程逻辑</td>
+                    </tr>
+                    <tr>
+                        <td>网络开销</td>
+                        <td><span class="tag-bad">大</span> 多次网络往返（至少 N+2 次 RTT）</td>
+                        <td><span class="tag-good">小</span> 一次网络传输（1 次 RTT）</td>
+                    </tr>
+                    <tr>
+                        <td>回滚支持</td>
+                        <td><span class="tag-bad">不支持</span> 运行时错误仅跳过，不回滚</td>
+                        <td><span class="tag-neutral">受限支持</span> 可用 pcall 捕获错误并中止</td>
+                    </tr>
+                    <tr>
+                        <td>读-改-写</td>
+                        <td><span class="tag-bad">不支持</span> 不能基于上条结果决定下条命令</td>
+                        <td><span class="tag-good">支持</span> 可读取值后在脚本内做逻辑判断</td>
+                    </tr>
+                    <tr>
+                        <td>调试难度</td>
+                        <td><span class="tag-good">低</span> 命令直观，报错清晰</td>
+                        <td><span class="tag-bad">高</span> Lua 错误信息较少，排查困难</td>
+                    </tr>
+                    <tr>
+                        <td>长时阻塞风险</td>
+                        <td><span class="tag-good">低</span> 命令数有限，执行快</td>
+                        <td><span class="tag-bad">存在</span> 脚本有死循环风险，会阻塞整个服务</td>
+                    </tr>
+                    <tr>
+                        <td>典型命令</td>
+                        <td><code>MULTI</code> / <code>EXEC</code> / <code>DISCARD</code> / <code>WATCH</code></td>
+                        <td><code>EVAL</code> / <code>EVALSHA</code> / <code>SCRIPT LOAD</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Code Examples -->
+        <div class="section">
+            <div class="section-title">
+                <div class="icon" style="background:#fdecea;">💻</div>
+                代码示例
+            </div>
+            <div class="code-blocks">
+                <!-- Transaction -->
+                <div class="code-block">
+                    <div class="code-block-header code-block-header-tx">
+                        📦 事务：批量更新两个 key
+                    </div>
+                    <pre><span class="code-comment"># 开启事务</span>
+<span class="code-cmd">MULTI</span>
+<span class="code-comment"># OK</span>
+
+<span class="code-comment"># 命令入队（暂不执行）</span>
+<span class="code-cmd">SET</span> <span class="code-key">user:1:name</span> <span class="code-str">"Alice"</span>
+<span class="code-comment"># QUEUED</span>
+<span class="code-cmd">SET</span> <span class="code-key">user:1:age</span> <span class="code-num">25</span>
+<span class="code-comment"># QUEUED</span>
+<span class="code-cmd">INCR</span> <span class="code-key">user:count</span>
+<span class="code-comment"># QUEUED</span>
+
+<span class="code-comment"># 批量执行</span>
+<span class="code-cmd">EXEC</span>
+<span class="code-comment"># 1) OK
+# 2) OK
+# 3) (integer) 1</span>
+
+<span class="code-comment"># ⚠️ 若某条命令类型错误，
+# 只跳过该命令，其余照常执行</span></pre>
+                </div>
+
+                <!-- Lua -->
+                <div class="code-block">
+                    <div class="code-block-header code-block-header-lua">
+                        🌙 Lua：扣减库存 + 记录日志（原子）
+                    </div>
+                    <pre><span class="code-comment">-- Lua 脚本（在 EVAL 中传入）</span>
+<span class="code-kw">local</span> stock_key = <span class="code-fn">KEYS</span>[<span class="code-num">1</span>]
+<span class="code-kw">local</span> log_key   = <span class="code-fn">KEYS</span>[<span class="code-num">2</span>]
+<span class="code-kw">local</span> amount    = <span class="code-fn">tonumber</span>(<span class="code-fn">ARGV</span>[<span class="code-num">1</span>])
+
+<span class="code-comment">-- 读取当前库存</span>
+<span class="code-kw">local</span> stock = <span class="code-fn">tonumber</span>(
+  redis.<span class="code-fn">call</span>(<span class="code-str">'GET'</span>, stock_key) <span class="code-kw">or</span> <span class="code-num">0</span>
+)
+
+<span class="code-comment">-- 条件判断：库存不足则返回 -1</span>
+<span class="code-kw">if</span> stock &lt; amount <span class="code-kw">then</span>
+  <span class="code-kw">return</span> <span class="code-num">-1</span>
+<span class="code-kw">end</span>
+
+<span class="code-comment">-- 原子扣减并记录日志</span>
+redis.<span class="code-fn">call</span>(<span class="code-str">'DECRBY'</span>, stock_key, amount)
+redis.<span class="code-fn">call</span>(<span class="code-str">'RPUSH'</span>, log_key,
+  <span class="code-str">'deduct:'</span> .. amount)
+<span class="code-kw">return</span> stock - amount
+
+<span class="code-comment">-- 客户端调用：
+-- EVAL script 2 stock:101 log:101 5</span></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Use Cases -->
+        <div class="section">
+            <div class="section-title">
+                <div class="icon" style="background:#eef2ff;">🎯</div>
+                适用场景
+            </div>
+            <div class="scenarios">
+                <div class="scenario-card">
+                    <div class="scenario-header scenario-header-tx">
+                        📦 &nbsp;选择事务的场景
+                    </div>
+                    <div class="scenario-body">
+                        <div class="scenario-item">
+                            <span class="num num-blue">1</span>
+                            批量写入多个简单 key，无需读取中间结果（如初始化配置批量 SET）
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-blue">2</span>
+                            需要乐观锁（WATCH）：监听某个 key 是否在事务期间被修改
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-blue">3</span>
+                            逻辑简单、团队 Lua 技能不足、快速实现批量操作
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-blue">4</span>
+                            对网络延迟不敏感，可以接受多次 RTT
+                        </div>
+                    </div>
+                </div>
+                <div class="scenario-card">
+                    <div class="scenario-header scenario-header-lua">
+                        🌙 &nbsp;选择 Lua 脚本的场景
+                    </div>
+                    <div class="scenario-body">
+                        <div class="scenario-item">
+                            <span class="num num-orange">1</span>
+                            <strong>分布式锁</strong>：SET NX + 校验 + DEL 需要原子完成，防止误删他人锁
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-orange">2</span>
+                            <strong>扣减库存</strong>：先读库存，判断充足，再扣减并记日志，整体原子
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-orange">3</span>
+                            <strong>限流计数器</strong>：读取计数 → 判断阈值 → 更新 → 设过期，CAS 原子
+                        </div>
+                        <div class="scenario-item">
+                            <span class="num num-orange">4</span>
+                            <strong>排行榜批操作</strong>：读分数 → 加权计算 → 更新多个结构，需要一致性
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Decision Guide -->
+        <div class="decision">
+            <h3>🧭 决策指南：我该选哪个？</h3>
+            <div class="decision-grid">
+                <div class="decision-box">
+                    <h4>📦 <span style="color:#89b4fa;">选事务，当…</span></h4>
+                    <ul>
+                        <li>只需批量执行，无需读取中间结果</li>
+                        <li>命令之间相互独立，无条件依赖</li>
+                        <li>需要乐观锁 WATCH 监听 key 变化</li>
+                        <li>追求简单、团队熟悉度高</li>
+                    </ul>
+                </div>
+                <div class="decision-box">
+                    <h4>🌙 <span style="color:#f9e2af;">选 Lua，当…</span></h4>
+                    <ul>
+                        <li>需要「读取 → 判断 → 写入」的原子操作</li>
+                        <li>操作涉及条件分支或循环</li>
+                        <li>网络延迟敏感，希望减少 RTT</li>
+                        <li>实现分布式锁、限流等高并发场景</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary -->
+        <div class="summary">
+            <h3>💡 一句话总结</h3>
+            <p>
+                <strong>事务</strong>适合<strong>批量简单写操作</strong>（如 SET a 1; SET b 2），逻辑清晰但不支持回滚与条件判断；
+                <strong>Lua 脚本</strong>适合<strong>需要原子性的复杂操作</strong>（如分布式锁、扣库存+记日志），
+                在服务端一次性执行，减少网络开销并支持完整的编程逻辑。
+                <br><br>
+                核心判断标准：<strong>操作之间是否有数据依赖？</strong> 有 → 用 Lua；无 → 事务足够。
+            </p>
+        </div>
+
+    </div>
+</div>
+</body>
+</html>

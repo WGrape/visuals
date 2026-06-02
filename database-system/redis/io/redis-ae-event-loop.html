@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis ae 事件循环 — 彻底搞懂</title>
+    <style>
+        :root {
+            --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --bg4: #1c2128;
+            --txt: #e6edf3; --txt2: #8b949e;
+            --red: #ff6b6b; --blue: #58a6ff; --green: #3fb950;
+            --purple: #a371f7; --orange: #f0883e; --cyan: #39c5cf; --yellow: #e3b341;
+            --border: #30363d;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; background:var(--bg); color:var(--txt); line-height:1.7; }
+
+        /* NAV */
+        .nav { position:sticky; top:0; background:rgba(22,27,34,.96); border-bottom:1px solid var(--border); padding:13px 0; z-index:200; backdrop-filter:blur(10px); }
+        .nav-c { max-width:1100px; margin:0 auto; padding:0 20px; display:flex; justify-content:space-between; align-items:center; }
+        .nav-back { color:var(--blue); text-decoration:none; font-size:13px; }
+        .nav-title { font-size:14px; font-weight:700; color:var(--red); }
+
+        /* HERO */
+        .hero { text-align:center; padding:52px 20px 36px; background:linear-gradient(135deg,#0d1117,#1a1028,#0d1117); border-bottom:1px solid var(--border); }
+        .hero h1 { font-size:2.2rem; font-weight:800; margin-bottom:10px; }
+        .hero h1 em { color:var(--red); font-style:normal; }
+        .hero p { color:var(--txt2); max-width:580px; margin:0 auto; font-size:1rem; }
+
+        /* TOC pills */
+        .toc { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; padding:18px 20px; border-bottom:1px solid var(--border); background:var(--bg2); }
+        .toc a { padding:5px 14px; border-radius:20px; font-size:0.78rem; font-weight:600; text-decoration:none; border:1px solid var(--border); color:var(--txt2); transition:all .2s; }
+        .toc a:hover { border-color:var(--red); color:var(--red); }
+
+        /* LAYOUT */
+        .container { max-width:1100px; margin:0 auto; padding:44px 20px 80px; }
+        .section { margin-bottom:64px; scroll-margin-top:70px; }
+        .sec-title { font-size:1.35rem; font-weight:700; color:var(--cyan); margin-bottom:22px; padding-bottom:10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+        .sec-title .num { background:rgba(57,197,207,.15); color:var(--cyan); border:1px solid rgba(57,197,207,.35); border-radius:50%; width:28px; height:28px; display:flex; align-items:center; justify-content:center; font-size:.8rem; flex-shrink:0; }
+
+        /* CARDS */
+        .card { background:var(--bg4); border:1px solid var(--border); border-radius:12px; padding:22px; margin-bottom:18px; }
+        .card h3 { font-size:1rem; color:var(--yellow); margin-bottom:10px; }
+        .card p,.card li { color:var(--txt2); font-size:.9rem; line-height:1.85; }
+        .card ul { padding-left:18px; }
+        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+        .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+        @media(max-width:700px) { .grid2,.grid3 { grid-template-columns:1fr; } }
+
+        /* CODE */
+        pre { background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:16px; overflow-x:auto; font-size:.8rem; line-height:1.7; margin:10px 0; }
+        pre .k { color:var(--purple); } pre .t { color:var(--blue); } pre .c { color:var(--txt2); font-style:italic; }
+        pre .s { color:var(--green); } pre .n { color:var(--orange); } pre .m { color:var(--red); }
+        code { background:var(--bg3); color:var(--cyan); padding:1px 6px; border-radius:4px; font-size:.82em; }
+
+        /* BADGES */
+        .badge { display:inline-block; padding:2px 9px; border-radius:16px; font-size:.72rem; font-weight:700; margin-right:5px; }
+        .b-red { background:rgba(255,107,107,.13); color:var(--red); border:1px solid rgba(255,107,107,.3); }
+        .b-blue { background:rgba(88,166,255,.13); color:var(--blue); border:1px solid rgba(88,166,255,.3); }
+        .b-green { background:rgba(63,185,80,.13); color:var(--green); border:1px solid rgba(63,185,80,.3); }
+        .b-purple { background:rgba(163,113,247,.13); color:var(--purple); border:1px solid rgba(163,113,247,.3); }
+        .b-cyan { background:rgba(57,197,207,.13); color:var(--cyan); border:1px solid rgba(57,197,207,.3); }
+        .b-orange { background:rgba(240,136,62,.13); color:var(--orange); border:1px solid rgba(240,136,62,.3); }
+        .b-yellow { background:rgba(227,179,65,.13); color:var(--yellow); border:1px solid rgba(227,179,65,.3); }
+
+        /* CALLOUT */
+        .callout { border-left:3px solid var(--red); background:rgba(255,107,107,.05); padding:14px 18px; border-radius:0 8px 8px 0; margin:14px 0; font-size:.88rem; color:var(--txt2); }
+        .callout.blue { border-left-color:var(--blue); background:rgba(88,166,255,.05); }
+        .callout.green { border-left-color:var(--green); background:rgba(63,185,80,.05); }
+        .callout.purple { border-left-color:var(--purple); background:rgba(163,113,247,.05); }
+        .callout strong { color:var(--txt); }
+
+        /* BTN */
+        .btn { padding:8px 18px; border-radius:6px; border:none; cursor:pointer; font-size:.84rem; font-weight:600; transition:opacity .2s,transform .1s; }
+        .btn:active { transform:scale(.97); }
+        .btn-red { background:rgba(255,107,107,.18); color:var(--red); border:1px solid rgba(255,107,107,.4); }
+        .btn-blue { background:rgba(88,166,255,.15); color:var(--blue); border:1px solid rgba(88,166,255,.3); }
+        .btn-green { background:rgba(63,185,80,.15); color:var(--green); border:1px solid rgba(63,185,80,.3); }
+        .btn-yellow { background:rgba(227,179,65,.15); color:var(--yellow); border:1px solid rgba(227,179,65,.3); }
+        .btn:hover { opacity:.8; }
+        .ctrl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+
+        /* LOG */
+        .log { background:#0a0d12; border:1px solid var(--border); border-radius:8px; padding:12px 14px; font-family:'Courier New',monospace; font-size:.78rem; height:150px; overflow-y:auto; margin-top:12px; }
+        .ll { margin-bottom:3px; } .lt { color:var(--txt2); margin-right:8px; }
+        .lr { color:var(--red); } .lg { color:var(--green); } .lb { color:var(--blue); }
+        .lc { color:var(--cyan); } .ly { color:var(--yellow); } .lp { color:var(--purple); }
+
+        /* =========================================
+           SECTION 1: 架构图 canvas
+        ========================================= */
+        #archCanvas { width:100%; max-width:750px; display:block; margin:0 auto; border-radius:10px; }
+
+        /* =========================================
+           SECTION 2: 数据结构卡片
+        ========================================= */
+        .struct-box { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px; }
+        .struct-title { font-size:.85rem; font-weight:700; color:var(--blue); margin-bottom:12px; letter-spacing:.5px; }
+        .field-row { display:flex; align-items:baseline; gap:10px; padding:6px 0; border-bottom:1px solid rgba(48,54,61,.5); font-size:.8rem; }
+        .field-row:last-child { border-bottom:none; }
+        .field-type { color:var(--purple); min-width:100px; font-family:monospace; }
+        .field-name { color:var(--orange); font-family:monospace; min-width:130px; }
+        .field-desc { color:var(--txt2); }
+
+        /* =========================================
+           SECTION 3: 主循环动画
+        ========================================= */
+        #loopCanvas { width:100%; max-width:750px; display:block; margin:0 auto; border-radius:10px; }
+
+        /* =========================================
+           SECTION 4: 文件事件状态机
+        ========================================= */
+        .fsm-wrap { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px; }
+        .states-row { display:flex; gap:0; align-items:center; justify-content:center; flex-wrap:wrap; margin:18px 0; }
+        .state-box {
+            padding:14px 18px; border-radius:8px; border:2px solid var(--border);
+            background:var(--bg3); text-align:center; min-width:110px; font-size:.82rem;
+            transition:all .4s; position:relative;
+        }
+        .state-box.lit { border-color:var(--red); background:rgba(255,107,107,.1); }
+        .state-box.done { border-color:var(--green); background:rgba(63,185,80,.1); }
+        .state-box .s-icon { font-size:1.4rem; display:block; margin-bottom:4px; }
+        .state-box .s-name { font-weight:700; color:var(--txt2); font-size:.78rem; }
+        .state-box.lit .s-name { color:var(--red); }
+        .state-box.done .s-name { color:var(--green); }
+        .arrow-h { color:var(--txt2); font-size:1.3rem; padding:0 8px; align-self:center; }
+        .fsm-desc { text-align:center; font-size:.85rem; color:var(--txt2); min-height:24px; margin-top:10px; transition:opacity .3s; }
+
+        /* =========================================
+           SECTION 5: 时间事件
+        ========================================= */
+        .te-list { display:flex; flex-direction:column; gap:10px; }
+        .te-item {
+            display:flex; align-items:center; gap:14px; padding:14px 16px;
+            background:var(--bg3); border:1px solid var(--border); border-radius:8px;
+            font-size:.84rem; transition:border-color .3s, background .3s;
+        }
+        .te-item.fire { border-color:var(--orange); background:rgba(240,136,62,.1); }
+        .te-id { color:var(--blue); font-family:monospace; min-width:50px; }
+        .te-name { flex:1; color:var(--txt); font-weight:600; }
+        .te-interval { color:var(--txt2); font-size:.78rem; min-width:80px; }
+        .te-countdown { font-family:monospace; font-weight:700; color:var(--yellow); min-width:60px; text-align:right; }
+        .te-bar-wrap { flex:1.2; background:var(--bg2); border-radius:4px; height:6px; overflow:hidden; }
+        .te-bar { height:100%; border-radius:4px; background:var(--blue); transition:width .2s; }
+        .te-item.fire .te-bar { background:var(--orange); }
+
+        /* =========================================
+           SECTION 6: 平台适配
+        ========================================= */
+        .platform-tabs { display:flex; gap:8px; margin-bottom:16px; }
+        .ptab { padding:7px 16px; border-radius:6px; border:1px solid var(--border); background:var(--bg3); cursor:pointer; font-size:.82rem; font-weight:600; color:var(--txt2); transition:all .2s; }
+        .ptab.active { border-color:var(--red); color:var(--red); background:rgba(255,107,107,.1); }
+        .platform-panel { display:none; }
+        .platform-panel.active { display:block; }
+
+        /* =========================================
+           SECTION 7: 完整流程 step-by-step
+        ========================================= */
+        .step-list { display:flex; flex-direction:column; }
+        .step-item { display:flex; gap:14px; padding:15px 0; border-bottom:1px solid rgba(48,54,61,.4); opacity:.28; transition:opacity .45s, transform .4s; transform:translateX(-8px); }
+        .step-item.on { opacity:1; transform:translateX(0); }
+        .step-item:last-child { border-bottom:none; }
+        .sn { width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.76rem; font-weight:700; flex-shrink:0; background:var(--bg3); border:2px solid var(--border); transition:all .4s; color:var(--txt2); }
+        .step-item.on .sn { background:rgba(255,107,107,.15); border-color:var(--red); color:var(--red); }
+        .sc h5 { font-size:.88rem; margin-bottom:3px; }
+        .sc p { font-size:.78rem; color:var(--txt2); }
+        .prog-bar-wrap { background:var(--bg3); border-radius:4px; height:4px; margin:14px 0; overflow:hidden; }
+        .prog-bar { height:100%; background:linear-gradient(90deg,var(--red),var(--orange)); border-radius:4px; width:0; transition:width .5s ease; }
+
+        /* =========================================
+           SECTION 8: Quiz
+        ========================================= */
+        .quiz-card { background:var(--bg4); border:1px solid var(--border); border-radius:10px; padding:22px; margin-bottom:16px; }
+        .quiz-card .q-text { font-size:.92rem; margin-bottom:14px; color:var(--txt); font-weight:600; }
+        .quiz-options { display:flex; flex-direction:column; gap:8px; }
+        .qopt { padding:10px 14px; border-radius:6px; border:1px solid var(--border); background:var(--bg3); cursor:pointer; font-size:.84rem; color:var(--txt2); transition:all .2s; display:flex; align-items:center; gap:8px; }
+        .qopt:hover { border-color:var(--blue); color:var(--txt); }
+        .qopt.correct { border-color:var(--green); background:rgba(63,185,80,.1); color:var(--green); }
+        .qopt.wrong { border-color:var(--red); background:rgba(255,107,107,.1); color:var(--red); }
+        .q-feedback { margin-top:10px; font-size:.83rem; min-height:20px; color:var(--txt2); }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <div class="nav-c">
+        <a href="../../index.html" class="nav-back">← 数据库系统</a>
+        <span class="nav-title">Redis ae 事件循环</span>
+        <span class="badge b-red">Interactive</span>
+    </div>
+</nav>
+
+<div class="hero">
+    <h1>Redis <em>ae</em> 事件循环</h1>
+    <p>彻底搞懂 Redis 的事件驱动引擎 — 从数据结构到循环流程，从文件事件到时间事件</p>
+</div>
+
+<div class="toc">
+    <a href="#s1">① 是什么</a>
+    <a href="#s2">② 数据结构</a>
+    <a href="#s3">③ 主循环动画</a>
+    <a href="#s4">④ 文件事件</a>
+    <a href="#s5">⑤ 时间事件</a>
+    <a href="#s6">⑥ 平台适配</a>
+    <a href="#s7">⑦ 完整流程</a>
+    <a href="#s8">⑧ 测一测</a>
+</div>
+
+<div class="container">
+
+<!-- ============================================================
+     SECTION 1: 是什么
+============================================================ -->
+<div class="section" id="s1">
+    <div class="sec-title"><span class="num">1</span> ae 是什么？</div>
+
+    <div class="callout">
+        <strong>ae = "A simple event-driven programming library"</strong>，是 Redis 自己实现的一个轻量事件库，代码只有约 500 行（<code>ae.c</code> / <code>ae.h</code>）。它是 Redis 整个网络 IO 的核心引擎。
+    </div>
+
+    <div class="grid2">
+        <div class="card">
+            <h3>🤔 为什么 Redis 要自己写事件库？</h3>
+            <ul>
+                <li>Libevent / libuv 太重，Redis 追求极简</li>
+                <li>可以针对 Redis 场景精准优化</li>
+                <li>跨平台抽象：Linux 用 <code>epoll</code>，macOS 用 <code>kqueue</code>，其他用 <code>select</code></li>
+                <li>整个库只管两件事：<strong>文件事件</strong> + <strong>时间事件</strong></li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3>📦 ae 的职责边界</h3>
+            <ul>
+                <li>监听 socket fd 的可读/可写状态</li>
+                <li>到时间点时触发定时回调</li>
+                <li>不断循环，直到 <code>stop</code> 标志被置 1</li>
+                <li><strong>不负责</strong>命令解析、数据存储、持久化</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:0">
+        <h3>🗺️ 整体架构位置</h3>
+        <canvas id="archCanvas" height="200"></canvas>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 2: 数据结构
+============================================================ -->
+<div class="section" id="s2">
+    <div class="sec-title"><span class="num">2</span> 核心数据结构</div>
+
+    <div class="callout blue">点击下方结构体字段可查看详细说明</div>
+
+    <!-- aeEventLoop -->
+    <div class="card">
+        <h3>① aeEventLoop — 事件循环总控</h3>
+        <div class="struct-box">
+            <div class="struct-title">typedef struct aeEventLoop { ... }</div>
+            <div class="field-row" onclick="showDetail('el-maxfd')" style="cursor:pointer">
+                <span class="field-type">int</span>
+                <span class="field-name">maxfd</span>
+                <span class="field-desc">当前注册的最大 fd 编号</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-setsize')" style="cursor:pointer">
+                <span class="field-type">int</span>
+                <span class="field-name">setsize</span>
+                <span class="field-desc">可监听 fd 的上限（默认 10000+）</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-events')" style="cursor:pointer">
+                <span class="field-type">aeFileEvent *</span>
+                <span class="field-name">events</span>
+                <span class="field-desc">📁 注册的文件事件数组，下标 = fd</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-fired')" style="cursor:pointer">
+                <span class="field-type">aeFiredEvent *</span>
+                <span class="field-name">fired</span>
+                <span class="field-desc">⚡ 本轮就绪事件列表（epoll_wait 返回后填充）</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-time')" style="cursor:pointer">
+                <span class="field-type">aeTimeEvent *</span>
+                <span class="field-name">timeEventHead</span>
+                <span class="field-desc">⏰ 时间事件链表头节点</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-stop')" style="cursor:pointer">
+                <span class="field-type">int</span>
+                <span class="field-name">stop</span>
+                <span class="field-desc">置 1 时退出主循环</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-api')" style="cursor:pointer">
+                <span class="field-type">void *</span>
+                <span class="field-name">apidata</span>
+                <span class="field-desc">底层 IO 多路复用的私有数据（epoll/kqueue fd 等）</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-before')" style="cursor:pointer">
+                <span class="field-type">aeBeforeSleepProc *</span>
+                <span class="field-name">beforesleep</span>
+                <span class="field-desc">每次阻塞前调用的钩子（如刷新输出缓冲区）</span>
+            </div>
+            <div class="field-row" onclick="showDetail('el-after')" style="cursor:pointer">
+                <span class="field-type">aeBeforeSleepProc *</span>
+                <span class="field-name">aftersleep</span>
+                <span class="field-desc">epoll_wait 返回后立即调用的钩子</span>
+            </div>
+        </div>
+        <div id="field-detail" class="callout" style="margin-top:12px; display:none;"></div>
+    </div>
+
+    <div class="grid2">
+        <!-- aeFileEvent -->
+        <div class="card">
+            <h3>② aeFileEvent — 文件事件</h3>
+            <div class="struct-box">
+                <div class="struct-title">typedef struct aeFileEvent { ... }</div>
+                <div class="field-row">
+                    <span class="field-type">int</span>
+                    <span class="field-name">mask</span>
+                    <span class="field-desc"><code>AE_READABLE</code> / <code>AE_WRITABLE</code> / <code>AE_BARRIER</code></span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">aeFileProc *</span>
+                    <span class="field-name">rfileProc</span>
+                    <span class="field-desc">可读时回调（如 readQueryFromClient）</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">aeFileProc *</span>
+                    <span class="field-name">wfileProc</span>
+                    <span class="field-desc">可写时回调（如 sendReplyToClient）</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">void *</span>
+                    <span class="field-name">clientData</span>
+                    <span class="field-desc">回调时传入的用户数据（client 指针）</span>
+                </div>
+            </div>
+            <div class="callout green" style="margin-top:12px">
+                <strong>每个 fd 对应一个 aeFileEvent</strong>，用数组存储（下标即 fd），O(1) 查找
+            </div>
+        </div>
+
+        <!-- aeTimeEvent -->
+        <div class="card">
+            <h3>③ aeTimeEvent — 时间事件</h3>
+            <div class="struct-box">
+                <div class="struct-title">typedef struct aeTimeEvent { ... }</div>
+                <div class="field-row">
+                    <span class="field-type">long long</span>
+                    <span class="field-name">id</span>
+                    <span class="field-desc">事件唯一 ID（单调递增）</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">monotime</span>
+                    <span class="field-name">when</span>
+                    <span class="field-desc">触发时间点（绝对时间戳，单位 ms）</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">aeTimeProc *</span>
+                    <span class="field-name">timeProc</span>
+                    <span class="field-desc">触发时的回调函数</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">aeEventFinalizerProc *</span>
+                    <span class="field-name">finalizerProc</span>
+                    <span class="field-desc">事件删除时的清理回调</span>
+                </div>
+                <div class="field-row">
+                    <span class="field-type">struct aeTimeEvent *</span>
+                    <span class="field-name">next / prev</span>
+                    <span class="field-desc">双向链表指针</span>
+                </div>
+            </div>
+            <div class="callout purple" style="margin-top:12px">
+                返回值 <strong>≥ 0</strong> = 毫秒后重新触发；返回 <strong>AE_NOMORE (-1)</strong> = 一次性事件，执行后删除
+            </div>
+        </div>
+    </div>
+
+    <!-- aeFiredEvent -->
+    <div class="card">
+        <h3>④ aeFiredEvent — 就绪事件（临时）</h3>
+        <div class="struct-box">
+            <div class="struct-title">typedef struct aeFiredEvent { ... }</div>
+            <div class="field-row">
+                <span class="field-type">int</span>
+                <span class="field-name">fd</span>
+                <span class="field-desc">就绪的文件描述符</span>
+            </div>
+            <div class="field-row">
+                <span class="field-type">int</span>
+                <span class="field-name">mask</span>
+                <span class="field-desc">就绪类型：AE_READABLE / AE_WRITABLE</span>
+            </div>
+        </div>
+        <div class="callout" style="margin-top:12px">
+            这是个<strong>临时数组</strong>，每次 <code>epoll_wait</code> 返回后填充，处理完当轮事件即"作废"。
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 3: 主循环动画
+============================================================ -->
+<div class="section" id="s3">
+    <div class="sec-title"><span class="num">3</span> 主循环 aeMain() 动画</div>
+
+    <div class="callout blue">
+        <code>aeMain()</code> 就是一个 <strong>while(!stop)</strong> 循环，不断调用 <code>aeProcessEvents()</code>。每一次 <code>aeProcessEvents()</code> 叫做一个 <strong>Tick</strong>。
+    </div>
+
+    <div class="card">
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="loopStart()">▶ 开始运行</button>
+            <button class="btn btn-blue" onclick="loopPause()">⏸ 暂停</button>
+            <button class="btn btn-yellow" onclick="loopStep()">⏭ 单步</button>
+            <button class="btn btn-green" onclick="loopReset()">↩ 重置</button>
+            <span id="loopTickLabel" style="font-size:.82rem;color:var(--txt2)">Tick: 0 | Phase: —</span>
+        </div>
+        <canvas id="loopCanvas" height="300"></canvas>
+        <div class="log" id="loopLog"></div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 4: 文件事件
+============================================================ -->
+<div class="section" id="s4">
+    <div class="sec-title"><span class="num">4</span> 文件事件 — 状态机演示</div>
+
+    <div class="grid2">
+        <div class="card">
+            <h3>事件类型</h3>
+            <p><span class="badge b-blue">AE_READABLE</span> fd 可读 → 有数据到来，或新连接到达<br><br>
+               <span class="badge b-green">AE_WRITABLE</span> fd 可写 → 输出缓冲区有空间，可以发送响应<br><br>
+               <span class="badge b-purple">AE_BARRIER</span> 特殊标志：强制先写后读（AOF 持久化时用到）</p>
+        </div>
+        <div class="card">
+            <h3>关键 API</h3>
+            <pre><span class="c">/* 注册事件 */</span>
+<span class="t">int</span> <span class="n">aeCreateFileEvent</span>(
+    aeEventLoop *<span class="m">el</span>,
+    <span class="t">int</span> <span class="m">fd</span>,
+    <span class="t">int</span> <span class="m">mask</span>,       <span class="c">// AE_READABLE | AE_WRITABLE</span>
+    aeFileProc *<span class="m">proc</span>,
+    <span class="t">void</span> *<span class="m">clientData</span>
+);
+
+<span class="c">/* 注销事件 */</span>
+<span class="t">void</span> <span class="n">aeDeleteFileEvent</span>(
+    aeEventLoop *<span class="m">el</span>, <span class="t">int</span> <span class="m">fd</span>, <span class="t">int</span> <span class="m">mask</span>
+);</pre>
+        </div>
+    </div>
+
+    <div class="fsm-wrap">
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="fsmRun()">▶ 模拟新客户端请求</button>
+            <button class="btn btn-blue" onclick="fsmReset()">↩ 重置</button>
+        </div>
+        <div class="states-row" id="fsmStates">
+            <div class="state-box" id="fsm0"><span class="s-icon">🖥️</span><span class="s-name">server 监听</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm1"><span class="s-icon">🤝</span><span class="s-name">accept 连接</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm2"><span class="s-icon">📥</span><span class="s-name">注册 READABLE</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm3"><span class="s-icon">📖</span><span class="s-name">读取命令</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm4"><span class="s-icon">⚙️</span><span class="s-name">执行命令</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm5"><span class="s-icon">📤</span><span class="s-name">注册 WRITABLE</span></div>
+            <div class="arrow-h">→</div>
+            <div class="state-box" id="fsm6"><span class="s-icon">✅</span><span class="s-name">回包完成</span></div>
+        </div>
+        <div class="fsm-desc" id="fsmDesc">点击「模拟新客户端请求」开始演示</div>
+        <div class="log" id="fsmLog" style="height:120px"></div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 5: 时间事件
+============================================================ -->
+<div class="section" id="s5">
+    <div class="sec-title"><span class="num">5</span> 时间事件 — 定时任务演示</div>
+
+    <div class="grid2">
+        <div class="card">
+            <h3>时间事件如何确定阻塞时长？</h3>
+            <p>ae 在调用 <code>epoll_wait</code> 时不会无限阻塞，timeout 被设置为：</p>
+            <pre><span class="k">timeout</span> = <span class="n">最近时间事件触发时间</span> - <span class="n">当前时间</span></pre>
+            <p>这样既不会错过定时任务，又能最大化利用等待时间。</p>
+        </div>
+        <div class="card">
+            <h3>Redis 中最重要的时间事件</h3>
+            <p><code style="color:var(--orange)">serverCron()</code> — 每 <strong>100ms</strong> 触发一次</p>
+            <ul style="margin-top:8px">
+                <li>清理过期 Key</li>
+                <li>更新 LRU 时钟</li>
+                <li>持久化检查（RDB/AOF）</li>
+                <li>主从复制心跳</li>
+                <li>慢日志、统计信息更新</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>⏱️ 时间事件倒计时演示</h3>
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="teStart()">▶ 启动</button>
+            <button class="btn btn-blue" onclick="teStop()">⏸ 暂停</button>
+            <button class="btn btn-green" onclick="teReset()">↩ 重置</button>
+            <span id="teSimTime" style="font-size:.82rem;color:var(--txt2)">模拟时间: 0ms</span>
+        </div>
+        <div class="te-list" id="teList"></div>
+        <div class="log" id="teLog" style="margin-top:12px"></div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 6: 平台适配
+============================================================ -->
+<div class="section" id="s6">
+    <div class="sec-title"><span class="num">6</span> 跨平台适配 — ae 如何封装底层 IO</div>
+
+    <div class="callout purple">
+        ae 通过 <strong>编译时条件判断</strong> 选择底层实现，对上层提供统一 API（<code>aeApiCreate</code> / <code>aeApiAddEvent</code> / <code>aeApiPoll</code>）
+    </div>
+
+    <pre style="margin-bottom:20px"><span class="c">/* ae.c 中的平台选择逻辑 */</span>
+<span class="k">#ifdef</span> HAVE_EVPORT
+<span class="k">#include</span> <span class="s">"ae_evport.c"</span>   <span class="c">// Solaris event ports</span>
+<span class="k">#else</span>
+    <span class="k">#ifdef</span> HAVE_EPOLL
+    <span class="k">#include</span> <span class="s">"ae_epoll.c"</span>  <span class="c">// Linux epoll  ← 最常用</span>
+    <span class="k">#else</span>
+        <span class="k">#ifdef</span> HAVE_KQUEUE
+        <span class="k">#include</span> <span class="s">"ae_kqueue.c"</span> <span class="c">// macOS/BSD kqueue</span>
+        <span class="k">#else</span>
+        <span class="k">#include</span> <span class="s">"ae_select.c"</span> <span class="c">// fallback，fd 上限 1024</span>
+        <span class="k">#endif</span>
+    <span class="k">#endif</span>
+<span class="k">#endif</span></pre>
+
+    <div class="platform-tabs">
+        <button class="ptab active" onclick="showPlatform('epoll')">Linux epoll</button>
+        <button class="ptab" onclick="showPlatform('kqueue')">macOS kqueue</button>
+        <button class="ptab" onclick="showPlatform('select')">select (fallback)</button>
+    </div>
+
+    <div class="platform-panel active" id="panel-epoll">
+        <div class="card">
+            <h3>🐧 Linux epoll</h3>
+            <p style="margin-bottom:12px"><span class="badge b-green">推荐</span> 生产环境首选，支持数十万并发连接</p>
+            <pre><span class="c">/* aeApiCreate：创建 epoll 实例 */</span>
+state->epfd = <span class="n">epoll_create</span>(<span class="m">1024</span>); <span class="c">// 参数已被忽略，随便写</span>
+
+<span class="c">/* aeApiAddEvent：注册 fd */</span>
+<span class="t">struct</span> epoll_event ee = {<span class="m">0</span>};
+ee.events = EPOLLIN;              <span class="c">// AE_READABLE → EPOLLIN</span>
+ee.data.fd = fd;
+<span class="n">epoll_ctl</span>(state->epfd, EPOLL_CTL_ADD, fd, &ee);
+
+<span class="c">/* aeApiPoll：等待就绪事件 */</span>
+<span class="t">int</span> retval = <span class="n">epoll_wait</span>(state->epfd,
+    state->events, AE_SETSIZE, tvp ? tvp->tv_msec : -<span class="m">1</span>);</pre>
+            <ul style="margin-top:12px">
+                <li>基于<strong>红黑树</strong>管理所有监听 fd，注册/删除 O(logN)</li>
+                <li>就绪事件存入<strong>就绪链表</strong>，每次只返回真正就绪的 fd，O(就绪数)</li>
+                <li>支持边缘触发（ET）和水平触发（LT），Redis 用 LT 更安全</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="platform-panel" id="panel-kqueue">
+        <div class="card">
+            <h3>🍎 macOS / BSD kqueue</h3>
+            <p style="margin-bottom:12px"><span class="badge b-blue">macOS</span> Redis 本地开发环境常用</p>
+            <pre><span class="c">/* aeApiCreate */</span>
+state->kqfd = <span class="n">kqueue</span>();
+
+<span class="c">/* aeApiAddEvent：注册事件 */</span>
+<span class="t">struct</span> kevent ke;
+EV_SET(&ke, fd, EVFILT_READ, EV_ADD, <span class="m">0</span>, <span class="m">0</span>, NULL);
+<span class="n">kevent</span>(state->kqfd, &ke, <span class="m">1</span>, NULL, <span class="m">0</span>, NULL);
+
+<span class="c">/* aeApiPoll */</span>
+<span class="t">int</span> retval = <span class="n">kevent</span>(state->kqfd,
+    NULL, <span class="m">0</span>, state->events, AE_SETSIZE, tvp);</pre>
+            <ul style="margin-top:12px">
+                <li>与 epoll 语义相似，但 API 风格不同</li>
+                <li>支持文件、socket、信号、进程等多种 filter</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="platform-panel" id="panel-select">
+        <div class="card">
+            <h3>⚠️ select (fallback)</h3>
+            <p style="margin-bottom:12px"><span class="badge b-orange">不推荐生产</span> 仅当系统无 epoll/kqueue 时使用</p>
+            <pre><span class="c">/* aeApiPoll */</span>
+fd_set rfds, wfds;
+FD_ZERO(&rfds); FD_ZERO(&wfds);
+<span class="c">// 遍历所有 fd，逐一加入 fd_set...</span>
+<span class="n">select</span>(maxfd+<span class="m">1</span>, &rfds, &wfds, NULL, tvp);</pre>
+            <ul style="margin-top:12px">
+                <li>每次调用都要传递完整 fd_set，O(maxfd) 复杂度</li>
+                <li>fd 数量上限：<strong>1024</strong>（FD_SETSIZE）</li>
+                <li>性能差，不适合高并发场景</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 7: 完整流程 step-by-step
+============================================================ -->
+<div class="section" id="s7">
+    <div class="sec-title"><span class="num">7</span> 一次完整事件循环 Tick 的 12 步</div>
+
+    <div class="card">
+        <div class="ctrl">
+            <button class="btn btn-red" onclick="stepStart()">▶ 逐步播放</button>
+            <button class="btn btn-blue" onclick="stepReset()">↩ 重置</button>
+            <span id="stepStatus" style="font-size:.82rem;color:var(--txt2)"></span>
+        </div>
+        <div class="prog-bar-wrap"><div class="prog-bar" id="stepBar"></div></div>
+        <div class="step-list" id="stepList">
+            <div class="step-item"><div class="sn">1</div><div class="sc"><h5>aeMain() while 循环检查 stop 标志</h5><p>stop == 0 → 继续；stop == 1 → Redis 关闭</p></div></div>
+            <div class="step-item"><div class="sn">2</div><div class="sc"><h5>调用 beforesleep() 钩子</h5><p>刷新客户端输出缓冲区、处理 Cluster 等待回复、AOF 刷盘（如有）</p></div></div>
+            <div class="step-item"><div class="sn">3</div><div class="sc"><h5>计算 epoll_wait 的 timeout</h5><p>遍历时间事件链表，找到最近触发时间 → timeout = max(0, 最近事件时间 - now)</p></div></div>
+            <div class="step-item"><div class="sn">4</div><div class="sc"><h5>调用 aeApiPoll()（即 epoll_wait）</h5><p>主线程在此处阻塞，等待 fd 就绪或超时，内核把就绪 fd 填入 fired 数组</p></div></div>
+            <div class="step-item"><div class="sn">5</div><div class="sc"><h5>调用 aftersleep() 钩子</h5><p>Redis 6.0+ 在此通知 IO 线程开始异步读取（多线程 IO 的入口）</p></div></div>
+            <div class="step-item"><div class="sn">6</div><div class="sc"><h5>遍历 fired 数组，处理文件事件（读）</h5><p>对每个就绪 fd，若 mask & AE_READABLE → 调用 rfileProc（如 readQueryFromClient）</p></div></div>
+            <div class="step-item"><div class="sn">7</div><div class="sc"><h5>遍历 fired 数组，处理文件事件（写）</h5><p>若 mask & AE_WRITABLE 且无 AE_BARRIER → 调用 wfileProc（如 sendReplyToClient）</p></div></div>
+            <div class="step-item"><div class="sn">8</div><div class="sc"><h5>AE_BARRIER 特殊处理</h5><p>若文件事件设了 AE_BARRIER 标志，强制先写后读（AOF fsync 时保证持久化顺序）</p></div></div>
+            <div class="step-item"><div class="sn">9</div><div class="sc"><h5>处理时间事件（aeProcessTimeEvents）</h5><p>遍历时间事件链表，对 when ≤ now 的事件调用 timeProc 回调</p></div></div>
+            <div class="step-item"><div class="sn">10</div><div class="sc"><h5>时间事件的返回值判断</h5><p>返回 AE_NOMORE(-1) → 删除该事件；返回 retval ≥ 0 → when += retval，等待下次触发</p></div></div>
+            <div class="step-item"><div class="sn">11</div><div class="sc"><h5>清理已标记删除的时间事件</h5><p>id == AE_DELETED_EVENT_ID 的节点从链表中摘除并释放内存</p></div></div>
+            <div class="step-item"><div class="sn">12</div><div class="sc"><h5>回到步骤 1，开始下一个 Tick</h5><p>整个过程在单线程中串行执行，无锁、无竞争，这就是 Redis 简单高效的秘密</p></div></div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     SECTION 8: Quiz
+============================================================ -->
+<div class="section" id="s8">
+    <div class="sec-title"><span class="num">8</span> 测一测，你学会了吗？</div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q1. aeEventLoop 中的 <code>events</code> 数组，其下标是什么？</div>
+        <div class="quiz-options">
+            <div class="qopt" onclick="answer(this,'q1',false)"><span>A</span> 事件 ID（单调递增）</div>
+            <div class="qopt" onclick="answer(this,'q1',true)"><span>B</span> 文件描述符 fd（数字）</div>
+            <div class="qopt" onclick="answer(this,'q1',false)"><span>C</span> 客户端连接序号</div>
+            <div class="qopt" onclick="answer(this,'q1',false)"><span>D</span> epoll 事件类型</div>
+        </div>
+        <div class="q-feedback" id="fb-q1"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q2. <code>epoll_wait</code> 的超时时间由谁决定？</div>
+        <div class="quiz-options">
+            <div class="qopt" onclick="answer(this,'q2',false)"><span>A</span> 固定 100ms，与 serverCron 一致</div>
+            <div class="qopt" onclick="answer(this,'q2',false)"><span>B</span> 永远不超时，一直阻塞</div>
+            <div class="qopt" onclick="answer(this,'q2',true)"><span>C</span> 最近时间事件触发时间 − 当前时间</div>
+            <div class="qopt" onclick="answer(this,'q2',false)"><span>D</span> 由客户端连接超时时间决定</div>
+        </div>
+        <div class="q-feedback" id="fb-q2"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q3. 时间事件的回调返回 <code>-1</code>（AE_NOMORE）意味着？</div>
+        <div class="quiz-options">
+            <div class="qopt" onclick="answer(this,'q3',false)"><span>A</span> 出错了，Redis 会崩溃</div>
+            <div class="qopt" onclick="answer(this,'q3',false)"><span>B</span> 1ms 后重新触发</div>
+            <div class="qopt" onclick="answer(this,'q3',true)"><span>C</span> 这是一次性事件，执行后自动删除</div>
+            <div class="qopt" onclick="answer(this,'q3',false)"><span>D</span> 暂停循环，等待下一个连接</div>
+        </div>
+        <div class="q-feedback" id="fb-q3"></div>
+    </div>
+
+    <div class="quiz-card">
+        <div class="q-text">Q4. <code>AE_BARRIER</code> 标志的作用是？</div>
+        <div class="quiz-options">
+            <div class="qopt" onclick="answer(this,'q4',false)"><span>A</span> 阻止新客户端连接进入</div>
+            <div class="qopt" onclick="answer(this,'q4',true)"><span>B</span> 强制同一 fd 先处理写事件再处理读事件（先写后读）</div>
+            <div class="qopt" onclick="answer(this,'q4',false)"><span>C</span> 给事件加互斥锁防止并发</div>
+            <div class="qopt" onclick="answer(this,'q4',false)"><span>D</span> 限制 epoll 每次最多返回的就绪数量</div>
+        </div>
+        <div class="q-feedback" id="fb-q4"></div>
+    </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+// ============================================================
+// SECTION 1: arch canvas
+// ============================================================
+(function drawArch(){
+    const c = document.getElementById('archCanvas');
+    const ctx = c.getContext('2d');
+    function draw() {
+        const W = c.parentElement.clientWidth - 44;
+        c.width = Math.min(W, 750); c.height = 200;
+        const w = c.width, h = c.height;
+        ctx.clearRect(0,0,w,h);
+        ctx.fillStyle='#161b22'; ctx.fillRect(0,0,w,h);
+
+        const layers = [
+            { label:'客户端 (TCP 连接)', color:'#58a6ff', y:20, h:30 },
+            { label:'ae 事件循环 (ae.c) — Redis 的心脏', color:'#ff6b6b', y:68, h:36 },
+            { label:'底层 IO：epoll / kqueue / select', color:'#a371f7', y:120, h:30 },
+            { label:'内核网络栈 / Socket 缓冲区', color:'#30363d', y:162, h:28 },
+        ];
+        layers.forEach(l => {
+            const pad = 30;
+            ctx.fillStyle = l.color + '22';
+            ctx.strokeStyle = l.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.roundRect(pad, l.y, w-pad*2, l.h, 6); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = l.color;
+            ctx.font = `${l.label.includes('ae') ? 'bold ' : ''}12px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText(l.label, w/2, l.y + l.h/2 + 4);
+        });
+        // arrows
+        [[50,88,50,118],[w-50,88,w-50,118]].forEach(([x1,y1,x2,y2])=>{
+            ctx.strokeStyle='#30363d'; ctx.lineWidth=1.5;
+            ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+        });
+    }
+    draw();
+    window.addEventListener('resize', draw);
+})();
+
+// ============================================================
+// FIELD DETAIL
+// ============================================================
+const FIELD_DETAILS = {
+    'el-maxfd': '<strong>maxfd</strong>：当前已注册的最大 fd 编号。ae 只需遍历 0~maxfd，避免扫描整个数组。',
+    'el-setsize': '<strong>setsize</strong>：事件循环能管理的 fd 上限。Redis 启动时根据 <code>maxclients</code> 配置设置（默认 10128）。',
+    'el-events': '<strong>events[]</strong>：以 fd 为下标的数组，每个元素是一个 aeFileEvent。注册 fd 时直接写 <code>events[fd]</code>，O(1) 存取。',
+    'el-fired': '<strong>fired[]</strong>：临时数组，每次 epoll_wait 返回后由底层 ae_epoll.c 填充就绪 fd 列表，处理完即"清空"（下轮覆盖）。',
+    'el-time': '<strong>timeEventHead</strong>：双向链表头，所有定时任务串在这里。每个 Tick 都会遍历链表检查是否有到期的时间事件。',
+    'el-stop': '<strong>stop</strong>：<code>aeStop()</code> 把它置 1，aeMain 的 while 循环就会退出，Redis 开始优雅关闭。',
+    'el-api': '<strong>apidata</strong>：void 指针，指向底层实现的私有结构体。epoll 时是 <code>aeApiState { int epfd; struct epoll_event *events; }</code>。',
+    'el-before': '<strong>beforesleep</strong>：在每次调用 epoll_wait <em>之前</em>执行。Redis 用它来刷新输出缓冲区、处理 cluster 消息等"即将阻塞前要做的事"。',
+    'el-after': '<strong>aftersleep</strong>：epoll_wait 返回<em>之后</em>立即执行。Redis 6.0 多线程 IO 模式下，在这里通知 IO 线程开始并发读取客户端数据。',
+};
+function showDetail(key) {
+    const box = document.getElementById('field-detail');
+    box.innerHTML = FIELD_DETAILS[key] || '';
+    box.style.display = 'block';
+}
+
+// ============================================================
+// SECTION 3: 主循环动画
+// ============================================================
+const lc = document.getElementById('loopCanvas');
+const lctx = lc.getContext('2d');
+let loopTick=0, loopPhase=0, loopRunning=false, loopTimer=null;
+
+const LOOP_PHASES = [
+    { name:'beforesleep()', color:'#a371f7', desc:'阻塞前钩子：刷输出缓冲区、AOF 等' },
+    { name:'计算 timeout', color:'#e3b341', desc:'timeout = 最近时间事件 − now' },
+    { name:'epoll_wait()', color:'#ff6b6b', desc:'阻塞等待 fd 就绪（或超时）' },
+    { name:'aftersleep()', color:'#58a6ff', desc:'阻塞后钩子：通知 IO 线程（6.0+）' },
+    { name:'处理文件事件', color:'#3fb950', desc:'遍历 fired 数组，调用读/写 handler' },
+    { name:'处理时间事件', color:'#f0883e', desc:'serverCron、过期清理等定时任务' },
+];
+
+function resizeLC() { lc.width = Math.min(lc.parentElement.clientWidth - 44, 750); }
+resizeLC();
+
+function drawLoop() {
+    const W=lc.width, H=lc.height;
+    lctx.clearRect(0,0,W,H);
+    lctx.fillStyle='#161b22'; lctx.fillRect(0,0,W,H);
+
+    const cx=W/2, cy=H/2-10, R=Math.min(W,H)*0.33;
+
+    // center
+    lctx.beginPath(); lctx.arc(cx,cy,36,0,Math.PI*2);
+    lctx.fillStyle='rgba(255,107,107,.12)'; lctx.fill();
+    lctx.strokeStyle='rgba(255,107,107,.5)'; lctx.lineWidth=2; lctx.stroke();
+    lctx.fillStyle='#e6edf3'; lctx.font='bold 11px sans-serif'; lctx.textAlign='center';
+    lctx.fillText('aeMain', cx, cy-4);
+    lctx.fillStyle='#8b949e'; lctx.font='10px sans-serif';
+    lctx.fillText(`Tick ${loopTick}`, cx, cy+10);
+
+    LOOP_PHASES.forEach((ph,i)=>{
+        const angle=(i/LOOP_PHASES.length)*Math.PI*2 - Math.PI/2;
+        const nx=cx+R*Math.cos(angle), ny=cy+R*Math.sin(angle);
+        const isActive = (i === loopPhase % LOOP_PHASES.length);
+
+        // spoke
+        lctx.beginPath(); lctx.moveTo(cx,cy); lctx.lineTo(nx,ny);
+        lctx.strokeStyle = isActive ? ph.color : '#30363d';
+        lctx.lineWidth = isActive ? 2.5 : 1; lctx.stroke();
+
+        // node
+        lctx.beginPath(); lctx.arc(nx,ny,isActive?28:23,0,Math.PI*2);
+        lctx.fillStyle = isActive ? ph.color+'25' : '#21262d'; lctx.fill();
+        lctx.strokeStyle = isActive ? ph.color : '#30363d';
+        lctx.lineWidth = isActive ? 2.5 : 1; lctx.stroke();
+
+        // text
+        lctx.fillStyle = isActive ? ph.color : '#8b949e';
+        lctx.font = `${isActive?'bold ':''}9.5px sans-serif`;
+        lctx.textAlign='center';
+        const words = ph.name.split('(');
+        if(words.length>1){
+            lctx.fillText(words[0], nx, ny-4);
+            lctx.fillText('('+words[1], nx, ny+8);
+        } else {
+            const parts = ph.name.split(' ');
+            const half = Math.ceil(parts.length/2);
+            lctx.fillText(parts.slice(0,half).join(' '), nx, ny-4);
+            lctx.fillText(parts.slice(half).join(' '), nx, ny+8);
+        }
+    });
+
+    // bottom description
+    if(loopRunning){
+        const cur=LOOP_PHASES[loopPhase % LOOP_PHASES.length];
+        lctx.fillStyle=cur.color; lctx.font='bold 12px sans-serif'; lctx.textAlign='center';
+        lctx.fillText('▶ '+cur.name, cx, H-28);
+        lctx.fillStyle='#8b949e'; lctx.font='11px sans-serif';
+        lctx.fillText(cur.desc, cx, H-12);
+    }
+}
+
+function loopLog(msg, cls='lb'){
+    const b=document.getElementById('loopLog');
+    const t=new Date().toLocaleTimeString('zh',{hour12:false});
+    b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`;
+    b.scrollTop=b.scrollHeight;
+}
+
+function loopTick_run(){
+    if(!loopRunning) return;
+    const ph=LOOP_PHASES[loopPhase % LOOP_PHASES.length];
+    if(loopPhase % LOOP_PHASES.length === 0){ loopTick++; loopLog(`━━ Tick #${loopTick} 开始 ━━`,'ly'); }
+    loopLog(`  → ${ph.name}：${ph.desc}`, loopPhase%2===0?'lg':'lc');
+    document.getElementById('loopTickLabel').textContent=`Tick: ${loopTick} | Phase: ${ph.name}`;
+    drawLoop(); loopPhase++;
+    loopTimer=setTimeout(loopTick_run, 850);
+}
+function loopStart(){ if(loopRunning)return; loopRunning=true; loopLog('aeMain() 启动','lr'); loopTick_run(); }
+function loopPause(){ loopRunning=false; clearTimeout(loopTimer); loopLog('⏸ 暂停','ly'); }
+function loopStep(){ loopRunning=false; clearTimeout(loopTimer);
+    const ph=LOOP_PHASES[loopPhase%LOOP_PHASES.length];
+    if(loopPhase%LOOP_PHASES.length===0){ loopTick++; loopLog(`━━ Tick #${loopTick} 开始 ━━`,'ly'); }
+    loopLog(`  → ${ph.name}：${ph.desc}`,'lc');
+    document.getElementById('loopTickLabel').textContent=`Tick: ${loopTick} | Phase: ${ph.name}`;
+    drawLoop(); loopPhase++;
+}
+function loopReset(){ loopRunning=false; clearTimeout(loopTimer); loopTick=0; loopPhase=0;
+    document.getElementById('loopLog').innerHTML='';
+    document.getElementById('loopTickLabel').textContent='Tick: 0 | Phase: —';
+    drawLoop();
+}
+drawLoop();
+window.addEventListener('resize',()=>{ resizeLC(); drawLoop(); });
+
+// ============================================================
+// SECTION 4: FSM
+// ============================================================
+const FSM_STEPS = [
+    { id:'fsm0', name:'server 监听 fd', desc:'Redis 启动时 aeCreateFileEvent(fd, AE_READABLE, acceptHandler)', cls:'lr' },
+    { id:'fsm1', name:'accept 新连接', desc:'acceptHandler 调用 accept()，得到新 clientfd=12', cls:'lc' },
+    { id:'fsm2', name:'注册 READABLE', desc:'aeCreateFileEvent(clientfd, AE_READABLE, readQueryFromClient)', cls:'lb' },
+    { id:'fsm3', name:'读取命令', desc:'epoll 通知 fd=12 可读，调用 readQueryFromClient()，解析 RESP 协议', cls:'lg' },
+    { id:'fsm4', name:'执行命令', desc:'processCommand() → SET mykey "hello" → 写入内存 dict', cls:'ly' },
+    { id:'fsm5', name:'注册 WRITABLE', desc:'addReply() 将 +OK\\r\\n 写入缓冲区，aeCreateFileEvent(fd, AE_WRITABLE, sendReplyToClient)', cls:'lp' },
+    { id:'fsm6', name:'回包完成', desc:'sendReplyToClient() 发送完毕，aeDeleteFileEvent(fd, AE_WRITABLE)，等待下一命令 ✅', cls:'lg' },
+];
+let fsmTimer=null, fsmStep=0, fsmRunning=false;
+
+function fsmLog(msg,cls='lb'){
+    const b=document.getElementById('fsmLog');
+    const t=new Date().toLocaleTimeString('zh',{hour12:false});
+    b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`;
+    b.scrollTop=b.scrollHeight;
+}
+async function fsmRun(){
+    fsmReset(); fsmRunning=true;
+    const delay=ms=>new Promise(r=>{ fsmTimer=setTimeout(r,ms); });
+    for(let i=0;i<FSM_STEPS.length;i++){
+        if(!fsmRunning) break;
+        // clear prev
+        if(i>0) document.getElementById(FSM_STEPS[i-1].id).className='state-box done';
+        const s=FSM_STEPS[i];
+        document.getElementById(s.id).className='state-box lit';
+        document.getElementById('fsmDesc').textContent=`步骤 ${i+1}: ${s.desc}`;
+        fsmLog(`[${s.name}] ${s.desc}`, s.cls);
+        await delay(900);
+    }
+    document.getElementById('fsmDesc').textContent='✅ 请求处理完成！等待下一个命令...';
+}
+function fsmReset(){
+    fsmRunning=false; clearTimeout(fsmTimer);
+    FSM_STEPS.forEach(s=>{ document.getElementById(s.id).className='state-box'; });
+    document.getElementById('fsmDesc').textContent='点击「模拟新客户端请求」开始演示';
+    document.getElementById('fsmLog').innerHTML='';
+}
+
+// ============================================================
+// SECTION 5: 时间事件
+// ============================================================
+const TE_EVENTS = [
+    { id:'te-0', name:'serverCron', interval:100, color:'#ff6b6b', desc:'过期清理/持久化检查/复制心跳' },
+    { id:'te-1', name:'activeExpireCycle', interval:250, color:'#e3b341', desc:'主动淘汰过期 Key（懒删除补充）' },
+    { id:'te-2', name:'replicationCron', interval:1000, color:'#3fb950', desc:'主从复制 PING/REPLCONF 心跳' },
+    { id:'te-3', name:'clusterCron', interval:100, color:'#58a6ff', desc:'Cluster 节点健康检查（仅集群模式）' },
+];
+let teTimers={}, teElapsed=0, teRunning=false, teRafId=null, teLastTs=null;
+let teCounters = {};
+
+function buildTeList(){
+    const el=document.getElementById('teList');
+    el.innerHTML='';
+    TE_EVENTS.forEach(ev=>{
+        teCounters[ev.id]=ev.interval;
+        el.innerHTML+=`
+        <div class="te-item" id="${ev.id}">
+            <span class="te-id">#${ev.id.split('-')[1]}</span>
+            <span class="te-name">${ev.name}</span>
+            <span class="te-interval">每 ${ev.interval}ms</span>
+            <div class="te-bar-wrap"><div class="te-bar" id="bar-${ev.id}" style="width:100%;background:${ev.color}44;border:1px solid ${ev.color}60"></div></div>
+            <span class="te-countdown" id="cd-${ev.id}">${ev.interval}ms</span>
+        </div>`;
+    });
+}
+buildTeList();
+
+function teLog(msg,cls='lb'){
+    const b=document.getElementById('teLog');
+    const t=new Date().toLocaleTimeString('zh',{hour12:false});
+    b.innerHTML+=`<div class="ll"><span class="lt">${t}</span><span class="${cls}">${msg}</span></div>`;
+    b.scrollTop=b.scrollHeight;
+}
+
+function teTick(ts){
+    if(!teRunning) return;
+    if(teLastTs===null) teLastTs=ts;
+    const delta=Math.min(ts-teLastTs, 50); // cap at 50ms per frame for sim
+    teLastTs=ts;
+    const SIM_SPEED=5; // 1ms real = 5ms sim
+    const simDelta=delta*SIM_SPEED;
+    teElapsed+=simDelta;
+    document.getElementById('teSimTime').textContent=`模拟时间: ${Math.round(teElapsed)}ms`;
+
+    TE_EVENTS.forEach(ev=>{
+        teCounters[ev.id]-=simDelta;
+        const el=document.getElementById(ev.id);
+        const bar=document.getElementById(`bar-${ev.id}`);
+        const cd=document.getElementById(`cd-${ev.id}`);
+        if(teCounters[ev.id]<=0){
+            teCounters[ev.id]=ev.interval;
+            el.classList.add('fire');
+            teLog(`⚡ FIRE → ${ev.name}() 执行！（${ev.desc}）`, ev.id==='te-0'?'lr':ev.id==='te-2'?'lg':'ly');
+            setTimeout(()=>el.classList.remove('fire'),400);
+        }
+        const pct=Math.max(0,(teCounters[ev.id]/ev.interval)*100);
+        bar.style.width=pct+'%';
+        cd.textContent=Math.max(0,Math.round(teCounters[ev.id]))+'ms';
+    });
+    teRafId=requestAnimationFrame(teTick);
+}
+function teStart(){ if(teRunning)return; teRunning=true; teLastTs=null; teRafId=requestAnimationFrame(teTick); }
+function teStop(){ teRunning=false; cancelAnimationFrame(teRafId); }
+function teReset(){ teStop(); teElapsed=0; teLastTs=null; document.getElementById('teSimTime').textContent='模拟时间: 0ms'; document.getElementById('teLog').innerHTML=''; buildTeList(); }
+
+// ============================================================
+// SECTION 6: platform tabs
+// ============================================================
+function showPlatform(name){
+    document.querySelectorAll('.ptab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.platform-panel').forEach(p=>p.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('panel-'+name).classList.add('active');
+}
+
+// ============================================================
+// SECTION 7: step-by-step
+// ============================================================
+let stepIdx=0, stepTimer=null;
+const stepItems=document.querySelectorAll('.step-item');
+function stepStart(){
+    stepReset();
+    function next(){
+        if(stepIdx>=stepItems.length){ document.getElementById('stepStatus').textContent='✅ 一个 Tick 完成！'; return; }
+        stepItems[stepIdx].classList.add('on');
+        document.getElementById('stepBar').style.width=`${((stepIdx+1)/stepItems.length)*100}%`;
+        document.getElementById('stepStatus').textContent=`步骤 ${stepIdx+1} / ${stepItems.length}`;
+        stepIdx++;
+        stepTimer=setTimeout(next, 650);
+    }
+    next();
+}
+function stepReset(){
+    clearTimeout(stepTimer); stepIdx=0;
+    stepItems.forEach(s=>s.classList.remove('on'));
+    document.getElementById('stepBar').style.width='0%';
+    document.getElementById('stepStatus').textContent='';
+}
+
+// ============================================================
+// SECTION 8: Quiz
+// ============================================================
+const Q_EXPLAIN = {
+    q1: '✅ 正确！events[] 以 fd 为下标，aeCreateFileEvent 时直接 events[fd] = {...}，O(1) 存取，非常高效。',
+    q2: '✅ 正确！ae 遍历时间事件链表，找到最近触发时间，计算出 epoll_wait 的 timeout，这样既不会错过定时任务，又能充分利用等待时间。',
+    q3: '✅ 正确！返回 AE_NOMORE(-1) 表示一次性事件，ae 会把该时间事件从链表中删除并释放内存。',
+    q4: '✅ 正确！AE_BARRIER 让 ae 先处理写事件、再处理读事件。Redis 在 AOF fsync 时用它保证持久化写入发生在回包之前。',
+};
+const Q_WRONG = {
+    q1: '❌ 错误。events[] 以 fd 编号为下标，不是事件 ID。',
+    q2: '❌ 错误。timeout 由最近时间事件决定，不是固定值，也不是永久阻塞。',
+    q3: '❌ 错误。-1（AE_NOMORE）是一次性事件的信号，表示执行完后删除该事件。',
+    q4: '❌ 错误。AE_BARRIER 是控制同一 fd 的读写顺序（先写后读），与连接数量无关。',
+};
+const answered={};
+function answer(el, qid, correct){
+    if(answered[qid]) return;
+    answered[qid]=true;
+    el.classList.add(correct?'correct':'wrong');
+    document.getElementById('fb-'+qid).textContent = correct ? Q_EXPLAIN[qid] : Q_WRONG[qid];
+    document.getElementById('fb-'+qid).style.color = correct ? 'var(--green)' : 'var(--red)';
+}
+</script>
+</body>
+</html>

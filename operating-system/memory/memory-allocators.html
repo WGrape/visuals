@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内存分配器深度解析：ptmalloc · tcmalloc · jemalloc</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --text3: #6e7681;
+  --ptm: #f97316;
+  --ptm-dim: rgba(249,115,22,0.15);
+  --ptm-border: rgba(249,115,22,0.35);
+  --tcm: #a855f7;
+  --tcm-dim: rgba(168,85,247,0.15);
+  --tcm-border: rgba(168,85,247,0.35);
+  --jem: #22d3ee;
+  --jem-dim: rgba(34,211,238,0.15);
+  --jem-border: rgba(34,211,238,0.35);
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.8;
+}
+
+/* ── HERO ── */
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 72px 24px 60px;
+  text-align: center;
+  background: linear-gradient(160deg,#0d1117 0%,#161b22 60%,#0d1117 100%);
+}
+.hero-glow {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 50%, rgba(249,115,22,.12) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 50% 50%, rgba(168,85,247,.10) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 50%, rgba(34,211,238,.12) 0%, transparent 60%);
+  animation: glow-pulse 8s ease-in-out infinite alternate;
+}
+@keyframes glow-pulse { from{opacity:.6} to{opacity:1} }
+.hero h1 {
+  position: relative; z-index:1;
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -.02em;
+  line-height: 1.2;
+}
+.hero h1 span.pt { color: var(--ptm); }
+.hero h1 span.tc { color: var(--tcm); }
+.hero h1 span.je { color: var(--jem); }
+.hero .sub {
+  position: relative; z-index:1;
+  color: var(--text2);
+  margin-top: 14px;
+  font-size: 1.05rem;
+}
+.hero .badges {
+  position: relative; z-index:1;
+  display: flex; gap:10px; justify-content:center; flex-wrap:wrap;
+  margin-top: 28px;
+}
+.badge {
+  padding: 5px 15px; border-radius:20px; font-size:.82rem; font-weight:600;
+}
+.badge.pt { background:var(--ptm-dim); color:var(--ptm); border:1px solid var(--ptm-border); }
+.badge.tc { background:var(--tcm-dim); color:var(--tcm); border:1px solid var(--tcm-border); }
+.badge.je { background:var(--jem-dim); color:var(--jem); border:1px solid var(--jem-border); }
+
+/* ── NAV TOC ── */
+.toc {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(13,17,23,.9);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  overflow-x: auto;
+}
+.toc ul {
+  list-style: none;
+  display: flex; gap: 0;
+  max-width: 1100px; margin: 0 auto;
+}
+.toc ul li a {
+  display: block;
+  padding: 14px 16px;
+  color: var(--text2);
+  text-decoration: none;
+  font-size: .88rem;
+  font-weight: 500;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color .2s, border-color .2s;
+}
+.toc ul li a:hover { color: var(--text); border-bottom-color: var(--border); }
+
+/* ── LAYOUT ── */
+.wrap {
+  max-width: 1100px; margin: 0 auto; padding: 0 24px 80px;
+}
+section { margin-top: 60px; }
+.sec-title {
+  font-size: 1.55rem; font-weight: 700;
+  margin-bottom: 28px;
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.sec-title .icon { font-size: 1.4rem; }
+
+/* ── CARDS ── */
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 32px;
+}
+.card + .card { margin-top: 16px; }
+.grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap:18px; }
+.grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap:18px; }
+@media(max-width:780px){ .grid3{ grid-template-columns:1fr; } .grid2{ grid-template-columns:1fr; } }
+
+.card.pt-card { border-left: 3px solid var(--ptm); }
+.card.tc-card { border-left: 3px solid var(--tcm); }
+.card.je-card { border-left: 3px solid var(--jem); }
+
+.card-title {
+  font-size: 1.1rem; font-weight: 700;
+  margin-bottom: 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.dot.pt { background: var(--ptm); }
+.dot.tc { background: var(--tcm); }
+.dot.je { background: var(--jem); }
+
+.tag {
+  display: inline-block; padding: 2px 10px; border-radius: 12px;
+  font-size:.78rem; font-weight:600; margin: 2px 2px;
+}
+.tag.pt { background:var(--ptm-dim); color:var(--ptm); }
+.tag.tc { background:var(--tcm-dim); color:var(--tcm); }
+.tag.je { background:var(--jem-dim); color:var(--jem); }
+.tag.g  { background:rgba(63,185,80,.15); color:var(--green); }
+.tag.y  { background:rgba(210,153,34,.15); color:var(--yellow); }
+.tag.r  { background:rgba(248,81,73,.15); color:var(--red); }
+
+p { color:var(--text2); font-size:.93rem; margin-top:8px; }
+ul.points { list-style:none; margin-top:10px; }
+ul.points li {
+  color: var(--text2); font-size:.9rem;
+  padding: 4px 0 4px 18px;
+  position: relative;
+}
+ul.points li::before {
+  content:"›"; position:absolute; left:0;
+  color: var(--text3); font-weight:700;
+}
+
+/* ── ARCHITECTURE DIAGRAM ── */
+.arch-diagram {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  font-size: .82rem;
+  overflow-x: auto;
+}
+.arch-diagram .arch-title {
+  text-align:center; font-weight:700; margin-bottom:20px; font-size:1rem;
+}
+
+/* ptmalloc diagram */
+.pt-arch { display:flex; flex-direction:column; align-items:center; gap:0; min-width:380px; }
+.pt-arch .layer { width:100%; max-width:520px; }
+.pt-arch .box {
+  border-radius:8px; padding:10px 16px; text-align:center; font-weight:600;
+  margin:0 auto; position:relative;
+}
+.pt-arch .arrow {
+  text-align:center; color:var(--text3); font-size:1.2rem; line-height:1.4; margin:2px 0;
+}
+.pt-main-arena { background:rgba(249,115,22,.2); border:1px solid var(--ptm-border); color:var(--ptm); }
+.pt-sub-arena  { background:rgba(249,115,22,.08); border:1px dashed var(--ptm-border); color:var(--ptm); }
+.pt-heap-row { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:6px 0; }
+.pt-heap {
+  background:rgba(249,115,22,.05); border:1px solid rgba(249,115,22,.2);
+  border-radius:6px; padding:8px 14px; color:#fdba74; font-size:.8rem;
+}
+.pt-bin-row { display:flex; gap:6px; justify-content:center; flex-wrap:wrap; margin:6px 0; }
+.pt-bin {
+  background:rgba(249,115,22,.08); border:1px solid rgba(249,115,22,.2);
+  border-radius:6px; padding:6px 10px; color:#fdba74; font-size:.76rem; text-align:center;
+}
+
+/* tcmalloc diagram */
+.tc-arch { display:flex; gap:18px; min-width:480px; }
+.tc-col { flex:1; }
+.tc-box {
+  border-radius:8px; padding:10px 14px; text-align:center; font-weight:600;
+  margin-bottom:8px;
+}
+.tc-thread { background:rgba(168,85,247,.2); border:1px solid var(--tcm-border); color:var(--tcm); }
+.tc-cache  { background:rgba(168,85,247,.1); border:1px dashed var(--tcm-border); color:#c4b5fd; font-size:.8rem; }
+.tc-central{ background:rgba(168,85,247,.18); border:1px solid var(--tcm-border); color:var(--tcm); }
+.tc-span   { background:rgba(168,85,247,.06); border:1px solid rgba(168,85,247,.2); color:#c4b5fd; font-size:.8rem; border-radius:6px; padding:6px 10px; margin:4px 2px; display:inline-block; }
+.tc-page   { background:rgba(168,85,247,.15); border:1px solid var(--tcm-border); color:var(--tcm); }
+
+/* jemalloc diagram */
+.je-arch { display:flex; gap:18px; flex-wrap:wrap; min-width:480px; }
+.je-arena-block {
+  flex:1; min-width:200px;
+  background:rgba(34,211,238,.06); border:1px solid var(--jem-border);
+  border-radius:10px; padding:14px;
+}
+.je-arena-title { color:var(--jem); font-weight:700; text-align:center; margin-bottom:10px; }
+.je-chunk-row { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
+.je-chunk {
+  background:rgba(34,211,238,.1); border:1px solid rgba(34,211,238,.25);
+  border-radius:6px; padding:6px 10px; color:#67e8f9; font-size:.78rem;
+}
+.je-run { background:rgba(34,211,238,.05); border:1px dashed rgba(34,211,238,.2); border-radius:5px; padding:4px 8px; color:#a5f3fc; font-size:.74rem; margin-top:4px; }
+.je-tcache {
+  background:rgba(34,211,238,.12); border:1px solid var(--jem-border);
+  border-radius:8px; padding:10px 14px; text-align:center; color:var(--jem);
+  font-weight:600; margin-bottom:8px;
+}
+
+/* ── FLOW PROCESS ── */
+.flow {
+  display:flex; flex-direction:column; gap:0; position:relative;
+}
+.flow-step {
+  display:flex; gap:16px; align-items:flex-start;
+}
+.flow-step + .flow-step { margin-top:0; }
+.flow-left {
+  display:flex; flex-direction:column; align-items:center; gap:0; flex-shrink:0;
+}
+.flow-num {
+  width:36px; height:36px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-weight:700; font-size:.9rem; flex-shrink:0;
+}
+.flow-num.pt { background:var(--ptm-dim); color:var(--ptm); border:1px solid var(--ptm-border); }
+.flow-num.tc { background:var(--tcm-dim); color:var(--tcm); border:1px solid var(--tcm-border); }
+.flow-num.je { background:var(--jem-dim); color:var(--jem); border:1px solid var(--jem-border); }
+.flow-line {
+  width:2px; flex:1; min-height:24px;
+  background: linear-gradient(to bottom, var(--border), transparent);
+  margin-top:4px;
+}
+.flow-line.pt { background: linear-gradient(to bottom,rgba(249,115,22,.4),transparent); }
+.flow-line.tc { background: linear-gradient(to bottom,rgba(168,85,247,.4),transparent); }
+.flow-line.je { background: linear-gradient(to bottom,rgba(34,211,238,.4),transparent); }
+.flow-content {
+  flex:1; padding-bottom:20px;
+}
+.flow-content .title {
+  font-size:.95rem; font-weight:700; margin-bottom:4px; margin-top:7px;
+}
+.flow-content .desc { color:var(--text2); font-size:.86rem; line-height:1.7; }
+.flow-content .code-inline {
+  background:var(--bg3); border:1px solid var(--border);
+  border-radius:4px; padding:2px 8px;
+  font-family:"SFMono-Regular",Consolas,monospace; font-size:.82rem;
+  color:#e2e8f0; margin:0 2px;
+}
+
+/* ── COMPARE TABLE ── */
+.cmp-table { width:100%; border-collapse:collapse; font-size:.88rem; }
+.cmp-table th { padding:12px 16px; text-align:left; border-bottom:2px solid var(--border); color:var(--text2); font-weight:600; white-space:nowrap; }
+.cmp-table td { padding:12px 16px; border-bottom:1px solid var(--border); color:var(--text2); vertical-align:top; }
+.cmp-table tr:last-child td { border-bottom:none; }
+.cmp-table .row-label { color:var(--text); font-weight:600; font-size:.85rem; white-space:nowrap; }
+.cmp-table .pt-col { color:#fbd38d; }
+.cmp-table .tc-col { color:#d8b4fe; }
+.cmp-table .je-col { color:#a5f3fc; }
+.cmp-table tr:hover td { background:rgba(255,255,255,.02); }
+.cmp-table thead th:nth-child(2) { color:var(--ptm); }
+.cmp-table thead th:nth-child(3) { color:var(--tcm); }
+.cmp-table thead th:nth-child(4) { color:var(--jem); }
+
+/* ── PERF BARS ── */
+.perf-row { display:flex; align-items:center; gap:12px; margin:8px 0; }
+.perf-label { width:160px; font-size:.85rem; color:var(--text2); flex-shrink:0; }
+.perf-bars { flex:1; display:flex; flex-direction:column; gap:6px; }
+.bar-item { display:flex; align-items:center; gap:8px; }
+.bar-name { width:80px; font-size:.8rem; flex-shrink:0; }
+.bar-name.pt { color:var(--ptm); }
+.bar-name.tc { color:var(--tcm); }
+.bar-name.je { color:var(--jem); }
+.bar-track { flex:1; background:var(--bg3); border-radius:4px; height:10px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:4px; transition: width 1s ease; }
+.bar-fill.pt { background: linear-gradient(90deg,var(--ptm),#fb923c); }
+.bar-fill.tc { background: linear-gradient(90deg,var(--tcm),#c084fc); }
+.bar-fill.je { background: linear-gradient(90deg,var(--jem),#67e8f9); }
+.bar-val { font-size:.78rem; color:var(--text3); width:28px; text-align:right; flex-shrink:0; }
+
+/* ── LOCK MODEL ── */
+.lock-diagram {
+  display:flex; gap:12px; flex-wrap:wrap; justify-content:center;
+  padding: 24px; background:var(--bg3); border-radius:12px; border:1px solid var(--border);
+}
+.lock-thread {
+  border-radius:10px; padding:14px 16px; text-align:center;
+  font-size:.82rem; font-weight:600; flex:1; min-width:120px;
+}
+.lock-thread.pt {
+  background:var(--ptm-dim); border:1px solid var(--ptm-border); color:var(--ptm);
+}
+.lock-thread.tc {
+  background:var(--tcm-dim); border:1px solid var(--tcm-border); color:var(--tcm);
+}
+.lock-thread.je {
+  background:var(--jem-dim); border:1px solid var(--jem-border); color:var(--jem);
+}
+.lock-arrow { display:flex; align-items:center; color:var(--text3); font-size:1.5rem; }
+.lock-shared {
+  border-radius:10px; padding:14px 18px; text-align:center; font-size:.85rem;
+  background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.3); color:#fca5a5;
+  font-weight:600;
+}
+.lock-own {
+  border-radius:10px; padding:14px 18px; text-align:center; font-size:.85rem;
+  background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.3); color:#86efac;
+  font-weight:600;
+}
+
+/* ── HIGHLIGHT BOX ── */
+.hl-box {
+  border-radius:10px; padding:18px 22px; margin:16px 0;
+  font-size:.9rem; line-height:1.7;
+}
+.hl-box.tip  { background:rgba(34,211,238,.06); border:1px solid rgba(34,211,238,.2); color:#a5f3fc; }
+.hl-box.warn { background:rgba(210,153,34,.06); border:1px solid rgba(210,153,34,.2); color:#fde68a; }
+.hl-box.info { background:rgba(63,185,80,.06); border:1px solid rgba(63,185,80,.2); color:#86efac; }
+.hl-box strong { color:#e6edf3; }
+
+/* ── FOOTER ── */
+footer {
+  text-align:center; padding:32px 24px;
+  color:var(--text3); font-size:.82rem;
+  border-top:1px solid var(--border);
+}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:var(--bg2); }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+h3 { font-size:1.05rem; font-weight:700; margin-top:22px; margin-bottom:10px; color:var(--text); }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ HERO ═══════════ -->
+<div class="hero">
+  <div class="hero-glow"></div>
+  <h1>内存分配器深度解析<br>
+    <span class="pt">ptmalloc</span> &nbsp;·&nbsp;
+    <span class="tc">tcmalloc</span> &nbsp;·&nbsp;
+    <span class="je">jemalloc</span>
+  </h1>
+  <p class="sub">架构原理 · 核心工作流程 · 锁模型 · 性能对比 · 适用场景</p>
+  <div class="badges">
+    <span class="badge pt">🔶 ptmalloc — glibc 默认</span>
+    <span class="badge tc">🟣 tcmalloc — Google / Go</span>
+    <span class="badge je">🔵 jemalloc — Firefox / Redis / FreeBSD</span>
+  </div>
+</div>
+
+<!-- ═══════════ TOC ═══════════ -->
+<nav class="toc">
+  <ul>
+    <li><a href="#overview">📖 概述</a></li>
+    <li><a href="#arch">🏗️ 架构</a></li>
+    <li><a href="#flow">🔄 工作流程</a></li>
+    <li><a href="#lock">🔒 锁模型</a></li>
+    <li><a href="#frag">🧩 碎片管理</a></li>
+    <li><a href="#perf">📊 性能对比</a></li>
+    <li><a href="#compare">⚖️ 全面对比</a></li>
+    <li><a href="#scenario">🎯 使用场景</a></li>
+  </ul>
+</nav>
+
+<div class="wrap">
+
+<!-- ═══════════ 1. 概述 ═══════════ -->
+<section id="overview">
+  <div class="sec-title"><span class="icon">📖</span> 三大分配器概述</div>
+  <div class="grid3">
+    <div class="card pt-card">
+      <div class="card-title"><span class="dot pt"></span>ptmalloc2</div>
+      <span class="tag pt">glibc 内置</span>
+      <span class="tag y">1996 → 至今</span>
+      <p>Linux 系统默认内存分配器，是 dlmalloc 的多线程演进版本。以 <strong>Arena（竞技场）</strong> 为核心隔离单元，每个线程优先绑定到一个 Arena，通过 mutex 保护 Arena 内的所有操作。</p>
+      <ul class="points" style="margin-top:12px">
+        <li>作者：Wolfram Gloger 改进自 Doug Lea</li>
+        <li>核心结构：Arena → Heap → Chunk</li>
+        <li>最大问题：Arena 数固定，锁竞争激烈</li>
+        <li>内存不跨 Arena 归还，碎片化严重</li>
+      </ul>
+    </div>
+    <div class="card tc-card">
+      <div class="card-title"><span class="dot tc"></span>tcmalloc</div>
+      <span class="tag tc">Google 出品</span>
+      <span class="tag g">Go runtime 使用</span>
+      <p>Thread-Caching Malloc，Google 为解决高并发场景下的锁争用问题而设计。核心思路：<strong>每个线程拥有私有缓存</strong>，绝大多数分配/释放无需加锁，仅在缓存补充/归还时访问中央堆。</p>
+      <ul class="points" style="margin-top:12px">
+        <li>作者：Sanjay Ghemawat（Google）</li>
+        <li>核心结构：ThreadCache → CentralCache → PageHeap</li>
+        <li>小对象（≤256KB）完全无锁操作</li>
+        <li>Go 语言运行时基于其思想深度定制</li>
+      </ul>
+    </div>
+    <div class="card je-card">
+      <div class="card-title"><span class="dot je"></span>jemalloc</div>
+      <span class="tag je">Jason Evans</span>
+      <span class="tag g">Redis / Firefox</span>
+      <p>Jason Evans 为 FreeBSD 设计，后被 Facebook/Meta 大规模优化。以 <strong>多 Arena + 精细 Size Class + 线程缓存</strong> 三层结构为特征，在降低碎片率与高并发间取得最佳平衡。</p>
+      <ul class="points" style="margin-top:12px">
+        <li>作者：Jason Evans（2006，FreeBSD）</li>
+        <li>核心结构：tcache → Arena → Chunk → Run</li>
+        <li>Size Class 极细，碎片率业界最低</li>
+        <li>内置详尽的统计与监控接口</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 2. 架构 ═══════════ -->
+<section id="arch">
+  <div class="sec-title"><span class="icon">🏗️</span> 内存架构图</div>
+
+  <!-- ptmalloc -->
+  <div class="card" style="margin-bottom:18px;">
+    <div class="card-title"><span class="dot pt"></span>ptmalloc2 — Arena 架构</div>
+    <div class="arch-diagram">
+      <div class="arch-title" style="color:var(--ptm)">ptmalloc2 内存布局</div>
+      <div class="pt-arch">
+        <!-- 进程层 -->
+        <div class="layer">
+          <div class="box pt-main-arena" style="margin-bottom:6px">
+            🏟️ Main Arena（主竞技场）— 唯一可直接扩展 brk/mmap
+          </div>
+        </div>
+        <div class="pt-arch" style="width:100%">
+          <div style="display:flex;gap:6px;justify-content:center;width:100%;flex-wrap:wrap;margin:4px 0">
+            <div style="flex:1;min-width:120px;text-align:center">
+              <div class="box pt-sub-arena" style="font-size:.8rem;padding:8px 10px">Thread Arena 1<br><small style="color:var(--text3);font-weight:400">mutex 独立</small></div>
+            </div>
+            <div style="flex:1;min-width:120px;text-align:center">
+              <div class="box pt-sub-arena" style="font-size:.8rem;padding:8px 10px">Thread Arena 2<br><small style="color:var(--text3);font-weight:400">mutex 独立</small></div>
+            </div>
+            <div style="flex:1;min-width:80px;text-align:center">
+              <div class="box pt-sub-arena" style="font-size:.8rem;padding:8px 10px;color:var(--text3)">…<br><small>上限 8×CPU核</small></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="arrow pt-main-arena" style="background:transparent;border:none;color:var(--text3);font-size:.9rem;margin:6px 0">▼ 每个 Arena 内部</div>
+
+        <div class="layer" style="max-width:100%">
+          <div class="pt-heap-row">
+            <div class="pt-heap">📦 Heap 1<br><small style="color:var(--text3)">连续内存块</small></div>
+            <div class="pt-heap">📦 Heap 2<br><small style="color:var(--text3)">mmap 映射</small></div>
+            <div class="pt-heap">📦 Heap n<br><small style="color:var(--text3)">...</small></div>
+          </div>
+        </div>
+
+        <div class="arrow" style="color:var(--text3);font-size:.9rem;margin:6px 0">▼ Chunk 分类管理</div>
+
+        <div class="layer" style="max-width:100%">
+          <div class="pt-bin-row">
+            <div class="pt-bin">fast bins<br><small>16~80B<br>单链表 LIFO</small></div>
+            <div class="pt-bin">small bins<br><small>≤504B<br>双向循环链表</small></div>
+            <div class="pt-bin">large bins<br><small>≥512B<br>按大小有序链表</small></div>
+            <div class="pt-bin">unsorted bin<br><small>free 时临时<br>待分类</small></div>
+            <div class="pt-bin">top chunk<br><small>堆顶剩余<br>最后使用</small></div>
+          </div>
+        </div>
+
+        <div class="hl-box warn" style="width:100%;margin-top:16px">
+          <strong>⚠️ 关键缺陷：</strong>Arena 数量上限 = 8 × CPU 核数，超出后线程需<strong>排队等待</strong>空闲 Arena，造成锁竞争瓶颈。且不同 Arena 的内存<strong>无法跨 Arena 归还</strong>，极易导致内存碎片累积。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- tcmalloc -->
+  <div class="card" style="margin-bottom:18px;">
+    <div class="card-title"><span class="dot tc"></span>tcmalloc — 三层缓存架构</div>
+    <div class="arch-diagram">
+      <div class="arch-title" style="color:var(--tcm)">tcmalloc 三层结构（Thread → Central → Page）</div>
+      <div class="tc-arch">
+        <!-- 左：线程缓存 -->
+        <div class="tc-col">
+          <div class="tc-box tc-thread">🧵 Thread Local Cache<br><small style="font-weight:400;color:#ddd6fe">每线程私有，无锁</small></div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin:6px 0">
+            <div class="tc-cache">size 8B</div>
+            <div class="tc-cache">size 16B</div>
+            <div class="tc-cache">size 32B</div>
+            <div class="tc-cache">…</div>
+            <div class="tc-cache">size 256KB</div>
+          </div>
+          <div style="text-align:center;color:var(--text3);font-size:.8rem;margin-top:4px">86 个 size class 的 FreeList</div>
+        </div>
+        <!-- 中：箭头 -->
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:20px 0">
+          <div style="color:var(--tcm);font-size:.78rem;text-align:center">缓存不足时<br>从 Central 取</div>
+          <div style="color:var(--tcm);font-size:1.4rem">⇄</div>
+          <div style="color:var(--text3);font-size:.78rem;text-align:center">缓存过多时<br>归还 Central</div>
+        </div>
+        <!-- 右上：中央缓存 + Page Heap -->
+        <div class="tc-col">
+          <div class="tc-box tc-central">🏛️ Central Cache<br><small style="font-weight:400;color:#ddd6fe">细粒度 spinlock</small></div>
+          <div style="text-align:center;margin:6px 0">
+            <span class="tc-span">Span（页集合）</span>
+            <span class="tc-span">Span</span>
+            <span class="tc-span">…</span>
+          </div>
+          <div style="text-align:center;color:var(--text3);font-size:.78rem;margin-bottom:10px">Transfer Batch 批量转移</div>
+          <div class="tc-box tc-page">📄 Page Heap<br><small style="font-weight:400;color:#ddd6fe">全局唯一，Mutex 保护</small></div>
+          <div style="text-align:center;margin:6px 0">
+            <span class="tc-span">128 个 Span List<br>(按页数)</span>
+          </div>
+          <div style="text-align:center;color:var(--text3);font-size:.78rem">大对象（&gt;256KB）直接在此分配</div>
+        </div>
+      </div>
+      <div class="hl-box tip" style="margin-top:16px">
+        <strong>💡 设计亮点：</strong>小对象分配完全在 ThreadCache 内完成，<strong>零锁竞争</strong>。对象大小按 2 的幂次对齐，最多浪费 12.5% 空间但换来极高速度。
+      </div>
+    </div>
+  </div>
+
+  <!-- jemalloc -->
+  <div class="card">
+    <div class="card-title"><span class="dot je"></span>jemalloc — Arena + Chunk + Run 三层</div>
+    <div class="arch-diagram">
+      <div class="arch-title" style="color:var(--jem)">jemalloc 内存架构（tcache → Arena → Chunk → Run）</div>
+
+      <!-- tcache row -->
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:12px">
+        <div class="je-tcache">🗂 tcache (Thread)<br><small style="font-weight:400;color:#a5f3fc">每线程，无锁</small></div>
+        <div class="je-tcache">🗂 tcache (Thread)<br><small style="font-weight:400;color:#a5f3fc">每线程，无锁</small></div>
+        <div style="display:flex;align-items:center;color:var(--text3)">…</div>
+      </div>
+
+      <div style="text-align:center;color:var(--text3);margin-bottom:10px;font-size:.85rem">▼ tcache miss → 访问 Arena</div>
+
+      <!-- arena row -->
+      <div class="je-arch">
+        <div class="je-arena-block">
+          <div class="je-arena-title">🏟 Arena 0</div>
+          <div style="font-size:.78rem;color:var(--text3);text-align:center;margin-bottom:8px">绑定 CPU 核，细粒度 mutex</div>
+          <div class="je-chunk-row">
+            <div class="je-chunk">
+              Chunk (2MB)<br>
+              <div class="je-run">run (small 8B×N)</div>
+              <div class="je-run">run (small 16B×N)</div>
+              <div class="je-run">run (large 4KB)</div>
+            </div>
+            <div class="je-chunk">
+              Chunk (2MB)<br>
+              <div class="je-run">run ...</div>
+            </div>
+          </div>
+        </div>
+        <div class="je-arena-block">
+          <div class="je-arena-title">🏟 Arena 1</div>
+          <div style="font-size:.78rem;color:var(--text3);text-align:center;margin-bottom:8px">绑定 CPU 核，细粒度 mutex</div>
+          <div class="je-chunk-row">
+            <div class="je-chunk">Chunk (2MB)<br><div class="je-run">run ...</div></div>
+          </div>
+        </div>
+        <div class="je-arena-block" style="min-width:80px;display:flex;align-items:center;justify-content:center">
+          <div style="color:var(--text3);text-align:center">…<br><small>Arena 数 = CPU 核数 × 4</small></div>
+        </div>
+      </div>
+
+      <div style="text-align:center;color:var(--text3);margin:10px 0;font-size:.85rem">▼ 大对象（&gt;1MB）直接 mmap</div>
+      <div style="text-align:center">
+        <span class="je-chunk" style="display:inline-block;background:rgba(34,211,238,.06)">
+          🗺 mmap Large Extent（直接映射）
+        </span>
+      </div>
+
+      <div class="hl-box tip" style="margin-top:16px">
+        <strong>💡 设计亮点：</strong>Size Class 分 <strong>small（8B~14KB，约 48 档）/ large（14KB~1MB）/ huge（>1MB）</strong> 三类，每个 run 只存放同一 size class 的对象，碎片率远低于 ptmalloc。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 3. 工作流程 ═══════════ -->
+<section id="flow">
+  <div class="sec-title"><span class="icon">🔄</span> 核心工作流程（malloc / free）</div>
+
+  <div class="grid3">
+    <!-- ptmalloc flow -->
+    <div class="card pt-card">
+      <div class="card-title"><span class="dot pt"></span>ptmalloc malloc 流程</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">1</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">获取 Arena</div>
+            <div class="desc">线程尝试 <span class="code-inline">trylock</span> 上次用的 Arena；失败则轮询其他 Arena；全满则创建新 Arena（上限 8×cores）或阻塞等待。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">2</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">尝试 fast bins</div>
+            <div class="desc">size ≤ 80B 时，直接从对应 fast bin 的单链表头部取出 chunk，<strong>速度最快</strong>（但不合并相邻空闲块）。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">3</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">查 small/large bins</div>
+            <div class="desc">在 small bins 精确匹配，或在 large bins 找最小满足的 chunk（best-fit）。找到后切割并将剩余放入 unsorted bin。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">4</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">整理 unsorted bin</div>
+            <div class="desc">将 unsorted bin 里的 chunk 分类到 small/large bins，同时检查是否有精确匹配。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">5</div></div>
+          <div class="flow-content">
+            <div class="title">从 top chunk / mmap 分配</div>
+            <div class="desc">切割 top chunk 满足请求；若 top chunk 不足则用 <span class="code-inline">brk()</span> / <span class="code-inline">mmap()</span> 扩展堆。</div>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:20px">ptmalloc free 流程</h3>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">1</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">放入 fast bin（小块）</div>
+            <div class="desc">≤80B 的 chunk 直接挂到 fast bin 链表头，<strong>不合并</strong>邻居。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">2</div><div class="flow-line pt"></div></div>
+          <div class="flow-content">
+            <div class="title">合并邻居</div>
+            <div class="desc">检查前后相邻 chunk 是否空闲，若是则合并（coalesce），放入 unsorted bin。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num pt">3</div></div>
+          <div class="flow-content">
+            <div class="title">归还 OS（可选）</div>
+            <div class="desc">若 top chunk 超过阈值（128KB），调用 <span class="code-inline">sbrk(-n)</span> / <span class="code-inline">munmap()</span> 归还给 OS。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- tcmalloc flow -->
+    <div class="card tc-card">
+      <div class="card-title"><span class="dot tc"></span>tcmalloc malloc 流程</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">1</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">计算 size class</div>
+            <div class="desc">将请求大小向上取整到最近的 size class（共 86 档）。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">2</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">ThreadCache 查找（无锁）</div>
+            <div class="desc">直接访问当前线程 <span class="code-inline">ThreadCache::freelist_[cl]</span>，链表非空则弹出，<strong>全程无锁</strong>，纳秒级。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">3</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">从 CentralCache 批量补充</div>
+            <div class="desc">ThreadCache 空时，向 CentralCache 申请一个 <strong>batch</strong>（批量），减少跨层访问次数。CentralCache 用细粒度 spinlock。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">4</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">从 PageHeap 申请 Span</div>
+            <div class="desc">CentralCache 无可用 Span 时，向 PageHeap 申请 N 页（全局 Mutex）。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">5</div></div>
+          <div class="flow-content">
+            <div class="title">大对象直接 PageHeap</div>
+            <div class="desc">&gt;256KB 的请求跳过 ThreadCache，直接在 PageHeap 查找合适的 Span，或 mmap 新页。</div>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:20px">tcmalloc free 流程</h3>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">1</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">归还 ThreadCache（无锁）</div>
+            <div class="desc">小对象直接放回本线程 freelist，<strong>无需任何锁</strong>。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">2</div><div class="flow-line tc"></div></div>
+          <div class="flow-content">
+            <div class="title">GC 超额缓存</div>
+            <div class="desc">ThreadCache 总占用 &gt; 4MB 时，GC 机制将部分 freelist 归还 CentralCache（soft limit）。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num tc">3</div></div>
+          <div class="flow-content">
+            <div class="title">Span 归还 PageHeap</div>
+            <div class="desc">CentralCache 某 Span 中所有对象都释放后，将该 Span 归还 PageHeap；PageHeap 合并相邻 Span。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- jemalloc flow -->
+    <div class="card je-card">
+      <div class="card-title"><span class="dot je"></span>jemalloc malloc 流程</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">1</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">分类请求大小</div>
+            <div class="desc">
+              small（≤14KB）→ 走 tcache / run；<br>
+              large（14KB~1MB）→ 走 Arena 直接分配；<br>
+              huge（&gt;1MB）→ 直接 mmap。
+            </div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">2</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">查 tcache（无锁）</div>
+            <div class="desc">先查线程私有 tcache 对应 size class 的 bin，命中则直接返回，无需访问 Arena。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">3</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">选择 Arena</div>
+            <div class="desc">tcache miss 时，通过 <span class="code-inline">thread → arena</span> 映射找到绑定的 Arena（按 CPU 核数均匀分布），加细粒度 mutex。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">4</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">在 run 中分配</div>
+            <div class="desc">Arena 找到对应 size class 的当前活跃 run（slab），在其 bitmap 中标记一个空闲 region 为已用。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">5</div></div>
+          <div class="flow-content">
+            <div class="title">新建 Chunk / run</div>
+            <div class="desc">当前 run 已满时，从 Chunk 切割新 run；Chunk 不足时向 OS 申请 2MB 对齐的新 Chunk。</div>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:20px">jemalloc free 流程</h3>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">1</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">放入 tcache（无锁）</div>
+            <div class="desc">小对象先放回 tcache bin，延迟实际 free 操作。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">2</div><div class="flow-line je"></div></div>
+          <div class="flow-content">
+            <div class="title">更新 run bitmap</div>
+            <div class="desc">tcache flush 或大对象 free 时，清除 run 内对应 region 的 bitmap 位。</div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-left"><div class="flow-num je">3</div></div>
+          <div class="flow-content">
+            <div class="title">Chunk 回收 / 归还 OS</div>
+            <div class="desc">整个 run 空闲 → 回收到 Arena chunk map；整个 Chunk 空闲 → <span class="code-inline">madvise(DONTNEED)</span> 或 munmap 归还 OS。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 4. 锁模型 ═══════════ -->
+<section id="lock">
+  <div class="sec-title"><span class="icon">🔒</span> 锁模型与并发策略</div>
+
+  <div class="grid3">
+    <div class="card pt-card">
+      <div class="card-title"><span class="dot pt"></span>ptmalloc 锁模型</div>
+      <div class="lock-diagram" style="flex-direction:column;padding:16px">
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <div class="lock-thread pt">Thread 1</div>
+          <div class="lock-thread pt">Thread 2</div>
+          <div class="lock-thread pt">Thread 3</div>
+          <div style="display:flex;align-items:center;color:var(--text3)">…</div>
+        </div>
+        <div style="text-align:center;color:var(--text3);margin:8px 0;font-size:1.2rem">↓ 竞争</div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <div class="lock-shared" style="flex:1;min-width:100px">Arena A<br><small>全局 mutex</small></div>
+          <div class="lock-shared" style="flex:1;min-width:100px">Arena B<br><small>全局 mutex</small></div>
+        </div>
+      </div>
+      <ul class="points" style="margin-top:12px">
+        <li>每个 Arena 一把粗粒度 Mutex</li>
+        <li>线程超出 Arena 数时需轮询等锁</li>
+        <li>同一 Arena 内所有操作串行化</li>
+        <li><span class="tag r">高并发瓶颈严重</span></li>
+      </ul>
+    </div>
+
+    <div class="card tc-card">
+      <div class="card-title"><span class="dot tc"></span>tcmalloc 锁模型</div>
+      <div class="lock-diagram" style="flex-direction:column;padding:16px">
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <div class="lock-thread tc">Thread 1<br><small>private cache</small></div>
+          <div class="lock-thread tc">Thread 2<br><small>private cache</small></div>
+          <div class="lock-thread tc">Thread 3<br><small>private cache</small></div>
+        </div>
+        <div style="text-align:center;color:var(--text3);margin:6px 0;font-size:.82rem">↑↓ 仅补充/归还时访问</div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <div class="lock-own" style="flex:1">CentralCache<br><small>per-class spinlock</small></div>
+        </div>
+        <div style="text-align:center;color:var(--text3);margin:6px 0;font-size:1.1rem">↓</div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <div class="lock-shared" style="flex:1">PageHeap<br><small>全局 Mutex（低频）</small></div>
+        </div>
+      </div>
+      <ul class="points" style="margin-top:12px">
+        <li>ThreadCache 操作完全无锁</li>
+        <li>CentralCache 按 size class 分锁（细粒度 spinlock）</li>
+        <li>PageHeap 全局 Mutex，但访问频率极低</li>
+        <li><span class="tag g">高并发表现优秀</span></li>
+      </ul>
+    </div>
+
+    <div class="card je-card">
+      <div class="card-title"><span class="dot je"></span>jemalloc 锁模型</div>
+      <div class="lock-diagram" style="flex-direction:column;padding:16px">
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <div class="lock-thread je">Thread 1<br><small>tcache</small></div>
+          <div class="lock-thread je">Thread 2<br><small>tcache</small></div>
+          <div class="lock-thread je">Thread 3<br><small>tcache</small></div>
+        </div>
+        <div style="text-align:center;color:var(--text3);margin:6px 0;font-size:.82rem">↓ miss 时绑定到 Arena</div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <div class="lock-own" style="flex:1">Arena 0<br><small>细粒度 mutex</small></div>
+          <div class="lock-own" style="flex:1">Arena 1<br><small>细粒度 mutex</small></div>
+          <div style="display:flex;align-items:center;color:var(--text3)">…</div>
+        </div>
+      </div>
+      <ul class="points" style="margin-top:12px">
+        <li>tcache 操作完全无锁</li>
+        <li>Arena 数 = 4 × CPU 核数，均匀分散压力</li>
+        <li>Arena 内锁粒度更细（bin 级别）</li>
+        <li><span class="tag g">并发 + 碎片控制双优</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 5. 碎片管理 ═══════════ -->
+<section id="frag">
+  <div class="sec-title"><span class="icon">🧩</span> 内存碎片管理策略</div>
+  <div class="grid3">
+    <div class="card pt-card">
+      <div class="card-title"><span class="dot pt"></span>ptmalloc 碎片问题</div>
+      <p>ptmalloc 碎片问题是三者中最严重的：</p>
+      <ul class="points" style="margin-top:10px">
+        <li><strong>跨 Arena 不可复用：</strong>Arena A 释放的内存无法被 Arena B 使用</li>
+        <li><strong>fast bin 不合并：</strong>小块频繁分配释放形成外部碎片</li>
+        <li><strong>长生命周期对象：</strong>阻塞相邻小块合并，堆顶无法收缩</li>
+        <li><strong>内存膨胀场景：</strong>多线程 + 短生命周期对象是灾难</li>
+      </ul>
+      <div class="hl-box warn" style="margin-top:12px">
+        <strong>实际案例：</strong>某 C++ 服务切换 ptmalloc → jemalloc 后，RSS 从 12GB 降至 4GB，降幅约 67%。
+      </div>
+    </div>
+    <div class="card tc-card">
+      <div class="card-title"><span class="dot tc"></span>tcmalloc 碎片控制</div>
+      <p>tcmalloc 优先追求速度，碎片控制属于中等水平：</p>
+      <ul class="points" style="margin-top:10px">
+        <li><strong>向上取整 size class：</strong>最多浪费 12.5% 内存（内部碎片）</li>
+        <li><strong>Span 合并：</strong>PageHeap 会合并相邻空闲 Span</li>
+        <li><strong>ThreadCache GC：</strong>定期回收过多的线程缓存对象</li>
+        <li><strong>激进归还 OS：</strong>可配置 <span class="code-inline">MADV_FREE</span> 或 <span class="code-inline">MADV_DONTNEED</span></li>
+      </ul>
+      <div class="hl-box tip" style="margin-top:12px">
+        内部碎片率稳定，但外部碎片在内存使用模式不均匀时也会出现。
+      </div>
+    </div>
+    <div class="card je-card">
+      <div class="card-title"><span class="dot je"></span>jemalloc 碎片优化</div>
+      <p>jemalloc 是三者中碎片控制最精细的：</p>
+      <ul class="points" style="margin-top:10px">
+        <li><strong>极细 size class：</strong>约 48 档 small class，内部碎片 &lt;4%</li>
+        <li><strong>run 内 bitmap：</strong>同 size class 紧密排列，避免外部碎片</li>
+        <li><strong>Chunk 对齐：</strong>2MB 对齐便于元数据定位，减少边界浪费</li>
+        <li><strong>主动清理：</strong><span class="code-inline">arena.purge</span> 主动归还脏页</li>
+        <li><strong>背景线程：</strong>可开启 background_thread 异步清理</li>
+      </ul>
+      <div class="hl-box info" style="margin-top:12px">
+        Redis 默认使用 jemalloc，内存碎片率通常控制在 1.0~1.5 之间（&gt;1.5 视为碎片严重）。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 6. 性能对比 ═══════════ -->
+<section id="perf">
+  <div class="sec-title"><span class="icon">📊</span> 性能维度对比</div>
+  <div class="card">
+    <p style="margin-bottom:20px;color:var(--text2)">以下对比为相对表现（满分 10），实际数值因负载模式差异较大，仅供参考。</p>
+
+    <div class="perf-row">
+      <div class="perf-label">🚀 单线程分配速度</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:75%"></div></div><span class="bar-val">7.5</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:95%"></div></div><span class="bar-val">9.5</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:88%"></div></div><span class="bar-val">8.8</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">⚡ 多线程并发速度</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:45%"></div></div><span class="bar-val">4.5</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:95%"></div></div><span class="bar-val">9.5</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:92%"></div></div><span class="bar-val">9.2</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">🧩 内存碎片控制</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:40%"></div></div><span class="bar-val">4.0</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:72%"></div></div><span class="bar-val">7.2</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:95%"></div></div><span class="bar-val">9.5</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">💾 内存利用率</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:50%"></div></div><span class="bar-val">5.0</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:75%"></div></div><span class="bar-val">7.5</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:92%"></div></div><span class="bar-val">9.2</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">📈 高并发吞吐量</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:38%"></div></div><span class="bar-val">3.8</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:96%"></div></div><span class="bar-val">9.6</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:90%"></div></div><span class="bar-val">9.0</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">⚙️ 可观测性 / 调试</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:30%"></div></div><span class="bar-val">3.0</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:70%"></div></div><span class="bar-val">7.0</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:98%"></div></div><span class="bar-val">9.8</span></div>
+      </div>
+    </div>
+
+    <div class="perf-row">
+      <div class="perf-label">🔌 集成便利性</div>
+      <div class="perf-bars">
+        <div class="bar-item"><span class="bar-name pt">ptmalloc</span><div class="bar-track"><div class="bar-fill pt" style="width:100%"></div></div><span class="bar-val">10</span></div>
+        <div class="bar-item"><span class="bar-name tc">tcmalloc</span><div class="bar-track"><div class="bar-fill tc" style="width:75%"></div></div><span class="bar-val">7.5</span></div>
+        <div class="bar-item"><span class="bar-name je">jemalloc</span><div class="bar-track"><div class="bar-fill je" style="width:80%"></div></div><span class="bar-val">8.0</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 7. 全面对比表 ═══════════ -->
+<section id="compare">
+  <div class="sec-title"><span class="icon">⚖️</span> 全面对比表</div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="cmp-table">
+      <thead>
+        <tr>
+          <th style="width:160px">特性</th>
+          <th>🔶 ptmalloc2</th>
+          <th>🟣 tcmalloc</th>
+          <th>🔵 jemalloc</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="row-label">并发单元</td>
+          <td class="pt-col">Arena（有数量上限）</td>
+          <td class="tc-col">ThreadCache（无上限）</td>
+          <td class="je-col">tcache + Arena（CPU 数×4）</td>
+        </tr>
+        <tr>
+          <td class="row-label">锁粒度</td>
+          <td class="pt-col">粗粒度 Mutex（Arena 级）</td>
+          <td class="tc-col">无锁 + 细粒度 Spinlock + 低频 Mutex</td>
+          <td class="je-col">无锁（tcache）+ 细粒度 Mutex（Arena bin）</td>
+        </tr>
+        <tr>
+          <td class="row-label">小对象分配</td>
+          <td class="pt-col">fast bins（LIFO 单链表）</td>
+          <td class="tc-col">ThreadCache freelist（无锁链表）</td>
+          <td class="je-col">tcache bin（无锁）→ Arena run bitmap</td>
+        </tr>
+        <tr>
+          <td class="row-label">size class 数量</td>
+          <td class="pt-col">约 32 档 bin</td>
+          <td class="tc-col">约 86 档（精细）</td>
+          <td class="je-col">约 48+ 档（small/large/huge 三级）</td>
+        </tr>
+        <tr>
+          <td class="row-label">大对象处理</td>
+          <td class="pt-col">large bins + mmap（&gt;128KB）</td>
+          <td class="tc-col">PageHeap Span（&gt;256KB）</td>
+          <td class="je-col">Arena large bin（&gt;14KB）/ mmap huge（&gt;1MB）</td>
+        </tr>
+        <tr>
+          <td class="row-label">内存碎片</td>
+          <td class="pt-col"><span class="tag r">严重（跨 Arena 不复用）</span></td>
+          <td class="tc-col"><span class="tag y">中等（内部碎片约 12.5%）</span></td>
+          <td class="je-col"><span class="tag g">最优（&lt;4% 内部碎片）</span></td>
+        </tr>
+        <tr>
+          <td class="row-label">内存归还 OS</td>
+          <td class="pt-col">sbrk 缩减 + munmap（延迟）</td>
+          <td class="tc-col">madvise DONTNEED/FREE（可配置）</td>
+          <td class="je-col">madvise + 可选 background_thread 主动清理</td>
+        </tr>
+        <tr>
+          <td class="row-label">多线程性能</td>
+          <td class="pt-col"><span class="tag r">差（锁争用严重）</span></td>
+          <td class="tc-col"><span class="tag g">极优（Google 内部基准 &gt;ptmalloc 5x）</span></td>
+          <td class="je-col"><span class="tag g">优（与 tcmalloc 接近）</span></td>
+        </tr>
+        <tr>
+          <td class="row-label">内存占用</td>
+          <td class="pt-col"><span class="tag r">高（碎片 + Arena 开销）</span></td>
+          <td class="tc-col"><span class="tag y">中（每线程缓存固定开销）</span></td>
+          <td class="je-col"><span class="tag g">低（精细管理）</span></td>
+        </tr>
+        <tr>
+          <td class="row-label">可观测性</td>
+          <td class="pt-col">mtrace、mallinfo（有限）</td>
+          <td class="tc-col">pprof CPU/内存 profiling</td>
+          <td class="je-col">mallctl API、统计 epoch、内置 profiling</td>
+        </tr>
+        <tr>
+          <td class="row-label">线程缓存 GC</td>
+          <td class="pt-col">无</td>
+          <td class="tc-col">有（soft/hard limit，动态调整）</td>
+          <td class="je-col">有（tcache GC + arena background purge）</td>
+        </tr>
+        <tr>
+          <td class="row-label">适合语言/运行时</td>
+          <td class="pt-col">C/C++（Linux 默认）</td>
+          <td class="tc-col">C/C++、Go（内置变体）、Java（可替换）</td>
+          <td class="je-col">C/C++、Rust（默认）、Erlang、PHP</td>
+        </tr>
+        <tr>
+          <td class="row-label">知名用户</td>
+          <td class="pt-col">Linux 系统级程序</td>
+          <td class="tc-col">Chrome、Google 搜索、Go runtime</td>
+          <td class="je-col">Firefox、Redis、FreeBSD、Facebook</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════ 8. 场景 ═══════════ -->
+<section id="scenario">
+  <div class="sec-title"><span class="icon">🎯</span> 适用场景与选型建议</div>
+  <div class="grid3">
+    <div class="card pt-card">
+      <div class="card-title"><span class="dot pt"></span>何时用 ptmalloc</div>
+      <ul class="points">
+        <li>无特殊需求的 Linux C/C++ 程序（零配置）</li>
+        <li>单线程或极低并发的工具/脚本</li>
+        <li>已验证内存行为稳定、无碎片问题的遗留系统</li>
+        <li>容器化部署且内存充足、不关心用量优化</li>
+      </ul>
+      <div class="hl-box warn" style="margin-top:14px">
+        <strong>⚠️ 避免场景：</strong>高并发服务端、长期运行后内存不归还、大量小对象频繁分配释放。
+      </div>
+    </div>
+    <div class="card tc-card">
+      <div class="card-title"><span class="dot tc"></span>何时用 tcmalloc</div>
+      <ul class="points">
+        <li>追求极致分配吞吐量（如 Google 级别高 QPS 服务）</li>
+        <li>Go 语言（已内置，无需手动替换）</li>
+        <li>需要 pprof 内存/CPU profiling 的项目</li>
+        <li>大量短生命周期小对象（&lt;256KB）场景</li>
+        <li>CPU 核数多、线程数多的场景</li>
+      </ul>
+      <div class="hl-box tip" style="margin-top:14px">
+        <strong>💡 替换方式：</strong><span class="code-inline">LD_PRELOAD=/usr/lib/libtcmalloc.so ./app</span> 或编译时链接 <span class="code-inline">-ltcmalloc</span>
+      </div>
+    </div>
+    <div class="card je-card">
+      <div class="card-title"><span class="dot je"></span>何时用 jemalloc</div>
+      <ul class="points">
+        <li>内存占用敏感的长期运行服务（如数据库、缓存）</li>
+        <li>Redis 生产环境（官方推荐）</li>
+        <li>Rust 语言（cargo 默认使用 jemalloc）</li>
+        <li>需要精细内存监控和调优的场景</li>
+        <li>内存碎片问题已影响稳定性的服务</li>
+        <li>高并发 + 内存效率兼顾的场景</li>
+      </ul>
+      <div class="hl-box info" style="margin-top:14px">
+        <strong>💡 替换方式：</strong><span class="code-inline">LD_PRELOAD=/usr/lib/libjemalloc.so ./app</span>，Redis 可在编译时 <span class="code-inline">make USE_JEMALLOC=yes</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 决策树 -->
+  <div class="card" style="margin-top:20px">
+    <div class="card-title">🧭 快速选型决策树</div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:0;padding:10px 0;font-size:.88rem">
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 24px;color:var(--text);font-weight:600">你的程序需要高并发？</div>
+      <div style="display:flex;gap:60px;align-items:flex-start;margin-top:4px">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="color:var(--red);font-weight:600;font-size:.8rem">否</div>
+          <div style="width:1px;height:20px;background:var(--border)"></div>
+          <div style="background:var(--ptm-dim);border:1px solid var(--ptm-border);border-radius:8px;padding:10px 18px;color:var(--ptm);font-weight:600;text-align:center">
+            ptmalloc<br><small style="font-weight:400;color:var(--text3)">系统默认，够用了</small>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="color:var(--green);font-weight:600;font-size:.8rem">是</div>
+          <div style="width:1px;height:20px;background:var(--border)"></div>
+          <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 24px;color:var(--text);font-weight:600">内存占用/碎片是首要问题？</div>
+          <div style="display:flex;gap:40px;align-items:flex-start;margin-top:4px">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+              <div style="color:var(--red);font-weight:600;font-size:.8rem">否（更关注速度）</div>
+              <div style="width:1px;height:20px;background:var(--border)"></div>
+              <div style="background:var(--tcm-dim);border:1px solid var(--tcm-border);border-radius:8px;padding:10px 18px;color:var(--tcm);font-weight:600;text-align:center">
+                tcmalloc<br><small style="font-weight:400;color:var(--text3)">最快分配速度</small>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+              <div style="color:var(--green);font-weight:600;font-size:.8rem">是（内存优先）</div>
+              <div style="width:1px;height:20px;background:var(--border)"></div>
+              <div style="background:var(--jem-dim);border:1px solid var(--jem-border);border-radius:8px;padding:10px 18px;color:var(--jem);font-weight:600;text-align:center">
+                jemalloc<br><small style="font-weight:400;color:var(--text3)">最低碎片率</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /wrap -->
+
+<footer>
+  <p>内存分配器深度解析 · ptmalloc · tcmalloc · jemalloc · 仅供学习参考</p>
+  <p style="margin-top:6px">参考：glibc malloc internals · tcmalloc docs · jemalloc wiki · Redis memory optimization</p>
+</footer>
+
+</body>
+</html>
