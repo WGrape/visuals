@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>流式输出的断线续传机制 — 豆包「退出再进继续输出」是怎么实现的</title>
+<style>
+  :root {
+    --bg: #f8f9fb;
+    --card: #ffffff;
+    --text: #1a1a2e;
+    --sub: #5a5f7a;
+    --accent: #059669;
+    --accent2: #10b981;
+    --border: #e8ecf1;
+    --code-bg: #1e1e2e;
+    --code-text: #e1e4e8;
+    --warn-bg: #fff8e6;
+    --warn-border: #f0c040;
+    --info-bg: #e8f4fd;
+    --info-border: #90c8f0;
+    --success-bg: #e6f7ee;
+    --success-border: #34d399;
+    --pink-bg: #fdf2f8;
+    --pink-border: #f9a8d4;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+
+  /* Hero */
+  .hero {
+    text-align: center;
+    padding: 60px 20px 50px;
+    background: linear-gradient(135deg, #059669 0%, #10b981 40%, #34d399 100%);
+    color: #fff;
+    border-radius: 0 0 32px 32px;
+    margin-bottom: 48px;
+  }
+  .hero h1 { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 12px; }
+  .hero p { font-size: 1.1rem; opacity: 0.9; max-width: 640px; margin: 0 auto; }
+
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 36px 32px;
+    margin-bottom: 28px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .section h2 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section h2 .num {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    flex-shrink: 0;
+  }
+  .section .desc {
+    color: var(--sub);
+    font-size: 0.95rem;
+    margin-bottom: 20px;
+  }
+
+  /* Callout */
+  .callout {
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 0.92rem;
+    border-left: 4px solid;
+  }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); }
+  .callout.success { background: var(--success-bg); border-color: var(--success-border); }
+  .callout.pink { background: var(--pink-bg); border-color: var(--pink-border); }
+  .callout strong { display: block; margin-bottom: 4px; }
+
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    border-radius: 12px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    margin: 14px 0;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  }
+  code {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+    background: #eef0f5;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 0.88em;
+    color: #059669;
+  }
+  pre code { background: transparent; padding: 0; color: inherit; }
+
+  .cmt { color: #8b949e; }
+  .str { color: #a5d6ff; }
+  .key { color: #ffa198; }
+  .num { color: #79c0ff; }
+  .fn { color: #d2a8ff; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    text-align: left;
+  }
+  th {
+    background: #f3f4f8;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  tr:nth-child(even) { background: #fafbfc; }
+
+  /* Flow diagram */
+  .flow {
+    display: flex;
+    gap: 0;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding: 24px 0;
+  }
+  .flow .step {
+    background: var(--accent);
+    color: #fff;
+    padding: 12px 20px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .flow .arrow {
+    font-size: 1.5rem;
+    color: var(--accent);
+    margin: 0 8px;
+  }
+
+  .sub-section {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px dashed var(--border);
+  }
+  .sub-section h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+
+  ul, ol { padding-left: 20px; margin: 10px 0; }
+  li { margin-bottom: 6px; }
+
+  .highlight-box {
+    background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+    border: 2px solid var(--accent2);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin: 20px 0;
+  }
+  .highlight-box h3 { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 1.5rem; }
+    .section { padding: 24px 18px; }
+    pre { font-size: 0.72rem; padding: 14px 14px; }
+  }
+
+  /* Architecture diagram SVG embedded inline styles */
+  .arch-diagram {
+    background: #fff;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    padding: 20px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .arch-diagram svg { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>流式输出的断线续传机制</h1>
+  <p>深入解析「APP 退出后重新进入，输出还能自动继续」背后的技术原理 —— 以豆包为例</p>
+</div>
+
+<div class="container">
+
+  <!-- Section 0: 现象 -->
+  <div class="section">
+    <h2><span class="num">0</span> 先看现象</h2>
+    <p class="desc">你一定是经历过这个场景才开始好奇的：</p>
+    <div class="flow">
+      <span class="step">🤖 提问</span><span class="arrow">→</span>
+      <span class="step">📝 开始流式输出...</span><span class="arrow">→</span>
+      <span class="step" style="background: #f59e0b;">👆 退出 APP</span><span class="arrow">→</span>
+      <span class="step">⏱️ 过了一会</span><span class="arrow">→</span>
+      <span class="step">📱 重新打开 APP</span><span class="arrow">→</span>
+      <span class="step" style="background: #8b5cf6;">✨ 继续输出！</span>
+    </div>
+    <p style="margin-top: 16px; text-align: center; font-size: 1.05rem; color: var(--accent); font-weight: 600;">
+      这看起来像魔法，实际上是精心设计的<strong>「服务端缓冲 + 客户端续传」</strong>机制。
+    </p>
+  </div>
+
+  <!-- Section 1: 基础 -->
+  <div class="section">
+    <h2><span class="num">1</span> 先理解基础：SSE 是怎么做流式输出的</h2>
+    <p class="desc">要理解断线续传，必须先理解正常流式是怎么跑的。</p>
+
+    <div class="sub-section">
+      <h3>1.1 SSE (Server-Sent Events) 协议</h3>
+      <p>SSE 是 HTTP 长连接协议：客户端发一个 GET/POST 请求，服务端持续推送 <code>text/event-stream</code> 格式的数据，直到结束或断开。</p>
+      <pre><code><span class="cmt">// 客户端发起 POST 请求</span>
+POST /v1/chat/completions
+Content-Type: application/json
+Accept: text/event-stream
+
+{ <span class="str">"stream"</span>: <span class="num">true</span>, <span class="str">"messages"</span>: [...] }
+
+<span class="cmt">// 服务端持续推送 SSE 事件（逐 token）</span>
+<span class="fn">data</span>: {<span class="str">"id"</span>:<span class="str">"req_abc"</span>, <span class="str">"delta"</span>:{<span class="str">"content"</span>:<span class="str">"春"</span>}}
+
+<span class="fn">data</span>: {<span class="str">"id"</span>:<span class="str">"req_abc"</span>, <span class="str">"delta"</span>:{<span class="str">"content"</span>:<span class="str">"眠"</span>}}
+
+<span class="fn">data</span>: {<span class="str">"id"</span>:<span class="str">"req_abc"</span>, <span class="str">"delta"</span>:{<span class="str">"content"</span>:<span class="str">"不"</span>}}
+
+<span class="fn">data</span>: {<span class="str">"id"</span>:<span class="str">"req_abc"</span>, <span class="str">"delta"</span>:{<span class="str">"content"</span>:<span class="str">"觉"</span>}}
+
+<span class="fn">data</span>: {<span class="str">"id"</span>:<span class="str">"req_abc"</span>, <span class="str">"delta"</span>:{<span class="str">"content"</span>:<span class="str">"晓"</span>}}
+
+<span class="fn">data</span>: [DONE]</code></pre>
+    </div>
+
+    <div class="sub-section">
+      <h3>1.2 关键概念：请求级有状态</h3>
+      <p>一次 SSE 连接对应 <strong>一个 LLM 推理会话</strong>。服务端在内存中保存了：</p>
+      <ul>
+        <li>当前已生成的 token 列表</li>
+        <li>KV Cache（注意力机制的中间状态，加速后续生成）</li>
+        <li>用户原始 messages 上下文</li>
+      </ul>
+      <p>这个会话状态只在连接存活期间有效。<strong>连接一断，服务端通常会立即清理。</strong></p>
+    </div>
+
+    <div class="callout warn">
+      <strong>核心矛盾</strong>
+      正常 SSE 设计：断开 = 丢失 = 无法恢复。豆包的退出重进续传，本质上是<strong>在连接断开时主动持久化了会话状态</strong>。
+    </div>
+  </div>
+
+  <!-- Section 2 -->
+  <div class="section">
+    <h2><span class="num">2</span> 问题拆解：要实现断线续传，必须解决什么？</h2>
+    <p class="desc">把「退出再进继续输出」拆成三个子问题：</p>
+
+    <div class="highlight-box">
+      <h3>问题 ①：断开时，推理不能中断</h3>
+      <p>APP 退出时 TCP 连接断开，但服务端的 LLM 推理进程必须<strong>继续跑</strong>，不能因为客户端走了就停。</p>
+    </div>
+
+    <div class="highlight-box">
+      <h3>问题 ②：已生成的内容不能丢</h3>
+      <p>APP 退出前已经收到并显示了部分内容（比如 "春眠不觉"），重新打开时必须把这些内容原样恢复。</p>
+    </div>
+
+    <div class="highlight-box">
+      <h3>问题 ③：重新连接后，从断点继续推</h3>
+      <p>APP 重新打开后，发起一个新请求，服务端识别出「这是之前那个会话的续传」，把断开期间生成的新内容一次性补上，然后继续流式推送。</p>
+    </div>
+  </div>
+
+  <!-- Section 3: 核心方案 -->
+  <div class="section">
+    <h2><span class="num">3</span> 核心方案：会话级消息缓冲 + 断点续传</h2>
+    <p class="desc">这是业界最主流的实现路径，豆包、ChatGPT、Kimi 本质上都是这个方案。</p>
+
+    <div class="sub-section">
+      <h3>3.1 架构总览</h3>
+      <div class="arch-diagram">
+        <svg viewBox="0 0 880 340" width="100%" height="auto">
+          <!-- Client -->
+          <rect x="20" y="120" width="110" height="60" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+          <text x="75" y="148" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">📱 APP</text>
+          <text x="75" y="166" text-anchor="middle" font-size="11" fill="#3b82f6">客户端</text>
+
+          <!-- API Gateway -->
+          <rect x="200" y="60" width="100" height="50" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+          <text x="250" y="90" text-anchor="middle" font-size="12" font-weight="600" fill="#92400e">API 网关</text>
+
+          <!-- Session Manager -->
+          <rect x="200" y="140" width="130" height="60" rx="10" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+          <text x="265" y="166" text-anchor="middle" font-size="12" font-weight="700" fill="#be185d">会话管理器</text>
+          <text x="265" y="184" text-anchor="middle" font-size="10" fill="#be185d">SessionId → 状态</text>
+
+          <!-- Message Buffer (Redis) -->
+          <rect x="400" y="50" width="130" height="50" rx="8" fill="#d1fae5" stroke="#10b981" stroke-width="2"/>
+          <text x="465" y="80" text-anchor="middle" font-size="12" font-weight="600" fill="#065f46">Redis 消息队列</text>
+
+          <!-- LLM Engine -->
+          <rect x="400" y="130" width="130" height="80" rx="10" fill="#e0e7ff" stroke="#6366f1" stroke-width="2"/>
+          <text x="465" y="156" text-anchor="middle" font-size="12" font-weight="700" fill="#3730a3">LLM 推理引擎</text>
+          <text x="465" y="174" text-anchor="middle" font-size="10" fill="#6366f1">独立进程</text>
+          <text x="465" y="192" text-anchor="middle" font-size="10" fill="#6366f1">一直运行</text>
+
+          <!-- DB -->
+          <rect x="400" y="240" width="130" height="50" rx="8" fill="#f3f4f6" stroke="#6b7280" stroke-width="2"/>
+          <text x="465" y="270" text-anchor="middle" font-size="12" font-weight="600" fill="#374151">DB 持久存储</text>
+
+          <!-- HTTP Push -->
+          <rect x="620" y="60" width="110" height="50" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+          <text x="675" y="85" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">HTTP 长轮询 /</text>
+          <text x="675" y="100" text-anchor="middle" font-size="11" fill="#92400e">WebSocket</text>
+
+          <!-- Client reconnect -->
+          <rect x="620" y="240" width="110" height="50" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" stroke-dasharray="5,3"/>
+          <text x="675" y="265" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">📱 重新连接</text>
+          <text x="675" y="280" text-anchor="middle" font-size="10" fill="#3b82f6">续传请求</text>
+
+          <!-- Arrows -->
+          <line x1="130" y1="140" x2="198" y2="85" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="150" y="108" text-anchor="middle" font-size="9" fill="#94a3b8">POST 请求</text>
+
+          <line x1="300" y1="85" x2="398" y2="75" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+          <line x1="200" y1="165" x2="198" y2="165" stroke="#ec4899" stroke-width="1.5"/>
+          <text x="175" y="155" text-anchor="middle" font-size="9" fill="#be185d">创建会话</text>
+
+          <line x1="330" y1="170" x2="398" y2="165" stroke="#6366f1" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="350" y="155" text-anchor="middle" font-size="9" fill="#6366f1">写 token</text>
+
+          <line x1="530" y1="170" x2="618" y2="85" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="560" y="123" text-anchor="middle" font-size="9" fill="#94a3b8">推送 token</text>
+
+          <line x1="530" y1="265" x2="618" y2="265" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="560" y="258" text-anchor="middle" font-size="9" fill="#94a3b8">持久化完成</text>
+
+          <line x1="200" y1="265" x2="398" y2="265" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="280" y="258" text-anchor="middle" font-size="9" fill="#94a3b8">关联会话ID</text>
+
+          <line x1="620" y1="265" x2="560" y2="255" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <text x="580" y="230" text-anchor="middle" font-size="9" fill="#3b82f6">续传请求</text>
+
+          <line x1="200" y1="200" x2="198" y2="263" stroke="#94a3b8" stroke-width="1.5"/>
+          <text x="175" y="235" text-anchor="middle" font-size="9" fill="#94a3b8">续传</text>
+
+          <!-- Arrow marker -->
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+            </marker>
+          </defs>
+        </svg>
+      </div>
+      <p style="text-align: center; font-size: 0.85rem; color: var(--sub); margin-top: 8px;">
+        LLM 推理引擎和消息推送解耦 —— 推理不断，消息堆积在 Redis，客户端随时来取
+      </p>
+    </div>
+  </div>
+
+  <!-- Section 4: 详细实现 -->
+  <div class="section">
+    <h2><span class="num">4</span> 详细实现：一步一步拆解</h2>
+    <p class="desc">下面按时间线完整走一遍这个流程：</p>
+
+    <div class="sub-section">
+      <h3>4.1 第一步：建立会话</h3>
+      <p>用户发起提问时，服务端不仅要启动 LLM 推理，还要创建一个<strong>持久化会话</strong>：</p>
+      <pre><code><span class="cmt">// 服务端处理用户提问</span>
+<span class="key">func</span> HandleChat(userId, conversationId, messages) {
+
+    <span class="cmt">// 1. 生成唯一的会话 ID</span>
+    sessionId := <span class="fn">UUID</span>()
+
+    <span class="cmt">// 2. 在 Redis 中创建会话状态</span>
+    redis.HSet(<span class="str">"session:"</span>+sessionId, {
+        <span class="str">"status"</span>:         <span class="str">"generating"</span>,      <span class="cmt">// 状态：生成中</span>
+        <span class="str">"conversation_id"</span>: conversationId,    <span class="cmt">// 关联的对话 ID</span>
+        <span class="str">"user_id"</span>:         userId,              <span class="cmt">// 用户 ID</span>
+        <span class="str">"messages"</span>:         <span class="fn">json</span>(messages),     <span class="cmt">// 原始请求 messages</span>
+        <span class="str">"created_at"</span>:       <span class="fn">now</span>(),
+        <span class="str">"total_tokens"</span>:     <span class="num">0</span>,
+        <span class="str">"last_seq"</span>:         <span class="num">0</span>,                  <span class="cmt">// 最后一条消息序号</span>
+    })
+
+    <span class="cmt">// 3. 创建一个 Redis List 用于堆积生成的 token</span>
+    <span class="cmt">//    key: session:{id}:tokens</span>
+
+    <span class="cmt">// 4. 异步启动 LLM 推理（不阻塞 HTTP 响应）</span>
+    <span class="key">go</span> <span class="fn">startLLMInference</span>(sessionId, messages)
+
+    <span class="cmt">// 5. 立即返回 sessionId 给客户端</span>
+    <span class="key">return</span> { <span class="str">"session_id"</span>: sessionId }
+}</code></pre>
+    </div>
+
+    <div class="sub-section">
+      <h3>4.2 第二步：推理进程写 Token 到 Redis 队列</h3>
+      <p>LLM 推理在独立 goroutine / 进程中进行，每生成一个 token 就写入 Redis：</p>
+      <pre><code><span class="key">func</span> startLLMInference(sessionId, messages) {
+
+    stream := <span class="fn">llm.ChatCompletionStream</span>(messages)
+
+    seq := <span class="num">0</span>
+
+    <span class="key">for</span> chunk := <span class="key">range</span> stream {
+
+        seq++
+
+        <span class="cmt">// 每个 token 封装成带序号的消息</span>
+        tokenMsg := <span class="fn">json</span>({
+            <span class="str">"seq"</span>:     seq,                    <span class="cmt">// 消息序号，用于断点续传定位</span>
+            <span class="str">"content"</span>: chunk.Delta.Content,   <span class="cmt">// token 文本内容</span>
+            <span class="str">"ts"</span>:      <span class="fn">now</span>(),                 <span class="cmt">// 时间戳</span>
+        })
+
+        <span class="cmt">// 写入 Redis List — 尾部追加</span>
+        redis.RPush(<span class="str">"session:"</span>+sessionId+<span class="str">":tokens"</span>, tokenMsg)
+
+        <span class="cmt">// 更新最后序号</span>
+        redis.HSet(<span class="str">"session:"</span>+sessionId, <span class="str">"last_seq"</span>, seq)
+
+        <span class="cmt">// 发布到 Redis Pub/Sub，通知推送层有新 token</span>
+        redis.Publish(<span class="str">"channel:session:"</span>+sessionId, tokenMsg)
+    }
+
+    <span class="cmt">// 推理完成，标记会话状态</span>
+    redis.HSet(<span class="str">"session:"</span>+sessionId, <span class="str">"status"</span>, <span class="str">"completed"</span>)
+    redis.Publish(<span class="str">"channel:session:"</span>+sessionId, <span class="str">"__DONE__"</span>)
+}</code></pre>
+    </div>
+
+    <div class="sub-section">
+      <h3>4.3 第三步：实时推送（正常流程）</h3>
+      <p>客户端正常在线时，通过 SSE / WebSocket 订阅 Redis Pub/Sub，实时收到每个 token：</p>
+      <pre><code><span class="cmt">// 推送层 —— 订阅 Redis 频道，转发给客户端</span>
+<span class="key">func</span> streamTokens(sessionId) {
+    <span class="cmt">// 建立 SSE 连接，设置 Content-Type: text/event-stream</span>
+
+    pubsub := redis.Subscribe(<span class="str">"channel:session:"</span>+sessionId)
+
+    <span class="key">for</span> msg := <span class="key">range</span> pubsub.Channel() {
+        <span class="key">if</span> msg.Payload == <span class="str">"__DONE__"</span> {
+            writeSSE(<span class="str">"data: [DONE]\n\n"</span>)
+            <span class="key">break</span>
+        }
+        writeSSE(<span class="str">"data: "</span> + msg.Payload + <span class="str">"\n\n"</span>)
+        flush()
+    }
+}</code></pre>
+    </div>
+  </div>
+
+  <!-- Section 5: 断线续传 -->
+  <div class="section" style="background: linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%); border-color: #c4b5fd;">
+    <h2><span class="num">5</span> 核心！断线续传的实现（关键）</h2>
+    <p class="desc">这是回答你问题的核心部分。当 APP 退出再进来，发生了两件事：</p>
+
+    <div class="highlight-box">
+      <h3>5.1 客户端退出时 —— 什么都不会发生</h3>
+      <p>客户端断开 SSE 连接 → 推送层感知到连接断开 → <strong>但不做任何事</strong>。</p>
+      <p>因为 LLM 推理进程 <strong>完全独立</strong>，它不知道也<strong>不需要知道</strong>客户端是否在线。它只是继续往 Redis 队列里写 token。</p>
+      <p>这是整个设计最巧妙的地方：<strong>生产者和消费者完全解耦</strong>。</p>
+    </div>
+
+    <div class="highlight-box">
+      <h3>5.2 客户端重新进入时 —— 续传</h3>
+      <p>APP 重新打开后，发现自己所在的对话中有一个 <code>session_id</code> 且状态为 <code>"generating"</code>（说明服务端还在推理），于是发起续传：</p>
+    </div>
+
+    <pre><code><span class="cmt">// 客户端重新进入对话页面</span>
+<span class="cmt">// 1. 先查对话列表，发现当前对话有未完成的会话</span>
+<span class="cmt">//    会话状态: "generating"，已生成到 seq=42</span>
+
+<span class="cmt">// 2. 客户端本地已显示了 seq=0~15 的内容（退出前收到的）</span>
+<span class="cmt">//    从 UI 中取出 lastDisplayedSeq = 15</span>
+
+<span class="cmt">// 3. 发起续传请求</span>
+POST /v1/chat/resume
+{
+    <span class="str">"session_id"</span>: <span class="str">"abc-123"</span>,
+    <span class="str">"last_seq"</span>:   <span class="num">15</span>              <span class="cmt">// 告诉服务端：我收到了前 15 条</span>
+}</code></pre>
+      <pre><code><span class="cmt">// 服务端处理续传请求</span>
+<span class="key">func</span> ResumeSession(sessionId, lastSeq) {
+
+    <span class="cmt">// 1. 查 Redis 确认会话存在且状态为 "generating"</span>
+    session := redis.HGetAll(<span class="str">"session:"</span> + sessionId)
+    <span class="key">if</span> session.Status == <span class="str">""</span> {
+        <span class="key">return</span> 404 <span class="str">"会话不存在或已过期"</span>
+    }
+
+    <span class="cmt">// 2. 补发 lastSeq 之后的所有历史 token（一次性）</span>
+    history := redis.LRange(
+        <span class="str">"session:"</span>+sessionId+<span class="str">":tokens"</span>,
+        lastSeq,   <span class="cmt">// 起始位置 = 客户端最后收到的序号</span>
+        -<span class="num">1</span>,         <span class="cmt">// 到末尾</span>
+    )
+
+    <span class="cmt">// 3. 先把缺少的历史内容一次性发给客户端</span>
+    <span class="key">for</span> _, tokenJson := <span class="key">range</span> history {
+        writeSSE(<span class="str">"data: "</span> + tokenJson + <span class="str">"\n\n"</span>)
+    }
+
+    <span class="cmt">// 4. 然后继续实时订阅，推送后续新 token</span>
+    pubsub := redis.Subscribe(<span class="str">"channel:session:"</span> + sessionId)
+    <span class="key">for</span> msg := <span class="key">range</span> pubsub.Channel() {
+        <span class="key">if</span> msg.Payload == <span class="str">"__DONE__"</span> { <span class="key">break</span> }
+        writeSSE(<span class="str">"data: "</span> + msg.Payload + <span class="str">"\n\n"</span>)
+    }
+}</code></pre>
+
+    <div class="callout pink">
+      <strong>关键点：为什么用 last_seq 而不是时间戳？</strong><br>
+      用序号（sequence number）定位，比时间戳精确得多。客户端说「我拿到了前 15 条」，服务端就从第 16 条开始补推，<strong>不会丢也不会重复</strong>。这是消息队列的经典消费位点（offset）模式。
+    </div>
+  </div>
+
+  <!-- Section 6: 时序图 -->
+  <div class="section">
+    <h2><span class="num">6</span> 完整时序图</h2>
+    <div class="arch-diagram">
+      <svg viewBox="0 0 860 640" width="100%" height="auto">
+        <!-- Headers -->
+        <text x="180" y="25" text-anchor="middle" font-size="12" font-weight="700" fill="#3b82f6">📱 客户端</text>
+        <text x="430" y="25" text-anchor="middle" font-size="12" font-weight="700" fill="#10b981">🟢 LLM 推理</text>
+        <text x="680" y="25" text-anchor="middle" font-size="12" font-weight="700" fill="#ef4444">🔴 Redis</text>
+
+        <!-- Vertical lines -->
+        <line x1="180" y1="40" x2="180" y2="620" stroke="#3b82f6" stroke-width="2" stroke-dasharray="6,3"/>
+        <line x1="430" y1="40" x2="430" y2="620" stroke="#10b981" stroke-width="2" stroke-dasharray="6,3"/>
+        <line x1="680" y1="40" x2="680" y2="620" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,3"/>
+
+        <!-- Phase labels -->
+        <rect x="10" y="50" width="90" height="24" rx="6" fill="#dbeafe"/>
+        <text x="55" y="67" text-anchor="middle" font-size="10" font-weight="700" fill="#1e40af">Phase 1</text>
+
+        <!-- Step 1 -->
+        <line x1="180" y1="90" x2="430" y2="90" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="305" y="82" text-anchor="middle" font-size="10" fill="#333">① POST 提问 + 创建会话</text>
+
+        <line x1="430" y1="110" x2="680" y2="110" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="102" text-anchor="middle" font-size="9" fill="#065f46">HSET session:{id}</text>
+
+        <line x1="680" y1="130" x2="430" y2="130" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrowR)"/>
+        <text x="555" y="122" text-anchor="middle" font-size="9" fill="#991b1b">OK</text>
+
+        <line x1="430" y1="150" x2="180" y2="150" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="305" y="142" text-anchor="middle" font-size="10" fill="#333">② 返回 session_id</text>
+
+        <!-- Phase 2 -->
+        <rect x="10" y="175" width="90" height="24" rx="6" fill="#d1fae5"/>
+        <text x="55" y="192" text-anchor="middle" font-size="10" font-weight="700" fill="#065f46">Phase 2</text>
+
+        <line x1="180" y1="210" x2="430" y2="210" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="305" y="202" text-anchor="middle" font-size="10" fill="#333">③ 客户端订阅 SSE 频道</text>
+
+        <!-- Token 1 -->
+        <line x1="430" y1="240" x2="680" y2="240" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="232" text-anchor="middle" font-size="9" fill="#065f46">RPUSH seq=1 "春" + PUBLISH</text>
+
+        <line x1="680" y1="260" x2="180" y2="260" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="355" y="252" text-anchor="middle" font-size="9" fill="#991b1b">Pub/Sub → SSE: seq=1 "春"</text>
+
+        <!-- Token 2 -->
+        <line x1="430" y1="285" x2="680" y2="285" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="277" text-anchor="middle" font-size="9" fill="#065f46">RPUSH seq=2 "眠" + PUBLISH</text>
+
+        <line x1="680" y1="305" x2="180" y2="305" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="355" y="297" text-anchor="middle" font-size="9" fill="#991b1b">SSE: seq=2 "眠"</text>
+
+        <!-- Token 3 -->
+        <line x1="430" y1="330" x2="680" y2="330" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="322" text-anchor="middle" font-size="9" fill="#065f46">RPUSH seq=3 "不" + PUBLISH</text>
+
+        <line x1="680" y1="350" x2="180" y2="350" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="355" y="342" text-anchor="middle" font-size="9" fill="#991b1b">SSE: seq=3 "不"</text>
+
+        <!-- DISCONNECT -->
+        <rect x="410" y="370" width="60" height="20" rx="4" fill="#fecaca" stroke="#dc2626" stroke-width="1"/>
+        <text x="440" y="384" text-anchor="middle" font-size="9" font-weight="700" fill="#991b1b">断开!</text>
+        <line x1="180" y1="380" x2="430" y2="380" stroke="#dc2626" stroke-width="2"/>
+        <text x="305" y="397" text-anchor="middle" font-size="9" fill="#dc2626">APP 退出，SSE 连接断开</text>
+
+        <!-- Phase 3 -->
+        <rect x="10" y="400" width="90" height="24" rx="6" fill="#fce7f3"/>
+        <text x="55" y="417" text-anchor="middle" font-size="10" font-weight="700" fill="#be185d">Phase 3</text>
+
+        <!-- LLM keeps running -->
+        <line x1="430" y1="430" x2="680" y2="430" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="422" text-anchor="middle" font-size="9" fill="#065f46">RPUSH seq=4 "觉" (继续写!)</text>
+
+        <line x1="430" y1="455" x2="680" y2="455" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="447" text-anchor="middle" font-size="9" fill="#065f46">RPUSH seq=5 "晓" (不受影响)</text>
+
+        <line x1="430" y1="480" x2="680" y2="480" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="472" text-anchor="middle" font-size="9" fill="#065f46">HSET status="completed"</text>
+
+        <!-- Phase 4 -->
+        <rect x="10" y="500" width="90" height="24" rx="6" fill="#dbeafe"/>
+        <text x="55" y="517" text-anchor="middle" font-size="10" font-weight="700" fill="#1e40af">Phase 4</text>
+
+        <!-- Reconnect -->
+        <line x1="180" y1="535" x2="430" y2="535" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="305" y="527" text-anchor="middle" font-size="10" fill="#333">④ POST /resume last_seq=3</text>
+
+        <line x1="430" y1="555" x2="680" y2="555" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <text x="555" y="547" text-anchor="middle" font-size="9" fill="#065f46">LRANGE seq 3→-1</text>
+
+        <line x1="680" y1="575" x2="430" y2="575" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrowR)"/>
+        <text x="555" y="567" text-anchor="middle" font-size="9" fill="#991b1b">返回 seq=4,5</text>
+
+        <line x1="430" y1="595" x2="180" y2="595" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowB)"/>
+        <text x="305" y="587" text-anchor="middle" font-size="10" fill="#333">⑤ 补发 "觉晓" → SSE → 继续订阅</text>
+
+        <rect x="110" y="610" width="140" height="20" rx="4" fill="#d1fae5" stroke="#10b981" stroke-width="1"/>
+        <text x="180" y="624" text-anchor="middle" font-size="9" font-weight="700" fill="#065f46">✅ 客户端显示: 春眠不觉晓</text>
+
+        <defs>
+          <marker id="arrowB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#3b82f6"/>
+          </marker>
+          <marker id="arrowG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#10b981"/>
+          </marker>
+          <marker id="arrowR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444"/>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Section 7 -->
+  <div class="section">
+    <h2><span class="num">7</span> 进阶：客户端如何「还原」UI？</h2>
+    <p class="desc">断线重连后，不只是拿到 token 就行 —— 客户端还要把 UI 恢复成「正在输出中」的状态。</p>
+
+    <ol>
+      <li><strong>恢复消息列表</strong>：对话页面的 messages 列表不是存在内存里的，而是每次都从服务端拉取的。<code>GET /conversations/:id/messages</code> 返回所有消息（包括不完整的 AI 回复）。</li>
+      <li><strong>检测未完成消息</strong>：服务端返回的消息中，AI 回复带有 <code>status: "generating"</code> 标记，客户端看到这个就知道「这条还没输出完」。</li>
+      <li><strong>显示打字动画</strong>：客户端在未完成消息末尾显示闪烁光标或「...」动画，让用户感知到「还在生成中」。</li>
+      <li><strong>发起续传</strong>：如果消息 <code>session_id</code> 还在、状态为 generating，自动调 resume 接口，开始补推。</li>
+      <li><strong>增量渲染</strong>：续传回来的 token 逐字追加到消息末尾，继续「打字机效果」。</li>
+    </ol>
+
+    <pre><code><span class="cmt">// 客户端 APP 重新进入对话的伪代码</span>
+<span class="key">async function</span> <span class="fn">enterConversation</span>(conversationId) {
+
+    <span class="cmt">// 1. 拉取消息列表（从服务端/本地缓存）</span>
+    <span class="key">const</span> messages = <span class="key">await</span> <span class="fn">api.getMessages</span>(conversationId)
+
+    <span class="cmt">// 2. 渲染 UI</span>
+    <span class="fn">renderMessages</span>(messages)
+
+    <span class="cmt">// 3. 找到最后一条未完成的 AI 回复</span>
+    <span class="key">const</span> lastMsg = messages[messages.length - <span class="num">1</span>]
+    <span class="key">if</span> (lastMsg.role === <span class="str">'assistant'</span> && lastMsg.status === <span class="str">'generating'</span>) {
+
+        <span class="cmt">// 4. 显示「正在生成」的光标动画</span>
+        <span class="fn">showTypingIndicator</span>()
+
+        <span class="cmt">// 5. 发起续传（last_seq 是这条消息已收到的 token 数）</span>
+        <span class="key">const</span> stream = <span class="key">await</span> <span class="fn">api.resumeStream</span>(lastMsg.session_id, lastMsg.last_seq)
+
+        <span class="cmt">// 6. 逐 token 追加到 UI</span>
+        <span class="key">for await</span> (<span class="key">const</span> chunk <span class="key">of</span> stream) {
+            lastMsg.content += chunk.content
+            lastMsg.last_seq = chunk.seq
+            <span class="fn">updateUI</span>()  <span class="cmt">// 增量渲染，打字机效果</span>
+        }
+
+        <span class="cmt">// 7. 完成后去掉光标动画</span>
+        <span class="fn">hideTypingIndicator</span>()
+    }
+}</code></pre>
+  </div>
+
+  <!-- Section 8 -->
+  <div class="section">
+    <h2><span class="num">8</span> 关键设计决策与权衡</h2>
+    <p class="desc">这个方案不是免费的，有一些必须要做的取舍：</p>
+    <table>
+      <tr><th>决策点</th><th>Option A</th><th>Option B</th><th>推荐</th></tr>
+      <tr>
+        <td><strong>消息存储</strong></td>
+        <td>Redis 纯内存，性能好但有内存上限</td>
+        <td>消息队列 (Kafka/Pulsar)，支持持久化和回溯</td>
+        <td>小规模用 Redis，大规模用 Kafka</td>
+      </tr>
+      <tr>
+        <td><strong>会话过期</strong></td>
+        <td>推理完成后立即删除，节省资源</td>
+        <td>保留 N 分钟（如 30min），给续传窗口</td>
+        <td>保留 30 分钟，过期后提示「已过期」</td>
+      </tr>
+      <tr>
+        <td><strong>推送方式</strong></td>
+        <td>WebSocket 全双工，实时性好</td>
+        <td>HTTP 长轮询，兼容性好，防火墙友好</td>
+        <td>移动端优先长轮询，桌面端用 WS</td>
+      </tr>
+      <tr>
+        <td><strong>推理取消</strong></td>
+        <td>客户端断开就取消推理，省 GPU</td>
+        <td>客户端断开推理继续，可续传</td>
+        <td>要看产品定位：豆包选 B，ChatGPT 大部分场景选 A</td>
+      </tr>
+    </table>
+
+    <div class="callout warn">
+      <strong>成本考量</strong>
+      断线续传的核心代价是：用户退出后服务端<strong>仍然占用 GPU 推理资源</strong>。如果 100 万个用户同时退出，GPU 可能白白燃烧。所以大部分产品会设一个<strong>超时</strong>（如 5 分钟内没续传就释放资源），或对免费版不提供续传。
+    </div>
+  </div>
+
+  <!-- Section 9: 总结 -->
+  <div class="section" style="background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border-color: #86efac;">
+    <h2><span class="num">9</span> 一句话总结</h2>
+    <p style="font-size: 1.1rem; line-height: 2; text-align: center; padding: 16px 0;">
+      豆包的「退出再进继续输出」并不是什么魔法，而是把<br>
+      <strong style="color: var(--accent); font-size: 1.2rem;">「SSE 长连接」替换成了「Redis 消息队列 + 序号偏移续传」</strong><br>
+      让 LLM 推理进程和客户端连接<strong>完全解耦</strong>。<br><br>
+      推理不管你在线不在线，只管往 Redis 里写 token。<br>
+      客户端上线后拿着上次的序号来取，从断点继续。<br><br>
+      这就是<strong>生产者-消费者模型</strong>在大模型流式输出场景下的经典应用。
+    </p>
+    <div style="text-align: center; margin-top: 16px;">
+      <span style="background: var(--accent); color: #fff; padding: 6px 16px; border-radius: 20px; font-size: 0.85rem; font-weight: 600;">
+        生产解耦 = 断线续传
+      </span>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

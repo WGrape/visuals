@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP / HTTP 底层实现全解析 — 从操作系统到语言封装</title>
+<style>
+  :root {
+    --bg: #fafbfc;
+    --card-bg: #ffffff;
+    --text: #24292e;
+    --text-muted: #586069;
+    --border: #e1e4e8;
+    --accent: #0366d6;
+    --accent-light: #f0f6ff;
+    --green: #28a745;
+    --orange: #f66a0a;
+    --red: #d73a49;
+    --purple: #6f42c1;
+    --code-bg: #f6f8fa;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.1);
+    --radius: 10px;
+    --mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'Consolas', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding-bottom: 120px;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 40%, #1c2541 100%);
+    color: #fff;
+    padding: 64px 24px 56px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(circle at 30% 60%, rgba(3,102,214,0.2) 0%, transparent 50%),
+                radial-gradient(circle at 70% 30%, rgba(111,66,193,0.15) 0%, transparent 50%);
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    position: relative;
+    z-index: 1;
+  }
+  .hero h1 span { color: #58a6ff; }
+  .hero p {
+    font-size: 1.15rem;
+    color: #8b949e;
+    margin-top: 12px;
+    max-width: 680px;
+    margin-inline: auto;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ── Container ── */
+  .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+  /* ── Section ── */
+  section { margin: 48px 0; }
+
+  .section-title {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section-title .num {
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 1rem; font-weight: 800;
+  }
+  .section-subtitle { color: var(--text-muted); margin-bottom: 20px; font-size: 0.95rem; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+  }
+  .card h3 { font-size: 1.15rem; margin-bottom: 12px; color: var(--accent); }
+  .card p, .card li { font-size: 0.95rem; color: var(--text-muted); }
+
+  /* ── Architecture Diagram ── */
+  .arch-diagram {
+    display: flex; flex-direction: column;
+    gap: 2px;
+    margin: 24px 0;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  .arch-layer {
+    border-radius: 8px;
+    padding: 14px 18px;
+    display: flex; align-items: center; gap: 14px;
+    transition: transform 0.2s, box-shadow 0.2s;
+    cursor: default;
+  }
+  .arch-layer:hover {
+    transform: translateX(4px);
+    box-shadow: var(--shadow-lg);
+  }
+  .arch-layer .layer-label {
+    font-weight: 700;
+    min-width: 72px;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .arch-layer .layer-desc { color: inherit; opacity: 0.85; }
+  .layer-app  { background: #ddf4ff; border: 1px solid #79c0ff; color: #032f62; }
+  .layer-lang  { background: #dafbe1; border: 1px solid #7dd48e; color: #0b5d1e; }
+  .layer-sys   { background: #fff8c5; border: 1px solid #e2c236; color: #5c4b00; }
+  .layer-os    { background: #ffebe9; border: 1px solid #ffa198; color: #8b1a10; }
+  .layer-hw    { background: #f0e7ff; border: 1px solid #cba6f7; color: #4a1a8b; }
+
+  /* ── Code Blocks ── */
+  .code-block {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0;
+  }
+  .code-block .lang-tag {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 0 0 6px 0;
+    font-family: var(--mono);
+  }
+  .code-block pre {
+    padding: 18px 22px;
+    margin: 0;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.84rem;
+    line-height: 1.65;
+  }
+  .code-block code { font-family: var(--mono); }
+
+  /* Syntax highlighting tokens */
+  .kw  { color: #d73a49; font-weight: 600; }  /* keyword */
+  .fn  { color: #6f42c1; }                    /* function */
+  .str { color: #032f62; }                    /* string */
+  .cm  { color: #6a737d; font-style: italic; } /* comment */
+  .num { color: #005cc5; }                    /* number */
+  .ty  { color: #22863a; }                    /* type */
+  .op  { color: #d73a49; }                    /* operator */
+
+  /* ── Flow Diagram ── */
+  .flow-row {
+    display: flex; align-items: center; gap: 10px;
+    margin: 6px 0; font-family: var(--mono); font-size: 0.84rem;
+  }
+  .flow-node {
+    padding: 6px 14px; border-radius: 6px;
+    font-weight: 600; white-space: nowrap;
+  }
+  .flow-srv  { background: #ddf4ff; border: 1px solid #79c0ff; color: #032f62; }
+  .flow-cli  { background: #dafbe1; border: 1px solid #7dd48e; color: #0b5d1e; }
+  .flow-arrow { color: var(--text-muted); font-size: 0.9rem; }
+
+  /* ── Tabs for language comparison ── */
+  .lang-tabs {
+    display: flex; gap: 4px; flex-wrap: wrap;
+    margin-bottom: 0;
+  }
+  .lang-tab {
+    padding: 8px 18px; border: 1px solid var(--border);
+    background: var(--card-bg); border-radius: 8px 8px 0 0;
+    cursor: pointer; font-size: 0.88rem; font-weight: 600;
+    transition: all 0.15s;
+  }
+  .lang-tab:hover { background: var(--accent-light); }
+  .lang-tab.active {
+    background: var(--code-bg);
+    border-bottom-color: var(--code-bg);
+    color: var(--accent);
+  }
+  .lang-panel { display: none; }
+  .lang-panel.active { display: block; }
+
+  /* ── Comparison Table ── */
+  .cmp-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 0.88rem; margin: 16px 0;
+  }
+  .cmp-table th {
+    background: var(--code-bg);
+    padding: 10px 14px; text-align: left;
+    border-bottom: 2px solid var(--border);
+    font-weight: 700;
+  }
+  .cmp-table td {
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .cmp-table tr:hover td { background: #f6f8fa; }
+
+  /* ── Callout ── */
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-light);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 18px 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn { border-color: var(--orange); background: #fff8f2; }
+  .callout.idea { border-color: var(--purple); background: #f5f0ff; }
+
+  /* ── Handshake Animation ── */
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  .handshake-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px; background: var(--card-bg);
+    box-shadow: var(--shadow);
+  }
+  .hs-step {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 0; border-bottom: 1px dashed var(--border);
+  }
+  .hs-step:last-child { border-bottom: none; }
+  .hs-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .hs-dot.syn  { background: var(--accent); }
+  .hs-dot.synack { background: var(--purple); }
+  .hs-dot.ack  { background: var(--green); }
+  .hs-dot.data { background: var(--orange); }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center; padding: 40px 24px;
+    color: var(--text-muted); font-size: 0.84rem;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 1.8rem; }
+    .card { padding: 18px 20px; }
+    .arch-layer { flex-direction: column; align-items: flex-start; gap: 4px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<div class="hero">
+  <h1>TCP / HTTP 是怎么<span>「手撸」</span>出来的？</h1>
+  <p>从操作系统内核到各语言的 Socket API，用伪代码逐层拆解网络通信的底层实现</p>
+</div>
+
+<!-- ═══════════════ 1. 核心问题 ═══════════════ -->
+<div class="container">
+<section>
+  <div class="section-title"><span class="num">1</span> 核心问题：语言层面的网络库到底在做什么？</div>
+  <p class="section-subtitle">这些库不是凭空实现的——它们都在调用同一个东西：操作系统提供的 <strong>Socket API</strong></p>
+
+  <div class="card">
+    <h3>简单回答</h3>
+    <p>
+      <strong>都是调用操作系统能力。</strong>
+      无论你用 Python 的 <code>socket</code> 模块、Java 的 <code>java.net.Socket</code>、Go 的 <code>net.Dial</code>、还是 Node.js 的 <code>net.createConnection</code>——
+      它们底层最终都调用了 C 语言的 <code>socket()</code> / <code>bind()</code> / <code>listen()</code> / <code>accept()</code> / <code>connect()</code> / <code>send()</code> / <code>recv()</code> 系统调用。
+    </p>
+    <p>这些系统调用直接跟<strong>操作系统内核中的 TCP/IP 协议栈</strong>交互，而内核又通过网卡驱动程序操作硬件发送和接收数据包。</p>
+  </div>
+
+  <!-- Architecture layers -->
+  <div class="arch-diagram">
+    <div class="arch-layer layer-app">
+      <span class="layer-label">应用层</span>
+      <span class="layer-desc">你的代码：HTTP Server / Browser / curl … 发送 "GET /index.html HTTP/1.1"</span>
+    </div>
+    <div class="arch-layer layer-lang">
+      <span class="layer-label">语言层</span>
+      <span class="layer-desc">语言标准库：Python socket / Java net / Go net / Node net … 封装系统调用</span>
+    </div>
+    <div class="arch-layer layer-sys">
+      <span class="layer-label">系统调用</span>
+      <span class="layer-desc">C 函数：socket() / bind() / connect() / send() / recv() … 陷入内核态</span>
+    </div>
+    <div class="arch-layer layer-os">
+      <span class="layer-label">内核层</span>
+      <span class="layer-desc">TCP/IP 协议栈：三次握手 / 流量控制 / 拥塞控制 / 分包重组 … 管理所有连接</span>
+    </div>
+    <div class="arch-layer layer-hw">
+      <span class="layer-label">硬件层</span>
+      <span class="layer-desc">网卡驱动 → 网卡 → 网线/无线 → 路由器 → 互联网 → 对端</span>
+    </div>
+  </div>
+
+  <div class="callout idea">
+    <strong>关键认知：</strong>你写的代码只负责「说什么」（应用层数据），至于「怎么把数据可靠地送过去」（分包、重传、排序、流量控制），全部由操作系统的 TCP 协议栈自动完成。你只需要调用 <code>send()</code>，内核就帮你搞定一切。
+  </div>
+</section>
+
+<!-- ═══════════════ 2. Socket = 操作系统给用户态开的「窗口」 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">2</span> 什么是 Socket？操作系统给用户程序开的「窗口」</div>
+  <p class="section-subtitle">Socket 不是网络协议，它是操作系统提供的一个抽象接口，让你像操作文件一样操作网络连接</p>
+
+  <div class="card">
+    <h3>Socket 的本质</h3>
+    <p>在 Linux/Unix 中，Socket 被实现为一个<strong>文件描述符（file descriptor）</strong>。这意味着你可以用 <code>read()</code> 和 <code>write()</code> 操作它，就像操作普通文件一样。</p>
+    <p>当你调用 <code>socket()</code> 时，内核在内存中创建一个数据结构，用来维护这个连接的所有状态（本地端口、远端地址、发送/接收缓冲区、TCP 状态机等），然后返回一个整数（文件描述符）给你。</p>
+
+    <div class="code-block">
+      <span class="lang-tag">C — 创建一个 TCP Socket</span>
+      <pre><code><span class="cm">// socket(协议族, 类型, 协议)</span>
+<span class="ty">int</span> <span class="fn">sockfd</span> = <span class="fn">socket</span>(AF_INET, SOCK_STREAM, <span class="num">0</span>);
+<span class="cm">//   AF_INET     → 使用 IPv4</span>
+<span class="cm">//   SOCK_STREAM → 面向流的、可靠的连接 = TCP</span>
+<span class="cm">//   0           → 自动选择协议 (TCP)</span>
+
+<span class="kw">if</span> (sockfd &lt; <span class="num">0</span>) {
+    <span class="fn">perror</span>(<span class="str">"socket creation failed"</span>);
+    <span class="kw">return</span> <span class="num">-1</span>;
+}
+<span class="cm">// sockfd 就是一个普通的整数，但它代表内核中的一个 TCP 连接端点</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 3. TCP 服务器：手写伪代码 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">3</span> 手写一个 TCP 服务器（伪代码）</div>
+  <p class="section-subtitle">一个最简 TCP Echo 服务器的完整流程，每一步都是系统调用</p>
+
+  <div class="card">
+    <h3>TCP Server 完整流程</h3>
+
+    <div class="code-block">
+      <span class="lang-tag">伪代码 — TCP Echo 服务器</span>
+      <pre><code><span class="cm">// ═════════════ 第 1 步：创建 Socket ═════════════</span>
+<span class="kw">let</span> server_fd = <span class="fn">socket</span>(AF_INET, SOCK_STREAM, <span class="num">0</span>)
+<span class="cm">// 向内核申请一个 TCP socket 端点</span>
+<span class="cm">// 内核分配内存，初始化 TCP 状态机为 CLOSED</span>
+
+<span class="cm">// ═════════════ 第 2 步：绑定地址 ═════════════</span>
+<span class="kw">let</span> addr = <span class="fn">sockaddr_in</span>(
+    ip   = <span class="str">"0.0.0.0"</span>,    <span class="cm">// 监听所有网卡</span>
+    port = <span class="num">8080</span>           <span class="cm">// 监听端口</span>
+)
+<span class="fn">bind</span>(server_fd, addr)
+<span class="cm">// 把这端口的「所有权」注册到 server_fd 上</span>
+
+<span class="cm">// ═════════════ 第 3 步：开始监听 ═════════════</span>
+<span class="fn">listen</span>(server_fd, backlog = <span class="num">128</span>)
+<span class="cm">// 把 TCP 状态机从 CLOSED → LISTEN</span>
+<span class="cm">// backlog = 内核为这个 socket 维护的「等待 accept」队列长度</span>
+<span class="cm">// 至此，内核已经可以接收 SYN 包了！</span>
+
+<span class="cm">// ═════════════ 第 4 步：接受连接 ═════════════</span>
+<span class="kw">loop</span>:
+    client_fd, client_addr = <span class="fn">accept</span>(server_fd)
+    <span class="cm">// accept 是阻塞的——内核完成三次握手后才返回</span>
+    <span class="cm">// 返回一个新的 socket fd，专门用于和这个客户端通信</span>
+    <span class="cm">// 原 server_fd 继续监听新连接</span>
+
+    <span class="cm">// ═══════ 第 5 步：收发数据 ═══════</span>
+    <span class="kw">while</span> <span class="kw">true</span>:
+        data = <span class="fn">recv</span>(client_fd, buffer_size = <span class="num">4096</span>)
+        <span class="cm">// 从内核的接收缓冲区读取数据</span>
+        <span class="cm">// 内核已经帮你做了：拆包、去重、排序、ACK 确认</span>
+
+        <span class="kw">if</span> data is empty:
+            <span class="kw">break</span>  <span class="cm">// 对方关闭了连接</span>
+
+        <span class="fn">send</span>(client_fd, data)
+        <span class="cm">// 写入内核的发送缓冲区</span>
+        <span class="cm">// 内核自动分包、加上 TCP 头、通过网卡发出</span>
+
+    <span class="cm">// ═══════ 第 6 步：关闭连接 ═══════</span>
+    <span class="fn">close</span>(client_fd)
+    <span class="cm">// 内核发送 FIN 包，执行四次挥手</span></code></pre>
+    </div>
+
+    <!-- Visual flow -->
+    <div class="handshake-box" style="margin-top: 20px;">
+      <h3 style="margin-bottom: 14px; font-size: 1rem;">时间线：Server 和 Client 的交互过程</h3>
+      <div class="hs-step">
+        <span class="hs-dot syn"></span>
+        <span style="min-width:80px;font-weight:700;">Server</span>
+        <span><code>socket() → bind() → listen()</code></span>
+        <span style="color:var(--text-muted);">→ 进入 LISTEN 状态，等待连接</span>
+      </div>
+      <div class="hs-step">
+        <span class="hs-dot" style="background:#22863a;"></span>
+        <span style="min-width:80px;font-weight:700;">Client</span>
+        <span><code>socket() → connect()</code></span>
+        <span style="color:var(--text-muted);">→ 发起三次握手 → 三次握手 → 三次握手</span>
+      </div>
+      <div class="hs-step">
+        <span class="hs-dot synack"></span>
+        <span style="min-width:80px;font-weight:700;color:var(--purple);">内核</span>
+        <span colspan="2">SYN → SYN-ACK → ACK（三次握手完成，连接建立）</span>
+      </div>
+      <div class="hs-step">
+        <span class="hs-dot syn"></span>
+        <span style="min-width:80px;font-weight:700;">Server</span>
+        <span><code>accept()</code> 返回</span>
+        <span style="color:var(--text-muted);">→ 拿到新 fd，可以开始通信</span>
+      </div>
+      <div class="hs-step">
+        <span class="hs-dot data"></span>
+        <span style="min-width:80px;font-weight:700;color:var(--orange);">双方</span>
+        <span><code>send() / recv()</code> 反复调用</span>
+        <span style="color:var(--text-muted);">→ 数据双向流动</span>
+      </div>
+      <div class="hs-step">
+        <span class="hs-dot" style="background:#6a737d;"></span>
+        <span style="min-width:80px;font-weight:700;">任一方</span>
+        <span><code>close()</code></span>
+        <span style="color:var(--text-muted);">→ FIN → ACK → FIN → ACK（四次挥手）</span>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top: 20px;">
+      <strong>关键点：</strong>三次握手不是你代码做的！你调用 <code>connect()</code> 之后，<strong>内核自动帮你完成三次握手</strong>，握手成功后 <code>connect()</code> 才返回。同理，<code>accept()</code> 也是在握手完成后才返回。
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 4. TCP 客户端 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">4</span> 手写一个 TCP 客户端（伪代码）</div>
+  <p class="section-subtitle">客户端比服务端更简单，只需要 socket + connect + send/recv</p>
+
+  <div class="code-block">
+    <span class="lang-tag">伪代码 — TCP 客户端</span>
+    <pre><code><span class="cm">// ═════════════ 第 1 步：创建 Socket ═════════════</span>
+<span class="kw">let</span> sockfd = <span class="fn">socket</span>(AF_INET, SOCK_STREAM, <span class="num">0</span>)
+
+<span class="cm">// ═════════════ 第 2 步：连接到服务器 ═════════════</span>
+<span class="kw">let</span> server_addr = <span class="fn">sockaddr_in</span>(
+    ip   = <span class="str">"127.0.0.1"</span>,  <span class="cm">// 目标 IP</span>
+    port = <span class="num">8080</span>           <span class="cm">// 目标端口</span>
+)
+<span class="fn">connect</span>(sockfd, server_addr)
+<span class="cm">// 内核自动完成：
+//   1. 操作系统自动分配一个本地临时端口（ephemeral port）
+//   2. 发送 SYN 包到 127.0.0.1:8080
+//   3. 等待 SYN-ACK
+//   4. 回复 ACK，三次握手完成
+//   5. connect() 返回</span>
+
+<span class="cm">// ═════════════ 第 3 步：发送数据 ═════════════</span>
+<span class="kw">let</span> message = <span class="str">"Hello, Server!"</span>
+<span class="fn">send</span>(sockfd, message)
+<span class="cm">// 数据进入内核发送缓冲区 → 内核分包 → TCP 头 → IP 头 → 以太网帧 → 网卡发出</span>
+
+<span class="cm">// ═════════════ 第 4 步：接收响应 ═════════════</span>
+<span class="kw">let</span> response = <span class="fn">recv</span>(sockfd, buffer_size = <span class="num">4096</span>)
+<span class="fn">print</span>(response)
+
+<span class="cm">// ═════════════ 第 5 步：关闭 ═════════════</span>
+<span class="fn">close</span>(sockfd)</code></pre>
+  </div>
+
+  <div class="callout warn">
+    <strong>注意：</strong>客户端不需要 <code>bind()</code> 和 <code>listen()</code>。当你调用 <code>connect()</code> 时，操作系统自动帮你分配一个本地临时端口（比如 52341），你不需要关心。
+  </div>
+</section>
+
+<!-- ═══════════════ 5. 内核到底做了什么？ ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">5</span> 你只调了 send()，内核做了多少事？</div>
+  <p class="section-subtitle">一次 send() 调用在内核中的完整路径</p>
+
+  <div class="card">
+    <div class="arch-diagram">
+      <div class="arch-layer layer-app">
+        <span class="layer-label">用户态</span>
+        <span class="layer-desc"><code>send(fd, "Hello", 5)</code> → 陷入内核（syscall）</span>
+      </div>
+      <div class="arch-layer layer-os" style="background:#fff3cd;">
+        <span class="layer-label">内核①</span>
+        <span class="layer-desc">VFS 层：根据 fd 找到 socket 数据结构</span>
+      </div>
+      <div class="arch-layer layer-os" style="background:#fff3cd;">
+        <span class="layer-label">内核②</span>
+        <span class="layer-desc">TCP 层：数据拷贝到发送缓冲区，检查发送窗口、拥塞窗口</span>
+      </div>
+      <div class="arch-layer layer-os" style="background:#fff3cd;">
+        <span class="layer-label">内核③</span>
+        <span class="layer-desc">TCP 层：如果可发送，封装 TCP 头（源端口、目的端口、序列号、ACK、窗口大小、校验和…）</span>
+      </div>
+      <div class="arch-layer layer-os" style="background:#fff3cd;">
+        <span class="layer-label">内核④</span>
+        <span class="layer-desc">IP 层：封装 IP 头（源 IP、目的 IP、TTL、协议类型…），路由查找下一跳</span>
+      </div>
+      <div class="arch-layer layer-os" style="background:#fff3cd;">
+        <span class="layer-label">内核⑤</span>
+        <span class="layer-desc">数据链路层：封装 MAC 头，ARP 查找下一跳 MAC 地址</span>
+      </div>
+      <div class="arch-layer layer-hw">
+        <span class="layer-label">硬件</span>
+        <span class="layer-desc">网卡驱动 → DMA 传输 → 网卡 → 网线发出电信号/光信号</span>
+      </div>
+    </div>
+
+    <div class="callout idea" style="margin-top: 20px;">
+      <strong>给你一个直观感受：</strong><br>
+      你调用 <code>send(fd, "Hello", 5)</code> 这一行代码——<br>
+      内核至少执行了：<strong>缓冲区检查 → 分段 → TCP头封装 → 拥塞控制判断 → IP头封装 → 路由查找 → ARP查询 → MAC头封装 → 网卡队列 → DMA传输 → 中断处理 → 等待ACK → 可能重传</strong><br>
+      而你只需要等这一行代码返回（默认是阻塞模式）。
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 6. HTTP = 在 TCP 连接上发送文本 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">6</span> HTTP 不过是「在 TCP 连接上按约定格式收发文本」</div>
+  <p class="section-subtitle">HTTP 是应用层协议，它完全不关心底层是 TCP 还是别的什么——只要能可靠传输字节流就行</p>
+
+  <div class="card">
+    <h3>用伪代码实现一个最简 HTTP 服务器</h3>
+
+    <div class="code-block">
+      <span class="lang-tag">伪代码 — 最简 HTTP/1.1 服务器（基于 TCP）</span>
+      <pre><code><span class="cm">// 前面：socket() → bind() → listen() → accept()  ← 和 TCP 服务器完全一样</span>
+
+<span class="kw">loop</span>:
+    client_fd = <span class="fn">accept</span>(server_fd)
+
+    <span class="cm">// ═══ 从 TCP 连接中读取 HTTP 请求 ═══</span>
+    raw_request = <span class="str">""</span>
+    <span class="kw">while</span> <span class="kw">true</span>:
+        chunk = <span class="fn">recv</span>(client_fd, <span class="num">4096</span>)
+        raw_request += chunk
+        <span class="kw">if</span> <span class="str">"\r\n\r\n"</span> in raw_request:    <span class="cm">// HTTP 请求头结束标志</span>
+            <span class="kw">break</span>
+
+    <span class="cm">// ═══ 解析 HTTP 请求 ═══</span>
+    <span class="cm">// raw_request 大概长这样：</span>
+    <span class="cm">//   GET /index.html HTTP/1.1\r\n</span>
+    <span class="cm">//   Host: localhost:8080\r\n</span>
+    <span class="cm">//   Connection: keep-alive\r\n</span>
+    <span class="cm">//   \r\n</span>
+
+    lines = raw_request.<span class="fn">split</span>(<span class="str">"\r\n"</span>)
+    first_line = lines[<span class="num">0</span>].<span class="fn">split</span>(<span class="str">" "</span>)
+    method  = first_line[<span class="num">0</span>]   <span class="cm">// "GET"</span>
+    path    = first_line[<span class="num">1</span>]   <span class="cm">// "/index.html"</span>
+    version = first_line[<span class="num">2</span>]   <span class="cm">// "HTTP/1.1"</span>
+
+    <span class="cm">// ═══ 解析请求头 ═══</span>
+    headers = {}
+    <span class="kw">for</span> line in lines[<span class="num">1</span>:]:
+        <span class="kw">if</span> line == <span class="str">""</span>: <span class="kw">break</span>
+        key, value = line.<span class="fn">split</span>(<span class="str">": "</span>, <span class="num">1</span>)
+        headers[key] = value
+
+    <span class="cm">// ═══ 生成 HTTP 响应 ═══</span>
+    <span class="kw">let</span> body = <span class="str">"&lt;h1&gt;Hello, World!&lt;/h1&gt;"</span>
+
+    <span class="kw">let</span> response = <span class="str">""</span>
+    response += <span class="str">"HTTP/1.1 200 OK\r\n"</span>                    <span class="cm">// 状态行</span>
+    response += <span class="str">"Content-Type: text/html\r\n"</span>              <span class="cm">// 响应头</span>
+    response += <span class="str">"Content-Length: "</span> + <span class="fn">len</span>(body) + <span class="str">"\r\n"</span>
+    response += <span class="str">"Connection: close\r\n"</span>
+    response += <span class="str">"\r\n"</span>                                     <span class="cm">// 空行分隔</span>
+    response += body                                            <span class="cm">// 响应体</span>
+
+    <span class="cm">// ═══ 通过 TCP 发送响应 ═══</span>
+    <span class="fn">send</span>(client_fd, response)
+    <span class="fn">close</span>(client_fd)</code></pre>
+    </div>
+
+    <div class="callout idea">
+      <strong>看到了吗？</strong>HTTP 服务器和 TCP 服务器的唯一区别就是：<br>
+      ① 多了一个「解析 HTTP 请求格式」的步骤<br>
+      ② 多了一个「按 HTTP 格式拼响应字符串」的步骤<br>
+      ③ 底层还是 <code>recv()</code> 收数据、<code>send()</code> 发数据<br><br>
+      HTTP 是<strong>应用层协议</strong>，它定义的是「数据的格式和语义」；<br>
+      TCP 是<strong>传输层协议</strong>，它负责「如何可靠地把这些字节送过去」。
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 7. 各语言封装对比 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">7</span> 各语言是如何封装 Socket 的？</div>
+  <p class="section-subtitle">换汤不换药——底层都是 POSIX Socket API，只是语法糖不同</p>
+
+  <!-- Language Tabs -->
+  <div class="lang-tabs" id="langTabs">
+    <div class="lang-tab active" data-lang="c">C（最底层）</div>
+    <div class="lang-tab" data-lang="py">Python</div>
+    <div class="lang-tab" data-lang="java">Java</div>
+    <div class="lang-tab" data-lang="go">Go</div>
+    <div class="lang-tab" data-lang="rust">Rust</div>
+    <div class="lang-tab" data-lang="node">Node.js</div>
+  </div>
+
+  <div class="lang-panel active" data-lang="c">
+    <div class="code-block">
+      <span class="lang-tag">C — 直接调用 POSIX 系统调用</span>
+      <pre><code><span class="cm">/* C 的 socket 编程就是直接写系统调用 */
+/* &lt;sys/socket.h&gt; 提供的函数直接对应内核系统调用 */</span>
+
+<span class="ty">int</span> <span class="fn">main</span>() {
+    <span class="ty">int</span> sockfd = <span class="fn">socket</span>(AF_INET, SOCK_STREAM, <span class="num">0</span>);
+
+    <span class="kw">struct</span> sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port   = <span class="fn">htons</span>(<span class="num">8080</span>);           <span class="cm">// 端口号要转网络字节序</span>
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    <span class="fn">bind</span>(sockfd, (<span class="kw">struct</span> sockaddr*)&amp;addr, <span class="kw">sizeof</span>(addr));
+    <span class="fn">listen</span>(sockfd, <span class="num">128</span>);
+
+    <span class="kw">while</span> (<span class="num">1</span>) {
+        <span class="kw">struct</span> sockaddr_in client;
+        <span class="ty">socklen_t</span> client_len = <span class="kw">sizeof</span>(client);
+        <span class="ty">int</span> client_fd = <span class="fn">accept</span>(sockfd, (<span class="kw">struct</span> sockaddr*)&amp;client, &amp;client_len);
+
+        <span class="ty">char</span> buf[<span class="num">4096</span>];
+        <span class="ty">ssize_t</span> n = <span class="fn">recv</span>(client_fd, buf, <span class="kw">sizeof</span>(buf), <span class="num">0</span>);
+        <span class="fn">send</span>(client_fd, buf, n, <span class="num">0</span>);
+
+        <span class="fn">close</span>(client_fd);
+    }
+    <span class="kw">return</span> <span class="num">0</span>;
+}</code></pre>
+    </div>
+  </div>
+
+  <div class="lang-panel" data-lang="py">
+    <div class="code-block">
+      <span class="lang-tag">Python — socket 模块是对 C 系统调用的薄封装</span>
+      <pre><code><span class="kw">import</span> socket
+
+<span class="cm"># Python 的 socket 模块底层调用的是 C 的 socket()/bind()/listen()...</span>
+<span class="cm"># CPython 源码中直接 #include &lt;sys/socket.h&gt; 然后做了一层 Python 对象包装</span>
+
+server = socket.<span class="fn">socket</span>(socket.AF_INET, socket.SOCK_STREAM)
+server.<span class="fn">bind</span>((<span class="str">'0.0.0.0'</span>, <span class="num">8080</span>))
+server.<span class="fn">listen</span>(<span class="num">128</span>)
+
+<span class="kw">while</span> <span class="kw">True</span>:
+    client, addr = server.<span class="fn">accept</span>()
+    data = client.<span class="fn">recv</span>(<span class="num">4096</span>)
+    client.<span class="fn">sendall</span>(data)
+    client.<span class="fn">close</span>()</code></pre>
+    </div>
+  </div>
+
+  <div class="lang-panel" data-lang="java">
+    <div class="code-block">
+      <span class="lang-tag">Java — java.net.Socket 封装了 Socket 系统调用，通过 JNI 调用 C</span>
+      <pre><code><span class="kw">import</span> java.net.*;
+<span class="kw">import</span> java.io.*;
+
+<span class="cm">// Java 的 java.net.Socket 最终通过 JNI (Java Native Interface)</span>
+<span class="cm">// 调用本地 C 库的 socket()/bind()/listen()/accept() 等系统调用</span>
+<span class="cm">// 路径：Java → JNI → libc → syscall → 内核</span>
+
+<span class="ty">ServerSocket</span> server = <span class="kw">new</span> <span class="ty">ServerSocket</span>(<span class="num">8080</span>);
+
+<span class="kw">while</span> (<span class="kw">true</span>) {
+    <span class="ty">Socket</span> client = server.<span class="fn">accept</span>();
+
+    <span class="ty">InputStream</span>  in  = client.<span class="fn">getInputStream</span>();
+    <span class="ty">OutputStream</span> out = client.<span class="fn">getOutputStream</span>();
+
+    <span class="ty">byte</span>[] buf = <span class="kw">new</span> <span class="ty">byte</span>[<span class="num">4096</span>];
+    <span class="ty">int</span> n = in.<span class="fn">read</span>(buf);
+    out.<span class="fn">write</span>(buf, <span class="num">0</span>, n);
+
+    client.<span class="fn">close</span>();
+}</code></pre>
+    </div>
+  </div>
+
+  <div class="lang-panel" data-lang="go">
+    <div class="code-block">
+      <span class="lang-tag">Go — net 包通过 syscall 包直接发起系统调用，不经过 libc</span>
+      <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> <span class="str">"net"</span>
+
+<span class="cm">// Go 的 net 包比较特殊：</span>
+<span class="cm">// Go 有自己的运行时，不依赖 libc</span>
+<span class="cm">// 它通过 //go:linkname 或汇编直接发起 syscall 指令</span>
+<span class="cm">// Linux 上直接调用 sys_socket / sys_bind / sys_listen ...</span>
+
+<span class="kw">func</span> <span class="fn">main</span>() {
+    <span class="cm">// 一行代码就包含：socket() + bind() + listen()</span>
+    listener, _ := net.<span class="fn">Listen</span>(<span class="str">"tcp"</span>, <span class="str">":8080"</span>)
+
+    <span class="kw">for</span> {
+        conn, _ := listener.<span class="fn">Accept</span>()   <span class="cm">// accept() 系统调用</span>
+
+        <span class="kw">go</span> <span class="kw">func</span>(c net.Conn) {            <span class="cm">// goroutine 并发处理</span>
+            buf := <span class="fn">make</span>([]<span class="ty">byte</span>, <span class="num">4096</span>)
+            n, _ := c.<span class="fn">Read</span>(buf)          <span class="cm">// recv() 系统调用</span>
+            c.<span class="fn">Write</span>(buf[:n])              <span class="cm">// send() 系统调用</span>
+            c.<span class="fn">Close</span>()                     <span class="cm">// close() 系统调用</span>
+        }(conn)
+    }
+}</code></pre>
+    </div>
+  </div>
+
+  <div class="lang-panel" data-lang="rust">
+    <div class="code-block">
+      <span class="lang-tag">Rust — std::net 封装了 libc 的系统调用</span>
+      <pre><code><span class="kw">use</span> std::net::{TcpListener, TcpStream};
+<span class="kw">use</span> std::io::{Read, Write};
+
+<span class="cm">// Rust 的 std::net 底层通过 libc crate 调用 C 的系统调用</span>
+<span class="cm">// 路径：Rust → libc crate → C ABI → syscall → 内核</span>
+
+<span class="kw">fn</span> <span class="fn">main</span>() -> std::io::Result&lt;()&gt; {
+    <span class="kw">let</span> listener = <span class="ty">TcpListener</span>::<span class="fn">bind</span>(<span class="str">"0.0.0.0:8080"</span>)?;
+
+    <span class="kw">for</span> stream <span class="kw">in</span> listener.<span class="fn">incoming</span>() {
+        <span class="kw">let</span> <span class="kw">mut</span> stream: <span class="ty">TcpStream</span> = stream?;
+
+        <span class="kw">let</span> <span class="kw">mut</span> buf = [<span class="num">0u8</span>; <span class="num">4096</span>];
+        <span class="kw">let</span> n = stream.<span class="fn">read</span>(&amp;<span class="kw">mut</span> buf)?;
+        stream.<span class="fn">write_all</span>(&amp;buf[..n])?;
+        <span class="cm">// drop(stream) 自动调用 close()</span>
+    }
+    <span class="ty">Ok</span>(())
+}</code></pre>
+    </div>
+  </div>
+
+  <div class="lang-panel" data-lang="node">
+    <div class="code-block">
+      <span class="lang-tag">Node.js — net 模块底层通过 libuv 异步调用系统调用</span>
+      <pre><code><span class="kw">const</span> net = require(<span class="str">'net'</span>);
+
+<span class="cm">// Node.js 的网络层路径：
+// JavaScript → libuv (C) → 系统调用 → 内核
+// libuv 在事件循环中用 epoll/kqueue 实现非阻塞 IO</span>
+
+<span class="kw">const</span> server = net.<span class="fn">createServer</span>((socket) => {
+    <span class="cm">// 'socket' 是一个 Duplex stream，封装了 TCP 连接</span>
+    socket.<span class="fn">on</span>(<span class="str">'data'</span>, (data) => {
+        socket.<span class="fn">write</span>(data);  <span class="cm">// echo back</span>
+    });
+    socket.<span class="fn">on</span>(<span class="str">'end'</span>, () => {
+        <span class="cm">// 连接关闭</span>
+    });
+});
+
+server.<span class="fn">listen</span>(<span class="num">8080</span>, () => {
+    console.<span class="fn">log</span>(<span class="str">'Server listening on port 8080'</span>);
+});</code></pre>
+    </div>
+  </div>
+
+  <!-- Comparison Table -->
+  <div class="card" style="margin-top: 20px;">
+    <h3>各语言 Socket 实现路径对比</h3>
+    <table class="cmp-table">
+      <thead>
+        <tr>
+          <th>语言</th>
+          <th>调用路径</th>
+          <th>是否经过 libc</th>
+          <th>特点</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>C</strong></td>
+          <td><code>用户代码 → libc → syscall → 内核</code></td>
+          <td>✅ 是</td>
+          <td>最直接，1:1 映射系统调用</td>
+        </tr>
+        <tr>
+          <td><strong>Python (CPython)</strong></td>
+          <td><code>Python socket 模块 → C 扩展 → libc → syscall → 内核</code></td>
+          <td>✅ 是</td>
+          <td>每个 socket 操作有 Python 对象包装开销</td>
+        </tr>
+        <tr>
+          <td><strong>Java</strong></td>
+          <td><code>Java net → JNI → libc → syscall → 内核</code></td>
+          <td>✅ 是</td>
+          <td>JNI 调用有跨语言开销；NIO 用 epoll 实现非阻塞</td>
+        </tr>
+        <tr>
+          <td><strong>Go</strong></td>
+          <td><code>Go net → 直接 syscall 指令 → 内核</code></td>
+          <td>❌ 否（通常）</td>
+          <td>绕过 libc，由 Go 运行时直接发起系统调用；netpoller 用 epoll</td>
+        </tr>
+        <tr>
+          <td><strong>Rust</strong></td>
+          <td><code>Rust std::net → libc crate → libc → syscall → 内核</code></td>
+          <td>✅ 是（std）</td>
+          <td>零成本抽象；也有 tokio 异步运行时用 epoll</td>
+        </tr>
+        <tr>
+          <td><strong>Node.js</strong></td>
+          <td><code>JS net → libuv (C) → syscall → 内核</code></td>
+          <td>✅ 是</td>
+          <td>libuv 用 epoll 实现事件驱动异步 IO</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout idea" style="margin-top: 16px;">
+      <strong>Go 比较特别：</strong>Go 有自己的运行时调度器，不需要 libc。在 Linux 上，Go 通过汇编直接执行 <code>syscall</code> 指令（如 <code>sys_socket</code>、<code>sys_connect</code>），完全绕过 libc。这样做的好处是避免了 C 调用栈切换开销，配合 goroutine 可以轻松支撑百万级并发连接。
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 8. 非阻塞 IO ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">8</span> 进阶：非阻塞 IO 和事件循环</div>
+  <p class="section-subtitle">上面的例子都是阻塞模式——那 Node.js 和 Nginx 是怎么处理成千上万并发连接的？</p>
+
+  <div class="card">
+    <h3>阻塞 vs 非阻塞</h3>
+    <p>默认情况下，<code>accept()</code>、<code>recv()</code> 都是阻塞的——没有连接或数据时，调用线程会挂起。这意味着一个线程只能处理一个连接。</p>
+    <p>高并发服务器（Nginx、Node.js、Go、Redis）使用 <strong>非阻塞 IO + IO 多路复用</strong>：</p>
+
+    <div class="code-block" style="margin-top: 16px;">
+      <span class="lang-tag">伪代码 — epoll 事件循环（Linux 高性能服务器的核心）</span>
+      <pre><code><span class="cm">// 这是 Nginx / Node.js / Redis / Go netpoller 的底层原理</span>
+
+<span class="kw">let</span> epoll_fd = <span class="fn">epoll_create1</span>(<span class="num">0</span>)     <span class="cm">// 创建一个 epoll 实例</span>
+
+<span class="kw">let</span> server_fd = <span class="fn">socket</span>(AF_INET, SOCK_STREAM, <span class="num">0</span>)
+<span class="fn">set_nonblocking</span>(server_fd)            <span class="cm">// 设为非阻塞模式</span>
+<span class="fn">bind</span>(server_fd, addr)
+<span class="fn">listen</span>(server_fd, <span class="num">128</span>)
+
+<span class="fn">epoll_ctl</span>(epoll_fd, ADD, server_fd, EPOLLIN)
+<span class="cm">// 告诉 epoll：「帮我盯着 server_fd，有可读事件时通知我」</span>
+
+<span class="kw">let</span> events = []   <span class="cm">// 事件数组</span>
+
+<span class="kw">while</span> <span class="kw">true</span>:
+    <span class="cm">// ═══ 核心：一个线程等待多个 fd 的事件 ═══</span>
+    ready_count = <span class="fn">epoll_wait</span>(epoll_fd, events, max_events = <span class="num">1024</span>, timeout)
+
+    <span class="kw">for</span> i in <span class="num">0</span>..ready_count:
+        fd = events[i].fd
+
+        <span class="kw">if</span> fd == server_fd:
+            <span class="cm">// 有新连接到来</span>
+            client_fd = <span class="fn">accept</span>(server_fd)
+            <span class="fn">set_nonblocking</span>(client_fd)
+            <span class="fn">epoll_ctl</span>(epoll_fd, ADD, client_fd, EPOLLIN)
+            <span class="cm">// 把新连接的 fd 也加入监控</span>
+
+        <span class="kw">else</span>:
+            <span class="cm">// 客户端发来了数据</span>
+            data = <span class="fn">recv</span>(fd, <span class="num">4096</span>)
+            <span class="kw">if</span> data is empty:
+                <span class="fn">close</span>(fd)
+                <span class="fn">epoll_ctl</span>(epoll_fd, DEL, fd)
+            <span class="kw">else</span>:
+                <span class="fn">send</span>(fd, data)</code></pre>
+    </div>
+
+    <div class="callout">
+      <strong>一句话总结：</strong>阻塞 IO 是「一个一个问」，非阻塞 IO + epoll 是「同时盯着几千个 fd，谁有动静就处理谁」——这就是 Nginx 能支撑数万并发连接的秘密。
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ 9. 总结 ═══════════════ -->
+<section>
+  <div class="section-title"><span class="num">9</span> 总结：一图胜千言</div>
+
+  <div class="card" style="text-align: center;">
+    <svg viewBox="0 0 680 520" xmlns="http://www.w3.org/2000/svg" style="max-width: 100%;">
+      <defs>
+        <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#586069"/>
+        </marker>
+        <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#f6f8fa"/>
+          <stop offset="100%" stop-color="#e1e4e8"/>
+        </linearGradient>
+        <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.1"/></filter>
+      </defs>
+
+      <!-- Background -->
+      <rect x="0" y="0" width="680" height="520" rx="12" fill="url(#bgGrad)"/>
+
+      <!-- Title -->
+      <text x="340" y="36" text-anchor="middle" font-size="16" font-weight="700" fill="#24292e" font-family="sans-serif">从你的代码到网络数据包——完整调用链</text>
+
+      <!-- Node: Your Code -->
+      <rect x="200" y="56" width="280" height="46" rx="8" fill="#ddf4ff" stroke="#79c0ff" filter="url(#shadow)"/>
+      <text x="340" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="#032f62" font-family="sans-serif">你的代码（应用层）</text>
+      <text x="340" y="92" text-anchor="middle" font-size="11" fill="#032f62" font-family="monospace">send(fd, "GET / HTTP/1.1\r\n")</text>
+
+      <!-- Arrow -->
+      <line x1="340" y1="102" x2="340" y2="128" stroke="#586069" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Node: Language Layer -->
+      <rect x="200" y="130" width="280" height="46" rx="8" fill="#dafbe1" stroke="#7dd48e" filter="url(#shadow)"/>
+      <text x="340" y="148" text-anchor="middle" font-size="13" font-weight="700" fill="#0b5d1e" font-family="sans-serif">语言标准库（封装层）</text>
+      <text x="340" y="166" text-anchor="middle" font-size="11" fill="#0b5d1e" font-family="monospace">Python socket / Go net / Java Socket / ...</text>
+
+      <line x1="340" y1="176" x2="340" y2="202" stroke="#586069" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Node: Syscall -->
+      <rect x="200" y="204" width="280" height="46" rx="8" fill="#fff8c5" stroke="#e2c236" filter="url(#shadow)"/>
+      <text x="340" y="222" text-anchor="middle" font-size="13" font-weight="700" fill="#5c4b00" font-family="sans-serif">系统调用（陷入内核）</text>
+      <text x="340" y="240" text-anchor="middle" font-size="11" fill="#5c4b00" font-family="monospace">sys_sendto(fd, buf, len, flags, addr)</text>
+
+      <line x1="340" y1="250" x2="340" y2="276" stroke="#586069" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Node: Kernel TCP -->
+      <rect x="200" y="278" width="280" height="60" rx="8" fill="#ffebe9" stroke="#ffa198" filter="url(#shadow)"/>
+      <text x="340" y="298" text-anchor="middle" font-size="13" font-weight="700" fill="#8b1a10" font-family="sans-serif">内核 TCP/IP 协议栈</text>
+      <text x="340" y="315" text-anchor="middle" font-size="10" fill="#8b1a10" font-family="monospace">分段 → 重传 → 流量控制 → 拥塞控制</text>
+      <text x="340" y="330" text-anchor="middle" font-size="10" fill="#8b1a10" font-family="monospace">TCP头 → IP头 → 路由 → ARP → MAC头</text>
+
+      <line x1="340" y1="338" x2="340" y2="364" stroke="#586069" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Node: NIC -->
+      <rect x="200" y="366" width="280" height="46" rx="8" fill="#f0e7ff" stroke="#cba6f7" filter="url(#shadow)"/>
+      <text x="340" y="384" text-anchor="middle" font-size="13" font-weight="700" fill="#4a1a8b" font-family="sans-serif">网卡驱动 → 网卡 → 网络</text>
+      <text x="340" y="402" text-anchor="middle" font-size="11" fill="#4a1a8b" font-family="monospace">DMA → 电信号/光信号 → 互联网</text>
+
+      <!-- Side annotations -->
+      <g font-family="sans-serif" font-size="10" fill="#586069">
+        <line x1="490" y1="79" x2="530" y2="79" stroke="#d1d5da"/>
+        <line x1="530" y1="79" x2="600" y2="79" stroke="#d1d5da"/>
+        <text x="500" y="74" text-anchor="middle">HTTP 协议</text>
+
+        <line x1="490" y1="153" x2="530" y2="153" stroke="#d1d5da"/>
+        <line x1="530" y1="153" x2="600" y2="153" stroke="#d1d5da"/>
+        <text x="500" y="148" text-anchor="middle">语法糖</text>
+
+        <line x1="490" y1="227" x2="530" y2="227" stroke="#d1d5da"/>
+        <line x1="530" y1="227" x2="600" y2="227" stroke="#d1d5da"/>
+        <text x="500" y="222" text-anchor="middle">用户态/内核态</text>
+        <text x="500" y="235" text-anchor="middle">边界</text>
+
+        <line x1="490" y1="308" x2="530" y2="308" stroke="#d1d5da"/>
+        <line x1="530" y1="308" x2="600" y2="308" stroke="#d1d5da"/>
+        <text x="500" y="303" text-anchor="middle">TCP 可靠性</text>
+
+        <line x1="490" y1="389" x2="530" y2="389" stroke="#d1d5da"/>
+        <line x1="530" y1="389" x2="600" y2="389" stroke="#d1d5da"/>
+        <text x="500" y="384" text-anchor="middle">物理传输</text>
+      </g>
+
+      <!-- Bottom key insight -->
+      <rect x="60" y="440" width="560" height="62" rx="8" fill="#f0f6ff" stroke="#79c0ff" stroke-width="1.5"/>
+      <text x="340" y="462" text-anchor="middle" font-size="12" font-weight="700" fill="#0366d6" font-family="sans-serif">核 心 结 论</text>
+      <text x="340" y="482" text-anchor="middle" font-size="11" fill="#24292e" font-family="sans-serif">
+        你写的每一行网络代码最终都变成了 <tspan font-weight="700" fill="#d73a49">socket() → bind() → listen() → accept() → send()/recv() → close()</tspan>
+      </text>
+      <text x="340" y="497" text-anchor="middle" font-size="11" fill="#586069" font-family="sans-serif">
+        这 7 个系统调用就是所有网络编程的共同根基，无论你用什么语言
+      </text>
+    </svg>
+  </div>
+</section>
+
+</div><!-- .container -->
+
+<footer>
+  <p>TCP / HTTP 底层实现全解析 — 生成于 2026-06-03</p>
+</footer>
+
+<script>
+// Language tab switcher
+document.querySelectorAll('.lang-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const lang = tab.dataset.lang;
+    document.querySelectorAll('.lang-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.lang-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.querySelector(`.lang-panel[data-lang="${lang}"]`).classList.add('active');
+  });
+});
+</script>
+
+</body>
+</html>
