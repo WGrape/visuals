@@ -1,5 +1,9 @@
 (function () {
-    const containerBase = "../container/index.html?page=";
+    // Pages that need a different relative depth can declare it on <html>,
+    // e.g. <html data-app-root="../../">. Existing pages retain the
+    // original ../container/ behavior when the attribute is absent.
+    const appRoot = document.documentElement.getAttribute("data-app-root");
+    const containerBase = (appRoot === null ? "../" : appRoot) + "container/index.html?page=";
 
     function shouldSkipLink(rawHref) {
         if (!rawHref) return true;
