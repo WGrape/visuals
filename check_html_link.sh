@@ -38,47 +38,49 @@ while IFS= read -r -d '' html_file; do
     # 获取文件的相对路径（去掉开头的./）
     relative_path="${html_file#./}"
 
-    # 找到对应的上级index.html
-    # 逻辑：
-    # - game-design/flash-technology-explained.html -> game-design/index.html
-    # - algorithm/trees/binary_tree_traversal.html -> algorithm/index.html
-    # - high-concurrency/kafka/kafka-partition-explained.html -> high-concurrency/index.html
+    # 查找“最近的上级 index.html”：从文件所在目录开始，逐级向上查找，
+    # 直到仓库根目录。只要任意一级祖先 index.html 中包含了指向该文件的链接，
+    # 即视为已链接。这样可以正确处理嵌套目录（如
+    # kaoyan/kaoyan-math-2/Linear-Algebra/ch01.html 应检查
+    # kaoyan/kaoyan-math-2/Linear-Algebra/index.html，而不是 kaoyan/index.html）。
+    #
+    # 逻辑示例：
+    # - game-design/flash.html               -> game-design/index.html
+    # - algorithm/trees/binary_tree.html     -> algorithm/trees/index.html（或更高层 index）
+    # - kaoyan/kaoyan-math-2/LA/ch01.html    -> kaoyan/kaoyan-math-2/LA/index.html（或更高层 index）
 
-    # 按/分割路径，取第一部分作为顶级目录
-    top_dir=$(echo "$relative_path" | cut -d'/' -f1)
+    dir=$(dirname "$relative_path")
+    linked=0
+    checked=""
 
-    # 如果文件直接在顶级目录下（如 game-design/xxx.html），则上级index就是 top_dir/index.html
-    # 如果文件在更深的目录（如 algorithm/trees/xxx.html），上级index也是 top_dir/index.html
-    parent_index="${top_dir}/index.html"
+    while [[ "$dir" != "." && "$dir" != "/" && -n "$dir" ]]; do
+        candidate="$dir/index.html"
+        if [[ -f "$candidate" ]]; then
+            checked="$checked $candidate"
+            # 计算从 candidate 所在目录到该文件的相对路径（macOS 无 realpath，用 python3 兜底）
+            link_target=$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$relative_path" "$dir" 2>/dev/null || basename "$relative_path")
+            if grep -q "href=\"${link_target}\"" "$candidate" 2>/dev/null; then
+                linked=1
+                break
+            fi
+            # 兜底：文件名匹配（适配 href="子目录/文件名" 等写法）
+            filename=$(basename "$relative_path")
+            if grep -q "href=\".*${filename}\"" "$candidate" 2>/dev/null; then
+                linked=1
+                break
+            fi
+        fi
+        dir=$(dirname "$dir")
+    done
 
-    # 检查parent_index是否存在
-    if [[ ! -f "$parent_index" ]]; then
-        echo -e "${YELLOW}跳过: $relative_path (上级index $parent_index 不存在)${NC}"
-        continue
-    fi
-
-    # 检查parent_index中是否有链接指向这个文件
-    # 需要匹配的可能形式：
-    # - href="kafka/kafka-partition-explained.html"
-    # - href="trees/binary_tree_traversal.html"
-    # - href="flash-technology-explained.html"
-
-    # 获取相对于parent_index所在目录的路径
-    parent_dir=$(dirname "$parent_index")
-    link_target=$(realpath --relative-to="$parent_dir" "$html_file" 2>/dev/null || echo "$relative_path" | sed "s|^${top_dir}/||")
-
-    # 检查链接是否存在
-    if grep -q "href=\"${link_target}\"" "$parent_index" 2>/dev/null; then
+    if [[ "$linked" -eq 1 ]]; then
         echo -e "${GREEN}✓ $relative_path${NC}"
         found=$((found + 1))
     else
-        # 尝试另一种方式：直接搜索文件名
-        filename=$(basename "$html_file")
-        if grep -q "href=\".*${filename}\"" "$parent_index" 2>/dev/null; then
-            echo -e "${GREEN}✓ $relative_path${NC}"
-            found=$((found + 1))
+        if [[ -z "$checked" ]]; then
+            echo -e "${YELLOW}跳过: $relative_path (未找到任何上级 index.html)${NC}"
         else
-            missing_info="$relative_path -> 未在 $parent_index 中找到链接"
+            missing_info="$relative_path -> 未在以下 index 中找到链接:$checked"
             echo -e "${RED}✗ $missing_info${NC}"
             missing=$((missing + 1))
             if [[ -z "$missing_files" ]]; then
