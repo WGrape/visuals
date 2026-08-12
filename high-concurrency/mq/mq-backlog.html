@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MQ 消息积压问题全解 · 从原理到实战</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg-from: #0d1b2a;
+    --bg-to: #1a2744;
+    --accent: #f97316;
+    --accent-light: #fb923c;
+    --accent-blue: #60a5fa;
+    --accent-green: #34d399;
+    --accent-red: #f87171;
+    --card-bg: rgba(255,255,255,0.05);
+    --card-border: rgba(255,255,255,0.1);
+    --text-1: #f1f5f9;
+    --text-2: rgba(255,255,255,0.68);
+    --text-3: rgba(255,255,255,0.5);
+    --code-bg: rgba(0,0,0,0.35);
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: linear-gradient(135deg, var(--bg-from) 0%, var(--bg-to) 60%, #0d1520 100%);
+    min-height: 100vh;
+    color: var(--text-1);
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 1.5rem 5rem; }
+
+  /* Header */
+  header {
+    background: rgba(10,18,40,0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header .bar { max-width: 1060px; margin: 0 auto; padding: 0.9rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+  .logo { font-weight: 800; font-size: 1.3rem; background: linear-gradient(135deg, var(--accent), var(--accent-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-decoration: none; }
+  .crumbs { color: var(--text-3); font-size: 0.85rem; }
+  .crumbs a { color: var(--text-2); text-decoration: none; }
+  .crumbs a:hover { color: var(--accent-light); }
+
+  /* Hero */
+  .hero { padding: 3.5rem 0 2rem; text-align: center; }
+  .hero .badge { display: inline-block; padding: 0.3rem 0.9rem; border: 1px solid rgba(249,115,22,0.4); border-radius: 999px; color: var(--accent-light); font-size: 0.82rem; margin-bottom: 1.2rem; }
+  .hero h1 { font-size: 2.6rem; line-height: 1.25; background: linear-gradient(135deg, #fff, var(--accent-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--text-2); margin-top: 1rem; font-size: 1.05rem; max-width: 680px; margin-left: auto; margin-right: auto; }
+
+  /* TOC */
+  .toc { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.4rem 1.6rem; margin: 2rem 0; }
+  .toc h3 { font-size: 0.95rem; color: var(--accent-light); margin-bottom: 0.7rem; letter-spacing: 0.05em; }
+  .toc ol { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 0.5rem 1.2rem; }
+  .toc a { color: var(--text-2); text-decoration: none; font-size: 0.92rem; display: flex; gap: 0.5rem; }
+  .toc a:hover { color: var(--accent-light); }
+  .toc .num { color: var(--accent); font-weight: 700; }
+
+  /* Section */
+  section { margin-top: 3.2rem; }
+  .sec-title { font-size: 1.55rem; display: flex; align-items: center; gap: 0.7rem; margin-bottom: 1.2rem; }
+  .sec-title .idx { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-light)); color: #1a1205; font-weight: 800; font-size: 1rem; flex: none; }
+  .sec-title .en { color: var(--text-3); font-size: 0.95rem; font-weight: 400; }
+  p.lead { color: var(--text-2); margin-bottom: 1rem; }
+  .hl { color: var(--accent-light); font-weight: 600; }
+  strong { color: #fff; }
+
+  /* Cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap: 1.1rem; margin-top: 1rem; }
+  .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.3rem 1.4rem; transition: transform .25s, border-color .25s; }
+  .card:hover { transform: translateY(-4px); border-color: rgba(249,115,22,0.4); }
+  .card .tag { display: inline-block; font-size: 0.72rem; padding: 0.15rem 0.6rem; border-radius: 6px; margin-bottom: 0.7rem; font-weight: 700; }
+  .tag.red { background: rgba(248,113,113,0.15); color: var(--accent-red); }
+  .tag.blue { background: rgba(96,165,250,0.15); color: var(--accent-blue); }
+  .tag.green { background: rgba(52,211,153,0.15); color: var(--accent-green); }
+  .tag.orange { background: rgba(249,115,22,0.15); color: var(--accent-light); }
+  .card h4 { font-size: 1.05rem; margin-bottom: 0.5rem; }
+  .card ul { list-style: none; color: var(--text-2); font-size: 0.9rem; }
+  .card ul li { padding-left: 1rem; position: relative; margin: 0.25rem 0; }
+  .card ul li::before { content: "▸"; position: absolute; left: 0; color: var(--accent); }
+
+  /* Diagram block */
+  .figure { background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.6rem; margin: 1.4rem 0; text-align: center; }
+  .figure svg { max-width: 100%; height: auto; }
+  .figure .cap { color: var(--text-3); font-size: 0.85rem; margin-top: 0.9rem; }
+
+  /* Table */
+  .tbl { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.92rem; }
+  .tbl th, .tbl td { border: 1px solid var(--card-border); padding: 0.7rem 0.9rem; text-align: left; vertical-align: top; }
+  .tbl th { background: rgba(249,115,22,0.12); color: var(--accent-light); font-weight: 700; }
+  .tbl td { color: var(--text-2); }
+  .tbl tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+  /* Callout */
+  .callout { border-left: 4px solid var(--accent); background: rgba(249,115,22,0.08); border-radius: 0 12px 12px 0; padding: 1rem 1.3rem; margin: 1.2rem 0; color: var(--text-1); }
+  .callout.warn { border-color: var(--accent-red); background: rgba(248,113,113,0.08); }
+  .callout.ok { border-color: var(--accent-green); background: rgba(52,211,153,0.08); }
+  .callout b { color: #fff; }
+
+  /* Steps */
+  .steps { counter-reset: s; }
+  .step { position: relative; padding: 1.2rem 1.4rem 1.2rem 4rem; border: 1px solid var(--card-border); border-radius: 14px; margin-bottom: 1rem; background: var(--card-bg); }
+  .step::before { counter-increment: s; content: counter(s); position: absolute; left: 1.2rem; top: 1.2rem; width: 2rem; height: 2rem; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-light)); color: #1a1205; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+  .step h4 { font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .step p { color: var(--text-2); font-size: 0.92rem; margin: 0; }
+
+  /* Two-col */
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } .hero h1 { font-size: 2rem; } }
+
+  pre { background: var(--code-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto; font-size: 0.85rem; color: #cfe3ff; margin: 1rem 0; line-height: 1.6; }
+  code { font-family: 'SF Mono', Menlo, Consolas, monospace; }
+
+  footer { text-align: center; color: var(--text-3); font-size: 0.85rem; padding: 3rem 1rem 2rem; border-top: 1px solid rgba(255,255,255,0.07); margin-top: 4rem; }
+  .pill { display:inline-block; padding:.15rem .55rem; border-radius:6px; background:rgba(255,255,255,0.08); font-size:.8rem; color:var(--text-2); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <a class="logo" href="../index.html">Visuals</a>
+    <div class="crumbs"><a href="../index.html">首页</a> / <a href="../index.html">高并发</a> / <a href="mq-guide.html">消息队列</a> / <span style="color:var(--text-2)">消息积压</span></div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="hero">
+    <span class="badge">高并发 · 消息队列 · 故障排查</span>
+    <h1>MQ 消息积压问题全解</h1>
+    <p>从「什么是积压」到「为什么会积压」，再到「怎么止血、怎么根治、怎么预防」——一套能直接上手的方法论。</p>
+  </div>
+
+  <nav class="toc">
+    <h3>本文导读</h3>
+    <ol>
+      <li><a href="#s1"><span class="num">01</span> 什么是 MQ 消息积压</a></li>
+      <li><a href="#s2"><span class="num">02</span> 六大类产生原因</a></li>
+      <li><a href="#s3"><span class="num">03</span> 最常见的根因 Top 3</a></li>
+      <li><a href="#s4"><span class="num">04</span> 如何解决（止血 + 根治）</a></li>
+      <li><a href="#s5"><span class="num">05</span> 解决思路与方案五步法</a></li>
+      <li><a href="#s6"><span class="num">06</span> 监控、告警与预防</a></li>
+    </ol>
+  </nav>
+
+  <!-- ============ 01 ============ -->
+  <section id="s1">
+    <h2 class="sec-title"><span class="idx">1</span> 什么是 MQ 消息积压 <span class="en">/ What is backlog</span></h2>
+    <p class="lead">
+      <strong>MQ（Message Queue，消息队列）</strong> 用来在系统之间异步传递消息。正常情况下，生产者发得快、消费者也消费得快，队列里基本不囤货。
+      所谓 <span class="hl">消息积压（Backlog / Accumulation）</span>，指的是：<strong>生产者发送消息的速率持续大于消费者处理消息的速率</strong>，导致消息在 Broker（消息中间件）里越堆越多、长时间得不到消费。
+    </p>
+
+    <div class="callout">
+      <b>一句话理解：</b> 队列就像一个蓄水池，进水（生产）比出水（消费）快，水位（积压量）就会持续上涨。水位不降，就是积压。
+    </div>
+
+    <div class="figure">
+      <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="生产消费积压示意图">
+        <defs>
+          <linearGradient id="gProd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#10b981"/></linearGradient>
+          <linearGradient id="gCons" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#3b82f6"/></linearGradient>
+          <linearGradient id="gQ" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#f97316"/></linearGradient>
+        </defs>
+        <!-- Producer -->
+        <rect x="20" y="70" width="120" height="80" rx="12" fill="url(#gProd)"/>
+        <text x="80" y="105" text-anchor="middle" fill="#06281c" font-size="16" font-weight="700">生产者</text>
+        <text x="80" y="128" text-anchor="middle" fill="#06281c" font-size="12">发送快 ⚡</text>
+        <!-- arrows into queue -->
+        <path d="M140 110 H210" stroke="#34d399" stroke-width="3" marker-end="url(#arrow)"/>
+        <!-- Queue (broker) -->
+        <rect x="210" y="30" width="180" height="160" rx="14" fill="rgba(249,115,22,0.12)" stroke="#f97316" stroke-width="2"/>
+        <text x="300" y="20" text-anchor="middle" fill="#fb923c" font-size="13" font-weight="700">Broker 队列（堆积中）</text>
+        <!-- stacked messages -->
+        <rect x="240" y="150" width="120" height="16" rx="3" fill="url(#gQ)"/>
+        <rect x="240" y="130" width="120" height="16" rx="3" fill="url(#gQ)" opacity="0.9"/>
+        <rect x="240" y="110" width="120" height="16" rx="3" fill="url(#gQ)" opacity="0.8"/>
+        <rect x="240" y="90" width="120" height="16" rx="3" fill="url(#gQ)" opacity="0.7"/>
+        <rect x="240" y="70" width="120" height="16" rx="3" fill="url(#gQ)" opacity="0.6"/>
+        <text x="300" y="185" text-anchor="middle" fill="#f97316" font-size="13" font-weight="700">↑ 水位持续上涨</text>
+        <!-- arrow out to consumer -->
+        <path d="M390 110 H460" stroke="#60a5fa" stroke-width="3" marker-end="url(#arrow)"/>
+        <!-- Consumer -->
+        <rect x="460" y="70" width="120" height="80" rx="12" fill="url(#gCons)"/>
+        <text x="520" y="105" text-anchor="middle" fill="#062047" font-size="16" font-weight="700">消费者</text>
+        <text x="520" y="128" text-anchor="middle" fill="#062047" font-size="12">处理慢 🐢</text>
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fff"/></marker>
+        </defs>
+      </svg>
+      <div class="cap">图 1：当「进水速度 > 出水速度」，队列中的消息就会不断堆积，这就是积压。</div>
+    </div>
+
+    <h3 style="margin-top:1.4rem; color:var(--text-1);">怎么判断「到底积压了没有」？看三个核心指标</h3>
+    <table class="tbl">
+      <thead><tr><th>指标</th><th>含义</th><th>怎么看</th></tr></thead>
+      <tbody>
+        <tr><td><b>堆积量 / Lag</b></td><td>队列里没被消费的消息条数（Kafka 叫 consumer lag）</td><td>lag 持续 &gt; 0 且在增长 = 正在积压；lag 回落 = 在恢复</td></tr>
+        <tr><td><b>消费延迟</b></td><td>一条消息从生产到被消费经历的时长</td><td>延迟从毫秒级涨到秒/分钟级，就是积压信号</td></tr>
+        <tr><td><b>生产 TPS vs 消费 TPS</b></td><td>单位时间生产条数 vs 消费条数</td><td>生产 TPS 长期 &gt; 消费 TPS，必然积压</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============ 02 ============ -->
+  <section id="s2">
+    <h2 class="sec-title"><span class="idx">2</span> 都有哪些原因 <span class="en">/ Why it happens</span></h2>
+    <p class="lead">积压的本质只有一句话：<strong>消费跟不上生产</strong>。但具体「为什么跟不上」，可以归纳成六大类。先定位属于哪一类，再对症下手。</p>
+
+    <div class="grid">
+      <div class="card">
+        <span class="tag red">最常见</span>
+        <h4>① 消费端处理太慢</h4>
+        <ul>
+          <li>业务逻辑重 / 计算量大</li>
+          <li>慢 SQL、全表扫描、缺索引</li>
+          <li>同步调用外部 RPC / HTTP 且对方慢</li>
+          <li>锁竞争、死锁、串行化瓶颈</li>
+          <li>Full GC 频繁，线程被「冻住」</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="tag orange">扩容</span>
+        <h4>② 消费者实例 / 线程不足</h4>
+        <ul>
+          <li>消费量上涨，但消费者没跟着扩容</li>
+          <li>单线程消费，CPU 多核闲置</li>
+          <li>线程池过小、被任务打满</li>
+          <li>容器资源（CPU/内存）被限流</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="tag blue">流量</span>
+        <h4>③ 突发流量峰值</h4>
+        <ul>
+          <li>秒杀、大促、抽奖瞬时洪峰</li>
+          <li>批量任务 / 数据迁移集中灌入</li>
+          <li>生产方重试、补偿逻辑疯狂补发</li>
+          <li>没有削峰，洪峰直接打到队列</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="tag blue">并行度</span>
+        <h4>④ 队列 / 分区并行度不足</h4>
+        <ul>
+          <li>Kafka partition 数太少</li>
+          <li>RocketMQ queue 数太少</li>
+          <li>消费者数 &gt; 分区数，多出的消费者干等</li>
+          <li>单分区成了全局瓶颈</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="tag red">雪崩</span>
+        <h4>⑤ 消费失败与重试风暴</h4>
+        <ul>
+          <li>消费抛异常 → 不断重试</li>
+          <li>重试占用线程 / 拉满资源</li>
+          <li>死信队列（DLQ）堆积</li>
+          <li>重试放大流量，越堵越慢</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="tag orange">基础设施</span>
+        <h4>⑥ 中间件 / 基础设施问题</h4>
+        <ul>
+          <li>Broker 磁盘 IO 瓶颈、打满</li>
+          <li>网络抖动、跨机房延迟</li>
+          <li>Broker 节点宕机 / 主从切换</li>
+          <li>磁盘满、水位超阈值被限速</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 03 ============ -->
+  <section id="s3">
+    <h2 class="sec-title"><span class="idx">3</span> 一般是什么原因导致的 <span class="en">/ Top root causes</span></h2>
+    <p class="lead">六类原因里，真实生产环境中 <strong>80% 的积压由下面三件事贡献</strong>。优先怀疑它们，能省掉大量排查时间。</p>
+
+    <div class="callout warn">
+      <b>实战经验：先查这三项，命中率最高。</b>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <h4>根因 Top 1：消费逻辑慢（慢 SQL / 同步阻塞）</h4>
+        <p>消费方法里有一条没走索引的 SQL、一次同步调用第三方接口超时、或一个串行循环。单条消息耗时从 5ms 变成 500ms，吞吐直接掉 100 倍。这是积压最普遍、也最容易被忽视的原因。</p>
+      </div>
+      <div class="step">
+        <h4>根因 Top 2：消费者没跟着业务量扩容</h4>
+        <p>日常 1 个消费者刚好够，流量涨了 5 倍却还是 1 个实例、单线程消费。没有水平扩展 + 弹性伸缩，消费能力是硬上限，迟早被压垮。</p>
+      </div>
+      <div class="step">
+        <h4>根因 Top 3：突发流量没有削峰预案</h4>
+        <p>大促 / 秒杀 / 批量任务一上来就是平时几十倍的瞬时流量，队列瞬间灌爆，而消费端没有任何限流、降级、临时扩容的预案，只能眼睁睁看着 lag 飙升。</p>
+      </div>
+    </div>
+
+    <p class="lead" style="margin-top:1.2rem;">
+      一句话总结：<span class="hl">积压 = 消费慢 × 没扩容 × 突发流量无预案</span>。三件事同时占一个，就容易出事；三个都占，必出事。
+    </p>
+  </section>
+
+  <!-- ============ 04 ============ -->
+  <section id="s4">
+    <h2 class="sec-title"><span class="idx">4</span> 针对积压如何解决 <span class="en">/ Two-layer fix</span></h2>
+    <p class="lead">解决分两层：<strong>第一层「紧急止血」</strong>是救火，先让 lag 不再涨、开始回落；<strong>第二层「根治优化」</strong>是治本，避免下次再积压。</p>
+
+    <div class="two">
+      <div>
+        <h3 style="color:var(--accent-red); margin-bottom:.6rem;">🚨 紧急止血（先救火）</h3>
+        <div class="card" style="border-color:rgba(248,113,113,0.3)">
+          <ul>
+            <li><b>临时扩容消费者</b>：增加 consumer 实例数（K8s 直接 scale up）</li>
+            <li><b>提高消费并发</b>：多线程 / 线程池消费单条消息</li>
+            <li><b>提高并行度</b>：增加 partition / queue 数，让更多消费者并行</li>
+            <li><b>降级非核心消息</b>：跳过 / 丢弃可补偿的非关键消息，先保核心链路</li>
+            <li><b>限流生产者</b>：暂停或节流发送，给消费端喘息空间（削峰）</li>
+            <li><b>建临时 Topic 加速</b>：新开 N 个 partition + N 个 consumer 疯狂消费旧队列，消费完再回写正常链路</li>
+          </ul>
+        </div>
+        <div class="callout warn" style="margin-top:1rem;">
+          <b>注意：</b> 止血手段多是「临时加机器 / 丢消息」，会牺牲成本或一致性，<b>不能长期依赖</b>。
+        </div>
+      </div>
+
+      <div>
+        <h3 style="color:var(--accent-green); margin-bottom:.6rem;">✅ 根治优化（治本）</h3>
+        <div class="card" style="border-color:rgba(52,211,153,0.3)">
+          <ul>
+            <li><b>优化消费逻辑</b>：异步化、批处理、消除慢 SQL、加缓存、去掉锁</li>
+            <li><b>消费端水平扩展 + 弹性伸缩</b>：HPA 按 lag 自动扩缩容</li>
+            <li><b>合理规划分区 / 队列数</b>：容量预留，避免单分区瓶颈</li>
+            <li><b>消息分级</b>：核心 / 非核心隔离，互不影响</li>
+            <li><b>限流 + 削峰填谷</b>：令牌桶 / 漏桶，洪峰平滑后再入队</li>
+            <li><b>幂等消费</b>：保证重复消费不出错，放心重试 / 重放</li>
+            <li><b>批量消费 + 批量落库</b>：一次拉一批、一次写一批，吞吐翻倍</li>
+          </ul>
+        </div>
+        <div class="callout ok" style="margin-top:1rem;">
+          <b>目标：</b> 让「消费能力」长期 &gt; 「峰值生产能力」，积压从架构上不可能发生。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 05 ============ -->
+  <section id="s5">
+    <h2 class="sec-title"><span class="idx">5</span> 解决思路与方案（五步法） <span class="en">/ Methodology</span></h2>
+    <p class="lead">遇到积压不要慌，按下面五步走，每一步都有明确产出。这是一套可以直接抄作业的排查与处理流程。</p>
+
+    <div class="figure">
+      <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="五步法流程图">
+        <defs><marker id="a2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker></defs>
+        <g font-size="13" font-weight="700" text-anchor="middle">
+          <rect x="10" y="70" width="130" height="44" rx="10" fill="rgba(96,165,250,0.18)" stroke="#60a5fa"/><text x="75" y="97" fill="#bfdbfe">① 监控发现</text>
+          <path d="M140 92 H160" stroke="#fb923c" stroke-width="3" marker-end="url(#a2)"/>
+          <rect x="160" y="70" width="130" height="44" rx="10" fill="rgba(249,115,22,0.18)" stroke="#f97316"/><text x="225" y="97" fill="#fdba74">② 定位原因</text>
+          <path d="M290 92 H310" stroke="#fb923c" stroke-width="3" marker-end="url(#a2)"/>
+          <rect x="310" y="70" width="130" height="44" rx="10" fill="rgba(248,113,113,0.18)" stroke="#f87171"/><text x="375" y="97" fill="#fecaca">③ 紧急止血</text>
+          <path d="M440 92 H460" stroke="#fb923c" stroke-width="3" marker-end="url(#a2)"/>
+          <rect x="460" y="70" width="130" height="44" rx="10" fill="rgba(52,211,153,0.18)" stroke="#34d399"/><text x="525" y="97" fill="#a7f3d0">④ 根治优化</text>
+          <path d="M590 92 H610" stroke="#fb923c" stroke-width="3" marker-end="url(#a2)"/>
+          <rect x="610" y="70" width="140" height="44" rx="10" fill="rgba(251,146,60,0.2)" stroke="#fb923c"/><text x="680" y="97" fill="#fed7aa">⑤ 预防演练</text>
+        </g>
+        <g font-size="11" fill="rgba(255,255,255,0.6)" text-anchor="middle">
+          <text x="75" y="135">lag 告警 / 延迟突增</text>
+          <text x="225" y="135">看耗时·吞吐·外部依赖</text>
+          <text x="375" y="135">扩容·降级·限流</text>
+          <text x="525" y="135">优化·弹性·隔离</text>
+          <text x="680" y="135">压测·容量规划·预案</text>
+        </g>
+      </svg>
+      <div class="cap">图 2：MQ 积压处理五步法——发现 → 定位 → 止血 → 根治 → 预防。</div>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <h4>① 监控发现：怎么知道积压了？</h4>
+        <p>看 consumer lag、消费延迟、生产/消费 TPS 曲线。设置告警阈值（如 lag &gt; 1 万且持续增长自动报警），别等用户投诉才发现。</p>
+      </div>
+      <div class="step">
+        <h4>② 定位原因：到底卡在哪？</h4>
+        <p>看消费单条耗时（是不是慢 SQL / 外部调用）；看消费 TPS（是不是实例不够）；看分区数（是不是并行度受限）；看错误日志（是不是重试风暴）；看 Broker 指标（是不是磁盘 / 网络）。<b>先量再猜</b>。</p>
+      </div>
+      <div class="step">
+        <h4>③ 紧急止血：先让 lag 回落</h4>
+        <p>按第 4 节「止血」操作：临时扩容消费者 + 多线程消费 + 提分区数；非核心消息降级跳过；必要时限流生产者。目标是<b>先止住上涨、开始下降</b>。</p>
+      </div>
+      <div class="step">
+        <h4>④ 根治优化：把根因拔掉</h4>
+        <p>优化消费逻辑（异步 / 批处理 / 去慢 SQL）；消费端接弹性伸缩（按 lag 自动扩缩）；核心 / 非核心消息隔离；接入限流削峰；保证幂等。让消费能力长期 &gt; 峰值生产。</p>
+      </div>
+      <div class="step">
+        <h4>⑤ 预防演练：让下次不再发生</h4>
+        <p>做容量规划与压测，知道系统上限在哪；准备大促 / 秒杀的扩容与降级预案；把「积压应急手册」固化成 runbook，定期演练。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 06 ============ -->
+  <section id="s6">
+    <h2 class="sec-title"><span class="idx">6</span> 监控、告警与预防 <span class="en">/ Prevent</span></h2>
+    <p class="lead">最好的处理是「让它不发生」。把下面几件事做在前面，积压基本不会成为故障。</p>
+
+    <table class="tbl">
+      <thead><tr><th>预防手段</th><th>具体做法</th><th>解决哪类问题</th></tr></thead>
+      <tbody>
+        <tr><td><b>实时监控 lag</b></td><td>Kafka exporter / RocketMQ dashboard 接 Prometheus + Grafana，盯 consumer lag</td><td>发现慢、定位快</td></tr>
+        <tr><td><b>分级告警</b></td><td>lag 超阈值（如 1 万）warning，超更大值（如 10 万）page 值班</td><td>早发现早处理</td></tr>
+        <tr><td><b>弹性伸缩</b></td><td>消费端按 lag 自动扩缩容（K8s HPA / 自定义指标）</td><td>消费者不足</td></tr>
+        <tr><td><b>容量规划 + 压测</b></td><td>提前测出单消费者吞吐上限，按比例预留实例与分区</td><td>突发流量</td></tr>
+        <tr><td><b>限流削峰</b></td><td>生产端令牌桶 / 漏桶，洪峰平滑后入队；非核心消息走降级通道</td><td>突发流量</td></tr>
+        <tr><td><b>消息分级隔离</b></td><td>核心 / 非核心分 topic、分队列，互不影响</td><td>重试风暴 / 局部堵塞</td></tr>
+        <tr><td><b>幂等 + 死信队列</b></td><td>重复消费安全；失败消息进 DLQ 不阻塞主链路</td><td>消费失败</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout ok">
+      <b>口诀收尾：</b> 积压不可怕，可怕的是「没监控、没预案、没扩容」。记住——<span class="pill">发现靠监控</span> <span class="pill">止血靠扩容降级</span> <span class="pill">根治靠优化+弹性</span> <span class="pill">预防靠压测+预案</span>。
+    </div>
+  </section>
+
+  <footer>
+    Visuals · 高并发 / 消息队列系列 &nbsp;|&nbsp; MQ 消息积压问题全解 &nbsp;|&nbsp; 内容供学习参考，生产落地请结合具体中间件（Kafka / RocketMQ / RabbitMQ / Pulsar）与团队规范。
+  </footer>
+
+</div>
+</body>
+</html>
