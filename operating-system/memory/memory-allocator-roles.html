@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内存分配器到底干了啥 · 为什么上层要自己再做一层</title>
+<style>
+:root{
+  --bg-from:#0d1b2a; --bg-to:#15233f; --bg-end:#0a1018;
+  --text:#e8eef6; --muted:#93a4bd;
+  --os:#38bdf8; --os2:#22d3ee;
+  --libc:#a78bfa; --libc2:#c4b5fd;
+  --app:#2dd4bf; --app2:#34d399;
+  --phys:#fb923c; --phys2:#f59e0b;
+  --card:rgba(255,255,255,.05); --card-b:rgba(255,255,255,.1);
+  --good:#34d399; --warn:#fbbf24; --bad:#f87171;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:linear-gradient(135deg,var(--bg-from) 0%,var(--bg-to) 55%,var(--bg-end) 100%);color:var(--text);min-height:100vh;line-height:1.7;padding-top:70px}
+a{color:var(--os2);text-decoration:none}
+header{position:fixed;top:0;width:100%;z-index:1000;background:rgba(10,18,40,.85);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.07)}
+nav{max-width:1200px;margin:0 auto;padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{font-weight:800;font-size:1.12rem;background:linear-gradient(135deg,#fb923c,#22d3ee);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.nav-home{font-size:.85rem;color:var(--muted);border:1px solid var(--card-b);padding:.35rem .8rem;border-radius:999px}
+.nav-home:hover{color:#fff;border-color:var(--os2)}
+.hero{text-align:center;padding:26px 1rem 6px}
+.hero h1{font-size:2rem;background:linear-gradient(90deg,#fb923c,#22d3ee,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem}
+.hero p{color:var(--muted);max-width:760px;margin:0 auto}
+.tabs{max-width:1100px;margin:20px auto 0;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;padding:0 1rem}
+.tab{padding:9px 15px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--card-b);color:var(--muted);cursor:pointer;font-size:.88rem;transition:.25s}
+.tab:hover{color:#fff;background:rgba(255,255,255,.1)}
+.tab.active{background:linear-gradient(90deg,#fb923c,#22d3ee);color:#0a1018;font-weight:700;border-color:transparent}
+.wrap{max-width:1080px;margin:22px auto 60px;padding:0 1rem}
+.panel{display:none;animation:fade .45s ease}
+.panel.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:22px;margin-bottom:22px;backdrop-filter:blur(6px)}
+.card h2{font-size:1.22rem;margin-bottom:12px}
+.card h3{font-size:1rem;margin:16px 0 8px;color:var(--os2)}
+.card p{color:#cdd8e8;margin:8px 0}
+.card ul{margin:8px 0 8px 1.2rem;color:#cdd8e8}
+.card li{margin:5px 0}
+.mono{font-family:'SF Mono',Consolas,Menlo,monospace;background:rgba(0,0,0,.35);padding:2px 7px;border-radius:6px;color:#ffd9a8;font-size:.86em}
+.kbd{font-family:monospace;background:#1e293b;border:1px solid #334155;border-bottom-width:2px;border-radius:6px;padding:1px 7px;color:#e2e8f0;font-size:.82em}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700}
+.l-os{color:var(--os2)} .l-libc{color:var(--libc)} .l-app{color:var(--app)} .l-phys{color:var(--phys)}
+.bg-os{background:linear-gradient(135deg,var(--os),var(--os2))}
+.bg-libc{background:linear-gradient(135deg,var(--libc),var(--libc2))}
+.bg-app{background:linear-gradient(135deg,var(--app),var(--app2))}
+.bg-phys{background:linear-gradient(135deg,var(--phys),var(--phys2))}
+.btn{padding:9px 16px;border-radius:10px;border:1px solid var(--card-b);background:rgba(255,255,255,.07);color:#fff;cursor:pointer;font-size:.88rem;transition:.2s;font-weight:600}
+.btn:hover{background:rgba(255,255,255,.14);transform:translateY(-1px)}
+.btn.go{background:linear-gradient(135deg,var(--app),var(--app2));color:#062b25;border-color:transparent}
+.btn.reset{background:transparent}
+/* layer stack */
+.layer{position:relative;border-radius:14px;padding:16px 20px;color:#0a1018;font-weight:700;margin:0;cursor:pointer;transition:.25s;border:1px solid rgba(255,255,255,.18)}
+.layer:hover{transform:translateX(4px)}
+.layer .sub{font-weight:500;font-size:.8rem;opacity:.82;margin-top:3px}
+.layer .code{font-family:monospace;font-size:.9rem;opacity:.85;font-weight:600}
+.connector{height:22px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--muted);font-size:.75rem}
+.connector .line{width:2px;height:100%;background:linear-gradient(var(--muted),transparent)}
+.detail{margin-top:14px;background:rgba(0,0,0,.3);border-left:3px solid var(--libc);border-radius:0 10px 10px 0;padding:12px 16px;font-size:.88rem;color:#cdd8e8;min-height:60px}
+.detail b{color:var(--libc)}
+.callout{background:rgba(251,146,60,.1);border:1px solid rgba(251,146,60,.35);border-radius:12px;padding:14px 16px;margin:12px 0;color:#ffe8d0}
+.callout b{color:var(--phys)}
+/* comparison bars */
+.cmp2{display:flex;gap:20px;flex-wrap:wrap;margin-top:10px}
+.cmpcol{flex:1;min-width:300px;background:rgba(0,0,0,.25);border-radius:12px;padding:14px}
+.cmpcol h4{font-size:.95rem;margin-bottom:10px}
+.bar{height:26px;border-radius:6px;margin:5px 0;display:flex;align-items:center;padding-left:8px;font-size:.72rem;font-weight:700;color:#0a1018;transition:width .6s ease;white-space:nowrap;overflow:hidden}
+.bar.used{background:linear-gradient(135deg,var(--app),var(--app2))}
+.bar.waste{background:repeating-linear-gradient(45deg,rgba(248,113,113,.5),rgba(248,113,113,.5) 6px,rgba(248,113,113,.2) 6px,rgba(248,113,113,.2) 12px);color:#fff}
+.stat{font-family:monospace;font-size:.82rem;margin-top:6px;color:#cdd8e8}
+/* heap strip */
+.strip{display:flex;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--card-b);background:rgba(0,0,0,.3);margin:12px 0}
+.blk{display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;color:#0a1018;border-right:1px solid rgba(0,0,0,.4);transition:.3s;overflow:hidden}
+.blk.used{background:linear-gradient(135deg,var(--libc),var(--libc2))}
+.blk.free{background:repeating-linear-gradient(45deg,rgba(255,255,255,.08),rgba(255,255,255,.08) 6px,rgba(255,255,255,.02) 6px,rgba(255,255,255,.02) 12px);color:var(--muted)}
+.blk.gap{background:repeating-linear-gradient(45deg,rgba(248,113,113,.35),rgba(248,113,113,.35) 5px,rgba(248,113,113,.12) 5px,rgba(248,113,113,.12) 10px);color:#ffd}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:.78rem;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
+/* size class */
+.sc-in{width:90px;padding:8px;border-radius:8px;border:1px solid var(--card-b);background:rgba(0,0,0,.3);color:#fff;font-family:monospace;text-align:center}
+/* zoo cards */
+.zoo{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.zcard{background:rgba(255,255,255,.05);border:1px solid var(--card-b);border-radius:14px;padding:16px;cursor:pointer;transition:.2s}
+.zcard:hover{transform:translateY(-4px);border-color:var(--os2);background:rgba(56,189,248,.08)}
+.zcard.sel{border-color:var(--app);box-shadow:0 0 0 2px rgba(45,212,191,.4)}
+.zcard .zt{font-weight:700;font-size:1.02rem;display:flex;align-items:center;gap:8px}
+.zcard .ztag{font-size:.66rem;padding:2px 7px;border-radius:999px;margin-left:auto}
+.zcard p{font-size:.8rem;color:var(--muted);margin-top:6px}
+.footnote{font-size:.78rem;color:var(--muted);font-style:italic;margin-top:8px}
+.footer{text-align:center;color:var(--muted);padding:30px 1rem 50px;font-size:.82rem;border-top:1px solid rgba(255,255,255,.07);margin-top:30px}
+table.cmp{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:8px}
+table.cmp th,table.cmp td{border:1px solid rgba(255,255,255,.12);padding:9px 11px;text-align:left;vertical-align:top}
+table.cmp th{background:rgba(255,255,255,.05)}
+@media(max-width:680px){.hero h1{font-size:1.5rem}}
+</style>
+</head>
+<body>
+<header>
+  <nav>
+    <div class="logo">内存分配器 · 它到底干了啥</div>
+    <a class="nav-home" href="../index.html">← 操作系统</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>“上层”到底在内存分配里干了啥？</h1>
+  <p>最大的误会：以为 <span class="mono">malloc</span> 是操作系统给的函数，上层只是转发调用。真相恰恰相反——本页用图和可交互演示讲清：内核只给粗粒度的 <span class="mono">brk/mmap</span>，<span class="mono">malloc</span> 你自己进程的库函数，而它（以及更上层的专用分配器）做的事远比你想象的多。</p>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-t="0">① 核心困惑与真相</div>
+  <div class="tab" data-t="1">② 操作系统到底给了啥</div>
+  <div class="tab" data-t="2">③ 分配器在上面干了啥</div>
+  <div class="tab" data-t="3">④ 分配器动物园</div>
+  <div class="tab" data-t="4">⑤ 速查总结</div>
+</div>
+
+<div class="wrap">
+
+  <!-- ===== PANEL 0 ===== -->
+  <section class="panel active">
+    <div class="card">
+      <h2>🤔 先说清楚：malloc 在哪一“层”？</h2>
+      <p>点下方每一层，看它到底归谁、干什么。重点看第二层——<b>malloc / free 是跑在你进程里的用户态库函数</b>，不在内核里。</p>
+      <div id="layerStack">
+        <div class="layer bg-app" data-k="app"><div>① 应用程序</div><div class="code">int *p = malloc(17);</div></div>
+        <div class="connector"><div class="line"></div>▲ 普通函数调用，不进内核</div>
+        <div class="layer bg-libc" data-k="libc"><div>② C 运行库 malloc / free（用户态）</div><div class="code">glibc ptmalloc / jemalloc / tcmalloc …</div><div class="sub">这才是“分配器”本身，跑在你的进程里</div></div>
+        <div class="connector"><div class="line"></div>▲ 偶尔才进内核（地不够时）</div>
+        <div class="layer bg-os" data-k="os"><div>③ 操作系统内核</div><div class="code">brk() / sbrk() / mmap() / munmap()</div><div class="sub">只给“整页(4KB)”的虚拟内存，且要系统调用</div></div>
+        <div class="connector"><div class="line"></div>▲ 操作物理页框</div>
+        <div class="layer bg-phys" data-k="phys"><div>④ 物理内存 DRAM</div><div class="code">电容阵列 / 页框(page frame)</div></div>
+      </div>
+      <div class="detail" id="layerDetail"><b>点任意一层查看说明。</b></div>
+    </div>
+
+    <div class="card">
+      <h2>💡 一句话破题</h2>
+      <div class="callout">
+        <b>你以为：</b>程序 → 调 OS 的 malloc → 拿到内存。<br>
+        <b>实际是：</b>程序 → 调 <b>libc 里的 malloc</b>（用户态，自己做切分/记账/回收）→ 只有“手里地不够了”才偶尔 → 调 OS 的 <span class="mono">brk/mmap</span> 批一大块回来 → 再切成小块给你。
+      </div>
+      <p>所以你问的「上层自己还能做啥」——<b>那个“上层”（libc 里的 malloc）本身就是分配器</b>，它才是干绝大多数活的角色。内核只负责“批发整页的虚拟地址”，完全不知道你那个 17 字节的对象长什么样、什么时候该释放。</p>
+      <p>更往上，应用还能在 libc malloc <i>之上</i>再写专用分配器（对象池、临时区分配器、GC 堆等）。下面几节逐一拆解。</p>
+    </div>
+  </section>
+
+  <!-- ===== PANEL 1 ===== -->
+  <section class="panel">
+    <div class="card">
+      <h2>🧱 操作系统到底“给”了你什么？</h2>
+      <p>内核提供给用户程序的，只有两类非常<b>粗粒度、且昂贵</b>的原语：</p>
+      <ul>
+        <li><span class="l-os">brk / sbrk</span>：把进程的“堆顶指针（program break）”往上挪，从而“圈出”一块连续的虚拟地址。一次移动可能拿到好几页，但没法只拿 17 字节。</li>
+        <li><span class="l-os">mmap / munmap</span>：把一段<b>匿名或文件</b>内存映射进进程地址空间，按<b>页（通常 4KB）对齐</b>。适合大块或想单独释放的区域。</li>
+      </ul>
+      <div class="callout">
+        <b>两个致命限制：</b><br>
+        1️⃣ <b>粒度是页</b>：你不能向内核要“17 字节”，最小也是一整页 4096 字节，剩下 4079 字节白白浪费。<br>
+        2️⃣ <b>要进内核</b>：每次都是系统调用（上下文切换），开销约几百纳秒到微秒级，远慢于一次普通函数调用。
+      </div>
+      <p>那如果“每次分配都直接问 OS”会怎样？点下面按钮看看 1000 次 20 字节分配的下场👇</p>
+      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn go" onclick="runNaive()">⚠️ 模拟：每次都问 OS（naive）</button>
+        <button class="btn" onclick="runAllocator()">✅ 模拟：用分配器（batch）</button>
+        <button class="btn reset" onclick="resetSim()">↺ 重置</button>
+      </div>
+      <div class="cmp2">
+        <div class="cmpcol">
+          <h4 style="color:var(--bad)">naive：每次 mmap 一页</h4>
+          <div class="bar used" id="nUsed" style="width:0">已用</div>
+          <div class="bar waste" id="nWaste" style="width:0">浪费</div>
+          <div class="stat" id="nStat">点上方按钮运行</div>
+        </div>
+        <div class="cmpcol">
+          <h4 style="color:var(--good)">allocator：批发后切分</h4>
+          <div class="bar used" id="aUsed" style="width:0">已用</div>
+          <div class="bar waste" id="aWaste" style="width:0">浪费/元数据</div>
+          <div class="stat" id="aStat">点上方按钮运行</div>
+        </div>
+      </div>
+      <p class="footnote">注：真实 malloc 还有 chunk 头（几十字节）等元数据开销，这里为对比做了简化，但“naive 浪费 ~99% 内存 + 1000 次系统调用”的结论是成立的。</p>
+    </div>
+  </section>
+
+  <!-- ===== PANEL 2 ===== -->
+  <section class="panel">
+    <div class="card">
+      <h2>🔧 分配器在 OS 之上，到底干了哪些活？</h2>
+      <p>拿到 OS 批发来的几页虚拟内存后，分配器要在<b>用户态</b>扮演一个“迷你操作系统”，把大块切成任意大小的碎片并高效管理。它的核心职责：</p>
+      <ul>
+        <li><b>① 任意尺寸切分</b>：把 4KB 页切成 17、100、1000 字节的块——内核做不到。</li>
+        <li><b>② 记账（bookkeeping）</b>：每个块前面藏一个“头”，记下它有多大、是否空闲，这样 <span class="mono">free(p)</span> 才知道回收多少。</li>
+        <li><b>③ 空闲管理</b>：用空闲链表 / bin 数组记住哪些块空着，<b>优先复用</b>，而不是每次找 OS。</li>
+        <li><b>④ 对抗碎片</b>：外部碎片靠“拆分 + 相邻合并（coalescing）”；内部碎片靠“尺寸分级（size class）”减少浪费。</li>
+        <li><b>⑤ 对齐</b>：对象常需 8/16 字节对齐，分配器负责垫齐。</li>
+        <li><b>⑥ 并发性能</b>：多核下用每线程缓存、无锁快路径，避免所有人都抢同一把大锁。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>🕳️ 交互演示：外部碎片 vs 尺寸分级</h2>
+      <p>下面是一段堆。先分配 A/B/C，再释放中间的 B 形成空洞，然后分配一个稍大的 D——看普通分配器会“塞不进空洞”而浪费空间；尺寸分级怎么解决这个问题。</p>
+      <div class="strip" id="fragStrip"></div>
+      <div class="legend">
+        <span><i style="background:linear-gradient(135deg,var(--libc),var(--libc2))"></i>已分配</span>
+        <span><i style="background:repeating-linear-gradient(45deg,rgba(255,255,255,.1),rgba(255,255,255,.1) 6px,rgba(255,255,255,.03) 6px,rgba(255,255,255,.03) 12px)"></i>空闲</span>
+        <span><i style="background:repeating-linear-gradient(45deg,rgba(248,113,113,.4),rgba(248,113,113,.4) 5px,rgba(248,113,113,.15) 5px,rgba(248,113,113,.15) 10px)"></i>碎片空洞(放不下)</span>
+      </div>
+      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+        <button class="btn" onclick="fragAllocABC()">分配 A(40) B(40) C(40)</button>
+        <button class="btn" onclick="fragFreeB()">释放 B</button>
+        <button class="btn" onclick="fragAllocD()">分配 D(60) ← 普通方案</button>
+        <button class="btn go" onclick="fragSizeClass()">分配 D(60) ← 尺寸分级方案</button>
+        <button class="btn reset" onclick="fragReset()">↺ 重置</button>
+      </div>
+      <div class="detail" id="fragMsg" style="border-color:var(--libc)"><b>点上面的按钮逐步操作，看碎片如何产生与被解决。</b></div>
+    </div>
+
+    <div class="card">
+      <h2>📏 交互演示：内部碎片与 size class</h2>
+      <p>你申请的空间会被<b>向上取整</b>到某个“尺寸等级”，多出来的就是内部碎片。输入想要的字节数，看它实际分到哪一级。</p>
+      <div class="controls" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:6px">
+        <span>申请字节：</span><input class="sc-in" id="scReq" type="number" min="1" max="512" value="17">
+        <button class="btn" onclick="calcSC()">计算</button>
+        <button class="btn reset" onclick="randSC()">🎲 随机</button>
+      </div>
+      <div class="detail" id="scMsg" style="border-color:var(--app)"></div>
+    </div>
+  </section>
+
+  <!-- ===== PANEL 3 ===== -->
+  <section class="panel">
+    <div class="card">
+      <h2>🦁 分配器“动物园”：为什么有这么多？</h2>
+      <p>既然都要“切分+记账+回收”，为什么还有 ptmalloc、jemalloc、tcmalloc、mimalloc… 以及应用层的对象池、区域分配器？因为它们针对的<b>瓶颈不同</b>。点卡片看各自解决什么问题。</p>
+      <div class="zoo" id="zoo">
+        <div class="zcard sel" data-k="ptmalloc"><div class="zt">ptmalloc <span class="ztag" style="background:rgba(167,139,250,.2);color:var(--libc)">通用·glibc默认</span></div><p>glibc 自带。单堆 + 多线程 arena + bin。够用但多核下全局锁易成瓶颈。</p></div>
+        <div class="zcard" data-k="jemalloc"><div class="zt">jemalloc <span class="ztag" style="background:rgba(45,212,191,.2);color:var(--app)">低碎片·多核</span></div><p>Facebook 出品。arena + size class + 着色，碎片的长期占用极低，多核扩展好。</p></div>
+        <div class="zcard" data-k="tcmalloc"><div class="zt">tcmalloc <span class="ztag" style="background:rgba(45,212,191,.2);color:var(--app)">无锁快路径</span></div><p>Google 出品。每线程缓存(mcache)让小对象分配基本无锁，Go 分配器受其启发。</p></div>
+        <div class="zcard" data-k="mimalloc"><div class="zt">mimalloc <span class="ztag" style="background:rgba(45,212,191,.2);color:var(--app)">极简·快</span></div><p>微软出品。用“自由表”设计，元数据极轻，单线程/多线程都很快，代码量小。</p></div>
+        <div class="zcard" data-k="arena"><div class="zt">区域/凹凸分配器 <span class="ztag" style="background:rgba(251,146,60,.2);color:var(--phys)">应用层·临时</span></div><p>Arena / bump allocator：只进不退，最后整体一次性释放。解析器、编译器、帧内存超快。</p></div>
+        <div class="zcard" data-k="pool"><div class="zt">对象池 <span class="ztag" style="background:rgba(251,146,60,.2);color:var(--phys)">应用层·定长</span></div><p>固定大小对象反复创建销毁（游戏实体、网络连接）。零碎片、零搜索，O(1) 取放。</p></div>
+        <div class="zcard" data-k="gc"><div class="zt">GC 堆 <span class="ztag" style="background:rgba(251,146,60,.2);color:var(--phys)">应用层·自动</span></div><p>Go/Java/V8：分配器与垃圾回收协作，程序员不写 free，由运行时判断对象死活后回收。</p></div>
+        <div class="zcard" data-k="slab"><div class="zt">slab 分配器 <span class="ztag" style="background:rgba(56,189,248,.2);color:var(--os2)">内核层</span></div><p>Linux 内核用：为内核对象（如 task_struct）做定长缓存，避免内核自己频繁切分。</p></div>
+      </div>
+      <div class="detail" id="zooDetail" style="border-color:var(--app)"></div>
+    </div>
+  </section>
+
+  <!-- ===== PANEL 4 ===== -->
+  <section class="panel">
+    <div class="card">
+      <h2>📌 速查：谁干了什么</h2>
+      <table class="cmp">
+        <tr><th>角色</th><th>在哪</th><th>给你的原语/接口</th><th>粒度</th><th>要不要进内核</th></tr>
+        <tr><td>物理内存</td><td>硬件</td><td>电容/页框</td><td>字节(硬件)</td><td>—</td></tr>
+        <tr><td>操作系统内核</td><td>内核态</td><td><span class="mono">brk/sbrk/mmap/munmap</span></td><td>整页(4KB)</td><td>是(系统调用)</td></tr>
+        <tr><td>C 运行库 malloc</td><td>用户态(libc)</td><td><span class="mono">malloc/free/calloc</span></td><td>任意字节</td><td>否(偶尔补货)</td></tr>
+        <tr><td>应用专用分配器</td><td>用户态(你的代码)</td><td>自定义 API</td><td>任意/定长</td><td>否</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h2>🎯 回到你最初的疑问</h2>
+      <ul>
+        <li><b>“内存分配不就是调 OS 的吗？”</b> —— 不准确。你直接调用的 <span class="mono">malloc</span> 是 libc 的<b>用户态</b>函数；它只在“存货不够”时才去调 OS 的 <span class="mono">brk/mmap</span> 批发。</li>
+        <li><b>“上层自己还能做啥？”</b> —— 正是那个“上层”在做绝大多数活：把页切成任意小对象、记账、维护空闲表、复用、对抗碎片、对齐、并发无锁化。</li>
+        <li><b>“还有啥能做的？”</b> —— 通用分配器之上还能做专用分配器：区域/凹凸分配（一次性释放）、对象池（定长零碎片）、GC 堆（自动回收），各自针对特定瓶颈把性能再榨一遍。</li>
+        <li><b>一句话：</b>内核负责“按页批发虚拟地址”，分配器负责“按字节零售 + 全生命周期管理”。没有这层，你的 17 字节对象根本无从谈起。</li>
+      </ul>
+    </div>
+  </section>
+
+</div>
+
+<div class="footer">内存分配器到底干了啥 · 交互式可视化 · 参数为典型实现的简化表示，用于理解而非精确实现细节。</div>
+
+<script>
+/* tabs */
+document.querySelectorAll('.tab').forEach(t=>{t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  document.querySelectorAll('.panel')[+t.dataset.t].classList.add('active');
+};});
+
+/* layer info */
+const layerInfo={
+  app:'<b>① 应用程序</b><br>你写的代码调用 <span class="mono">malloc(17)</span>。这是一次<b>普通函数调用</b>，和调用 <span class="mono">printf</span> 一样，<b>不进入内核</b>。',
+  libc:'<b>② C 运行库 malloc（用户态分配器）</b><br>这是真相核心：<span class="mono">malloc/free</span> 实现在 glibc 等运行库里，<b>跑在你自己的进程地址空间</b>。它维护堆、空闲链表、尺寸分级，绝大多数分配在这里就完成了，根本不碰内核。',
+  os:'<b>③ 操作系统内核</b><br>只提供 <span class="mono">brk/sbrk/mmap/munmap</span>，且<b>按整页(4KB)粒度</b>、要系统调用。分配器“存货不够”时才偶尔调用它批发一大块虚拟内存回来。',
+  phys:'<b>④ 物理内存 DRAM</b><br>真正存比特的电容阵列，由内存控制器按物理页框访问。内核把虚拟页映射到这里，但应用和分配器都只跟“虚拟地址”打交道。'
+};
+document.querySelectorAll('#layerStack .layer').forEach(l=>{l.onclick=()=>{
+  document.querySelectorAll('#layerStack .layer').forEach(x=>x.style.outline='');
+  l.style.outline='2px solid rgba(255,255,255,.5)';
+  document.getElementById('layerDetail').innerHTML=layerInfo[l.dataset.k];
+};});
+
+/* ---- naive vs allocator ---- */
+const PAGE=4096, N=1000, OBJ=20;
+function setW(id,pct){document.getElementById(id).style.width=Math.max(0,Math.min(100,pct))+'%';}
+function resetSim(){
+  ['nUsed','nWaste','aUsed','aWaste'].forEach(id=>setW(id,0));
+  document.getElementById('nStat').textContent='点上方按钮运行';
+  document.getElementById('aStat').textContent='点上方按钮运行';
+}
+function runNaive(){
+  // each obj = 1 page
+  const committed=N*PAGE, used=N*OBJ;
+  setW('nUsed', used/committed*100); setW('nWaste',(committed-used)/committed*100);
+  document.getElementById('nUsed').textContent='已用 '+(used/1024).toFixed(0)+' KB';
+  document.getElementById('nWaste').textContent='浪费 '+((committed-used)/1024).toFixed(0)+' KB';
+  document.getElementById('nStat').textContent=`系统调用次数 ≈ ${N} 次 · 总占用 ${(committed/1024/1024).toFixed(1)} MB（其中 99.5% 浪费）`;
+}
+function runAllocator(){
+  const used=N*OBJ;
+  const committed=Math.ceil(used/PAGE)*PAGE;
+  const meta=Math.ceil(N*0.03*PAGE); // ~3% metadata
+  const waste=committed-used+meta;
+  setW('aUsed', used/committed*100);
+  setW('aWaste',(waste)/committed*100);
+  document.getElementById('aUsed').textContent='已用 '+(used/1024).toFixed(0)+' KB';
+  document.getElementById('aWaste').textContent='浪费/元数据 '+((waste)/1024).toFixed(0)+' KB';
+  document.getElementById('aStat').textContent=`系统调用次数 ≈ ${Math.ceil(committed/PAGE)} 次 · 总占用 ${(committed/1024).toFixed(0)} KB（一次性批发后切分）`;
+}
+resetSim();
+
+/* ---- fragmentation demo ---- */
+let frag=[{t:'free',s:200}];
+function renderFrag(){
+  const strip=document.getElementById('fragStrip');strip.innerHTML='';
+  const tot=frag.reduce((a,b)=>a+b.s,0);
+  frag.forEach(b=>{const d=document.createElement('div');d.className='blk '+(b.t==='used'?'used':(b.t==='gap'?'gap':'free'));d.style.flex=(b.s/tot*100)+'%';d.textContent=b.label||'';strip.appendChild(d);});
+}
+function fragReset(){frag=[{t:'free',s:200}];renderFrag();document.getElementById('fragMsg').innerHTML='<b>堆已清空（一大块空闲）。</b>';}
+function fragAllocABC(){
+  frag=[{t:'used',s:40,label:'A'},{t:'used',s:40,label:'B'},{t:'used',s:40,label:'C'},{t:'free',s:80,label:''}];
+  renderFrag();document.getElementById('fragMsg').innerHTML='<b>分配 A/B/C 各 40</b>，右侧还剩 80 空闲。';
+}
+function fragFreeB(){
+  if(!frag.find(b=>b.label==='B')){document.getElementById('fragMsg').innerHTML='请先分配 A/B/C。';return;}
+  frag[1]={t:'free',s:40,label:'free'};renderFrag();
+  document.getElementById('fragMsg').innerHTML='<b>释放 B</b> → 中间出现一个 40 的空洞（外部碎片）。';
+}
+function fragAllocD(){
+  if(!frag.find(b=>b.label==='free')){document.getElementById('fragMsg').innerHTML='请先分配 A/B/C 并释放 B。';return;}
+  // D=60 can't fit in 40 hole -> mark hole as gap, append D after C
+  frag=frag.map(b=>b.label==='free'?{...b,t:'gap',label:'洞'}:b);
+  frag.push({t:'used',s:60,label:'D'});
+  renderFrag();document.getElementById('fragMsg').innerHTML='<b>普通分配器：D(60) 塞不进 40 的洞</b>，只能放到末尾，中间的洞被标记为<b>碎片空洞</b>——这就是外部碎片。';
+}
+function fragSizeClass(){
+  if(!frag.find(b=>b.label==='free')&&!frag.find(b=>b.t==='gap')){document.getElementById('fragMsg').innerHTML='请先分配 A/B/C 并释放 B。';return;}
+  // all small objects rounded to size class 64 => B's 40 slot already fits D(60->64)? show it reused the hole
+  frag=frag.map(b=>{
+    if(b.label==='free'||b.t==='gap'){return {t:'used',s:64,label:'D'};}
+    return b;
+  });
+  renderFrag();document.getElementById('fragMsg').innerHTML='<b>尺寸分级方案：</b>所有小对象统一按 64 字节的“尺寸等级”分配。B 释放出的 40 槽其实是 64 级，<b>刚好能放下 D(向上取整到 64)</b>，空洞被复用，外部碎片消失（代价是每块多几字节内部碎片）。';
+}
+fragReset();
+
+/* ---- size class ---- */
+function calcSC(){
+  const req=Math.max(1,Math.min(512,parseInt(document.getElementById('scReq').value)||0));
+  // simplified size classes: multiples of 8 up to 128, then 16, etc. Use 8-byte classes for clarity.
+  const cls=Math.ceil(req/8)*8;
+  const internal=cls-req;
+  const pct=(internal/cls*100).toFixed(1);
+  document.getElementById('scMsg').innerHTML=
+    `申请 <b>${req}</b> 字节 → 向上取整到尺寸等级 <b>${cls}</b> 字节<br>`+
+    `内部碎片 = ${internal} 字节（占该块的 ${pct}%）`+
+    `<br><span style="color:var(--muted)">分配器用固定尺寸等级换来了“同尺寸块可随意复用、几乎零搜索”，代价是每个对象可能多几个字节的内部碎片。真实实现的等级更细致（如 Go 约 70 级、glibc 按 16 字节步进）。</span>`;
+}
+function randSC(){document.getElementById('scReq').value=1+Math.floor(Math.random()*200);calcSC();}
+calcSC();
+
+/* ---- zoo ---- */
+const zooInfo={
+  ptmalloc:'<b>ptmalloc（glibc 默认通用分配器）</b><br>解决“通用场景开箱即用”。用 main arena + 每线程 arena 减少锁竞争，内部用 fast/small/large bin 管理空闲块。缺点：多核高并发下全局锁仍是瓶颈，长期运行碎片较明显。',
+  jemalloc:'<b>jemalloc（Facebook）</b><br>主攻<b>低碎片 + 多核扩展</b>。多个 arena 分散竞争，size class + 着色(alignment coloring)降低缓存行冲突，长期内存占用远低于 ptmalloc。适合长期运行的服务。',
+  tcmalloc:'<b>tcmalloc（Google）</b><br>主攻<b>分配速度 + 并发</b>。每个线程有独立 mcache（无锁快路径），小对象分配几乎零竞争；中央 mcentral + mheap 兜底。Go 的内存分配器直接受其启发。',
+  mimalloc:'<b>mimalloc（微软）</b><br>主攻<b>简单且快</b>。用“自由表(free list)”代替复杂 bin，元数据极少，单/多线程性能都顶尖，代码量小易嵌入。很多新项目用它替换 ptmalloc。',
+  arena:'<b>区域 / 凹凸(bump)分配器（应用层）</b><br>场景：一批临时对象，最后整体一起销毁（解析器、编译器、请求处理）。做法：一个指针往后推，分配 O(1)；释放时把指针一举归零，<b>不逐个回收</b>。极致快但对象不能单独释放。',
+  pool:'<b>对象池（应用层）</b><br>场景：大量同尺寸对象反复创建/销毁（游戏实体、网络连接、协程栈）。预分配一池固定大小块，取/放都是 O(1)，<b>零碎片、零搜索</b>。典型的“专用分配器”。',
+  gc:'<b>GC 堆（Go / Java / V8）</b><br>场景：不想手写 free。分配器与垃圾回收器协作：对象不可达后由 GC 标记-清除回收，空闲 span 可归还 OS。程序员只管 new/make，代价是 GC 的少量停顿/CPU。',
+  slab:'<b>slab 分配器（内核层）</b><br>Linux 内核用。内核要经常创建/销毁固定大小的对象（如 task_struct、inode），slab 为每种对象维护定长缓存，避免内核自己频繁切分页面、减少碎片与初始化开销。'
+};
+document.querySelectorAll('#zoo .zcard').forEach(c=>{c.onclick=()=>{
+  document.querySelectorAll('#zoo .zcard').forEach(x=>x.classList.remove('sel'));
+  c.classList.add('sel');document.getElementById('zooDetail').innerHTML=zooInfo[c.dataset.k];
+};});
+document.getElementById('zooDetail').innerHTML=zooInfo.ptmalloc;
+</script>
+</body>
+</html>

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>内存分配原理与全过程 · 从物理内存到 C / Go</title>
+<style>
+:root{
+  --bg-from:#0d1b2a; --bg-to:#15233f; --bg-end:#0a1018;
+  --text:#e8eef6; --muted:#93a4bd;
+  --phys:#fb923c; --phys2:#f59e0b;
+  --os:#38bdf8; --os2:#22d3ee;
+  --clang:#a78bfa; --clang2:#c4b5fd;
+  --go:#2dd4bf; --go2:#34d399;
+  --card:rgba(255,255,255,.05); --card-b:rgba(255,255,255,.1);
+  --good:#34d399; --warn:#fbbf24; --bad:#f87171;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;
+  background:linear-gradient(135deg,var(--bg-from) 0%,var(--bg-to) 55%,var(--bg-end) 100%);
+  color:var(--text); min-height:100vh; line-height:1.7; padding-top:70px;
+}
+a{color:var(--os2);text-decoration:none}
+/* nav */
+header{position:fixed;top:0;width:100%;z-index:1000;background:rgba(10,18,40,.85);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.07)}
+nav{max-width:1200px;margin:0 auto;padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{font-weight:800;font-size:1.15rem;background:linear-gradient(135deg,#fb923c,#22d3ee);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.nav-home{font-size:.85rem;color:var(--muted);border:1px solid var(--card-b);padding:.35rem .8rem;border-radius:999px}
+.nav-home:hover{color:#fff;border-color:var(--os2)}
+/* hero */
+.hero{text-align:center;padding:28px 1rem 10px}
+.hero h1{font-size:2.1rem;background:linear-gradient(90deg,#fb923c,#22d3ee,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem}
+.hero p{color:var(--muted);max-width:740px;margin:0 auto}
+/* tabs */
+.tabs{max-width:1100px;margin:22px auto 0;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;padding:0 1rem}
+.tab{padding:9px 16px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--card-b);color:var(--muted);cursor:pointer;font-size:.9rem;transition:.25s;user-select:none}
+.tab:hover{color:#fff;background:rgba(255,255,255,.1)}
+.tab.active{background:linear-gradient(90deg,#fb923c,#22d3ee);color:#0a1018;font-weight:700;border-color:transparent}
+/* container */
+.wrap{max-width:1100px;margin:24px auto 60px;padding:0 1rem}
+.panel{display:none;animation:fade .45s ease}
+.panel.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:22px;margin-bottom:22px;backdrop-filter:blur(6px)}
+.card h2{font-size:1.25rem;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+.card h3{font-size:1.02rem;margin:18px 0 8px;color:var(--os2)}
+.card p{color:#cdd8e8;margin:8px 0}
+.card ul{margin:8px 0 8px 1.2rem;color:#cdd8e8}
+.card li{margin:5px 0}
+.tag{font-size:.72rem;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.08);color:var(--muted);margin-left:6px}
+.mono{font-family:'SF Mono',Consolas,Menlo,monospace;background:rgba(0,0,0,.35);padding:2px 7px;border-radius:6px;color:#ffd9a8;font-size:.88em}
+.kbd{font-family:monospace;background:#1e293b;border:1px solid #334155;border-bottom-width:2px;border-radius:6px;padding:1px 7px;color:#e2e8f0;font-size:.85em}
+/* layer palette */
+.l-phys{color:var(--phys)} .l-os{color:var(--os2)} .l-c{color:var(--clang)} .l-go{color:var(--go)}
+.bg-phys{background:linear-gradient(135deg,var(--phys),var(--phys2))}
+.bg-os{background:linear-gradient(135deg,var(--os),var(--os2))}
+.bg-c{background:linear-gradient(135deg,var(--clang),var(--clang2))}
+.bg-go{background:linear-gradient(135deg,var(--go),var(--go2))}
+/* ===== end-to-end trace stack ===== */
+.trace-stack{display:flex;flex-direction:column;gap:0;align-items:stretch;margin:10px 0}
+.tlayer{position:relative;border-radius:14px;padding:18px 20px;color:#0a1018;font-weight:700;overflow:hidden;transition:.35s;opacity:.45;transform:scale(.985);border:1px solid rgba(255,255,255,.18)}
+.tlayer.active{opacity:1;transform:scale(1.0);box-shadow:0 0 0 3px rgba(255,255,255,.35),0 14px 40px rgba(0,0,0,.45)}
+.tlayer .code{font-family:monospace;font-weight:600;font-size:.95rem;opacity:.85}
+.tlayer .sub{font-weight:500;font-size:.82rem;opacity:.8;margin-top:3px;color:#0a1018}
+.tlayer.dim{opacity:.3}
+.connector{height:26px;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative}
+.connector .line{width:2px;height:100%;background:linear-gradient(var(--muted),transparent)}
+.connector .arrow{position:absolute;bottom:-2px;color:var(--muted);font-size:.8rem}
+.packet{position:absolute;left:50%;transform:translateX(-50%);width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 14px #fff;top:-7px;display:none}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 14px}
+.btn{padding:10px 18px;border-radius:10px;border:1px solid var(--card-b);background:rgba(255,255,255,.07);color:#fff;cursor:pointer;font-size:.92rem;transition:.2s;font-weight:600}
+.btn:hover{background:rgba(255,255,255,.14);transform:translateY(-1px)}
+.btn.c{background:linear-gradient(135deg,var(--clang),var(--clang2));color:#1a1030;border-color:transparent}
+.btn.go{background:linear-gradient(135deg,var(--go),var(--go2));color:#062b25;border-color:transparent}
+.btn.reset{background:transparent}
+.log{background:rgba(0,0,0,.32);border:1px solid var(--card-b);border-radius:12px;padding:14px;font-family:monospace;font-size:.84rem;min-height:120px;max-height:220px;overflow:auto}
+.log .ln{margin:3px 0;opacity:0;animation:fadein .3s forwards}
+@keyframes fadein{to{opacity:1}}
+.log .t1{color:var(--phys)} .log .t2{color:var(--os2)} .log .t3{color:var(--clang)} .log .t4{color:var(--go)}
+/* ===== memory grid (physical) ===== */
+.grid-wrap{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}
+.grid{display:grid;grid-template-columns:repeat(8,38px);gap:4px}
+.cell{width:38px;height:38px;border-radius:6px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-size:.62rem;color:var(--muted);cursor:pointer;transition:.15s;font-family:monospace}
+.cell:hover{border-color:var(--phys)}
+.cell.hl{background:linear-gradient(135deg,var(--phys),var(--phys2));color:#1a1030;font-weight:700;border-color:#fff;box-shadow:0 0 12px var(--phys)}
+.cell.row{background:rgba(251,146,60,.18)}
+.cell.col{background:rgba(56,189,248,.18)}
+.cell.filled{background:rgba(52,211,153,.22);border-color:var(--go)}
+.cell-info{flex:1;min-width:240px}
+.decoder{background:rgba(0,0,0,.3);border-radius:10px;padding:14px;font-family:monospace;font-size:.82rem;margin-top:10px}
+.decoder b{color:var(--phys)}
+input.addr{width:90px;padding:8px;border-radius:8px;border:1px solid var(--card-b);background:rgba(0,0,0,.3);color:#fff;font-family:monospace;text-align:center}
+/* ===== page table ===== */
+.pt-stage{display:flex;gap:30px;flex-wrap:wrap;align-items:flex-start}
+.pt-box{flex:1;min-width:280px}
+.va-bits{display:flex;gap:6px;margin:10px 0}
+.bit-group{border-radius:8px;padding:8px;text-align:center;font-family:monospace}
+.bit-vpn{background:rgba(56,189,248,.15);border:1px solid var(--os)}
+.bit-off{background:rgba(251,146,60,.15);border:1px solid var(--phys)}
+.bit-group small{display:block;color:var(--muted);font-size:.62rem;margin-top:3px}
+.ptable{border-collapse:collapse;margin-top:8px;font-family:monospace;font-size:.78rem}
+.ptable th,.ptable td{border:1px solid rgba(255,255,255,.12);padding:4px 8px;text-align:center}
+.ptable th{color:var(--muted);font-weight:600}
+.ptable tr.cur{background:rgba(56,189,248,.2)}
+.ptable td.pf{color:var(--good)}
+.ptable td.np{color:var(--bad)}
+.frames{display:grid;grid-template-columns:repeat(4,46px);gap:6px;margin-top:8px}
+.frame{height:46px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid var(--card-b);display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:.7rem;color:var(--muted);transition:.2s}
+.frame.hl{background:linear-gradient(135deg,var(--go),var(--go2));color:#062b25;font-weight:700;box-shadow:0 0 12px var(--go)}
+/* ===== flowchart ===== */
+.flow{display:flex;flex-direction:column;align-items:center;gap:0}
+.fnode{background:rgba(255,255,255,.06);border:1px solid var(--card-b);border-radius:12px;padding:12px 18px;max-width:520px;text-align:center;cursor:pointer;transition:.2s;width:100%}
+.fnode:hover{border-color:var(--os2);background:rgba(56,189,248,.1)}
+.fnode.sel{border-color:var(--go);box-shadow:0 0 0 2px rgba(45,212,191,.4)}
+.fnode .t{font-weight:700}
+.fnode .d{font-size:.78rem;color:var(--muted);margin-top:4px}
+.farrow{color:var(--muted);margin:6px 0;font-size:.8rem}
+.frow{display:flex;gap:18px;width:100%;justify-content:center;flex-wrap:wrap}
+.frow .fnode{max-width:250px}
+.detail{margin-top:14px;background:rgba(0,0,0,.3);border-left:3px solid var(--go);border-radius:0 10px 10px 0;padding:12px 16px;font-size:.86rem;color:#cdd8e8;min-height:60px}
+.detail b{color:var(--go)}
+/* heap sim */
+.heapbar{height:120px;border-radius:10px;background:rgba(0,0,0,.3);border:1px solid var(--card-b);position:relative;overflow:hidden;display:flex;align-items:stretch}
+.chunk{position:relative;border-right:1px solid rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:.7rem;color:#1a1030;font-weight:700;transition:.3s;overflow:hidden}
+.chunk.free{background:repeating-linear-gradient(45deg,rgba(255,255,255,.06),rgba(255,255,255,.06) 6px,rgba(255,255,255,.02) 6px,rgba(255,255,255,.02) 12px);color:var(--muted)}
+.chunk.used-c{background:linear-gradient(135deg,var(--clang),var(--clang2))}
+.chunk.used-go{background:linear-gradient(135deg,var(--go),var(--go2))}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:.8rem;color:var(--muted)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
+/* compare table */
+table.cmp{width:100%;border-collapse:collapse;font-size:.88rem;margin-top:8px}
+table.cmp th,table.cmp td{border:1px solid rgba(255,255,255,.12);padding:10px 12px;text-align:left;vertical-align:top}
+table.cmp th{background:rgba(255,255,255,.05);color:var(--text)}
+table.cmp td.c{color:var(--clang)} table.cmp td.go{color:var(--go)}
+.note{font-size:.8rem;color:var(--muted);margin-top:8px;font-style:italic}
+.footer{text-align:center;color:var(--muted);padding:30px 1rem 50px;font-size:.82rem;border-top:1px solid rgba(255,255,255,.07);margin-top:30px}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700}
+.hl-c{background:rgba(167,139,250,.18);color:var(--clang)}
+.hl-go{background:rgba(45,212,191,.18);color:var(--go)}
+@media(max-width:680px){.grid{grid-template-columns:repeat(8,30px)}.cell{width:30px;height:30px}}
+</style>
+</head>
+<body>
+<header>
+  <nav>
+    <div class="logo">内存分配 · 原理与过程</div>
+    <a class="nav-home" href="../index.html">← 操作系统</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>内存分配原理与全过程</h1>
+  <p>从最底层的物理内存芯片，到操作系统内核，再到 C 和 Go 语言运行时的分配器 —— 一次内存申请究竟经历了什么？下面用可交互的动画带你逐层拆解。</p>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-t="0">① 全景 &amp; 端到端动画</div>
+  <div class="tab" data-t="1">② 物理内存层</div>
+  <div class="tab" data-t="2">③ 操作系统层</div>
+  <div class="tab" data-t="3">④ C 语言层</div>
+  <div class="tab" data-t="4">⑤ Go 语言层</div>
+  <div class="tab" data-t="5">⑥ C vs Go 对比</div>
+</div>
+
+<div class="wrap">
+
+  <!-- ============ PANEL 0 ============ -->
+  <section class="panel active">
+    <div class="card">
+      <h2>🧭 三层模型总览</h2>
+      <p>一次“我要 256 字节内存”的请求，会自上而下穿过三个抽象层。<b>越往下越接近硬件，越往上越接近程序员。</b>点下面的按钮，看一个请求如何从头走到物理内存，再拿到一个可用的地址。</p>
+      <div class="trace-stack" id="traceStack">
+        <div class="tlayer bg-c" data-layer="appC">
+          <div>应用代码（C）</div>
+          <div class="code">int *p = malloc(256);</div>
+          <div class="sub">程序员发起申请，语言运行时接管</div>
+        </div>
+        <div class="connector"><div class="line"></div><div class="arrow">▼</div><div class="packet" id="pkt"></div></div>
+        <div class="tlayer bg-c" data-layer="rtC">
+          <div>C 运行时分配器（glibc ptmalloc）</div>
+          <div class="code">bin 查找 / 分割 top chunk</div>
+          <div class="sub">在已向 OS 要来的堆里找空闲块，优先复用</div>
+        </div>
+        <div class="connector"><div class="line"></div><div class="arrow">▼</div></div>
+        <div class="tlayer bg-os" data-layer="os">
+          <div>操作系统（虚拟内存 / 系统调用）</div>
+          <div class="code">brk() / mmap() 系统调用</div>
+          <div class="sub">扩大进程堆或映射匿名页，建立虚拟→物理映射</div>
+        </div>
+        <div class="connector"><div class="line"></div><div class="arrow">▼</div></div>
+        <div class="tlayer bg-phys" data-layer="phys">
+          <div>物理内存（DRAM 芯片）</div>
+          <div class="code">页表项指向的物理页框（page frame）</div>
+          <div class="sub">真正存放比特的电容阵列，由内存控制器访问</div>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="btn c" onclick="runTrace('c')">▶ C：malloc(256)</button>
+        <button class="btn go" onclick="runTrace('go')">▶ Go：make([]byte, 256)</button>
+        <button class="btn reset" onclick="resetTrace()">↺ 重置</button>
+      </div>
+      <div class="log" id="traceLog"></div>
+    </div>
+
+    <div class="card">
+      <h2>📍 为什么需要这么多层？</h2>
+      <ul>
+        <li><span class="l-phys">物理层</span>只懂“地址总线上的电信号 + 电容里的电荷”，它不知道什么是“进程”“对象”“变量”。直接让程序操作物理地址既不安全也难用。</li>
+        <li><span class="l-os">操作系统层</span>在物理内存之上加了一层<b>虚拟内存</b>：每个进程都以为自己独占一整片连续地址空间，OS 负责把它映射到零碎的物理页框上，并提供隔离、共享与按需分配。</li>
+        <li><span class="l-c">语言层</span>则在 OS 给的“大块地”（堆）上做精细化二次分配：因为每次都找 OS 要太慢，所以运行时把 OS 给的内存切成小块、自己管理空闲链表，让 <span class="mono">malloc/free</span> 快到微秒级。</li>
+        <li><b>关键事实：</b>你写的 <span class="mono">malloc</span> / <span class="mono">new</span> <b>不会每次都进入内核</b>。绝大多数分配在用户态就完成了，只有“地不够了”才触发系统调用。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 1 ============ -->
+  <section class="panel">
+    <div class="card">
+      <h2>💾 物理内存层：内存到底是什么？</h2>
+      <p>拆开任何一根内存条（DIMM），里面是成片的 <b>DRAM 芯片</b>。每个存储单元（1T1C）由一个晶体管 + 一个电容组成：电容带电 = 1，不带电 = 0。因为电容会漏电，所以内存控制器必须<b>定期刷新（refresh）</b>才能保住数据 —— 这也正是“动态（Dynamic）”内存的由来。</p>
+      <h3>物理地址 = 地址总线上的电信号</h3>
+      <p>CPU 把“想访问哪个字节”编码成一组电信号送到地址总线。比如 6 根地址线就能编出 2⁶ = 64 个地址。内存芯片内部的<b>行列译码器（row/col decoder）</b>把地址拆成“第几行、第几列”，从而选中唯一一个存储单元。下面用 8×8 = 64 个单元演示这个过程。</p>
+      <div class="grid-wrap">
+        <div>
+          <div class="grid" id="physGrid"></div>
+          <div class="controls" style="margin-top:12px">
+            <input class="addr" id="physAddr" type="number" min="0" max="63" placeholder="0-63" value="42">
+            <button class="btn" onclick="lookupPhys()">🔍 寻址</button>
+            <button class="btn" onclick="writePhys()">✏️ 写入</button>
+            <button class="btn reset" onclick="randPhys()">🎲 随机</button>
+          </div>
+          <div class="decoder" id="physDecode">输入地址后，这里会显示“行 / 列”译码过程。</div>
+        </div>
+        <div class="cell-info">
+          <h3>几个常被忽略的点</h3>
+          <ul>
+            <li>物理地址空间大小受地址线位数限制。x86-64 芯片通常实现 <b>40~52 根物理地址线</b>（可寻址数十 GB ~ 数 TB），并非理论的 2⁶⁴。</li>
+            <li>物理内存是<b>字节寻址、按字/缓存行访问</b>的。CPU 实际以 64 字节缓存行（cache line）为单位与内存交换。</li>
+            <li>“物理地址 → 哪个颗粒、哪个 bank、哪一行”由<b>内存控制器</b>负责，对 OS 和应用程序完全透明。</li>
+            <li>硬件层面没有“释放”概念，只有“覆盖”。所谓释放，是上层（OS/运行时）标记这块地址“可以 reuse”。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 2 ============ -->
+  <section class="panel">
+    <div class="card">
+      <h2>🛡️ 操作系统层：虚拟内存与分页</h2>
+      <p>如果程序直接操作物理地址，两个进程很容易互相踩内存，且地址空间碎片化严重。OS 的解法是<b>虚拟内存</b>：每个进程拥有独立的虚拟地址空间，由<b>页表（page table）</b>把虚拟页（page）映射到物理页框（frame）。每次访存，<b>MMU</b> 硬件借助 <b>TLB</b> 缓存做地址翻译。</p>
+      <h3>动手走一次地址翻译</h3>
+      <p>下面把虚拟地址拆成 <b>4 位虚拟页号（VPN）+ 4 位页内偏移（offset）</b>，共 256 字节虚拟空间、16 个虚拟页。点“翻译”看 MMU 如何查页表、命中/缺失，并最终落到物理页框。</p>
+      <div class="pt-stage">
+        <div class="pt-box">
+          <div class="va-bits">
+            <div class="bit-group bit-vpn">VPN<span id="vpnShow">—</span><small>4 位 · 选页</small></div>
+            <div class="bit-group bit-off">Offset<span id="offShow">—</span><small>4 位 · 页内位置</small></div>
+          </div>
+          <div class="controls">
+            <input class="addr" id="vaInput" type="number" min="0" max="255" value="180">
+            <button class="btn" onclick="translateVA()">🔄 翻译</button>
+            <button class="btn reset" onclick="randVA()">🎲 随机</button>
+          </div>
+          <div class="decoder" id="vaDecode">输入 0-255 的虚拟地址开始。</div>
+        </div>
+        <div class="pt-box">
+          <h3 style="margin-top:0;color:var(--os2)">页表（VPN → PFN）</h3>
+          <table class="ptable" id="ptable"></table>
+          <h3 style="color:var(--go)">物理内存（页框）</h3>
+          <div class="frames" id="frames"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📦 OS 如何把内存“给”进程？</h2>
+      <ul>
+        <li><b>brk / sbrk 系统调用</b>：移动“程序断点（program break）”，把堆区向高地址扩张。这是 <span class="mono">malloc</span> 在“小对象”时向内核批量要地的主要方式。注意：刚 brk 出来的只是<b>虚拟地址范围</b>，物理页要等真正写入（page fault）才分配 —— 这叫<b>按需分页（demand paging）</b>。</li>
+        <li><b>mmap(MAP_ANONYMOUS)</b>：直接映射一段匿名虚拟内存，适合大块分配或想单独释放的场景（C 里 >128KB 的对象就用它，释放时 <span class="mono">munmap</span> 直接还给 OS）。</li>
+        <li><b>内核自己的分配器</b>：OS 收到“给我 N 个物理页”的请求后，用 <span class="pill" style="background:rgba(56,189,248,.18);color:var(--os2)">伙伴系统(buddy)</span> 管理空闲页框（按 2 的幂合并/拆分），用 <span class="pill" style="background:rgba(56,189,248,.18);color:var(--os2)">slab 分配器</span> 为内核对象（如 task_struct）做定长缓存。</li>
+      </ul>
+      <p class="note">一句话：OS 给进程的是“虚拟地址 + 一套映射”，物理内存是延后、按需、按页补给的。真正“按字节切分、快速复用”的脏活，交给了下一层的语言运行时。</p>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 3 ============ -->
+  <section class="panel">
+    <div class="card">
+      <h2>🔧 C 语言层：glibc ptmalloc 分配器</h2>
+      <p>当你调用 <span class="mono">malloc(size)</span>，glibc 的 ptmalloc 不会每次都进内核。它维护一个<b>堆（heap）</b>（从 OS 用 brk/mmap 批发来的大块）并切成许多 <b>chunk</b>，再用若干条“空闲链表（bin）”管理。点下面的节点，看清一次分配走哪条路径。</p>
+      <div class="flow" id="cFlow">
+        <div class="fnode sel" data-k="start"><div class="t">malloc(size)</div><div class="d">入口：要 size 字节</div></div>
+        <div class="farrow">▼</div>
+        <div class="fnode" data-k="mmap"><div class="t">size &gt; 128KB ?</div><div class="d">默认 MMAP_THRESHOLD</div></div>
+        <div class="farrow">▼ 否，走堆</div>
+        <div class="fnode" data-k="fast"><div class="t">size ≤ 128B ?</div><div class="d">fast bin：LIFO，释放时不立即合并</div></div>
+        <div class="farrow">▼ 否</div>
+        <div class="frow">
+          <div class="fnode" data-k="small"><div class="t">≤ ~1024B → small bin</div><div class="d">按大小分桶，FIFO</div></div>
+          <div class="fnode" data-k="large"><div class="t">&gt; ~1024B → large bin</div><div class="d">按大小排序，最佳适配</div></div>
+        </div>
+        <div class="farrow">▼ 都找不到合适空闲块时</div>
+        <div class="fnode" data-k="top"><div class="t">切分 top chunk / 向 OS 要地</div><div class="d">用 sbrk 或 mmap 扩张堆</div></div>
+      </div>
+      <div class="detail" id="cDetail"><b>点上方任意节点查看说明。</b></div>
+    </div>
+
+    <div class="card">
+      <h2>🧪 小堆模拟器（概念版）</h2>
+      <p>点“分配”在堆上放一个块，点“释放”回收最后用的块。空闲块用斜纹表示，运行时不会立即把它还给 OS，而是留在 bin 里等下次复用 —— 这正是“为什么不 free 就内存泄漏”的原因。</p>
+      <div class="heapbar" id="heapBar"></div>
+      <div class="legend">
+        <span><i style="background:linear-gradient(135deg,var(--clang),var(--clang2))"></i>已分配(C)</span>
+        <span><i style="background:repeating-linear-gradient(45deg,rgba(255,255,255,.1),rgba(255,255,255,.1) 6px,rgba(255,255,255,.03) 6px,rgba(255,255,255,.03) 12px)"></i>空闲(可复用)</span>
+      </div>
+      <div class="controls" style="margin-top:12px">
+        <button class="btn c" onclick="allocC()">＋ 分配(随机大小)</button>
+        <button class="btn" onclick="freeC()">－ 释放(最近)</button>
+        <button class="btn reset" onclick="resetHeap()">↺ 重置</button>
+      </div>
+      <div class="decoder" id="heapMsg" style="margin-top:10px">堆初始为空，全部是可用空间（top chunk）。</div>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 4 ============ -->
+  <section class="panel">
+    <div class="card">
+      <h2>🐹 Go 语言层：受 tcmalloc 启发的三级分配器</h2>
+      <p>Go 运行时也向 OS（Linux 上用 <span class="mono">mmap</span>）批发大块内存，但它在用户态设计了一套<b>无锁快速路径</b>：每个 P（处理器）都有自己的缓存。点节点看一个对象从哪来。</p>
+      <div class="flow" id="goFlow">
+        <div class="fnode sel" data-k="gstart"><div class="t">分配对象（如 make([]byte, n)）</div><div class="d">先经逃逸分析：能放栈就放栈</div></div>
+        <div class="farrow">▼</div>
+        <div class="fnode" data-k="gtiny"><div class="t">tiny（≤16B 无指针）？</div><div class="d">mcache.tiny 微分配，减少碎片</div></div>
+        <div class="farrow">▼ 否则看大小</div>
+        <div class="fnode" data-k="gsmall"><div class="t">small（&lt; 32KB）</div><div class="d">定 size class → mcache → mcentral → mheap</div></div>
+        <div class="farrow">▼</div>
+        <div class="fnode" data-k="glarge"><div class="t">large（≥ 32KB）</div><div class="d">直接找 mheap 要一整段 span</div></div>
+        <div class="farrow">▼ 任一级缺货时</div>
+        <div class="fnode" data-k="gos"><div class="t">向 OS 要（sysAlloc / mmap）</div><div class="d">mheap 向内核申请新 span</div></div>
+      </div>
+      <div class="detail" id="goDetail"><b>点上方任意节点查看说明。</b></div>
+    </div>
+
+    <div class="card">
+      <h2>🧩 三级缓存：mcache / mcentral / mheap</h2>
+      <ul>
+        <li><span class="hl-c">mcache</span>：绑定到每个 P，<b>无锁</b>。日常分配 99% 在这里命中，直接拿一个同 size class 的空闲对象，速度极快。</li>
+        <li><span class="hl-c">mcentral</span>：全局按 size class 分桶的中央空闲链表，带锁。mcache 空了就向它“批发”一批对象。</li>
+        <li><span class="hl-c">mheap</span>：管理所有 span（连续的若干页）。mcentral 不够时从这里切 span；mheap 没有空闲 span 才向 OS 申请。</li>
+        <li><b>size class</b>：Go 把对象按约 70 个尺寸等级归类（如 8/16/24/32…字节），同类对象共用一种块大小，既快又省碎片。</li>
+      </ul>
+      <h3>和 C 最大的不同：没有 free，有 GC</h3>
+      <p>Go 没有 <span class="mono">free</span>。对象不可达后，由<b>并发标记-清除 GC</b> 回收，分配器与 GC 协作标记 span。另外，<b>逃逸分析</b>会让很多局部变量直接分配在 goroutine 栈上——栈随函数返回自动回收，连 GC 都不用参与。这就是为什么 Go “不容易内存泄漏”，但代价是 GC 的少量开销。</p>
+    </div>
+  </section>
+
+  <!-- ============ PANEL 5 ============ -->
+  <section class="panel">
+    <div class="card">
+      <h2>⚖️ C vs Go 内存分配对比</h2>
+      <table class="cmp">
+        <tr><th>维度</th><th class="c">C (glibc ptmalloc)</th><th class="go">Go (runtime allocator)</th></tr>
+        <tr><td>谁管理生命周期</td><td class="c">程序员手动 malloc / free</td><td class="go">运行时 + 垃圾回收(GC)自动</td></tr>
+        <tr><td>分配入口</td><td class="c">malloc / calloc / realloc</td><td class="go">new / make，逃逸分析决定栈或堆</td></tr>
+        <tr><td>快速路径</td><td class="c">线程 arena + bin 链表（有锁竞争）</td><td class="go">每 P 的 mcache，无锁</td></tr>
+        <tr><td>小块策略</td><td class="c">fast/small/large bin + top chunk</td><td class="go">size class + mcache/mcentral/mheap + span</td></tr>
+        <tr><td>大块(&gt;~128KB)</td><td class="c">mmap 匿名映射，free 即 munmap 还给 OS</td><td class="go">≥32KB 直接 mheap 拿 span</td></tr>
+        <tr><td>还给 OS 的时机</td><td class="c">仅 mmap 大块可还；堆顶碎片常驻</td><td class="go">GC 回收后空闲 span 可被 mheap 归还（较积极）</td></tr>
+        <tr><td>典型风险</td><td class="c">泄漏 / 悬垂指针 / 双重释放 / 碎片</td><td class="go">GC 停顿(已极小) / 临时对象 GC 压力</td></tr>
+        <tr><td>“每次都进内核？”</td><td class="c">否，bin 命中在用户态</td><td class="go">否，mcache 命中在用户态</td></tr>
+      </table>
+      <p class="note">两者殊途同归：都在“OS 批发来的大块虚拟内存”之上做用户态二次分配，避免频繁系统调用；区别只在谁来释放、以及如何减少锁竞争。</p>
+    </div>
+
+    <div class="card">
+      <h2>🚀 一句话串起全过程</h2>
+      <p>当你写下 <span class="mono">malloc(256)</span> 或 <span class="mono">make([]byte,256)</span>：</p>
+      <ul>
+        <li><b>① 语言运行时</b>先在用户态的空闲链表里找 256 字节左右的块 —— 命中就直接返回指针（微秒级，不进内核）。</li>
+        <li><b>② 找不到</b>时，运行时用 <span class="mono">brk</span>/<span class="mono">mmap</span> 系统调用向 OS 要更大一块虚拟内存。</li>
+        <li><b>③ OS</b> 更新页表、建立虚拟→物理映射，但物理页框往往<b>延迟到首次写入</b>才由 page fault 真正分配。</li>
+        <li><b>④ 最终</b>数据落到 DRAM 的电容阵列里，由内存控制器按物理地址读写。</li>
+      </ul>
+      <p>回到第①个标签页，点 C 或 Go 按钮，把这条链路再动态走一遍吧。</p>
+    </div>
+  </section>
+
+</div>
+
+<div class="footer">内存分配原理与全过程 · 交互式可视化 · 内容用于学习理解，部分参数（如 128KB 阈值、size class 数量）为典型实现的简化表示。</div>
+
+<script>
+/* ---------- tabs ---------- */
+document.querySelectorAll('.tab').forEach(t=>{
+  t.onclick=()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.querySelectorAll('.panel')[+t.dataset.t].classList.add('active');
+  };
+});
+
+/* ---------- helper ---------- */
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function setLog(id,html,cls){const el=document.getElementById(id);const line=document.createElement('div');line.className='ln '+(cls||'');line.innerHTML=html;el.appendChild(line);el.scrollTop=el.scrollHeight;}
+
+/* ---------- end-to-end trace ---------- */
+const layers=['appC','rtC','os','phys'];
+function resetTrace(){
+  layers.forEach(l=>{const e=document.querySelector(`[data-layer="${l}"]`);e.classList.remove('active');});
+  document.getElementById('traceLog').innerHTML='';
+  document.getElementById('pkt').style.display='none';
+}
+async function runTrace(lang){
+  resetTrace();
+  const log=document.getElementById('traceLog');
+  const steps = lang==='c' ? [
+    ['appC','t3','🟣 应用层','int *p = malloc(256);  —— 程序员申请 256 字节'],
+    ['rtC','t3','🟣 C 运行时','ptmalloc：先查 fast/small bin，未命中则切分 top chunk（用户态完成，约微秒）'],
+    ['os','t2','🔵 操作系统','堆不够 → brk()/mmap() 系统调用，扩大虚拟堆、建页表映射'],
+    ['phys','t1','🟠 物理内存','首次写入触发 page fault，内核用伙伴系统分配物理页框并刷新 TLB'],
+    ['appC','t3','🟣 返回','返回虚拟地址 p，程序可立即读写（物理页已就位）'],
+  ] : [
+    ['appC','t4','🟢 应用层','p := make([]byte, 256)  —— 逃逸分析判定放堆'],
+    ['rtC','t4','🟢 Go 运行时','按 size class 查 mcache（每 P 无锁），命中即返回'],
+    ['os','t2','🔵 操作系统','mcache 空 → mcentral → mheap → sysAlloc/mmap 向内核要 span'],
+    ['phys','t1','🟠 物理内存','page fault 分配物理页框；对象由并发 GC 在不可达时回收'],
+    ['appC','t4','🟢 返回','返回切片头(指针/len/cap)，无需手动 free'],
+  ];
+  // light up sequentially
+  for(let i=0;i<steps.length;i++){
+    const [l,cls,title,desc]=steps[i];
+    // dim others, activate current
+    layers.forEach(x=>{const e=document.querySelector(`[data-layer="${x}"]`);e.classList.toggle('active',x===l);e.classList.toggle('dim',x!==l);});
+    setLog('traceLog',`▸ <b class="${cls}">${title}</b>　${desc}`,cls);
+    await sleep(950);
+  }
+  setLog('traceLog',`<b style="color:var(--good)">✓ 分配完成。</b> 注意：第 1 步在用户态就结束了大多数情况，真正进内核只是“补货”时刻。`);
+}
+
+/* ---------- physical grid ---------- */
+const grid=document.getElementById('physGrid');
+const cells=[];
+for(let i=0;i<64;i++){const c=document.createElement('div');c.className='cell';c.textContent=i;c.dataset.i=i;c.onclick=()=>{document.getElementById('physAddr').value=i;lookupPhys();};grid.appendChild(c);cells.push(c);}
+function lookupPhys(){
+  const a=Math.max(0,Math.min(63,parseInt(document.getElementById('physAddr').value)||0));
+  const row=Math.floor(a/8),col=a%8;
+  cells.forEach(c=>c.classList.remove('hl','row','col'));
+  cells.forEach(c=>{const i=+c.dataset.i;if(Math.floor(i/8)===row)c.classList.add('row');if(i%8===col)c.classList.add('col');});
+  cells[a].classList.add('hl');
+  document.getElementById('physDecode').innerHTML=
+    `地址 <b>${a}</b> (二进制 ${a.toString(2).padStart(6,'0')})<br>`+
+    `→ 行译码 row = ⌊${a}/8⌋ = <b>${row}</b><br>`+
+    `→ 列译码 col = ${a} mod 8 = <b>${col}</b><br>`+
+    `→ 译码器选中 第${row}行第${col}列 的存储单元，读写其电容电荷。`;
+}
+function writePhys(){
+  const a=Math.max(0,Math.min(63,parseInt(document.getElementById('physAddr').value)||0));
+  cells[a].classList.add('filled');
+  document.getElementById('physDecode').innerHTML+=`<br><span style="color:var(--go)">✓ 已向地址 ${a} 写入数据（单元标记为已占用）。</span>`;
+}
+function randPhys(){document.getElementById('physAddr').value=Math.floor(Math.random()*64);lookupPhys();}
+lookupPhys();
+
+/* ---------- page table ---------- */
+// 16 PTE: pfn or -1(not present)
+const pte=[2,5,-1,7,1,9,3,-1,4,0,6,11,8,-1,10,12];
+const framesEl=document.getElementById('frames');
+for(let i=0;i<16;i++){const f=document.createElement('div');f.className='frame';f.textContent='F'+i;f.dataset.f=i;framesEl.appendChild(f);}
+const ptEl=document.getElementById('ptable');
+function buildPT(){
+  let h='<tr><th>VPN</th><th>→ PFN</th><th>状态</th></tr>';
+  pte.forEach((pfn,i)=>{
+    const np=pfn<0;
+    h+=`<tr data-v="${i}"><td>${i}</td><td class="${np?'np':'pf'}">${np?'—':pfn}</td><td class="${np?'np':'pf'}">${np?'未映射':'已分配'}</td></tr>`;
+  });
+  ptEl.innerHTML=h;
+}
+buildPT();
+function highlightVPN(vpn){
+  ptEl.querySelectorAll('tr').forEach(tr=>{tr.classList.toggle('cur',tr.dataset.v==vpn);});
+}
+async function translateVA(){
+  const va=Math.max(0,Math.min(255,parseInt(document.getElementById('vaInput').value)||0));
+  const vpn=Math.floor(va/16),off=va%16;
+  document.getElementById('vpnShow').textContent=vpn;
+  document.getElementById('offShow').textContent=off;
+  framesEl.querySelectorAll('.frame').forEach(f=>f.classList.remove('hl'));
+  const dec=document.getElementById('vaDecode');
+  dec.innerHTML=`虚拟地址 <b>${va}</b> = VPN <b>${vpn}</b> + offset <b>${off}</b> …`;
+  await sleep(450);
+  // TLB check (simulate)
+  dec.innerHTML+=`<br>① TLB 查询：未命中（模拟）→ 走页表`;
+  highlightVPN(vpn);
+  await sleep(550);
+  const pfn=pte[vpn];
+  if(pfn<0){
+    dec.innerHTML+=`<br>② 页表项 <span style="color:var(--bad)">未映射</span> → 触发 page fault，内核分配物理页框后重试。`;
+    return;
+  }
+  dec.innerHTML+=`<br>② 页表项：VPN ${vpn} → PFN <b>${pfn}</b>`;
+  await sleep(450);
+  dec.innerHTML+=`<br>③ 物理地址 = PFN<<4 | offset = <b>${pfn*16+off}</b>`;
+  framesEl.querySelectorAll('.frame').forEach(f=>{if(+f.dataset.f===pfn)f.classList.add('hl');});
+  dec.innerHTML+=`<br><span style="color:var(--good)">✓ MMU 把物理地址送上总线，内存控制器选中页框 F${pfn}。</span>`;
+}
+function randVA(){document.getElementById('vaInput').value=Math.floor(Math.random()*256);translateVA();}
+
+/* ---------- C flowchart ---------- */
+const cInfo={
+  start:'<b>malloc(size)</b><br>入口。size 是“用户想要的字节数”。实际分配的 chunk 会多出几十字节的<b>元数据（size 头 + 校验）</b>，并在 16 字节边界对齐。',
+  mmap:'<b>size &gt; MMAP_THRESHOLD（默认 128KB，64 位）</b><br>直接用 mmap 建一段匿名映射，独占一片虚拟内存。<b>优点：free 时 munmap 立即还给 OS</b>，不污染堆。缺点：mmap 系统调用本身有开销，小块频繁用会很慢。',
+  fast:'<b>size ≤ ~128B → fast bin</b><br>单链表、<b>LIFO（后进先出）</b>。释放时塞到链表头，<b>暂不与相邻块合并</b>，所以再次分配极快，但也容易留下碎片。下次 malloc  Larger 对象时才会被“清入”unsorted bin 并合并。',
+  small:'<b>≤ ~1024B → small bin</b><br>按 chunk 大小分 60+ 个桶，<b>FIFO</b>。同一桶里的块大小相同，分配/释放会做<b>相邻块合并（coalescing）</b>以对抗碎片。',
+  large:'<b>&gt; ~1024B → large bin</b><br>块按大小<b>排序</b>存放，分配时用“最佳适配”找最接近的尺寸，空闲时同样合并。大块管理开销更高。',
+  top:'<b>所有 bin 都找不到合适块</b><br>就从堆顶的 <b>top chunk（ wilderness ）</b>切一块；若 top 也不够，调用 sysmalloc 通过 <span class="mono">sbrk</span> 推进堆底，或 <span class="mono">mmap</span> 新区域，这才真正进入内核。'
+};
+document.querySelectorAll('#cFlow .fnode').forEach(n=>{
+  n.onclick=()=>{document.querySelectorAll('#cFlow .fnode').forEach(x=>x.classList.remove('sel'));n.classList.add('sel');document.getElementById('cDetail').innerHTML=cInfo[n.dataset.k];};
+});
+document.getElementById('cDetail').innerHTML=cInfo.start;
+
+/* ---------- Go flowchart ---------- */
+const goInfo={
+  gstart:'<b>分配对象</b><br>编译器先做<b>逃逸分析</b>：若对象只在函数内用、且不被外部引用，就直接放 goroutine 栈——函数返回自动回收，最快最安全。否则才进堆分配流程。',
+  gtiny:'<b>tiny 分配（≤16B 且不含指针）</b><br>如小字符串、小数字。Go 用 mcache 里的 <b>tiny 缓冲区</b>把多个微对象塞进同一个小块，极大减少碎片与元数据开销。',
+  gsmall:'<b>small（&lt; 32KB）</b><br>按对象大小选 <b>size class</b>，然后从当前 P 的 <b>mcache</b> 拿一个空闲对象；mcache 空了向 mcentral 批发；mcentral 空了向 mheap 要 span。整个过程<b>无锁快速路径</b>。',
+  glarge:'<b>large（≥ 32KB）</b><br>绕过 mcache/mcentral，直接在 mheap 中分配一整段 <b>span</b>（连续若干页，按页对齐）。这类对象少但大。',
+  gos:'<b>向 OS 补货</b><br>mheap 没有空闲 span 时，用 <span class="mono">sysAlloc</span>（Linux 即 mmap）向内核申请一大块，再切成 span 供上层使用。之后由 GC 决定何时把空闲 span 归还 OS。'
+};
+document.querySelectorAll('#goFlow .fnode').forEach(n=>{
+  n.onclick=()=>{document.querySelectorAll('#goFlow .fnode').forEach(x=>x.classList.remove('sel'));n.classList.add('sel');document.getElementById('goDetail').innerHTML=goInfo[n.dataset.k];};
+});
+document.getElementById('goDetail').innerHTML=goInfo.gstart;
+
+/* ---------- heap simulator (C concept) ---------- */
+let heap=[{size:100,used:false,kind:'free'}]; // total width 100 units
+function renderHeap(){
+  const bar=document.getElementById('heapBar');bar.innerHTML='';
+  const total=heap.reduce((s,c)=>s+c.size,0);
+  heap.forEach((c,i)=>{
+    const d=document.createElement('div');d.className='chunk '+(c.used?'used-c':'free');
+    d.style.flex=c.size/total*100+'%';
+    d.title='block '+i+': '+(c.used?'used':'free')+' ('+c.size+'u)';
+    d.textContent=c.used?c.size:'';
+    bar.appendChild(d);
+  });
+}
+function allocC(){
+  const sz=8+Math.floor(Math.random()*24);
+  // try reuse a free block large enough
+  let placed=false;
+  for(let i=0;i<heap.length;i++){
+    if(!heap[i].used && heap[i].size>=sz){
+      if(heap[i].size>sz+4){ // split
+        heap.splice(i+1,0,{size:heap[i].size-sz,used:false,kind:'free'});
+        heap[i].size=sz;
+      }
+      heap[i].used=true;heap[i].kind='C';placed=true;
+      document.getElementById('heapMsg').innerHTML=`<span style="color:var(--clang)">分配 ${sz}u</span>：复用空闲块（演示 bin 命中，无需进内核）。`;
+      break;
+    }
+  }
+  if(!placed){ // grow top
+    heap.push({size:sz,used:true,kind:'C'});
+    document.getElementById('heapMsg').innerHTML=`<span style="color:var(--clang)">分配 ${sz}u</span>：无合适空闲块 → 向 OS 扩张堆（brk/mmap）。`;
+  }
+  renderHeap();
+}
+function freeC(){
+  // free last used
+  for(let i=heap.length-1;i>=0;i--){
+    if(heap[i].used){heap[i].used=false;heap[i].kind='free';
+      // merge adjacent free
+      if(i>0&&!heap[i-1].used){heap[i-1].size+=heap[i].size;heap.splice(i,1);i--;}
+      if(i<heap.length-1&&!heap[i+1].used){heap[i].size+=heap[i+1].size;heap.splice(i+1,1);}
+      document.getElementById('heapMsg').innerHTML=`<span style="color:var(--good)">释放</span>：块归还 bin，与相邻空闲合并。<b>注意：它仍留在进程堆里，没还给 OS</b>（除非是 mmap 大块）。`;
+      renderHeap();return;
+    }
+  }
+  document.getElementById('heapMsg').innerHTML='没有已分配块可释放。';
+}
+function resetHeap(){heap=[{size:100,used:false,kind:'free'}];renderHeap();document.getElementById('heapMsg').innerHTML='堆已重置为纯空闲（top chunk）。';}
+renderHeap();
+</script>
+</body>
+</html>
