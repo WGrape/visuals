@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linux 进程/线程 结构体与创建执行原理</title>
+<style>
+:root{
+  --bg-from:#0d1b2a; --bg-to:#15233f; --bg-end:#0a1018;
+  --text:#e8eef6; --muted:#93a4bd;
+  --os:#38bdf8; --os2:#22d3ee;
+  --phys:#fb923c; --phys2:#f59e0b;
+  --prog:#a78bfa; --prog2:#c4b5fd;
+  --good:#34d399; --warn:#fbbf24; --bad:#f87171;
+  --textseg:#f87171; --data:#fbbf24; --bss:#a3e635; --heap:#34d399;
+  --stack:#22d3ee; --mmap:#a78bfa; --kern:#64748b; --file:#94a3b8;
+  --card:rgba(255,255,255,.05); --card-b:rgba(255,255,255,.1);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:linear-gradient(135deg,var(--bg-from) 0%,var(--bg-to) 55%,var(--bg-end) 100%);color:var(--text);min-height:100vh;line-height:1.7;padding-top:70px}
+a{color:var(--os2);text-decoration:none}
+header{position:fixed;top:0;width:100%;z-index:1000;background:rgba(10,18,40,.85);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.07)}
+nav{max-width:1200px;margin:0 auto;padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{font-weight:800;font-size:1.12rem;background:linear-gradient(135deg,#fb923c,#22d3ee);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.nav-home{font-size:.85rem;color:var(--muted);border:1px solid var(--card-b);padding:.35rem .8rem;border-radius:999px}
+.nav-home:hover{color:#fff;border-color:var(--os2)}
+.hero{text-align:center;padding:26px 1rem 6px}
+.hero h1{font-size:2rem;background:linear-gradient(90deg,#fb923c,#22d3ee,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem}
+.hero p{color:var(--muted);max-width:840px;margin:0 auto}
+.tabs{max-width:1240px;margin:20px auto 0;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;padding:0 1rem}
+.tab{padding:9px 13px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--card-b);color:var(--muted);cursor:pointer;font-size:.82rem;transition:.25s}
+.tab:hover{color:#fff;background:rgba(255,255,255,.1)}
+.tab.active{background:linear-gradient(90deg,#fb923c,#22d3ee);color:#0a1018;font-weight:700;border-color:transparent}
+.wrap{max-width:1080px;margin:22px auto 60px;padding:0 1rem}
+.panel{display:none;animation:fade .45s ease}
+.panel.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:22px;margin-bottom:22px;backdrop-filter:blur(6px)}
+.card h2{font-size:1.2rem;margin-bottom:12px}
+.card h3{font-size:1rem;margin:16px 0 8px;color:var(--os2)}
+.card p{color:#cdd8e8;margin:8px 0}
+.card ul{margin:8px 0 8px 1.2rem;color:#cdd8e8}
+.card li{margin:5px 0}
+.mono{font-family:'SF Mono',Consolas,Menlo,monospace;background:rgba(0,0,0,.35);padding:2px 7px;border-radius:6px;color:#ffd9a8;font-size:.84em}
+.mono2{font-family:'SF Mono',Consolas,Menlo,monospace;background:rgba(56,189,248,.12);padding:2px 7px;border-radius:6px;color:#bae6fd;font-size:.82em}
+.callout{background:rgba(251,146,60,.1);border:1px solid rgba(251,146,60,.35);border-radius:12px;padding:14px 16px;margin:12px 0;color:#ffe8d0}
+.callout b{color:var(--phys)}
+.btn{padding:9px 15px;border-radius:10px;border:1px solid var(--card-b);background:rgba(255,255,255,.07);color:#fff;cursor:pointer;font-size:.86rem;transition:.2s;font-weight:600}
+.btn:hover{background:rgba(255,255,255,.14)}
+.detail{margin-top:14px;background:rgba(0,0,0,.3);border-left:3px solid var(--prog);border-radius:0 10px 10px 0;padding:12px 16px;font-size:.88rem;color:#cdd8e8;min-height:60px}
+.detail b{color:var(--prog)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.footer{text-align:center;color:var(--muted);padding:30px 1rem 50px;font-size:.82rem;border-top:1px solid rgba(255,255,255,.07);margin-top:30px}
+table.cmp{width:100%;border-collapse:collapse;font-size:.84rem;margin-top:8px}
+table.cmp th,table.cmp td{border:1px solid rgba(255,255,255,.12);padding:8px 10px;text-align:left;vertical-align:top}
+table.cmp th{background:rgba(255,255,255,.05)}
+/* big struct diagram */
+.struct-wrap{display:flex;flex-direction:column;gap:12px}
+.sgroup{display:flex;gap:14px;align-items:stretch;border-radius:12px;border:1px solid var(--card-b);background:rgba(255,255,255,.03);padding:12px 14px;cursor:pointer;transition:.2s}
+.sgroup:hover{border-color:var(--prog);background:rgba(167,139,250,.07)}
+.sgroup.sel{border-color:var(--phys);background:rgba(251,146,60,.08)}
+.sg-head{flex:0 0 150px;font-weight:700;font-size:.9rem;display:flex;align-items:center}
+.sg-head .tag{font-size:.72rem;font-family:monospace;color:var(--muted);display:block;font-weight:400;margin-top:3px}
+.sg-fields{flex:1;font-family:'SF Mono',Consolas,Menlo,monospace;font-size:.78rem;color:#cdd8e8;line-height:1.9}
+/* nested boxes */
+.nest{display:flex;justify-content:center;padding:6px}
+.bigbox{border-radius:14px;padding:16px;background:rgba(167,139,250,.08);border:2px dashed rgba(167,139,250,.45);width:100%}
+.bigbox .bt{font-weight:700;color:var(--prog);margin-bottom:8px}
+.row2{display:flex;gap:12px;flex-wrap:wrap}
+.subbox{flex:1;min-width:200px;border-radius:10px;padding:10px 12px;border:1px solid var(--card-b);background:rgba(255,255,255,.04);cursor:pointer;transition:.2s}
+.subbox:hover{border-color:var(--os)}
+.subbox.sel{border-color:var(--phys);background:rgba(251,146,60,.08)}
+.subbox .st{font-weight:700;font-size:.86rem;margin-bottom:4px}
+.subbox .sd{font-size:.74rem;color:var(--muted)}
+/* flow */
+.flow{display:flex;flex-direction:column;gap:0;align-items:center}
+.node{background:rgba(255,255,255,.06);border:1px solid var(--card-b);border-radius:10px;padding:9px 14px;font-size:.82rem;min-width:200px;text-align:center;transition:.2s}
+.node.act{background:rgba(251,146,60,.2);border-color:var(--phys);transform:scale(1.04)}
+.node.act2{background:rgba(56,189,248,.2);border-color:var(--os)}
+.node.code{min-width:0;font-family:monospace;font-size:.78rem;background:rgba(0,0,0,.25);text-align:left;max-width:520px}
+.arrow-v{color:var(--muted);font-size:1.1rem;line-height:1.2}
+/* two-col compare */
+.cmp2{display:flex;gap:16px;flex-wrap:wrap}
+.c2{width:340px;flex:1;min-width:300px;border-radius:14px;padding:14px;border:1px solid var(--card-b);background:rgba(255,255,255,.04)}
+.c2 h4{font-size:.95rem;margin-bottom:10px;text-align:center}
+.c2 .line{font-size:.78rem;padding:6px 9px;border-radius:7px;margin:5px 0;background:rgba(0,0,0,.2);display:flex;justify-content:space-between;gap:8px}
+.c2 .line .k{color:#cdd8e8}
+.c2 .line .v{font-family:monospace}
+.v.copy{color:var(--warn)} .v.share{color:var(--good)}
+/* clone flag table */
+.flagrow{cursor:pointer;border-radius:8px;padding:8px 10px;margin:5px 0;background:rgba(255,255,255,.03);border:1px solid var(--card-b);font-size:.83rem;transition:.2s}
+.flagrow:hover{border-color:var(--os);background:rgba(56,189,248,.07)}
+.flagrow.sel{border-color:var(--phys);background:rgba(251,146,60,.08)}
+.flagrow .fl{font-family:monospace;color:var(--os2);font-weight:700}
+.flagrow .fn{font-family:monospace;color:var(--muted);font-size:.74rem;float:right}
+/* timeline */
+.tl{display:flex;flex-direction:column;gap:0;position:relative;padding-left:42px}
+.tl:before{content:'';position:absolute;left:16px;top:8px;bottom:8px;width:2px;background:linear-gradient(var(--os),var(--prog))}
+.tl-item{position:relative;margin-bottom:12px;cursor:pointer}
+.tl-dot{position:absolute;left:-42px;top:0;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;background:linear-gradient(135deg,var(--os),var(--os2));color:#0a1018;font-size:.78rem;z-index:2}
+.tl-body{flex:1;background:rgba(255,255,255,.04);border:1px solid var(--card-b);border-radius:12px;padding:11px 14px;transition:.2s}
+.tl-item.sel .tl-body{border-color:var(--phys);background:rgba(251,146,60,.08)}
+.tl-body b{color:var(--os2)}
+.tl-body .who{font-size:.7rem;color:var(--muted);font-family:monospace}
+@media(max-width:680px){.hero h1{font-size:1.45rem}.sg-head{flex-basis:110px}}
+</style>
+</head>
+<body>
+<header><nav>
+  <div class="logo">task_struct 内核源码视角</div>
+  <a class="nav-home" href="../index.html">← 返回 OS 主页</a>
+</nav></header>
+
+<div class="hero">
+  <h1>Linux 进程与线程：结构体 & 创建/执行原理</h1>
+  <p>从内核源码角度看——<b>进程和线程在内核里是同一个东西：<span class="mono">struct task_struct</span></b>。区别只在于创建时共享了哪些资源。本页用图拆开结构体、fork / execve / clone 的真实调用路径。</p>
+</div>
+
+<div class="tabs" id="tabs">
+  <div class="tab active" data-t="0">① 核心洞察</div>
+  <div class="tab" data-t="1">② task_struct 解剖</div>
+  <div class="tab" data-t="2">③ mm_struct 与地址空间</div>
+  <div class="tab" data-t="3">④ 进程创建 fork()</div>
+  <div class="tab" data-t="4">⑤ 执行原理 execve()</div>
+  <div class="tab" data-t="5">⑥ 线程创建 clone()</div>
+  <div class="tab" data-t="6">⑦ 调度 & 内核线程 & 总结</div>
+</div>
+
+<div class="wrap">
+
+<!-- ============ TAB 0 ============ -->
+<div class="panel active" data-p="0">
+  <div class="card">
+    <h2>① 一句话点破：Linux 里没有「线程」这种独立概念</h2>
+    <div class="callout">
+      <b>进程 = 一个 task_struct 拥有独立的地址空间(mm_struct)；线程 = 另一个 task_struct 与它共享同一个 mm_struct（以及文件表、信号等）。</b><br><br>
+      Windows 把进程和线程做成两种不同内核对象；Linux 不这么干。内核只有一种调度实体 <span class="mono">task_struct</span>，所谓「线程」只是<b>创建时带上了 CLONE_VM 等共享标志</b>的 task_struct。所以「轻量级进程 LWP」就是这个意思——它本质上就是个 task_struct。
+    </div>
+    <div class="nest">
+      <div class="bigbox">
+        <div class="bt">struct task_struct（每个进程/线程一个）</div>
+        <div class="row2">
+          <div class="subbox" data-d="普通 fork 出的进程：task_struct 有<b>自己独有</b>的 mm_struct（copy_mm 时 dup_mm 拷贝 VMA，页表写时复制）。pid 唯一，tgid 等于自己的 pid，group_leader 指向自己。"><div class="st" style="color:var(--phys)">进程（Process）</div><div class="sd">自己的 mm_struct · 独立地址空间 · 独立 pid/tgid</div></div>
+          <div class="subbox" data-d="pthread_create 创建的线程：task_struct 与创建者<b>共享</b>同一个 mm_struct（CLONE_VM → copy_mm 仅 mm_users++）。pid 各自唯一，但 tgid 相同（= 组长 pid），getpid() 返回值也一样——内核眼里它们是一个『线程组』。" data-dd="1"><div class="st" style="color:var(--os2)">线程（Thread）</div><div class="sd">共享 mm_struct · 同 tgid · 各自 pid · 同线程组</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="detail" id="ins-d" style="border-left-color:var(--phys)">点上方两个框看「进程」与「线程」在内核里的真正区别：就是 task_struct 是否共享 mm_struct，以及 tgid 是否相同。</div>
+  </div>
+  <div class="card">
+    <h2>贯穿全篇的三个关键字段</h2>
+    <ul>
+      <li><span class="mono2">task_struct.pid</span> —— 该<b>任务自身</b>的唯一编号。每个 task_struct（无论进程还是线程）都有独立 pid。</li>
+      <li><span class="mono2">task_struct.tgid</span> —— <b>线程组 ID</b>。等于该组「组长」(group_leader) 的 pid。<span class="mono">getpid()</span> 返回的就是 tgid，所以同一进程里的所有线程 getpid() 都一样。</li>
+      <li><span class="mono2">task_struct.mm</span> —— 指向地址空间 <span class="mono">mm_struct</span>。进程独有；线程共享。这就是「进程/线程」在内核里的<b>唯一本质差别</b>。</li>
+    </ul>
+    <div class="callout">验证：你在用户态调 <span class="mono">getpid()</span> 拿到的是 tgid；调 <span class="mono">gettid()</span> 拿到的才是真正的 pid。<b>同进程多线程，pid 不同、tgid 相同</b>——这正是 task_struct 模型的直接体现。</div>
+  </div>
+</div>
+
+<!-- ============ TAB 1 ============ -->
+<div class="panel" data-p="1">
+  <div class="card">
+    <h2>② task_struct 解剖（源码：include/linux/sched.h）</h2>
+    <p>这是内核里最核心的结构体，几百个字段。按功能分组点击查看（节选与进程/线程最相关的字段）：</p>
+    <div class="struct-wrap" id="sg">
+      <div class="sgroup sel" data-d="身份与线程组：<span class='mono'>pid</span>(本任务唯一id)、<span class='mono'>tgid</span>(线程组id，=组长pid)、<span class='mono'>group_leader</span>(指向组长 task_struct)、<span class='mono'>pids[PIDTYPE_MAX]</span>(PIDTYPE_PID/TGID/PGID/SID 多级 pid 结构)、<span class='mono'>comm[16]</span>(命令名，如 'a.out')。<br><br>★ 进程 vs 线程的区别就藏在这里：线程的 tgid 与组长相同，pid 各不相同。">
+        <div class="sg-head">身份 / 线程组<span class="tag">pid · tgid · group_leader</span></div>
+        <div class="sg-fields">pid_t pid;<br>pid_t tgid;<br>struct task_struct *group_leader;<br>struct pid *pids[PIDTYPE_MAX];<br>char comm[TASK_COMM_LEN];</div>
+      </div>
+      <div class="sgroup" data-d="内存描述符：<span class='mono'>mm</span> 指向本任务的地址空间(mm_struct）；<span class='mono'>active_mm</span> 是『借用』的页表——<b>内核线程的 mm 为 NULL</b>，调度时借上一个任务的 mm 当 active_mm 以免切换页表。<br><br>★ fork 不共享时这里会 dup_mm 出新 mm；clone(CLONE_VM) 时这里直接指向同一个 mm。">
+        <div class="sg-head">内存<span class="tag">mm · active_mm</span></div>
+        <div class="sg-fields">struct mm_struct *mm;<br>struct mm_struct *active_mm;</div>
+      </div>
+      <div class="sgroup" data-d="打开文件与文件系统上下文：<span class='mono'>files</span> 指向打开文件描述符表(files_struct，即你 fd 0/1/2 那些）；<span class='mono'>fs</span> 指向根目录/当前工作目录(fs_struct)。<br><br>★ 普通 fork 默认复制一份 files；clone(CLONE_FILES) 时父子共享同一张 fd 表（线程改 fd，兄弟线程也看得见）。">
+        <div class="sg-head">文件 / 文件系统<span class="tag">files · fs</span></div>
+        <div class="sg-fields">struct files_struct *files;<br>struct fs_struct *fs;</div>
+      </div>
+      <div class="sgroup" data-d="信号：<span class='mono'>sighand</span> 指向信号处理函数表(sighand_struct)；<span class='mono'>signal</span> 指向线程组共享的信号悬挂信息(signal_struct)。<br><br>★ CLONE_SIGHAND 共享处理函数；CLONE_THREAD 让同组共享 signal——这就是线程间信号行为一致的来源。">
+        <div class="sg-head">信号<span class="tag">sighand · signal</span></div>
+        <div class="sg-fields">struct sighand_struct *sighand;<br>struct signal_struct *signal;</div>
+      </div>
+      <div class="sgroup" data-d="状态：<span class='mono'>__state</span>(运行/可中断睡眠/不可中断/D 等，旧版叫 state)、<span class='mono'>exit_state</span>(僵尸/死亡)、<span class='mono'>exit_code</span>。<br>调度：<span class='mono'>se</span>(CFS 调度实体 sched_entity)、<span class='mono'>rt</span>(实时调度实体)、<span class='mono'>policy</span>/<span class='mono'>prio</span>。<br><br>★ 每个 task_struct 都带一个 se，所以进程和线程都是<b>独立的被调度单位</b>。">
+        <div class="sg-head">状态 / 调度<span class="tag">__state · se · rt</span></div>
+        <div class="sg-fields">unsigned int __state;<br>int exit_state;<br>struct sched_entity se;<br>struct sched_rt_entity rt;</div>
+      </div>
+      <div class="sgroup" data-d="亲属关系与凭据：<span class='mono'>real_parent</span>/<span class='mono'>parent</span>(父)、<span class='mono'>children</span>/<span class='mono'>sibling</span>(子/兄弟链表)、<span class='mono'>tasks</span>(全系统任务链表节点)；<span class='mono'>cred</span> 指向权限凭据(uid/gid/cap)。<br>还有架构相关的 <span class='mono'>thread</span>(保存的寄存器 sp/pc 等，进程切换时用到)。">
+        <div class="sg-head">亲属 / 凭据 / 寄存器<span class="tag">parent · children · cred · thread</span></div>
+        <div class="sg-fields">struct task_struct *parent;<br>struct list_head children, sibling;<br>struct cred *cred;<br>struct thread_struct thread;</div>
+      </div>
+    </div>
+    <div class="detail" id="sg-d">身份与线程组：pid(本任务唯一id)、tgid(线程组id，=组长pid)、group_leader(指向组长 task_struct)、pids[]（多级 pid 结构）、comm[16](命令名)。★ 进程 vs 线程的区别就藏在这里：线程的 tgid 与组长相同，pid 各不相同。</div>
+  </div>
+  <div class="card">
+    <h2>从源码看「进程」到底是什么粒度</h2>
+    <p><span class="mono">task_struct</span> 把「一个能独立跑的东西」需要的全部上下文都装下了：它是谁(pid/tgid)、住哪(mm)、开了哪些文件(files)、收到信号怎么办(sighand)、现在啥状态(__state)、该被怎么调度(se)、它爹是谁(parent)。</p>
+    <p>所以内核调度器只认 <span class="mono">task_struct</span>，<b>根本不区分「这是进程还是线程」</b>——它只关心这个 task_struct 该不该上 CPU。进程/线程的差异完全由「创建时共享了哪些字段」决定，下一节会看到。</p>
+  </div>
+</div>
+
+<!-- ============ TAB 2 ============ -->
+<div class="panel" data-p="2">
+  <div class="card">
+    <h2>③ mm_struct 与虚拟地址空间（mm_types.h）</h2>
+    <p>task_struct 的 <span class="mono">mm</span> 指向它。<b>这是「进程」和「线程」在内核层面的唯一本质分水岭</b>：进程有自己独立的 mm，线程与同组共享同一个 mm。</p>
+    <div class="struct-wrap" id="mg">
+      <div class="sgroup sel" data-d="<span class='mono'>mmap</span>：vm_area_struct 链表（进程所有内存区域的头）；<span class='mono'>mm_rb</span>：同一批 VMA 的红黑树（按地址快速查找）。每个 VMA 描述一段『[起,止]地址+权限+背后文件』。<br><br>这就是上一页讲的『VMA 地图』的内核实现。">
+        <div class="sg-head">区域列表<span class="tag">mmap · mm_rb</span></div>
+        <div class="sg-fields">struct vm_area_struct *mmap;<br>struct rb_root mm_rb;</div>
+      </div>
+      <div class="sgroup" data-d="<span class='mono'>pgd</span>：页全局目录（顶层页表基址）。CPU 的 CR3 寄存器装的就是它（物理地址）。MMU 靠它把虚拟地址翻成物理地址。<br><br>★ fork 时 pgd 被复制（页表项标 COW）；clone(CLONE_VM) 时直接共用，所以线程改内存兄弟立刻可见。">
+        <div class="sg-head">页表<span class="tag">pgd</span></div>
+        <div class="sg-fields">pgd_t *pgd;  /* 顶层页表 */</div>
+      </div>
+      <div class="sgroup" data-d="<span class='mono'>mm_users</span>：『有多少个 task_struct 在用这个 mm』的计数（线程共享时 >1）；<span class='mono'>mm_count</span>：mm 本身的引用计数。<br><br>★ 这俩计数解释了为什么线程退出不会立刻销毁地址空间——要等 mm_users 归零。">
+        <div class="sg-head">引用计数<span class="tag">mm_users · mm_count</span></div>
+        <div class="sg-fields">atomic_t mm_users;<br>atomic_t mm_count;</div>
+      </div>
+      <div class="sgroup" data-d="记录各区域边界：<span class='mono'>start_code/end_code</span>(代码)、<span class='mono'>start_data/end_data</span>(数据)、<span class='mono'>start_brk/brk</span>(堆顶)、<span class='mono'>start_stack</span>(栈底)、<span class='mono'>arg_start/end</span>(参数区)。<br><br>这就是『程序内存空间』在内核里的具体字段——execve 时由装载器填好。">
+        <div class="sg-head">区域边界<span class="tag">brk · stack · code</span></div>
+        <div class="sg-fields">unsigned long start_code, end_code;<br>unsigned long start_brk, brk;<br>unsigned long start_stack;</div>
+      </div>
+    </div>
+    <div class="detail" id="mg-d">mmap：vm_area_struct 链表（进程所有内存区域的头）；mm_rb：同一批 VMA 的红黑树。每个 VMA 描述一段『[起,止]地址+权限+背后文件』。这就是上一页讲的『VMA 地图』的内核实现。</div>
+  </div>
+  <div class="card">
+    <h2>vm_area_struct：一段连续虚拟区间</h2>
+    <div class="struct-wrap">
+      <div class="sgroup" data-d="单个 VMA 字段：<span class='mono'>vm_start/vm_end</span> 区间；<span class='mono'>vm_page_prot</span> 页权限(rwx)；<span class='mono'>vm_flags</span>(VM_READ/WRITE/EXEC/MAYSHARE…)；<span class='mono'>vm_file</span> 背后的文件(文件映射时)；<span class='mono'>vm_pgoff</span> 文件内偏移；<span class='mono'>vm_ops</span> 缺页等回调。"><div class="sg-head">struct vm_area_struct</div><div class="sg-fields">unsigned long vm_start, vm_end;<br>pgprot_t vm_page_prot;<br>unsigned long vm_flags;<br>struct file *vm_file;<br>const struct vm_operations_struct *vm_ops;</div></div>
+    </div>
+    <div class="callout">回顾：execve 装载时，内核就是为 ELF 的每个 PT_LOAD 段 <b>new 出一个 vm_area_struct</b> 挂进 mm->mmap。页表项此时多为空——真正访问才靠缺页异常从磁盘读进来（按需分页）。</div>
+  </div>
+</div>
+
+<!-- ============ TAB 3 ============ -->
+<div class="panel" data-p="3">
+  <div class="card">
+    <h2>④ 进程创建：fork() 内核路径（kernel/fork.c）</h2>
+    <p>用户态 <span class="mono">fork()</span> → glibc 包成 <span class="mono">clone()</span> 系统调用 → 内核 <span class="mono">kernel_clone()</span> → <span class="mono">copy_process()</span> → <span class="mono">wake_up_new_task()</span>。</p>
+    <div class="flow" style="align-items:stretch">
+      <div class="node act2">用户态：fork() / clone(SIGCHLD)</div>
+      <div class="arrow-v">↓ 系统调用陷入内核</div>
+      <div class="node">kernel_clone()<br><span style="font-size:.72rem">kernel/fork.c</span></div>
+      <div class="arrow-v">↓</div>
+      <div class="node">copy_process()<br><span style="font-size:.72rem">① dup_task_struct 复制一个全新 task_struct+内核栈</span></div>
+      <div class="arrow-v">↓ 逐个 copy_*</div>
+      <div class="node code">copy_creds → copy_files → copy_fs → copy_sighand → <b>copy_mm</b> → copy_signal → copy_namespaces → copy_io → copy_thread</div>
+      <div class="arrow-v">↓</div>
+      <div class="node">分配 pid / tgid，挂入任务链表与父进程 children</div>
+      <div class="arrow-v">↓ 返回 kernel_clone</div>
+      <div class="node act">wake_up_new_task()<br><span style="font-size:.72rem">放入运行队列，子进程通常先被调度（利于 COW）</span></div>
+    </div>
+    <div class="detail" id="fork-d" style="border-left-color:var(--os)">点上方任一节点无单独交互，这里补充关键点：copy_process 把父 task_struct 几乎原样复制成子 task_struct，<b>父子此时除了 pid/tgid 几乎一模一样</b>（包括寄存器——所以 fork 后靠返回值区分父子）。</div>
+  </div>
+  <div class="card">
+    <h2>fork 的核心：copy_mm 做了什么</h2>
+    <div class="cmp2">
+      <div class="c2" style="border-color:rgba(251,146,60,.4)"><h4 style="color:var(--phys)">fork（无 CLONE_VM）</h4>
+        <div class="line"><span class="k">mm_struct</span><span class="v copy">复制(dup_mm)</span></div>
+        <div class="line"><span class="k">页表</span><span class="v copy">复制，页标 COW</span></div>
+        <div class="line"><span class="k">VMA 列表</span><span class="v copy">逐份拷贝</span></div>
+        <div class="line"><span class="k">物理内存</span><span class="v copy">暂不拷，写时复制</span></div>
+        <div class="line" style="margin-top:8px;background:rgba(251,146,60,.1)"><span class="k">结果</span><span class="v" style="color:var(--phys)">父子独立地址空间</span></div>
+      </div>
+      <div class="c2" style="border-color:rgba(56,189,248,.4)"><h4 style="color:var(--os2)">关键点：为何 fork 快</h4>
+        <p style="font-size:.8rem;color:#cdd8e8">fork <b>并不立刻复制物理内存</b>。copy_mm 只是复制页表并把所有页标记为<b>写时复制(COW)</b>。父子共享同一份物理页，直到某一方写入才真正分裂。</p>
+        <p style="font-size:.8rem;color:#cdd8e8">这就是 fork 极快的原因——配合「子进程先被调度」，常见 <span class="mono">fork+exec</span> 场景下子进程往往还没写内存就 execve 换镜像了，COW 几乎从不会发生。</p>
+      </div>
+    </div>
+    <div class="callout"><b>一句话：</b> fork = 复制出一个新的 task_struct，mm 被 dup 但页表 COW；execve 往往紧随其后把旧镜像整个换掉，所以 fork 的「复制」开销在实际链路里被巧妙规避。</div>
+  </div>
+</div>
+
+<!-- ============ TAB 4 ============ -->
+<div class="panel" data-p="4">
+  <div class="card">
+    <h2>⑤ 执行新程序：execve() 内核路径（fs/exec.c + fs/binfmt_elf.c）</h2>
+    <p><span class="mono">execve()</span> 不新建 task_struct，而是<b>把当前进程「换脑子」</b>：丢弃旧地址空间，按新 ELF 建新地址空间，跳到新入口。pid 不变。</p>
+    <div class="flow" style="align-items:stretch">
+      <div class="node act2">用户态：execve(path, argv, envp)</div>
+      <div class="arrow-v">↓</div>
+      <div class="node">do_execveat_common()<br><span style="font-size:.72rem">打开文件、读脚本#!或ELF头(fs/exec.c)</span></div>
+      <div class="arrow-v">↓</div>
+      <div class="node">exec_binprm() → search_binary_handler()</div>
+      <div class="arrow-v">↓ 匹配 ELF 格式</div>
+      <div class="node">load_elf_binary()<br><span style="font-size:.72rem">fs/binfmt_elf.c —— 真正装载逻辑</span></div>
+      <div class="arrow-v">↓ 关键动作</div>
+      <div class="node code">begin_new_exec() 拆旧 mm → setup_new_exec() 换 mm → setup_arg_pages() 铺栈(argv/envp/auxv) → elf_map() 映射各 PT_LOAD 段 → 映射 ld.so</div>
+      <div class="arrow-v">↓</div>
+      <div class="node act">start_thread()<br><span style="font-size:.72rem">arch/x86/.../process_64.c：设 regs->ip=入口, regs->sp=新栈，返回用户态</span></div>
+    </div>
+    <div class="detail" id="exec-d" style="border-left-color:var(--os)">execve 的本质：<b>同一个 task_struct，把 mm 整个替换</b>。旧 mm 的 mm_users 减一（归零则释放），新 mm 由 ELF 段重建。PC 被设为新程序入口，栈被换成新的 argv/envp 栈——于是「进程」瞬间变成了另一个程序，但 pid、父进程关系全都不变。</div>
+  </div>
+  <div class="card">
+    <h2>load_elf_binary 里发生了什么（精华步骤）</h2>
+    <ul>
+      <li><b>解析 ELF 头</b>：校验魔数，找到 <span class="mono">PT_INTERP</span>（动态链接器路径）。</li>
+      <li><b>begin_new_exec()</b>：拆除旧地址空间（刷新 mm_users，旧的按需释放），开始新生命。</li>
+      <li><b>setup_new_exec()</b>：把 <span class="mono">current->mm</span> 指向新建的 mm，设置 <span class="mono">mm->exe_file</span>、地址空间大小。</li>
+      <li><b>setup_arg_pages()</b>：在计算好的 <span class="mono">mm->start_stack</span> 处铺好初始栈——argc/argv/envp/auxv（呼应上册「栈初始化」）。</li>
+      <li><b>elf_map()</b>：对每个 <span class="mono">PT_LOAD</span> 段调用 mmap 映射进 mm，生成对应 vm_area_struct（text r-x、data rw-）。</li>
+      <li><b>映射解释器</b>：若有 PT_INTERP，把 ld.so 也 mmap 进来（下一步由它做动态链接）。</li>
+      <li><b>start_thread()</b>：把寄存器 ip 设为入口（ELF e_entry 或 ld.so 入口）、sp 设为新栈顶，<b>返回用户态</b>那一刻，新程序第一条指令开始执行。</li>
+    </ul>
+    <div class="callout">对照上一页「静态程序→动态进程」：这里的 <span class="mono">load_elf_binary</span> 就是那页里「内核校验&读 ELF / 建VMA / 装ld.so / 铺栈」在内核源码里的<b>真实函数名与调用顺序</b>。两页是同一个故事的「原理篇」与「源码篇」。</div>
+  </div>
+</div>
+
+<!-- ============ TAB 5 ============ -->
+<div class="panel" data-p="5">
+  <div class="card">
+    <h2>⑥ 线程创建：clone() 与 pthread_create（kernel/fork.c）</h2>
+    <p>用户态 <span class="mono">pthread_create()</span>（glibc/NPTL）→ 调用 <span class="mono">clone()</span> 系统调用，带上一组<b>共享标志</b>。内核走的还是 <span class="mono">kernel_clone → copy_process</span>，区别全在这些标志改变了 copy_* 的行为。</p>
+    <h3>6.1 pthread_create 实际传的标志</h3>
+    <div style="font-family:monospace;font-size:.78rem;background:rgba(0,0,0,.28);border-radius:10px;padding:10px 12px;color:#bae6fd;margin:8px 0">CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | <b>CLONE_THREAD</b> | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn" onclick="flagFocus('CLONE_VM')">CLONE_VM</button>
+      <button class="btn" onclick="flagFocus('CLONE_FILES')">CLONE_FILES</button>
+      <button class="btn" onclick="flagFocus('CLONE_SIGHAND')">CLONE_SIGHAND</button>
+      <button class="btn" onclick="flagFocus('CLONE_THREAD')">CLONE_THREAD</button>
+    </div>
+    <div id="flags">
+      <div class="flagrow" data-k="CLONE_VM" data-d="<b>共享地址空间</b>：copy_mm 不再 dup_mm，而是让新 task_struct 的 mm 直接指向父的 mm，并 mm_users++。于是多线程看到同一片虚拟/物理内存——这是『线程』与『进程』的根本分界线。"><span class="fl">CLONE_VM</span><span class="fn">share mm</span> 共享内存描述符(mm_struct)</div>
+      <div class="flagrow" data-k="CLONE_FILES" data-d="<b>共享文件描述符表</b>：copy_files 共用同一 files_struct。一个线程 close(fd) 或 open()，同组其他线程立刻可见——所以线程间 fd 是共享的。"><span class="fl">CLONE_FILES</span><span class="fn">share fd table</span> 共享打开文件表</div>
+      <div class="flagrow" data-k="CLONE_SIGHAND" data-d="<b>共享信号处理函数表</b>：copy_sighand 共用 sighand_struct。线程间 signal disposition 一致。"><span class="fl">CLONE_SIGHAND</span><span class="fn">share sighand</span> 共享信号处理方式</div>
+      <div class="flagrow" data-k="CLONE_THREAD" data-d="<b>同线程组</b>：新 task_struct 的 tgid = 父的 tgid，group_leader 指向组长，且共享 signal_struct。从此 getpid() 对它们返回相同值，kill 发信号会发给整个组。★ 没有这个标志，即使共享 mm，内核仍把它们当独立进程(只是共享内存)。"><span class="fl">CLONE_THREAD</span><span class="fn">same thread group</span> 同一线程组(同 tgid)</div>
+    </div>
+    <div class="detail" id="flag-d" style="border-left-color:var(--os)">点上方按钮或任一行查看该标志的作用。线程与进程在内核里唯一的结构性差别，正是这些 CLONE_* 标志的有无。</div>
+  </div>
+  <div class="card">
+    <h2>6.2 fork 进程 vs pthread 线程：资源对照</h2>
+    <table class="cmp">
+      <thead><tr><th>资源</th><th>fork 出的进程</th><th>pthread 线程（CLONE_*）</th></tr></thead>
+      <tbody>
+        <tr><td>mm_struct（地址空间）</td><td>独立副本（COW）</td><td><span style="color:var(--good)">共享同一份</span></td></tr>
+        <tr><td>页表 / 物理内存</td><td>复制，写时分裂</td><td><span style="color:var(--good)">完全共用</span></td></tr>
+        <tr><td>文件描述符表</td><td>默认复制</td><td><span style="color:var(--good)">共享</span></td></tr>
+        <tr><td>信号处理表</td><td>复制</td><td><span style="color:var(--good)">共享</span></td></tr>
+        <tr><td>pid</td><td>各自独立</td><td>各自独立（gettid 不同）</td></tr>
+        <tr><td>tgid（getpid 看到）</td><td>各自不同</td><td><span style="color:var(--good)">相同</span>（同组）</td></tr>
+        <tr><td>内核对象类型</td><td colspan="2" style="text-align:center">都是 <span class="mono">task_struct</span>，调度器一视同仁</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">所以「多线程比多进程轻」轻在哪？<b>创建时不用复制 mm/页表/文件表</b>（共享即可），通信也不用 IPC（直接读写共享内存）。但代价是任一线程崩（段错误）会拖垮整个组——因为它们本就是共享地址空间的同一个 task_struct 家族。</div>
+  </div>
+</div>
+
+<!-- ============ TAB 6 ============ -->
+<div class="panel" data-p="6">
+  <div class="card">
+    <h2>⑦ 调度、内核线程与总结</h2>
+    <h3>7.1 调度：每个 task_struct 都是独立单位</h3>
+    <p>CFS 调度器操作的是 task_struct 里的 <span class="mono">sched_entity se</span>。无论进程还是线程，<b>只要是一个 task_struct，就是一个可被调度上 CPU 的实体</b>。所以 N 个线程是 N 个并行调度单位（受限于 CPU 核数），这正是多线程能真正并发的原因。</p>
+    <h3>7.2 内核线程（kthread）</h3>
+    <p>内核线程（如 ksoftirqd、kworker）也是 task_struct，但<b>mm = NULL</b>——它们从不跑用户代码、没有用户地址空间。调度切换时借上一个任务的 mm 作为 <span class="mono">active_mm</span>，避免无谓刷 CR3。它们由 <span class="mono">kthread_create() → kernel_thread() → clone</span> 创建，标志里通常带 CLONE_VM 但 mm 仍为空。</p>
+    <div class="callout">记住 <span class="mono">mm</span> vs <span class="mono">active_mm</span>：用户任务的 mm 非空；内核线程 mm 为空、靠 active_mm 借页表。这是 task_struct 模型优雅之处——统一调度，按需借用。</div>
+  </div>
+  <div class="card">
+    <h2>7.3 全篇一张速查表</h2>
+    <table class="cmp">
+      <thead><tr><th>问题</th><th>内核里的真相（结构体 / 函数）</th></tr></thead>
+      <tbody>
+        <tr><td>进程和线程在内核是两种对象吗？</td><td><b>不是。</b> 都是 <span class="mono">struct task_struct</span>（include/linux/sched.h）。</td></tr>
+        <tr><td>那区别到底是什么？</td><td>线程创建带 CLONE_VM 等标志 → <b>共享 mm_struct</b> 且同 tgid；进程则不共享 mm。</td></tr>
+        <tr><td>getpid 为何多线程一样？</td><td>它返回 <span class="mono">tgid</span>，而同组线程 tgid 相同。</td></tr>
+        <tr><td>fork 干了啥？</td><td><span class="mono">kernel_clone→copy_process</span>：dup_task_struct + 各 copy_*（copy_mm 复制 mm、页表 COW）。</td></tr>
+        <tr><td>execve 干了啥？</td><td>不新建 task_struct，<span class="mono">load_elf_binary</span> 拆旧 mm、建新 mm/VMA、铺栈、start_thread 跳入口。</td></tr>
+        <tr><td>线程创建干了啥？</td><td>还是 <span class="mono">copy_process</span>，但 CLONE_VM 让它共享 mm、CLONE_THREAD 让 tgid 相同。</td></tr>
+        <tr><td>地址空间在哪描述？</td><td><span class="mono">struct mm_struct</span>（mm_types.h）：mmap(VMA链表)+pgd(页表)+各区域边界。</td></tr>
+        <tr><td>内核线程特殊在哪？</td><td>mm=NULL，调度时用 active_mm 借用页表。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>收尾：把四页串起来</h2>
+    <div class="callout">
+      这套内存系列现在是一条完整链路：<br>
+      ① <b>原理全过程</b>（物理内存→OS→C/Go 分配）<br>
+      ② <b>分配器角色</b>（malloc 不是 OS 给的）<br>
+      ③ <b>空间模型</b>（C 布局 ⊂ OS 虚拟空间）<br>
+      ④ <b>静态程序→动态进程</b>（fork+execve 变身）<br>
+      ⑤ <b>本页：task_struct 源码视角</b>（进程/线程同体，差异在 CLONE_* 与 mm 共享）<br><br>
+      到这一层，你看到的不再是「黑盒进程」，而是 <span class="mono">task_struct</span> 里那几百个字段和 <span class="mono">kernel/fork.c</span>、<span class="mono">fs/exec.c</span> 里真实的代码路径。
+    </div>
+  </div>
+</div>
+
+<div class="footer">内存系列 · Linux 内核源码视角：task_struct / mm_struct 与 fork·execve·clone 原理 · 与前述姊妹篇互为表里</div>
+</div>
+
+<script>
+// tabs
+const tabs=document.querySelectorAll('.tab'), panels=document.querySelectorAll('.panel');
+tabs.forEach(t=>t.addEventListener('click',()=>{
+  const i=+t.dataset.t;
+  tabs.forEach(x=>x.classList.toggle('active',x===t));
+  panels.forEach(p=>p.classList.toggle('active',+p.dataset.p===i));
+  window.scrollTo({top:0,behavior:'smooth'});
+}));
+
+// Tab0 insight box
+document.querySelectorAll('.subbox').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.subbox').forEach(x=>x.classList.remove('sel')); b.classList.add('sel');
+  document.getElementById('ins-d').innerHTML=b.dataset.d;
+}));
+
+// Tab1 task_struct groups
+const sgs=document.querySelectorAll('#sg .sgroup'), sgD=document.getElementById('sg-d');
+sgs.forEach(g=>g.addEventListener('click',()=>{
+  sgs.forEach(x=>x.classList.remove('sel')); g.classList.add('sel'); sgD.innerHTML=g.dataset.d;
+}));
+
+// Tab2 mm groups
+const mgs=document.querySelectorAll('#mg .sgroup'), mgD=document.getElementById('mg-d');
+mgs.forEach(g=>g.addEventListener('click',()=>{
+  mgs.forEach(x=>x.classList.remove('sel')); g.classList.add('sel'); mgD.innerHTML=g.dataset.d;
+}));
+
+// Tab5 clone flags
+const flags=document.querySelectorAll('#flags .flagrow'), flagD=document.getElementById('flag-d');
+function flagFocus(k){
+  flags.forEach(f=>f.classList.toggle('sel',f.dataset.k===k));
+  const f=[...flags].find(x=>x.dataset.k===k); if(f) flagD.innerHTML=f.dataset.d;
+}
+flags.forEach(f=>f.addEventListener('click',()=>flagFocus(f.dataset.k)));
+</script>
+</body>
+</html>
