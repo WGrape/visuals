@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据库主从延迟：读到旧数据怎么办</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 40px 20px;
+    line-height: 1.75;
+  }
+  h1 {
+    text-align: center;
+    font-size: 30px;
+    color: #f8fafc;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #94a3b8;
+    margin-bottom: 40px;
+    font-size: 14px;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+  .section-title {
+    font-size: 23px;
+    color: #f8fafc;
+    margin: 56px 0 22px;
+    padding-left: 14px;
+    border-left: 4px solid #38bdf8;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px; height: 30px;
+    background: #0ea5e9; color: #fff;
+    border-radius: 8px;
+    font-size: 15px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .diagram-container {
+    background: #1e293b;
+    border-radius: 16px;
+    padding: 30px 24px;
+    box-shadow: 0 20px 45px rgba(0,0,0,0.4);
+    margin: 22px 0;
+    border: 1px solid #334155;
+  }
+  .diagram-cap {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 13px;
+    margin-top: 14px;
+  }
+  svg { display: block; margin: 0 auto; max-width: 100%; }
+  p { color: #cbd5e1; margin: 12px 0; font-size: 15px; }
+  .lead { font-size: 16px; color: #e2e8f0; }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin: 16px 0;
+  }
+  .card h3 { color: #f8fafc; font-size: 17px; margin-bottom: 10px; }
+  .card-blue { border-left: 4px solid #38bdf8; }
+  .card-amber { border-left: 4px solid #fbbf24; }
+  .card-green { border-left: 4px solid #34d399; }
+  .card-red { border-left: 4px solid #f87171; }
+  .card-purple { border-left: 4px solid #a78bfa; }
+  ul, ol { color: #cbd5e1; margin: 10px 0 10px 22px; font-size: 15px; }
+  li { margin: 7px 0; }
+  strong { color: #f8fafc; }
+  code {
+    background: #0f172a; color: #7dd3fc;
+    padding: 2px 7px; border-radius: 5px;
+    font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { padding: 11px 13px; text-align: left; border-bottom: 1px solid #334155; }
+  th { background: #0f172a; color: #f8fafc; font-weight: 600; }
+  td { color: #cbd5e1; }
+  tr:hover td { background: #243042; }
+  .tag { display:inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .tag-ok { background:#064e3b; color:#6ee7b7; }
+  .tag-mid { background:#78350f; color:#fcd34d; }
+  .tag-no { background:#7f1d1d; color:#fca5a5; }
+  .note {
+    background: #172033; border: 1px dashed #475569;
+    border-radius: 10px; padding: 14px 18px; margin: 16px 0;
+    color: #cbd5e1; font-size: 14px;
+  }
+  .note strong { color: #fbbf24; }
+  .flow-grid { display:flex; flex-wrap:wrap; gap:12px; margin:14px 0; }
+  .flow-step {
+    flex:1; min-width:140px; text-align:center;
+    background:#0f172a; border:1px solid #334155; border-radius:10px;
+    padding:14px 10px; color:#cbd5e1; font-size:14px;
+  }
+  .flow-step b { display:block; color:#38bdf8; font-size:15px; margin-bottom:6px; }
+  .summary-box {
+    background: linear-gradient(135deg,#1e293b,#172033);
+    border:1px solid #334155; border-radius:16px;
+    padding:26px 28px; margin-top:30px;
+  }
+  .summary-box h2 { color:#f8fafc; font-size:20px; margin-bottom:14px; }
+  .footer { text-align:center; color:#64748b; font-size:12px; margin-top:50px; }
+  .x-label { fill:#94a3b8; font-size:11px; }
+  .x-title { fill:#f8fafc; font-size:13px; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>🐬 数据库主从延迟：读到旧数据怎么办？</h1>
+<p class="subtitle">读写分离下「写主库、读从库」最常见的一致性坑，一文讲清成因、判断、预防与兜底</p>
+
+<p class="lead">
+很多系统为了扛住读流量，会做 <strong>读写分离</strong>：写请求走 <strong>主库（Master）</strong>，读请求走 <strong>从库（Slave）</strong>。
+但主从之间是 <strong>异步复制</strong> 的——主库写完，从库不一定立刻跟上。于是一个经典 bug 就出现了：
+<strong>刚改完数据，页面一刷新，发现改的东西「没生效」</strong>。这背后就是「主从延迟导致读到旧数据」。
+</p>
+
+<!-- ==================== 1. 延迟从何而来 ==================== -->
+<h2 class="section-title"><span class="section-num">1</span>延迟从何而来：复制链路上天然有时间差</h2>
+
+<p>
+MySQL 主从复制是一条流水线，数据要从主库「流」到从库并「重放」完，中间任何一环慢了，就会产生延迟（单位通常是秒，记为 <code>Seconds_Behind_Master</code>）。
+</p>
+
+<div class="diagram-container">
+<svg width="820" height="430" viewBox="0 0 820 430">
+  <defs>
+    <marker id="aBlue" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#38bdf8"/></marker>
+    <marker id="aAmber" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#fbbf24"/></marker>
+    <marker id="aRed" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#f87171"/></marker>
+    <filter id="sh1"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.35"/></filter>
+  </defs>
+
+  <!-- Master -->
+  <rect x="30" y="60" width="200" height="70" rx="10" ry="10" fill="#1e3a5f" stroke="#60a5fa" stroke-width="2" filter="url(#sh1)"/>
+  <text x="130" y="92" text-anchor="middle" fill="#f8fafc" font-size="16" font-weight="700">主库 Master</text>
+  <text x="130" y="113" text-anchor="middle" fill="#93c5fd" font-size="12">写请求 / 业务数据</text>
+
+  <!-- binlog -->
+  <rect x="30" y="170" width="200" height="55" rx="8" ry="8" fill="#0f2a44" stroke="#38bdf8" stroke-width="1.5" filter="url(#sh1)"/>
+  <text x="130" y="192" text-anchor="middle" fill="#7dd3fc" font-size="13" font-weight="600">① 记录 binlog</text>
+  <text x="130" y="212" text-anchor="middle" fill="#94a3b8" font-size="11">事务提交后落二进制日志</text>
+
+  <!-- dump thread -->
+  <line x1="130" y1="225" x2="130" y2="258" stroke="#38bdf8" stroke-width="2" marker-end="url(#aBlue)"/>
+
+  <!-- network -->
+  <rect x="300" y="250" width="220" height="50" rx="8" ry="8" fill="#3a2f0f" stroke="#fbbf24" stroke-width="1.5" filter="url(#sh1)"/>
+  <text x="410" y="272" text-anchor="middle" fill="#fcd34d" font-size="13" font-weight="600">② 网络传输（Dump→IO线程）</text>
+  <text x="410" y="290" text-anchor="middle" fill="#94a3b8" font-size="11">受带宽/抖动影响，可能卡顿</text>
+
+  <!-- relay log -->
+  <rect x="590" y="170" width="200" height="55" rx="8" ry="8" fill="#0f2a44" stroke="#38bdf8" stroke-width="1.5" filter="url(#sh1)"/>
+  <text x="690" y="192" text-anchor="middle" fill="#7dd3fc" font-size="13" font-weight="600">③ 写 relay log</text>
+  <text x="690" y="212" text-anchor="middle" fill="#94a3b8" font-size="11">从库 IO 线程接收并暂存</text>
+
+  <!-- slave replay -->
+  <rect x="590" y="60" width="200" height="70" rx="10" ry="10" fill="#3a1f1f" stroke="#f87171" stroke-width="2" filter="url(#sh1)"/>
+  <text x="690" y="92" text-anchor="middle" fill="#f8fafc" font-size="16" font-weight="700">从库 Slave</text>
+  <text x="690" y="113" text-anchor="middle" fill="#fca5a5" font-size="12">读请求 / 回放中</text>
+
+  <!-- line master->binlog done; network arrows -->
+  <path d="M230 195 L300 275" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aAmber)"/>
+  <path d="M520 275 L590 197" stroke="#fbbf24" stroke-width="2" fill="none" marker-end="url(#aAmber)"/>
+  <!-- replay arrow -->
+  <line x1="690" y1="125" x2="690" y2="168" stroke="#f87171" stroke-width="2" marker-end="url(#aRed)"/>
+  <text x="715" y="150" fill="#fca5a5" font-size="11">④ SQL线程</text>
+  <text x="715" y="165" fill="#fca5a5" font-size="11">回放(重放)</text>
+
+  <!-- delay gap -->
+  <rect x="305" y="350" width="320" height="56" rx="10" ry="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="465" y="374" text-anchor="middle" fill="#fcd34d" font-size="14" font-weight="700">⏱ 延迟窗口 = ②③④ 累积耗时</text>
+  <text x="465" y="394" text-anchor="middle" fill="#94a3b8" font-size="11">在这段时间内，从库数据落后于主库</text>
+</svg>
+<div class="diagram-cap">图 1：MySQL 主从异步复制链路——延迟发生在「传输 + 回放」环节</div>
+</div>
+
+<div class="card card-amber">
+  <h3>常见延迟成因</h3>
+  <ul>
+    <li><strong>从库单线程回放</strong>（老版本）：主库可以并发写，从库只有一个 SQL 线程串行重放，写入量大时必落后。MySQL 5.7+ 有多线程复制（MTS，<code>slave_parallel_workers</code>）缓解。</li>
+    <li><strong>大事务 / 批量操作</strong>：一个事务改了 100 万行，主库一瞬间提交，从库要慢慢回放很久。</li>
+    <li><strong>网络延迟或抖动</strong>：跨机房、跨可用区复制时尤其明显。</li>
+    <li><strong>从库负载高</strong>：从库还扛着大量查询 / 报表 / 备份，CPU、IO 被占满，回放被挤兑。</li>
+    <li><strong>从库硬件 / 配置弱于主库</strong>。</li>
+  </ul>
+</div>
+
+<!-- ==================== 2. 为什么会读到旧数据 ==================== -->
+<h2 class="section-title"><span class="section-num">2</span>为什么会读到旧数据：写完立刻读从库</h2>
+
+<p>
+问题几乎总是同一个模式：<strong>「写主库」和「读从库」发生在极短的时间间隔内</strong>，而从库还没追上。
+下面这条时序线是最典型的翻车现场。
+</p>
+
+<div class="diagram-container">
+<svg width="820" height="360" viewBox="0 0 820 360">
+  <defs>
+    <marker id="a2" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#94a3b8"/></marker>
+  </defs>
+  <!-- timeline -->
+  <line x1="40" y1="40" x2="780" y2="40" stroke="#475569" stroke-width="2"/>
+  <text x="40" y="28" fill="#94a3b8" font-size="11">时间 →</text>
+
+  <!-- Master band -->
+  <rect x="40" y="70" width="740" height="60" rx="8" ry="8" fill="#0f2a44" stroke="#60a5fa" stroke-width="1.2"/>
+  <text x="58" y="90" fill="#93c5fd" font-size="12" font-weight="600">主库</text>
+  <rect x="120" y="85" width="110" height="30" rx="6" ry="6" fill="#1e3a5f" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="175" y="105" text-anchor="middle" fill="#f8fafc" font-size="12">写入 name=A</text>
+  <!-- master has A right after -->
+  <rect x="230" y="85" width="540" height="30" rx="6" ry="6" fill="#064e3b" opacity="0.35"/>
+  <text x="500" y="105" text-anchor="middle" fill="#6ee7b7" font-size="12">主库此后一直是新值 A</text>
+
+  <!-- Slave band -->
+  <rect x="40" y="170" width="740" height="60" rx="8" ry="8" fill="#0f2a44" stroke="#f87171" stroke-width="1.2"/>
+  <text x="58" y="190" fill="#fca5a5" font-size="12" font-weight="600">从库</text>
+  <rect x="120" y="185" width="160" height="30" rx="6" ry="6" fill="#7f1d1d" opacity="0.5"/>
+  <text x="200" y="205" text-anchor="middle" fill="#fca5a5" font-size="12">仍是旧值 A₀</text>
+  <text x="300" y="205" fill="#94a3b8" font-size="11">(复制尚未到达)</text>
+  <!-- slave catches up later -->
+  <rect x="500" y="185" width="270" height="30" rx="6" ry="6" fill="#064e3b" opacity="0.4"/>
+  <text x="635" y="205" text-anchor="middle" fill="#6ee7b7" font-size="12">延迟窗口结束后才更新为 A</text>
+
+  <!-- read arrow -->
+  <line x1="250" y1="145" x2="250" y2="170" stroke="#fbbf24" stroke-width="2" marker-end="url(#a2)"/>
+  <text x="258" y="165" fill="#fcd34d" font-size="11">t1 读从库</text>
+  <circle cx="250" cy="200" r="6" fill="#fbbf24"/>
+  <text x="262" y="222" fill="#fcd34d" font-size="12" font-weight="600">❌ 读到旧值 A₀</text>
+
+  <!-- catch up arrow -->
+  <line x1="560" y1="145" x2="560" y2="170" stroke="#34d399" stroke-width="2" marker-end="url(#a2)"/>
+  <text x="568" y="165" fill="#6ee7b7" font-size="11">t2 再读从库</text>
+  <text x="500" y="222" fill="#6ee7b7" font-size="12" font-weight="600">✅ 读到新值 A</text>
+
+  <!-- gap bracket -->
+  <line x1="250" y1="245" x2="500" y2="245" stroke="#fbbf24" stroke-width="1.5"/>
+  <line x1="250" y1="240" x2="250" y2="250" stroke="#fbbf24" stroke-width="1.5"/>
+  <line x1="500" y1="240" x2="500" y2="250" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="375" y="262" text-anchor="middle" fill="#fcd34d" font-size="12">延迟窗口：读旧数据的危险区</text>
+</svg>
+<div class="diagram-cap">图 2：写完主库（t0）后，在延迟窗口内读从库（t1）就会拿到旧值</div>
+</div>
+
+<div class="card card-red">
+  <h3>高发业务场景</h3>
+  <ul>
+    <li><strong>注册完立刻登录</strong>：注册写主库，登录读从库 → 提示「用户不存在」。</li>
+    <li><strong>下单完查订单</strong>：下单写主库，订单列表读从库 → 看不到刚下的单。</li>
+    <li><strong>改完资料刷新</strong>：改昵称/头像写主库，详情页读从库 → 改了「没反应」。</li>
+    <li><strong>支付完查余额</strong>：扣款写主库，余额查询读从库 → 余额没变。</li>
+  </ul>
+</div>
+
+<!-- ==================== 3. 怎么判断是旧数据 ==================== -->
+<h2 class="section-title"><span class="section-num">3</span>怎么判断「读到的就是旧数据」？</h2>
+
+<p>
+先说一个残酷的真相：<strong>从库自己并不知道「业务上」它落后了多少</strong>。
+<code>Seconds_Behind_Master</code> 只能告诉你从库整体落后几秒，<strong>无法告诉你某一条具体记录是不是旧的</strong>。
+所以「判断读到的是不是旧数据」通常要从两个层面入手：
+</p>
+
+<div class="flow-grid">
+  <div class="flow-step"><b>层面一</b>系统层：从库整体延迟多大？（能不能读）</div>
+  <div class="flow-step"><b>层面二</b>业务层：这条记录是不是我刚写的新值？（是不是旧）</div>
+</div>
+
+<h3 style="color:#f8fafc;font-size:17px;margin:18px 0 8px;">① 系统层判断：看从库整体延迟</h3>
+<div class="diagram-container">
+<svg width="780" height="150" viewBox="0 0 780 150">
+  <rect x="40" y="45" width="200" height="60" rx="10" ry="10" fill="#1e3a5f" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="140" y="72" text-anchor="middle" fill="#f8fafc" font-size="13" font-weight="600">SHOW SLAVE STATUS</text>
+  <text x="140" y="93" text-anchor="middle" fill="#93c5fd" font-size="11">查看从库状态</text>
+  <line x1="240" y1="75" x2="320" y2="75" stroke="#38bdf8" stroke-width="2" marker-end="url(#aBlue)"/>
+  <rect x="330" y="45" width="200" height="60" rx="10" ry="10" fill="#0f2a44" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="430" y="70" text-anchor="middle" fill="#7dd3fc" font-size="12" font-weight="600">Seconds_Behind_Master</text>
+  <text x="430" y="90" text-anchor="middle" fill="#94a3b8" font-size="11">= NULL 表示复制断了</text>
+  <line x1="530" y1="75" x2="610" y2="75" stroke="#38bdf8" stroke-width="2" marker-end="url(#aBlue)"/>
+  <rect x="620" y="45" width="120" height="60" rx="10" ry="10" fill="#172033" stroke="#34d399" stroke-width="1.5"/>
+  <text x="680" y="72" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="600">&gt;阈值?</text>
+  <text x="680" y="92" text-anchor="middle" fill="#94a3b8" font-size="11">如 &gt;1s 禁读</text>
+</svg>
+<div class="diagram-cap">图 3：用 <code>Seconds_Behind_Master</code> 判断「此刻从库是否值得信任」</div>
+</div>
+
+<div class="note">
+<strong>⚠️ 坑：</strong><code>Seconds_Behind_Master = 0</code> 也不绝对安全。它只反映 <em>relay log 回放</em> 的延迟，不反映 <em>IO 线程</em>（网络接收）的延迟；
+而且当主库长时间无写入时，该值会固定在 0，即使复制链路其实有网络中断也显示 0。更可靠的做法是结合 <strong>GTID</strong> 和复制心跳监控。
+</div>
+
+<h3 style="color:#f8fafc;font-size:17px;margin:18px 0 8px;">② 业务层判断：给数据打「版本号 / 时间戳」</h3>
+<p>
+最实用的业务级判断法是<strong>让写操作返回一个「凭据」</strong>，读回来后比对。常见三种凭据：
+</p>
+<ul>
+  <li><strong>更新时间戳 / 版本号（version）</strong>：写主库后返回新的 <code>updated_at</code> 或 <code>version</code>；前端/接口拿着这个值去读从库，若读回的 <code>version</code> 小于期望值，说明读到旧数据。</li>
+  <li><strong>GTID / 事务位点</strong>：MySQL 开启 GTID 后，主库写入会分配全局事务 ID。应用记下刚写入的 GTID 集合，读从库后通过 <code>WAIT_FOR_EXECUTED_GTID_SET</code> / 查 <code>@@gtid_executed</code> 判断从库是否已应用该事务。</li>
+  <li><strong>业务期望值校验</strong>：比如下单后期望订单状态是 <code>PAID</code>，读回来若是 <code>UNPAID</code> 直接判定为旧/不一致。</li>
+</ul>
+
+<div class="card card-blue">
+  <h3>判断小结</h3>
+  <ul>
+    <li><strong>能不能读（系统层）</strong>：看 <code>Seconds_Behind_Master</code> + GTID 复制状态，超阈值就别读从库。</li>
+    <li><strong>是不是旧（业务层）</strong>：靠 version / 时间戳 / GTID / 业务期望值做比对，读回的值和期望不符即判定旧数据。</li>
+  </ul>
+</div>
+
+<!-- ==================== 4. 防止读旧数据的方案 ==================== -->
+<h2 class="section-title"><span class="section-num">4</span>怎么防止读到旧数据：6 个方案对比</h2>
+
+<p>按「彻底程度」从高到低，下面是实战中最常用的方案。绝大多数系统不是只选一个，而是<strong>组合使用</strong>。</p>
+
+<div class="card card-red">
+  <h3>方案 A：关键读写都走主库（最简单粗暴）</h3>
+  <p>把所有「写后立即读」的请求，以及核心一致性要求高的读（余额、订单状态），直接路由到主库；只有锦上添花的统计/列表类读走从库。
+  <strong>优点</strong>：零延迟问题，实现最简单。<strong>缺点</strong>：主库压力大，读写分离收益打折。适合读流量没那么恐怖的系统。</p>
+</div>
+
+<div class="card card-amber">
+  <h3>方案 B：写后读「强制走主库」（最推荐）</h3>
+  <p>识别「同一用户/会话的写后读」模式，在写完后的一个短窗口内，该用户的相关读请求强制路由到主库，窗口过后恢复读从库。常见实现：</p>
+  <ul>
+    <li><strong>会话 sticky</strong>：用户刚写过，就在 session/cookie 里打个标记，N 秒内该用户读主库。</li>
+    <li><strong>按 userId 路由</strong>：写完把 userId 放进一个短期缓存（如 Redis，expire 1s），读路由时若命中则走主库。</li>
+    <li><strong>注解 / Hint 路由</strong>：在代码里对关键读打 <code>/* FORCE_MASTER */</code> 标记，中间件（如 ShardingSphere、MyCat）据此路由。</li>
+  </ul>
+</div>
+
+<div class="card card-blue">
+  <h3>方案 C：等位点同步后再读（最严谨）</h3>
+  <p>利用 GTID 做「读前等待」：主库写入后拿到 GTID，读之前让<strong>从库</strong>执行
+  <code>SELECT WAIT_FOR_EXECUTED_GTID_SET('&lt;刚写入的GTID&gt;', &lt;超时秒&gt;)</code>，
+  等从库真正回放到该事务后再读。MySQL 8.0 还能在连接上开启 <code>session_track_gtids</code> 自动跟踪。
+  <strong>优点</strong>：严格保证读到新值，又不浪费主库读。 <strong>缺点</strong>：每次多一次等待 RT，实现偏复杂。</p>
+</div>
+
+<div class="card card-purple">
+  <h3>方案 D：半同步复制（降低概率，不保证）</h3>
+  <p>开启 <code>rpl_semi_sync_master_enabled</code>，主库提交事务时要等<strong>至少一个从库收到 binlog</strong> 才返回成功（after_sync 模式）。
+  这能<strong>降低数据丢失风险</strong>，但注意：从库「收到」≠「回放完」，读从库仍可能落在回放之前，<strong>不能完全杜绝旧数据</strong>。把它当作「减少延迟幅度」的手段，而不是银弹。</p>
+</div>
+
+<div class="card card-green">
+  <h3>方案 E：双写缓存做「读兜底」</h3>
+  <p>写主库的同时，把最新值写入 Redis（带短过期）。读请求先查从库，若发现可能不一致（或缓存命中）就用缓存里的新鲜值。
+  <strong>优点</strong>：读从库依然扛量，又避开了回放延迟。<strong>注意</strong>：要处理好「缓存与数据库一致性」（如先删缓存再写库、或延时双删），否则会引入新的坑。</p>
+</div>
+
+<div class="card card-blue">
+  <h3>方案 F：监控 + 自动降级（兜底防线）</h3>
+  <p>持续监控 <code>Seconds_Behind_Master</code> 和 GTID 差距，一旦从库延迟超阈值，<strong>自动把所有读切回主库</strong>（或拒绝走从库），延迟恢复后再切回。这是防止「从库大落后时集体读旧」的保险丝。</p>
+</div>
+
+<div class="diagram-container">
+<table>
+  <thead>
+    <tr><th>方案</th><th>一致性保证</th><th>主库压力</th><th>实现复杂度</th><th>适用场景</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>A 读写都走主库</td><td><span class="tag tag-ok">强</span></td><td><span class="tag tag-no">高</span></td><td><span class="tag tag-ok">低</span></td><td>读量不大 / 强一致核心</td></tr>
+    <tr><td>B 写后读走主库</td><td><span class="tag tag-ok">强(关键读)</span></td><td><span class="tag tag-mid">中</span></td><td><span class="tag tag-mid">中</span></td><td><span class="tag tag-ok">最常用</span></td></tr>
+    <tr><td>C 等 GTID 同步</td><td><span class="tag tag-ok">强</span></td><td><span class="tag tag-ok">低</span></td><td><span class="tag tag-no">高</span></td><td>严格要求无旧数据</td></tr>
+    <tr><td>D 半同步复制</td><td><span class="tag tag-mid">弱(降概率)</span></td><td><span class="tag tag-ok">低</span></td><td><span class="tag tag-mid">中</span></td><td>防数据丢失为主</td></tr>
+    <tr><td>E 缓存兜底</td><td><span class="tag tag-mid">中</span></td><td><span class="tag tag-ok">低</span></td><td><span class="tag tag-mid">中</span></td><td>读量大且容忍最终一致</td></tr>
+    <tr><td>F 监控自动降级</td><td><span class="tag tag-ok">兜底</span></td><td><span class="tag tag-mid">动态</span></td><td><span class="tag tag-mid">中</span></td><td>所有读写分离系统必备</td></tr>
+  </tbody>
+</table>
+<div class="diagram-cap">表 1：六种方案在「一致性 / 主库压力 / 复杂度」上的权衡</div>
+</div>
+
+<!-- ==================== 5. 已经读到旧数据怎么办 ==================== -->
+<h2 class="section-title"><span class="section-num">5</span>如果已经读到旧数据，怎么办？</h2>
+
+<p>就算方案做足，极端情况下仍可能偶尔读到旧值。这时候要有一套<strong>兜底处理流程</strong>，把影响压到最低。</p>
+
+<div class="diagram-container">
+<svg width="820" height="430" viewBox="0 0 820 430">
+  <defs>
+    <marker id="a3" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#38bdf8"/></marker>
+    <marker id="a3r" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#f87171"/></marker>
+  </defs>
+
+  <!-- step 1 -->
+  <rect x="40" y="40" width="220" height="70" rx="10" ry="10" fill="#1e293b" stroke="#f87171" stroke-width="1.8"/>
+  <text x="150" y="68" text-anchor="middle" fill="#f8fafc" font-size="14" font-weight="700">① 识别旧数据</text>
+  <text x="150" y="90" text-anchor="middle" fill="#94a3b8" font-size="11">version/时间戳/期望值不符</text>
+
+  <!-- step 2 -->
+  <rect x="300" y="40" width="220" height="70" rx="10" ry="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.8"/>
+  <text x="410" y="68" text-anchor="middle" fill="#f8fafc" font-size="14" font-weight="700">② 短间隔重试</text>
+  <text x="410" y="90" text-anchor="middle" fill="#94a3b8" font-size="11">等几百毫秒再读从库</text>
+
+  <line x1="260" y1="75" x2="298" y2="75" stroke="#38bdf8" stroke-width="2" marker-end="url(#a3)"/>
+
+  <!-- decision -->
+  <polygon points="560,40 700,75 560,110 560,40" fill="#3a2f0f" stroke="#fbbf24" stroke-width="1.8"/>
+  <text x="585" y="72" fill="#fcd34d" font-size="13" font-weight="700">新值?</text>
+  <text x="585" y="90" fill="#94a3b8" font-size="10">重试后</text>
+
+  <!-- down: still old -> force master -->
+  <line x1="620" y1="110" x2="620" y2="160" stroke="#f87171" stroke-width="2" marker-end="url(#a3r)"/>
+  <rect x="510" y="165" width="220" height="70" rx="10" ry="10" fill="#1e293b" stroke="#f87171" stroke-width="1.8"/>
+  <text x="620" y="193" text-anchor="middle" fill="#f8fafc" font-size="14" font-weight="700">③ 强制回源主库</text>
+  <text x="620" y="215" text-anchor="middle" fill="#94a3b8" font-size="11">直接读主库拿最新值</text>
+  <text x="640" y="145" fill="#fca5a5" font-size="11">否</text>
+
+  <!-- right: ok -->
+  <line x1="700" y1="75" x2="760" y2="75" stroke="#34d399" stroke-width="2" marker-end="url(#a3)"/>
+  <text x="710" y="68" fill="#6ee7b7" font-size="11">是</text>
+  <rect x="760" y="45" width="40" height="60" rx="8" ry="8" fill="#064e3b" stroke="#34d399" stroke-width="1.5"/>
+  <text x="780" y="80" text-anchor="middle" fill="#6ee7b7" font-size="20">✓</text>
+
+  <!-- step 4 compensation -->
+  <rect x="510" y="265" width="220" height="70" rx="10" ry="10" fill="#1e293b" stroke="#a78bfa" stroke-width="1.8"/>
+  <text x="620" y="293" text-anchor="middle" fill="#f8fafc" font-size="14" font-weight="700">④ 业务补偿</text>
+  <text x="620" y="315" text-anchor="middle" fill="#94a3b8" font-size="11">主动刷新 / 回写正确值</text>
+  <line x1="620" y1="235" x2="620" y2="263" stroke="#a78bfa" stroke-width="2" marker-end="url(#a3)"/>
+
+  <!-- step 5 alarm -->
+  <rect x="40" y="265" width="220" height="70" rx="10" ry="10" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8"/>
+  <text x="150" y="293" text-anchor="middle" fill="#f8fafc" font-size="14" font-weight="700">⑤ 告警 & 记录</text>
+  <text x="150" y="315" text-anchor="middle" fill="#94a3b8" font-size="11">上报延迟 / 不一致事件</text>
+  <line x1="260" y1="300" x2="298" y2="300" stroke="#a78bfa" stroke-width="2" marker-end="url(#a3)"/>
+  <line x1="330" y1="300" x2="508" y2="300" stroke="#a78bfa" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#a3)"/>
+
+  <!-- step 6 user -->
+  <rect x="40" y="365" width="690" height="50" rx="10" ry="10" fill="#172033" stroke="#34d399" stroke-width="1.5"/>
+  <text x="385" y="388" text-anchor="middle" fill="#6ee7b7" font-size="14" font-weight="700">⑥ 前端友好提示：「数据同步中，请稍后刷新」+ 提供手动刷新入口</text>
+  <line x1="150" y1="335" x2="150" y2="363" stroke="#34d399" stroke-width="2" marker-end="url(#a3)"/>
+  <line x1="620" y1="335" x2="620" y2="363" stroke="#34d399" stroke-width="2" marker-end="url(#a3)"/>
+</svg>
+<div class="diagram-cap">图 4：读到旧数据后的兜底处理流程</div>
+</div>
+
+<div class="card card-green">
+  <h3>兜底六步法</h3>
+  <ol>
+    <li><strong>识别</strong>：通过 version / 时间戳 / 业务期望值，确认这次读到的是旧值。</li>
+    <li><strong>重试</strong>：延迟窗口通常很短（毫秒~秒级），做一次短间隔（如 200~500ms）重试，多数情况能拿到新值。</li>
+    <li><strong>回源</strong>：重试仍旧，则直接读主库拿最新数据（牺牲一次主库读，换正确性）。</li>
+    <li><strong>补偿</strong>：若已对用户产生错误展示，业务层主动刷新或回写正确值，必要时对账修复。</li>
+    <li><strong>告警</strong>：把这次延迟 / 不一致事件上报监控，累计超阈值触发「读全切主库」的自动降级。</li>
+    <li><strong>提示</strong>：前端给出「同步中，请刷新」之类的友好提示，并提供手动刷新，避免用户误以为功能坏了。</li>
+  </ol>
+</div>
+
+<!-- ==================== 6. 总结 ==================== -->
+<h2 class="section-title"><span class="section-num">6</span>实战总结：一套组合拳</h2>
+
+<div class="summary-box">
+  <h2>🎯 记住这 4 句话</h2>
+  <ul>
+    <li><strong>① 旧数据来自异步复制的延迟窗口</strong>：写完主库、从库回放完之前读，就可能读到旧值。</li>
+    <li><strong>② 判断旧数据 = 系统层 + 业务层</strong>：系统层看 <code>Seconds_Behind_Master</code> / GTID 知「该不该读从库」；业务层用 version / 时间戳 / 期望值知「这条是不是旧」。</li>
+    <li><strong>③ 预防首选「写后读走主库」</strong>：最实用、成本最低；严格要求时再上「等 GTID 同步」。半同步只能降概率，不是保证。</li>
+    <li><strong>④ 兜底要自动化</strong>：重试 → 回源主库 → 告警降级 → 前端提示，形成闭环，把偶发旧数据的影响压到最低。</li>
+  </ul>
+  <div class="note" style="margin-top:18px;">
+    <strong>落地建议：</strong>普通列表/统计读走从库；注册、下单、改资料、查余额这类「写后立即读」的请求，统一在代码或中间件层标记走主库；再配上 <code>Seconds_Behind_Master</code> 监控自动降级，基本就能兼顾性能与一致性。
+  </div>
+</div>
+
+<div class="footer">数据库主从延迟 · 读写分离一致性 · 图文讲解 · 配图均为示意</div>
+
+</div>
+</body>
+</html>

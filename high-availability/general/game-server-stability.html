@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>高并发游戏服务器稳定性 · 五大核心手段</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg2: #111827;
+    --card: rgba(255,255,255,0.04);
+    --card-hover: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.08);
+    --fg: #e2e8f0;
+    --fg2: #94a3b8;
+    --accent: #38bdf8;
+    /* 五大手段配色 */
+    --c-layer: #38bdf8;   /* 分层承接 蓝 */
+    --c-scale: #34d399;   /* 弹性伸缩 绿 */
+    --c-guard: #f87171;   /* 限流熔断降级 红 */
+    --c-defend: #fbbf24;  /* 多层攻防 橙 */
+    --c-go: #a78bfa;      /* Go 优化 紫 */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+    overflow-x: hidden;
+    line-height: 1.75;
+  }
+  code {
+    background: rgba(56,189,248,0.12);
+    color: #7dd3fc;
+    padding: 2px 7px; border-radius: 5px;
+    font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px;
+  }
+  /* ========== Nav ========== */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11,17,32,0.85);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 10px 18px; justify-content: center;
+  }
+  .nav a {
+    color: var(--fg2); text-decoration: none;
+    font-size: 13px; padding: 5px 12px; border-radius: 20px;
+    border: 1px solid transparent; transition: all .2s; cursor: pointer;
+  }
+  .nav a:hover { color: #fff; background: var(--card-hover); }
+  .nav .n-layer:hover { color: var(--c-layer); border-color: var(--c-layer); }
+  .nav .n-scale:hover { color: var(--c-scale); border-color: var(--c-scale); }
+  .nav .n-guard:hover { color: var(--c-guard); border-color: var(--c-guard); }
+  .nav .n-defend:hover { color: var(--c-defend); border-color: var(--c-defend); }
+  .nav .n-go:hover { color: var(--c-go); border-color: var(--c-go); }
+  .nav .active { color: #06121f; background: var(--accent); font-weight: 700; }
+
+  /* ========== Hero ========== */
+  .hero { text-align: center; padding: 52px 24px 26px; }
+  .hero h1 {
+    font-size: 2.3rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 12px;
+    background: linear-gradient(135deg, #38bdf8, #34d399, #f87171, #fbbf24, #a78bfa);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero p { color: var(--fg2); font-size: 1.05rem; max-width: 760px; margin: 0 auto; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 22px; }
+  .pill {
+    font-size: 13px; font-weight: 600; padding: 6px 16px; border-radius: 20px;
+    border: 1px solid var(--border); background: var(--card);
+  }
+  .pill.l { color: var(--c-layer); border-color: var(--c-layer); }
+  .pill.s { color: var(--c-scale); border-color: var(--c-scale); }
+  .pill.g { color: var(--c-guard); border-color: var(--c-guard); }
+  .pill.d { color: var(--c-defend); border-color: var(--c-defend); }
+  .pill.go { color: var(--c-go); border-color: var(--c-go); }
+
+  /* ========== Section ========== */
+  .section { max-width: 1040px; margin: 0 auto; padding: 38px 22px 10px; display: none; }
+  .section.active { display: block; animation: fade .4s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .sect-head { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+  .sect-num {
+    width: 44px; height: 44px; border-radius: 12px; flex: 0 0 44px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 800; color: #06121f;
+  }
+  .sect-head h2 { font-size: 1.5rem; }
+  .sect-sub { color: var(--fg2); margin: 4px 0 22px; padding-left: 58px; }
+
+  .card-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px 22px; margin: 16px 0;
+  }
+  .card-box h3 { font-size: 1.12rem; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .card-box p, .card-box li { color: var(--fg2); font-size: 0.94rem; }
+  .card-box ul { padding-left: 20px; margin-top: 8px; }
+  .card-box li { margin: 5px 0; }
+  .hl { color: var(--fg); font-weight: 600; }
+  .kw { color: #7dd3fc; font-weight: 600; }
+
+  /* 通用 SVG 容器 */
+  .diagram { width: 100%; margin: 18px 0; background: rgba(0,0,0,0.18); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+  .diagram svg { width: 100%; height: auto; display: block; }
+  .cap { text-align: center; color: var(--fg2); font-size: 12.5px; margin-top: 6px; }
+
+  /* 可点节点 */
+  .clickable { cursor: pointer; transition: all .2s; }
+  .clickable:hover { filter: brightness(1.25); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 12.5px; color: var(--fg2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+  /* 详情面板 */
+  .detail {
+    background: rgba(56,189,248,0.07); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 12px 16px; margin-top: 12px; font-size: 14px; color: var(--fg);
+  }
+  .detail b { color: #7dd3fc; }
+
+  /* 对比表 */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: rgba(255,255,255,0.05); color: var(--fg); font-weight: 700; }
+  td { color: var(--fg2); }
+  tr:hover td { background: rgba(255,255,255,0.025); }
+
+  /* 按钮 */
+  .btn {
+    background: var(--accent); color: #06121f; border: none; padding: 8px 18px;
+    border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13.5px; transition: all .2s;
+  }
+  .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+
+  /* 模拟器 */
+  .sim { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin: 16px 0; }
+  .sim-controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 14px; }
+  .sim-controls label { font-size: 13px; color: var(--fg2); display: flex; flex-direction: column; gap: 4px; }
+  input[type=range] { width: 150px; accent-color: var(--accent); }
+  .workers { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .wcell {
+    width: 56px; height: 56px; border-radius: 10px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
+    border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--fg2);
+  }
+  .wcell.busy { background: rgba(248,113,113,0.25); border-color: #f87171; color: #fecaca; }
+  .wcell.idle { background: rgba(52,211,153,0.18); border-color: #34d399; color: #a7f3d0; }
+  .wcell.queue { background: rgba(251,191,36,0.22); border-color: #fbbf24; color: #fde68a; }
+  .sim-stat { font-size: 13.5px; color: var(--fg); margin-top: 10px; }
+  .sim-stat b { color: #7dd3fc; }
+
+  /* 时间轴动画 */
+  .timeline-wrap { background: rgba(0,0,0,0.2); border-radius: 12px; padding: 16px; margin: 16px 0; }
+  .tl-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  .tl-label { width: 130px; font-size: 13px; color: var(--fg2); flex: 0 0 130px; }
+  .tl-track { flex: 1; height: 26px; background: rgba(255,255,255,0.04); border-radius: 6px; position: relative; overflow: hidden; }
+  .tl-fill { position: absolute; top: 0; left: 0; height: 100%; width: 0; border-radius: 6px; transition: width .3s linear; }
+  .tl-fill.req1 { background: linear-gradient(90deg,#38bdf8,#0ea5e9); }
+  .tl-fill.req2 { background: linear-gradient(90deg,#a78bfa,#7c3aed); }
+  .tl-fill.req3 { background: linear-gradient(90deg,#34d399,#059669); }
+
+  footer { text-align: center; color: var(--fg2); font-size: 13px; padding: 40px 20px 60px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .quote {
+    border-left: 4px solid var(--c-layer); padding: 14px 18px; margin: 18px 0;
+    background: rgba(56,189,248,0.06); border-radius: 0 10px 10px 0; font-size: 15px; color: var(--fg);
+  }
+  .quote b { color: #7dd3fc; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } .sect-sub { padding-left: 0; } }
+  .tag { display: inline-block; font-size: 11.5px; padding: 2px 9px; border-radius: 6px; background: rgba(255,255,255,0.06); color: var(--fg2); margin: 2px; }
+</style>
+</head>
+<body>
+<div class="nav" id="nav">
+  <a data-tab="overview" class="active">🎯 总览</a>
+  <a data-tab="layer" class="n-layer">① 分层承接</a>
+  <a data-tab="scale" class="n-scale">② 弹性伸缩</a>
+  <a data-tab="guard" class="n-guard">③ 限流熔断降级</a>
+  <a data-tab="defend" class="n-defend">④ 多层攻防</a>
+  <a data-tab="go" class="n-go">⑤ Go 级优化</a>
+  <a data-tab="summary">🏁 闭环总结</a>
+</div>
+
+<!-- ============ 总览 ============ -->
+<section class="section active" id="overview">
+  <div class="hero" style="padding-top:10px;">
+    <h1 style="font-size:2rem;">高并发游戏服务器稳定性</h1>
+    <p>不靠「堆机器」，而是靠一套 <b>流量可控、异常可挡、攻击可防、资源可自适应</b> 的工程体系。</p>
+    <div class="pill-row">
+      <span class="pill l">① 分布式分层承接</span>
+      <span class="pill s">② 流量自适应弹性伸缩</span>
+      <span class="pill g">③ 限流·熔断·降级</span>
+      <span class="pill d">④ 多层攻防体系</span>
+      <span class="pill go">⑤ Go 专属优化</span>
+    </div>
+  </div>
+
+  <div class="card-box">
+    <h3>🔑 一句话本质</h3>
+    <p>游戏流量是<span class="kw">脉冲式洪峰</span>（开服、活动、版本更新瞬间打爆单机）。稳定的本质不是买更多机器，而是把「<span class="hl">扛洪峰、控资源、防雪崩、抗攻击、精细调优</span>」做成一套<span class="kw">闭环工程体系</span>。</p>
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/>
+        </marker>
+      </defs>
+      <!-- 五大手段环 -->
+      <g>
+        <rect x="20" y="30" width="170" height="60" rx="10" fill="rgba(56,189,248,0.16)" stroke="#38bdf8" class="clickable" data-go="layer"/>
+        <text x="105" y="55" text-anchor="middle" fill="#7dd3fc" font-size="14" font-weight="700">① 分层承接</text>
+        <text x="105" y="76" text-anchor="middle" fill="#94a3b8" font-size="11">扛洪峰·解耦扩容</text>
+
+        <rect x="20" y="110" width="170" height="60" rx="10" fill="rgba(52,211,153,0.16)" stroke="#34d399" class="clickable" data-go="scale"/>
+        <text x="105" y="135" text-anchor="middle" fill="#6ee7b7" font-size="14" font-weight="700">② 弹性伸缩</text>
+        <text x="105" y="156" text-anchor="middle" fill="#94a3b8" font-size="11">峰顶谷收·自适应</text>
+
+        <rect x="20" y="190" width="170" height="60" rx="10" fill="rgba(248,113,113,0.16)" stroke="#f87171" class="clickable" data-go="guard"/>
+        <text x="105" y="215" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">③ 限流熔断降级</text>
+        <text x="105" y="236" text-anchor="middle" fill="#94a3b8" font-size="11">防雪崩·兜底</text>
+      </g>
+      <g>
+        <rect x="570" y="30" width="170" height="60" rx="10" fill="rgba(251,191,36,0.16)" stroke="#fbbf24" class="clickable" data-go="defend"/>
+        <text x="655" y="55" text-anchor="middle" fill="#fcd34d" font-size="14" font-weight="700">④ 多层攻防</text>
+        <text x="655" y="76" text-anchor="middle" fill="#94a3b8" font-size="11">抗 CC·防刷包</text>
+
+        <rect x="570" y="110" width="170" height="60" rx="10" fill="rgba(167,139,250,0.16)" stroke="#a78bfa" class="clickable" data-go="go"/>
+        <text x="655" y="135" text-anchor="middle" fill="#c4b5fd" font-size="14" font-weight="700">⑤ Go 级优化</text>
+        <text x="655" y="156" text-anchor="middle" fill="#94a3b8" font-size="11">语言坑·精细调优</text>
+
+        <rect x="570" y="190" width="170" height="60" rx="10" fill="rgba(255,255,255,0.07)" stroke="#e2e8f0"/>
+        <text x="655" y="215" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">稳定目标</text>
+        <text x="655" y="236" text-anchor="middle" fill="#94a3b8" font-size="11">不掉线·不崩服</text>
+      </g>
+      <!-- 中心 -->
+      <circle cx="380" cy="150" r="58" fill="rgba(56,189,248,0.10)" stroke="#38bdf8" stroke-width="2"/>
+      <text x="380" y="143" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="800">游戏服务</text>
+      <text x="380" y="165" text-anchor="middle" fill="#94a3b8" font-size="12">稳定性闭环</text>
+      <!-- 连线 -->
+      <line x1="190" y1="60" x2="322" y2="130" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="190" y1="140" x2="322" y2="150" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="190" y1="220" x2="322" y2="170" stroke="#f87171" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="570" y1="60" x2="438" y2="130" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="570" y1="140" x2="438" y2="150" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="380" y1="208" x2="380" y2="190" stroke="#e2e8f0" stroke-width="1.5" marker-end="url(#arr)"/>
+    </svg>
+    <div class="cap">五大手段环绕「稳定目标」形成闭环 · 点击任一卡片跳转到对应章节</div>
+  </div>
+
+  <div class="card-box">
+    <h3>📐 这五大手段的分工逻辑</h3>
+    <ul>
+      <li><span class="kw">① 分层承接</span>：解决「大流量崩服」——把脉冲洪峰拆散到无状态网关 + 分片逻辑服 + 微服务。</li>
+      <li><span class="kw">② 弹性伸缩</span>：解决「峰谷不稳、资源浪费」——高峰顶得住、低谷不浪费、缩容不掉线。</li>
+      <li><span class="kw">③ 限流·熔断·降级</span>：解决「服务雪崩」——异常出现不扩散，下游卡死不让协程爆炸。</li>
+      <li><span class="kw">④ 多层攻防</span>：解决「CC / 恶意刷包」——接入层、协议层、业务层、集群兜底四层防御。</li>
+      <li><span class="kw">⑤ Go 级优化</span>：解决「Go 语言特有坑」——协程失控、脏连接、广播风暴、GC 抖动。</li>
+    </ul>
+    <div class="detail">💡 <b>关键认知</b>：这五点是<b>层层递进的兜底链</b>。①负责「平时扛得住」，③负责「出事不扩散」，④负责「有人搞事挡得住」，②⑤负责「资源与性能可持续」。任何一层缺失，都会成为崩服的突破口。</div>
+  </div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ ① 分层承接 ============ -->
+<section class="section" id="layer">
+  <div class="sect-head"><div class="sect-num" style="background:var(--c-layer);">①</div><h2>分布式分层承接 — 解决大流量崩服</h2></div>
+  <div class="sect-sub">游戏流量是脉冲式洪峰，单机必死，必须分层解耦扩容。</div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/></marker>
+      </defs>
+      <!-- 客户端潮汐 -->
+      <rect x="300" y="10" width="160" height="44" rx="8" fill="rgba(148,163,184,0.15)" stroke="#94a3b8"/>
+      <text x="380" y="32" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="700">玩家客户端（脉冲洪峰）</text>
+      <text x="380" y="48" text-anchor="middle" fill="#94a3b8" font-size="10">开服 / 活动 / 版本更新</text>
+      <line x1="380" y1="54" x2="380" y2="80" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+      <!-- 网关层 -->
+      <rect x="40" y="82" width="680" height="74" rx="10" fill="rgba(56,189,248,0.10)" stroke="#38bdf8" stroke-width="1.5"/>
+      <text x="60" y="102" fill="#7dd3fc" font-size="13" font-weight="700">网关无状态集群（水平扩容）</text>
+      <g>
+        <rect x="60" y="112" width="120" height="34" rx="6" fill="rgba(56,189,248,0.14)" stroke="#38bdf8" class="clickable" data-d="gw"/>
+        <text x="120" y="133" text-anchor="middle" fill="#bae6fd" font-size="11">网关节点 A</text>
+        <rect x="200" y="112" width="120" height="34" rx="6" fill="rgba(56,189,248,0.14)" stroke="#38bdf8" class="clickable" data-d="gw"/>
+        <text x="260" y="133" text-anchor="middle" fill="#bae6fd" font-size="11">网关节点 B</text>
+        <rect x="340" y="112" width="120" height="34" rx="6" fill="rgba(56,189,248,0.14)" stroke="#38bdf8" class="clickable" data-d="gw"/>
+        <text x="400" y="133" text-anchor="middle" fill="#bae6fd" font-size="11">网关节点 C</text>
+        <rect x="480" y="112" width="120" height="34" rx="6" fill="rgba(56,189,248,0.14)" stroke="#38bdf8" class="clickable" data-d="gw"/>
+        <text x="540" y="133" text-anchor="middle" fill="#bae6fd" font-size="11">... 可无限加</text>
+        <rect x="620" y="112" width="90" height="34" rx="6" fill="rgba(56,189,248,0.06)" stroke="#38bdf8"/>
+        <text x="665" y="133" text-anchor="middle" fill="#94a3b8" font-size="10">LB 负载</text>
+      </g>
+      <line x1="380" y1="156" x2="380" y2="182" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+      <!-- 逻辑分片层 -->
+      <rect x="40" y="184" width="680" height="74" rx="10" fill="rgba(52,211,153,0.10)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="60" y="204" fill="#6ee7b7" font-size="13" font-weight="700">逻辑服业务分片（按 ID / 场景）</text>
+      <g>
+        <rect x="60" y="214" width="150" height="34" rx="6" fill="rgba(52,211,153,0.14)" stroke="#34d399" class="clickable" data-d="shard"/>
+        <text x="135" y="235" text-anchor="middle" fill="#a7f3d0" font-size="11">房间 / 副本分片</text>
+        <rect x="230" y="214" width="150" height="34" rx="6" fill="rgba(52,211,153,0.14)" stroke="#34d399" class="clickable" data-d="shard"/>
+        <text x="305" y="235" text-anchor="middle" fill="#a7f3d0" font-size="11">地图 / 场景分片</text>
+        <rect x="400" y="214" width="150" height="34" rx="6" fill="rgba(52,211,153,0.14)" stroke="#34d399" class="clickable" data-d="shard"/>
+        <text x="475" y="235" text-anchor="middle" fill="#a7f3d0" font-size="11">对战分片</text>
+        <rect x="570" y="214" width="140" height="34" rx="6" fill="rgba(52,211,153,0.06)" stroke="#34d399"/>
+        <text x="640" y="235" text-anchor="middle" fill="#94a3b8" font-size="10">避免单点热点</text>
+      </g>
+      <line x1="380" y1="258" x2="380" y2="284" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+      <!-- 微服务层 -->
+      <rect x="40" y="286" width="680" height="64" rx="10" fill="rgba(167,139,250,0.10)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="60" y="306" fill="#c4b5fd" font-size="13" font-weight="700">业务微服务独立部署</text>
+      <g>
+        <rect x="60" y="314" width="100" height="28" rx="6" fill="rgba(167,139,250,0.14)" stroke="#a78bfa" class="clickable" data-d="ms"/>
+        <text x="110" y="332" text-anchor="middle" fill="#ddd6fe" font-size="10">登录</text>
+        <rect x="175" y="314" width="100" height="28" rx="6" fill="rgba(167,139,250,0.14)" stroke="#a78bfa" class="clickable" data-d="ms"/>
+        <text x="225" y="332" text-anchor="middle" fill="#ddd6fe" font-size="10">道具</text>
+        <rect x="290" y="314" width="100" height="28" rx="6" fill="rgba(167,139,250,0.14)" stroke="#a78bfa" class="clickable" data-d="ms"/>
+        <text x="340" y="332" text-anchor="middle" fill="#ddd6fe" font-size="10">战斗</text>
+        <rect x="405" y="314" width="100" height="28" rx="6" fill="rgba(167,139,250,0.14)" stroke="#a78bfa" class="clickable" data-d="ms"/>
+        <text x="455" y="332" text-anchor="middle" fill="#ddd6fe" font-size="10">聊天</text>
+        <rect x="520" y="314" width="190" height="28" rx="6" fill="rgba(167,139,250,0.05)" stroke="#a78bfa"/>
+        <text x="615" y="332" text-anchor="middle" fill="#94a3b8" font-size="10">单个崩不掉全服</text>
+      </g>
+    </svg>
+    <div class="cap">三层分层：网关解耦接入 → 逻辑服分片抗热点 → 微服务隔离故障 · 点击节点看说明</div>
+  </div>
+  <div class="detail" id="layer-detail" style="display:none;"></div>
+
+  <div class="card-box">
+    <h3>🧩 三层各自解决什么</h3>
+    <ul>
+      <li><span class="kw">网关无状态集群</span>：所有长连接统一接入、协议清洗、流量打散。因为<b>无状态</b>，所以可<b>无限水平扩容</b>——加机器就能加吞吐，前面挂 LB 轮询即可。</li>
+      <li><span class="kw">逻辑服业务分片</span>：房间、副本、地图、对战按 <code>ID / 场景哈希</code> 分片。单服只负责一部分实体，避免「万人同屏」把单节点打爆。</li>
+      <li><span class="kw">业务微服务拆分</span>：登录、道具、战斗、聊天独立部署。某个服务崩溃（如聊天卡死）不会拖垮登录和对局，<b>故障域被隔离</b>。</li>
+    </ul>
+  </div>
+
+  <div class="card-box">
+    <h3>📌 案例落地</h3>
+    <p><span class="hl">MMO 百万并发</span>：靠「无状态网关集群 + 地图/副本分片 + 微服务」三层叠加，把瞬时洪峰分散到成百上千个节点。</p>
+    <p style="margin-top:8px;"><span class="hl">棋牌万级房间</span>：房间天然可按 ID 分片，单房间独立进程，一间炸了不影响其他房间。</p>
+    <div class="detail">⚠️ <b>反面教材</b>：把所有逻辑塞进「一个大服 + 一把全局锁」，开服瞬间的连接洪峰会直接打爆单节点的 accept 队列与内存，<b>崩服</b>几乎是必然。</div>
+  </div>
+
+  <div class="quote">核心一句话：<b>单层扛不住脉冲洪峰，分层解耦 + 水平扩展才能把洪峰拆散到成千上万节点上。</b></div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ ② 弹性伸缩 ============ -->
+<section class="section" id="scale">
+  <div class="sect-head"><div class="sect-num" style="background:var(--c-scale);">②</div><h2>流量自适应弹性伸缩 — 解决峰谷不稳、资源浪费</h2></div>
+  <div class="sect-sub">游戏流量潮汐极强：稳的关键是高峰顶得住、低谷不浪费、缩容不掉线。</div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg">
+      <!-- 坐标轴 -->
+      <line x1="50" y1="200" x2="720" y2="200" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="50" y1="30" x2="50" y2="200" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="385" y="225" text-anchor="middle" fill="#94a3b8" font-size="12">时间 →</text>
+      <text x="22" y="115" text-anchor="middle" fill="#94a3b8" font-size="12" transform="rotate(-90 22 115)">负载</text>
+      <!-- 潮汐波浪线 -->
+      <path d="M50,180 C120,175 150,60 200,70 C250,80 280,150 340,140 C400,130 430,50 490,65 C550,80 580,160 640,150 C680,145 700,120 720,125"
+            fill="none" stroke="#34d399" stroke-width="3"/>
+      <!-- 自动扩容带（跟随波浪上方） -->
+      <path d="M50,170 C120,165 150,45 200,55 C250,65 280,135 340,125 C400,115 430,35 490,53 C550,68 580,145 640,135 C680,130 700,105 720,110"
+            fill="none" stroke="rgba(52,211,153,0.4)" stroke-width="6" stroke-dasharray="4 4"/>
+      <text x="490" y="40" text-anchor="middle" fill="#6ee7b7" font-size="12" font-weight="700">自动扩容跟随洪峰</text>
+      <!-- 优雅缩容标注 -->
+      <circle cx="640" cy="150" r="5" fill="#fbbf24"/>
+      <text x="650" y="146" fill="#fcd34d" font-size="11">优雅缩容点</text>
+    </svg>
+    <div class="cap">潮汐曲线（绿）与自动扩容带（虚线）贴合 · 峰顶扩容、谷底回收</div>
+  </div>
+
+  <div class="card-box">
+    <h3>⬆️ 扩容策略</h3>
+    <ul>
+      <li>基于<b>连接数、CPU、QPS</b> 自动扩容，应对<b>开服 / 活动爆量</b>。</li>
+      <li>扩容是「加节点」，前提是①里的<b>无状态</b>（网关）或<b>分片</b>（逻辑服）——有状态服务没法随意加。</li>
+    </ul>
+  </div>
+
+  <div class="card-box">
+    <h3>⬇️ 优雅缩容（游戏核心重点）</h3>
+    <p>很多系统缩容是直接 <code>kill</code> 进程，玩家瞬间掉线。<b>游戏不能这么干</b>。正确做法靠信号监听做三件事：</p>
+    <div class="diagram" style="background:rgba(0,0,0,0.25);">
+      <svg viewBox="0 0 720 90" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="25" width="160" height="44" rx="8" fill="rgba(251,191,36,0.16)" stroke="#fbbf24"/>
+        <text x="100" y="46" text-anchor="middle" fill="#fcd34d" font-size="12" font-weight="700">① 收到 SIGTERM</text>
+        <text x="100" y="62" text-anchor="middle" fill="#94a3b8" font-size="10">停止接受新连接</text>
+        <line x1="180" y1="47" x2="215" y2="47" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr2)"/>
+        <rect x="215" y="25" width="180" height="44" rx="8" fill="rgba(251,191,36,0.16)" stroke="#fbbf24"/>
+        <text x="305" y="46" text-anchor="middle" fill="#fcd34d" font-size="12" font-weight="700">② 等旧连接自然退出</text>
+        <text x="305" y="62" text-anchor="middle" fill="#94a3b8" font-size="10">不暴力杀、不打断对局</text>
+        <line x1="395" y1="47" x2="430" y2="47" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr2)"/>
+        <rect x="430" y="25" width="190" height="44" rx="8" fill="rgba(52,211,153,0.16)" stroke="#34d399"/>
+        <text x="525" y="46" text-anchor="middle" fill="#6ee7b7" font-size="12" font-weight="700">③ 空闲后才回收</text>
+        <text x="525" y="62" text-anchor="middle" fill="#94a3b8" font-size="10">缩容零玩家掉线</text>
+        <line x1="620" y1="47" x2="655" y2="47" stroke="#34d399" stroke-width="2" marker-end="url(#arr2)"/>
+        <rect x="655" y="25" width="50" height="44" rx="8" fill="rgba(52,211,153,0.07)" stroke="#34d399"/>
+        <text x="680" y="50" text-anchor="middle" fill="#a7f3d0" font-size="11">✓</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="card-box">
+    <h3>🧹 空闲资源回收</h3>
+    <ul>
+      <li><b>沙盒区块、房间、帧同步空闲连接</b> 自动清理。</li>
+      <li>杜绝<b>内存泄露、连接堆积</b>——长连接游戏最怕「僵死连接」慢慢拖垮节点。</li>
+    </ul>
+    <div class="detail">💡 <b>为什么「空闲回收」也是稳定性手段</b>：游戏里大量房间/副本玩完就空置，若不及时回收，这些<b>空壳连接</b>会继续占 fd、占内存、占 Goroutine，长期运行后节点被「温水煮青蛙」拖垮。回收 = 把资源还回池子。</div>
+  </div>
+
+  <div class="quote">核心一句话：<b>扩容解决「顶得住」，优雅缩容 + 空闲回收解决「不浪费、不掉线」——资源跟着潮汐呼吸。</b></div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ ③ 限流熔断降级 ============ -->
+<section class="section" id="guard">
+  <div class="sect-head"><div class="sect-num" style="background:var(--c-guard);">③</div><h2>限流 + 熔断 + 降级三层防护 — 杜绝服务雪崩</h2></div>
+  <div class="sect-sub">异常稳定性的核心兜底：解决数据库超时、下游卡顿、请求堆积、Goroutine 泄露。</div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg">
+      <!-- 三层盾牌 -->
+      <g>
+        <rect x="30" y="30" width="220" height="140" rx="12" fill="rgba(248,113,113,0.10)" stroke="#f87171" stroke-width="1.5"/>
+        <text x="140" y="58" text-anchor="middle" fill="#fca5a5" font-size="15" font-weight="800">限流（最外层）</text>
+        <text x="140" y="84" text-anchor="middle" fill="#94a3b8" font-size="11">令牌桶 / Redis 分布式</text>
+        <text x="140" y="104" text-anchor="middle" fill="#94a3b8" font-size="11">限制 QPS / 单IP / 单账号</text>
+        <text x="140" y="128" text-anchor="middle" fill="#fca5a5" font-size="11">防刷屏 · 防过载</text>
+        <text x="140" y="150" text-anchor="middle" fill="#94a3b8" font-size="10">请求还没进业务就拦</text>
+      </g>
+      <g>
+        <rect x="270" y="30" width="220" height="140" rx="12" fill="rgba(251,191,36,0.10)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="380" y="58" text-anchor="middle" fill="#fcd34d" font-size="15" font-weight="800">熔断（中间层）</text>
+        <text x="380" y="84" text-anchor="middle" fill="#94a3b8" font-size="11">下游错误/超时过高</text>
+        <text x="380" y="104" text-anchor="middle" fill="#94a3b8" font-size="11">直接断路</text>
+        <text x="380" y="128" text-anchor="middle" fill="#fcd34d" font-size="11">不疯狂重试</text>
+        <text x="380" y="150" text-anchor="middle" fill="#94a3b8" font-size="10">不堆积协程</text>
+      </g>
+      <g>
+        <rect x="510" y="30" width="220" height="140" rx="12" fill="rgba(52,211,153,0.10)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="620" y="58" text-anchor="middle" fill="#6ee7b7" font-size="15" font-weight="800">降级（最兜底）</text>
+        <text x="620" y="84" text-anchor="middle" fill="#94a3b8" font-size="11">高峰期砍非核心</text>
+        <text x="620" y="104" text-anchor="middle" fill="#94a3b8" font-size="11">日志 / 排行 / 特效</text>
+        <text x="620" y="128" text-anchor="middle" fill="#6ee7b7" font-size="11">保核心对局·登录·交易</text>
+        <text x="620" y="150" text-anchor="middle" fill="#94a3b8" font-size="10">保住玩家最在意的功能</text>
+      </g>
+    </svg>
+    <div class="cap">三层防护由外到内：限流挡在门外、熔断切断故障源、降级保住核心</div>
+  </div>
+
+  <div class="card-box">
+    <h3>🚦 限流</h3>
+    <ul>
+      <li><span class="kw">单机令牌桶</span>：每个进程维护令牌，匀速发放，拿不到令牌的请求直接拒绝。</li>
+      <li><span class="kw">分布式 Redis 限流</span>：限制<b>全局 QPS</b>、<b>单 IP</b>、<b>单账号</b> 频率，跨节点统一口径。</li>
+      <li>作用：<b>防刷屏、防过载</b>——把超出系统能力的请求挡在门外。</li>
+    </ul>
+  </div>
+
+  <div class="card-box">
+    <h3>⚡ 熔断</h3>
+    <p>下游（数据库 / 第三方）错误率或超时率过高时，直接<b>断路</b>：不再发请求、不再重试、不再为每个请求起一个 Goroutine 干等。</p>
+    <div class="diagram" style="background:rgba(0,0,0,0.25);">
+      <svg viewBox="0 0 720 70" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="18" width="160" height="36" rx="8" fill="rgba(248,113,113,0.16)" stroke="#f87171"/>
+        <text x="100" y="41" text-anchor="middle" fill="#fca5a5" font-size="12" font-weight="700">正常调用</text>
+        <line x1="180" y1="36" x2="215" y2="36" stroke="#f87171" stroke-width="2" marker-end="url(#arr2)"/>
+        <rect x="215" y="18" width="200" height="36" rx="8" fill="rgba(251,191,36,0.16)" stroke="#fbbf24"/>
+        <text x="315" y="36" text-anchor="middle" fill="#fcd34d" font-size="11" font-weight="700">错误率↑ 触发熔断</text>
+        <text x="315" y="50" text-anchor="middle" fill="#94a3b8" font-size="9">半开探测</text>
+        <line x1="415" y1="36" x2="450" y2="36" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr2)"/>
+        <rect x="450" y="18" width="240" height="36" rx="8" fill="rgba(52,211,153,0.16)" stroke="#34d399"/>
+        <text x="570" y="36" text-anchor="middle" fill="#6ee7b7" font-size="11" font-weight="700">恢复 → 闭合 / 持续异常 → 断开</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="card-box">
+    <h3>⬇️ 降级</h3>
+    <p>高峰期主动<b>砍掉非核心功能</b>：<code>日志</code>、<code>排行榜</code>、<code>特效</code>、<code>历史数据</code>，把算力集中保住<b>核心对局、登录、交易</b>。</p>
+    <div class="detail">🔥 <b>实战结论</b>：<b>90% 游戏服务器崩盘，都是因为没做熔断</b>——下游（如数据库）卡死，上游每个请求都起一个 Goroutine 干等，Goroutine 爆炸 → 内存爆 → 全服雪崩。熔断就是在这条链路上「剪断导火索」。</div>
+  </div>
+
+  <div class="quote">核心一句话：<b>限流挡门外、熔断剪导火索、降级保核心——三层一起，异常出现不扩散。</b></div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ ④ 多层攻防 ============ -->
+<section class="section" id="defend">
+  <div class="sect-head"><div class="sect-num" style="background:var(--c-defend);">④</div><h2>多层攻防体系 — 抵御 CC / 恶意刷包</h2></div>
+  <div class="sect-sub">游戏长连接 CC 比 Web 攻击更致命（占连接、占句柄、占带宽）。稳定必须四层防御。</div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="arr4" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/></marker></defs>
+      <!-- 攻击者 -->
+      <rect x="300" y="8" width="160" height="40" rx="8" fill="rgba(248,113,113,0.14)" stroke="#f87171"/>
+      <text x="380" y="33" text-anchor="middle" fill="#fca5a5" font-size="12" font-weight="700">攻击者 / 肉鸡</text>
+      <line x1="380" y1="48" x2="380" y2="72" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr4)"/>
+      <!-- 四层 -->
+      <g>
+        <rect x="40" y="74" width="680" height="54" rx="10" fill="rgba(251,191,36,0.10)" stroke="#fbbf24" stroke-width="1.5" class="clickable" data-dd="l1"/>
+        <text x="60" y="96" fill="#fcd34d" font-size="13" font-weight="700">① 接入层</text>
+        <text x="180" y="96" fill="#94a3b8" font-size="11.5">单 IP 连接数限制 · IP 黑名单 · 封禁肉鸡段</text>
+        <text x="660" y="96" fill="#94a3b8" font-size="10">第一道闸</text>
+      </g>
+      <line x1="380" y1="128" x2="380" y2="146" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr4)"/>
+      <g>
+        <rect x="40" y="148" width="680" height="54" rx="10" fill="rgba(248,113,113,0.10)" stroke="#f87171" stroke-width="1.5" class="clickable" data-dd="l2"/>
+        <text x="60" y="170" fill="#fca5a5" font-size="13" font-weight="700">② 协议层</text>
+        <text x="180" y="170" fill="#94a3b8" font-size="11.5">非法包 / 残缺包 / 无握手包 直接丢弃，不进业务</text>
+        <text x="660" y="170" fill="#94a3b8" font-size="10">拒绝脏数据</text>
+      </g>
+      <line x1="380" y1="202" x2="380" y2="220" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr4)"/>
+      <g>
+        <rect x="40" y="222" width="680" height="54" rx="10" fill="rgba(56,189,248,0.10)" stroke="#38bdf8" stroke-width="1.5" class="clickable" data-dd="l3"/>
+        <text x="60" y="244" fill="#7dd3fc" font-size="13" font-weight="700">③ 业务行为层</text>
+        <text x="180" y="244" fill="#94a3b8" font-size="11.5">防刷帧 · 防超速移动 · 防批量篡改地形</text>
+        <text x="660" y="244" fill="#94a3b8" font-size="10">逻辑校验</text>
+      </g>
+      <line x1="380" y1="276" x2="380" y2="294" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr4)"/>
+      <g>
+        <rect x="40" y="296" width="680" height="18" rx="8" fill="rgba(52,211,153,0.18)" stroke="#34d399" stroke-width="1.5" class="clickable" data-dd="l4"/>
+        <text x="380" y="309" text-anchor="middle" fill="#6ee7b7" font-size="11.5" font-weight="700">④ 集群兜底限流 · 攻击洪峰下依然保留正常玩家通行能力</text>
+      </g>
+    </svg>
+    <div class="cap">四层纵深防御：从接入到业务逐层过滤恶意流量 · 点击任一保护层看说明</div>
+  </div>
+  <div class="detail" id="defend-detail" style="display:none;"></div>
+
+  <div class="card-box">
+    <h3>🛡️ 为什么游戏 CC 比 Web 攻击更狠</h3>
+    <ul>
+      <li>Web 攻击多打 <code>HTTP 短连接</code>，扛完就走；游戏是<b>长连接</b>，一个恶意连接<b>长期占着 fd（句柄）、占着服务端内存、占着带宽</b>。</li>
+      <li>海量肉鸡建立空闲长连接，就能把服务端<b>连接表打满</b>，正常玩家进不来——这是「占坑」式攻击。</li>
+    </ul>
+  </div>
+
+  <div class="card-box">
+    <h3>🔰 四层防御职责</h3>
+    <ul>
+      <li><span class="kw">① 接入层</span>：单 IP 连接数上限、IP 黑名单、封禁整个肉鸡段（CIDR）。把「占坑」的连接在握手后第一时间掐掉。</li>
+      <li><span class="kw">② 协议层</span>：校验包长、魔数、序列号；非法包 / 残缺包 / 没完成握手的包直接丢弃，<b>根本不进业务逻辑</b>，避免解析开销。</li>
+      <li><span class="kw">③ 业务行为层</span>：服务端权威校验——防刷帧（帧率异常）、防超速移动（坐标瞬移）、防批量篡改地形（内存修改器）。</li>
+      <li><span class="kw">④ 集群兜底限流</span>：攻击洪峰下，用③里的限流手段保住正常玩家通道，宁可丢弃攻击流量也不误杀真实用户。</li>
+    </ul>
+  </div>
+
+  <div class="quote">核心一句话：<b>长连接游戏的攻击是「占坑」，四层纵深防御 = 在占坑之前就把恶意流量层层滤掉，且保住真实玩家。</b></div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ ⑤ Go 级优化 ============ -->
+<section class="section" id="go">
+  <div class="sect-head"><div class="sect-num" style="background:var(--c-go);">⑤</div><h2>Go 专属高并发稳定性优化（语言级核心）</h2></div>
+  <div class="sect-sub">Go 能稳跑百万并发，关键是规避 Go 特有坑。</div>
+
+  <div class="grid2">
+    <div class="card-box">
+      <h3>🔀 Goroutine 可控</h3>
+      <ul>
+        <li>禁止<b>无限新建协程</b>（每个连接 / 每个请求 <code>go func()</code> 是灾难）。</li>
+        <li>用<b>协程池</b> + <b>任务队列</b> 控制并发上限。</li>
+        <li>否则峰值时 Goroutine 暴涨 → 内存爆炸 → 调度开销反噬。</li>
+      </ul>
+    </div>
+    <div class="card-box">
+      <h3>🔌 连接精细化管理</h3>
+      <ul>
+        <li><b>超时断开</b>：读写设 deadline，不让连接干等。</li>
+        <li><b>心跳检测</b>：定时 ping/pong，识破「假死」连接。</li>
+        <li><b>弱网脏连接清理</b>：客户端掉了但服务端没感知的「僵尸连接」要主动清。</li>
+      </ul>
+    </div>
+    <div class="card-box">
+      <h3>📦 批量 IO 优化</h3>
+      <ul>
+        <li><b>帧同步、全局广播合并推送</b>：把 N 个玩家的广播合成一个包发，降低 CPU 与调度开销。</li>
+        <li>避免「一个事件一次 syscall」的广播风暴。</li>
+      </ul>
+    </div>
+    <div class="card-box">
+      <h3>♻️ 内存复用</h3>
+      <ul>
+        <li><b>对象池（sync.Pool）</b>、<b>buffer 复用</b>：减少堆分配。</li>
+        <li>避免 GC 抖动导致<b>卡顿掉帧</b>——游戏对延迟极度敏感。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg">
+      <text x="20" y="28" fill="#c4b5fd" font-size="13" font-weight="700">❌ 失控写法</text>
+      <rect x="20" y="40" width="340" height="80" rx="10" fill="rgba(248,113,113,0.10)" stroke="#f87171"/>
+      <text x="40" y="68" fill="#fca5a5" font-size="11">for each conn: go handle(conn)</text>
+      <text x="40" y="90" fill="#94a3b8" font-size="11">洪峰 → Goroutine 暴涨 → 内存爆</text>
+      <text x="40" y="110" fill="#94a3b8" font-size="11">调度开销↑ → 全服卡死</text>
+      <line x1="370" y1="80" x2="410" y2="80" stroke="#a78bfa" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="390" y="74" text-anchor="middle" fill="#94a3b8" font-size="10">改进</text>
+      <text x="420" y="28" fill="#6ee7b7" font-size="13" font-weight="700">✅ 可控写法</text>
+      <rect x="420" y="40" width="320" height="80" rx="10" fill="rgba(52,211,153,0.10)" stroke="#34d399"/>
+      <text x="440" y="68" fill="#a7f3d0" font-size="11">worker pool + 任务队列 + 限流</text>
+      <text x="440" y="90" fill="#94a3b8" font-size="11">并发有上限 · sync.Pool 复用</text>
+      <text x="440" y="110" fill="#94a3b8" font-size="11">心跳 + 超时清理脏连接</text>
+    </svg>
+    <div class="cap">Go 并发「失控」vs「可控」对照</div>
+  </div>
+
+  <div class="detail">💡 <b>为什么 Go 特别需要这套</b>：Goroutine 太便宜（初始栈仅 2KB），开发者容易「随手就 go 一个」。但百万连接下，无节制新建协程 + 堆分配 + 广播风暴，会让 GC 和调度器成为瓶颈。Go 的「便宜」是把双刃剑，<b>池化 + 复用 + 限流</b>是把双刃剑变利器的关键。</div>
+
+  <div class="quote">核心一句话：<b>Go 便宜的协程要用「池」管起来，连接要「精细」管起来，IO 要「合并」、内存要「复用」——才能百万并发不掉帧。</b></div>
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<!-- ============ 闭环总结 ============ -->
+<section class="section" id="summary">
+  <div class="hero" style="padding-top:10px;">
+    <h1 style="font-size:1.9rem;">闭环总结 · 五大手段如何咬合</h1>
+    <p>所有线上稳定的 Go 游戏服务，全部遵循这套闭环。</p>
+  </div>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 280" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="arrS" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/></marker></defs>
+      <g transform="translate(380,140)">
+        <circle r="120" fill="none" stroke="rgba(56,189,248,0.3)" stroke-width="1.5" stroke-dasharray="4 4"/>
+        <g>
+          <circle cx="0" cy="-120" r="34" fill="rgba(56,189,248,0.18)" stroke="#38bdf8"/>
+          <text x="0" y="-116" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="700">① 分层</text>
+          <text x="0" y="-102" text-anchor="middle" fill="#94a3b8" font-size="9">扛洪峰</text>
+          <circle cx="103" cy="-60" r="34" fill="rgba(52,211,153,0.18)" stroke="#34d399"/>
+          <text x="103" y="-56" text-anchor="middle" fill="#6ee7b7" font-size="11" font-weight="700">② 伸缩</text>
+          <text x="103" y="-42" text-anchor="middle" fill="#94a3b8" font-size="9">控资源</text>
+          <circle cx="103" cy="60" r="34" fill="rgba(248,113,113,0.18)" stroke="#f87171"/>
+          <text x="103" y="64" text-anchor="middle" fill="#fca5a5" font-size="11" font-weight="700">③ 限熔降</text>
+          <text x="103" y="78" text-anchor="middle" fill="#94a3b8" font-size="9">防雪崩</text>
+          <circle cx="0" cy="120" r="34" fill="rgba(251,191,36,0.18)" stroke="#fbbf24"/>
+          <text x="0" y="124" text-anchor="middle" fill="#fcd34d" font-size="11" font-weight="700">④ 攻防</text>
+          <text x="0" y="138" text-anchor="middle" fill="#94a3b8" font-size="9">抗攻击</text>
+          <circle cx="-103" cy="60" r="34" fill="rgba(167,139,250,0.18)" stroke="#a78bfa"/>
+          <text x="-103" y="64" text-anchor="middle" fill="#c4b5fd" font-size="11" font-weight="700">⑤ Go优化</text>
+          <text x="-103" y="78" text-anchor="middle" fill="#94a3b8" font-size="9">精细调</text>
+          <circle cx="-103" cy="-60" r="34" fill="rgba(255,255,255,0.06)" stroke="#e2e8f0"/>
+          <text x="-103" y="-56" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="700">稳定</text>
+          <text x="-103" y="-42" text-anchor="middle" fill="#94a3b8" font-size="9">不掉线</text>
+        </g>
+        <!-- 环形箭头 -->
+        <path d="M -12,-150 A 150 150 0 1 1 -150,12" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrS)"/>
+        <text x="60" y="-165" text-anchor="middle" fill="#94a3b8" font-size="11">闭环咬合</text>
+      </g>
+    </svg>
+    <div class="cap">五大手段首尾相连形成稳定性闭环</div>
+  </div>
+
+  <div class="card-box">
+    <h3>🧮 公式化记忆</h3>
+    <div class="quote" style="border-color:var(--c-go);">高并发游戏服务器的稳定性 = <span class="kw">分布式扛洪峰</span> + <span class="kw">弹性伸缩控资源</span> + <span class="kw">限流熔断防雪崩</span> + <span class="kw">多层防御抗攻击</span> + <span class="kw">Go 并发模型精细调优</span></div>
+  </div>
+
+  <div class="card-box">
+    <h3>✅ 闭环口诀</h3>
+    <ul>
+      <li><span class="hl">流量来了扛得住</span> → ① 分层承接 + ② 弹性伸缩</li>
+      <li><span class="hl">异常出现不扩散</span> → ③ 限流·熔断·降级</li>
+      <li><span class="hl">攻击来了挡得住</span> → ④ 多层攻防</li>
+      <li><span class="hl">闲时资源收得回</span> → ② 弹性伸缩（缩容）+ ⑤ Go 内存复用</li>
+    </ul>
+  </div>
+
+  <footer><a href="../index.html">← 返回高可用首页</a></footer>
+</section>
+
+<script>
+  // 导航切换
+  const nav = document.getElementById('nav');
+  const sections = document.querySelectorAll('.section');
+  nav.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-tab]');
+    if (!a) return;
+    const tab = a.dataset.tab;
+    nav.querySelectorAll('a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    sections.forEach(s => s.classList.remove('active'));
+    document.getElementById(tab).classList.add('active');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  // 总览图：点击跳转
+  document.querySelectorAll('[data-go]').forEach(el => {
+    el.addEventListener('click', () => {
+      const tab = el.dataset.go;
+      nav.querySelector(`a[data-tab="${tab}"]`).click();
+    });
+  });
+
+  // ① 分层节点说明
+  const layerText = {
+    gw: '<b>网关节点</b>：无状态，统一接入长连接、做协议清洗（解包/验签）、流量打散。因为不保存会话状态，前面挂 LB 就能无限加节点，是「水平扩容」的基石。',
+    shard: '<b>逻辑分片</b>：房间 / 副本 / 地图 / 对战按 ID 或场景哈希分片。单节点只服务一部分实体，避免「万人同屏」热点把单节点打爆。扩分片 = 扩承载能力。',
+    ms: '<b>微服务</b>：登录、道具、战斗、聊天独立部署独立扩缩。某个服务崩溃（如聊天卡死）被隔离在自身进程内，不会拖垮登录与对局——故障域收敛。'
+  };
+  const layerDetail = document.getElementById('layer-detail');
+  document.querySelectorAll('#layer [data-d]').forEach(el => {
+    el.addEventListener('click', () => {
+      layerDetail.style.display = 'block';
+      layerDetail.innerHTML = layerText[el.dataset.d];
+      layerDetail.scrollIntoView({ behavior:'smooth', block:'nearest' });
+    });
+  });
+
+  // ④ 攻防层说明
+  const defendText = {
+    l1: '<b>接入层（第一道闸）</b>：限制单 IP 连接数、维护 IP 黑名单、封禁整个肉鸡段（CIDR 段）。在 TCP 握手后、业务逻辑前就掐掉「占坑」的恶意长连接。',
+    l2: '<b>协议层</b>：校验包长度、魔数、序列号。非法包 / 残缺包 / 未完整握手的包直接丢弃，根本不进入业务解析，避免把攻击流量变成 CPU 开销。',
+    l3: '<b>业务行为层（服务端权威校验）</b>：防刷帧（帧率异常）、防超速移动（坐标瞬移）、防批量篡改地形（内存修改器）。这是「逻辑正确性」的最后防线。',
+    l4: '<b>集群兜底限流</b>：攻击洪峰下，用分布式限流保住正常玩家通道——宁可丢弃攻击流量，也绝不误杀真实用户的通行能力。'
+  };
+  const defendDetail = document.getElementById('defend-detail');
+  document.querySelectorAll('#defend [data-dd]').forEach(el => {
+    el.addEventListener('click', () => {
+      defendDetail.style.display = 'block';
+      defendDetail.innerHTML = defendText[el.dataset.dd];
+      defendDetail.scrollIntoView({ behavior:'smooth', block:'nearest' });
+    });
+  });
+</script>
+</body>
+</html>
