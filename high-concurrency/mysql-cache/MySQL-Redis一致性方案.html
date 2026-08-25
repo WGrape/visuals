@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL × Redis 一致性 —— 从根因到方案全景</title>
+<style>
+:root{
+  --bg0:#0f0c29; --bg1:#302b63; --bg2:#24243e;
+  --cyan:#00d4ff; --purple:#7b2ff7; --pink:#ec4899;
+  --red:#ff6b6b; --orange:#ff8e53; --green:#22c55e; --yellow:#facc15;
+  --card:rgba(255,255,255,0.05); --line:rgba(255,255,255,0.12);
+  --txt:#e8e8f0; --dim:#9aa0b4;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  background:linear-gradient(135deg,var(--bg0) 0%,var(--bg1) 50%,var(--bg2) 100%);
+  background-attachment:fixed;min-height:100vh;color:var(--txt);
+  overflow-x:hidden;line-height:1.7;
+}
+.container{max-width:1180px;margin:0 auto;padding:32px 20px 80px;}
+h1{text-align:center;font-size:2.4rem;margin:18px 0 6px;
+  background:linear-gradient(90deg,var(--cyan),var(--purple),var(--pink));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.subtitle{text-align:center;color:var(--dim);margin-bottom:26px;font-size:1.05rem;}
+/* sticky nav */
+nav{position:sticky;top:0;z-index:50;background:rgba(15,12,41,0.82);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--line);
+  display:flex;gap:6px;overflow-x:auto;padding:10px 20px;margin-bottom:34px;}
+nav a{color:var(--dim);text-decoration:none;font-size:.82rem;padding:6px 12px;
+  border-radius:20px;white-space:nowrap;transition:.2s;}
+nav a:hover{color:#fff;background:rgba(255,255,255,0.08);}
+/* sections */
+section{background:var(--card);border:1px solid var(--line);border-radius:22px;
+  padding:30px 32px;margin-bottom:28px;backdrop-filter:blur(8px);}
+section h2{font-size:1.5rem;margin-bottom:8px;color:#fff;display:flex;align-items:center;gap:10px;}
+section h2 .num{display:inline-flex;width:34px;height:34px;border-radius:10px;
+  background:linear-gradient(135deg,var(--cyan),var(--purple));color:#fff;
+  align-items:center;justify-content:center;font-size:1rem;font-weight:700;flex-shrink:0;}
+section h3{font-size:1.18rem;margin:22px 0 10px;color:var(--cyan);}
+section p{margin:10px 0;color:#d6d8e6;}
+.lead{color:var(--dim);font-size:1rem;margin-bottom:8px;}
+code{background:rgba(0,0,0,0.35);padding:2px 7px;border-radius:6px;
+  font-family:'SF Mono',Consolas,monospace;font-size:.86em;color:#ffd479;}
+pre{background:rgba(0,0,0,0.4);border:1px solid var(--line);border-radius:12px;
+  padding:16px 18px;overflow-x:auto;margin:12px 0;font-size:.83rem;line-height:1.55;}
+pre .cm{color:#6b7280;} pre .kw{color:#c792ea;} pre .fn{color:#82aaff;}
+pre .st{color:#c3e88d;} pre .nm{color:#f78c6c;}
+/* callout */
+.note{border-left:4px solid var(--cyan);background:rgba(0,212,255,0.07);
+  padding:14px 18px;border-radius:0 12px 12px 0;margin:16px 0;}
+.warn{border-left-color:var(--red);background:rgba(255,107,107,0.08);}
+.good{border-left-color:var(--green);background:rgba(34,197,94,0.08);}
+.note b{color:#fff;}
+/* cards grid */
+.grid{display:grid;gap:16px;margin:16px 0;}
+.g3{grid-template-columns:repeat(3,1fr);}
+.g2{grid-template-columns:repeat(2,1fr);}
+.mini{background:rgba(255,255,255,0.04);border:1px solid var(--line);
+  border-radius:14px;padding:18px;}
+.mini h4{font-size:1.02rem;margin-bottom:8px;}
+.mini.cyan{border-top:3px solid var(--cyan);}
+.mini.red{border-top:3px solid var(--red);}
+.mini.green{border-top:3px solid var(--green);}
+.mini.purple{border-top:3px solid var(--purple);}
+.mini.orange{border-top:3px solid var(--orange);}
+.mini.yellow{border-top:3px solid var(--yellow);}
+/* table */
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.86rem;}
+th,td{border:1px solid var(--line);padding:11px 13px;text-align:left;vertical-align:top;}
+th{background:rgba(255,255,255,0.09);color:#fff;font-weight:600;}
+td .badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:.78rem;font-weight:600;}
+.b-ok{background:rgba(34,197,94,.18);color:#4ade80;}
+.b-mid{background:rgba(250,204,21,.18);color:#facc15;}
+.b-bad{background:rgba(255,107,107,.18);color:#ff8585;}
+/* svg wrap */
+.svgbox{background:rgba(0,0,0,0.28);border:1px solid var(--line);border-radius:14px;
+  padding:18px;margin:16px 0;overflow-x:auto;}
+.svgbox svg{display:block;margin:0 auto;max-width:100%;}
+svg text{font-family:'PingFang SC','Microsoft YaHei',sans-serif;}
+/* interactive */
+.btn{cursor:pointer;border:none;border-radius:10px;padding:9px 18px;font-size:.88rem;
+  font-weight:600;color:#fff;background:linear-gradient(135deg,var(--cyan),var(--purple));
+  transition:.2s;}
+.btn:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(123,47,247,.35);}
+.btn.ghost{background:rgba(255,255,255,0.08);}
+.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0;}
+.controls label{font-size:.9rem;color:var(--dim);}
+input[type=range]{accent-color:var(--cyan);width:200px;}
+/* timeline race */
+.lanes{display:flex;flex-direction:column;gap:0;margin:10px 0;}
+.lane{display:flex;align-items:center;gap:14px;padding:8px 0;position:relative;}
+.lane .who{width:120px;flex-shrink:0;font-size:.85rem;font-weight:600;}
+.lane .who.write{color:var(--orange);}
+.lane .who.read{color:var(--cyan);}
+.lane .track{flex:1;height:46px;background:rgba(255,255,255,0.03);border-radius:8px;position:relative;}
+.ev{position:absolute;top:50%;transform:translate(-50%,-50%);width:30px;height:30px;
+  border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;
+  opacity:.25;transition:all .35s;cursor:default;}
+.ev.on{opacity:1;transform:translate(-50%,-50%) scale(1.12);box-shadow:0 0 14px currentColor;}
+.ev.db{background:rgba(255,142,83,.25);color:var(--orange);border:1px solid var(--orange);}
+.ev.cache{background:rgba(0,212,255,.25);color:var(--cyan);border:1px solid var(--cyan);}
+.ev.warn{background:rgba(255,107,107,.3);color:var(--red);border:1px solid var(--red);}
+.playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--pink);
+  box-shadow:0 0 10px var(--pink);opacity:0;transition:left .3s;}
+.explain{min-height:54px;background:rgba(0,0,0,.3);border-radius:10px;padding:12px 16px;
+  margin-top:12px;font-size:.92rem;border:1px solid var(--line);}
+.explain .tag{font-weight:700;color:var(--pink);}
+/* tabs */
+.tabs{display:flex;gap:8px;margin:16px 0 4px;flex-wrap:wrap;}
+.tab{cursor:pointer;padding:8px 16px;border-radius:10px;font-size:.85rem;
+  background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--line);}
+.tab.active{background:linear-gradient(135deg,var(--cyan),var(--purple));color:#fff;border:none;}
+.pane{display:none;}
+.pane.active{display:block;}
+.stepnum{display:inline-block;width:24px;height:24px;border-radius:50%;
+  background:var(--purple);color:#fff;text-align:center;line-height:24px;font-size:.8rem;margin-right:8px;font-weight:700;}
+footer{text-align:center;color:var(--dim);font-size:.82rem;padding:24px;}
+.kbd{font-family:monospace;background:#1e1b3a;border:1px solid var(--line);
+  border-radius:5px;padding:1px 6px;}
+@media(max-width:760px){.g3,.g2{grid-template-columns:1fr;}nav{flex-wrap:nowrap;}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>MySQL × Redis 一致性</h1>
+<p class="subtitle">从「为什么会不一致」到「延迟双删，再到更好的方案」—— 一次讲透</p>
+
+<nav>
+  <a href="#s1">① 根因</a>
+  <a href="#s2">② 三种写策略</a>
+  <a href="#s3">③ 方案全景</a>
+  <a href="#s4">④ 延迟双删（交互）</a>
+  <a href="#s5">⑤ binlog订阅</a>
+  <a href="#s6">⑥ 进阶方案</a>
+  <a href="#s7">⑦ 方案对比</a>
+  <a href="#s8">⑧ 选型决策</a>
+</nav>
+
+<!-- ===== 1 根因 ===== -->
+<section id="s1">
+  <h2><span class="num">1</span>为什么会不一致？先看清架构与根因</h2>
+  <p class="lead">缓存与数据库是<b>两个独立的存储</b>。一次「写」需要同时操作两者，而这两步<b>不是原子的</b>，并发读写就会交错出不一致。</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 720 280" width="720" height="280">
+    <defs>
+      <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#9aa0b4"/></marker>
+    </defs>
+    <!-- client -->
+    <rect x="30" y="110" width="90" height="60" rx="12" fill="rgba(255,255,255,.06)" stroke="#7b2ff7"/>
+    <text x="75" y="146" fill="#fff" font-size="14" text-anchor="middle">Client</text>
+    <!-- app -->
+    <rect x="200" y="110" width="110" height="60" rx="12" fill="rgba(255,255,255,.06)" stroke="#00d4ff"/>
+    <text x="255" y="142" fill="#fff" font-size="13" text-anchor="middle">应用层</text>
+    <text x="255" y="160" fill="#9aa0b4" font-size="11" text-anchor="middle">读写逻辑</text>
+    <!-- redis -->
+    <rect x="410" y="40" width="100" height="58" rx="12" fill="rgba(255,107,107,.12)" stroke="#ff6b6b"/>
+    <text x="460" y="74" fill="#fff" font-size="13" text-anchor="middle">Redis</text>
+    <text x="460" y="92" fill="#9aa0b4" font-size="11" text-anchor="middle">缓存</text>
+    <!-- mysql -->
+    <rect x="410" y="160" width="100" height="58" rx="12" fill="rgba(0,212,255,.10)" stroke="#00d4ff"/>
+    <text x="460" y="194" fill="#fff" font-size="13" text-anchor="middle">MySQL</text>
+    <text x="460" y="212" fill="#9aa0b4" font-size="11" text-anchor="middle">主库(真源)</text>
+    <!-- arrows -->
+    <line x1="120" y1="140" x2="195" y2="140" stroke="#9aa0b4" marker-end="url(#ar)"/>
+    <line x1="310" y1="128" x2="405" y2="92" stroke="#ff6b6b" marker-end="url(#ar)"/>
+    <line x1="310" y1="152" x2="405" y2="178" stroke="#00d4ff" marker-end="url(#ar)"/>
+    <text x="350" y="100" fill="#ff6b6b" font-size="11" text-anchor="middle">读/删缓存</text>
+    <text x="350" y="205" fill="#00d4ff" font-size="11" text-anchor="middle">读/写DB</text>
+    <!-- consistency gap -->
+    <path d="M460,98 C540,120 540,180 460,158" fill="none" stroke="#facc15" stroke-width="2" stroke-dasharray="5 4"/>
+    <text x="560" y="142" fill="#facc15" font-size="12">两步非原子 =</text>
+    <text x="560" y="160" fill="#facc15" font-size="12">不一致窗口</text>
+  </svg>
+  </div>
+
+  <h3>三大根因</h3>
+  <div class="grid g3">
+    <div class="mini red"><h4>① 双写非原子</h4><p>更新 DB 与更新/删除缓存是两个独立操作，中间可能被其它请求插入，造成「DB 是新值、缓存是旧值」或反之。</p></div>
+    <div class="mini orange"><h4>② 并发读写交错</h4><p>「读」在缓存失效时会回源 DB 并写回缓存；若此刻有「写」并发进行，就可能把旧值写回缓存，长期脏读。</p></div>
+    <div class="mini yellow"><h4>③ 删除/更新失败</h4><p>即便顺序正确，第二步（删缓存）可能因网络抖动失败，留下脏缓存；或缓存与 DB 间存在主从延迟（见前文主从专题）。</p></div>
+  </div>
+
+  <div class="note warn"><b>核心认知：</b>「强一致」在「DB + 独立缓存」架构下代价极高（需分布式锁串行化，牺牲并发）。业界普遍追求<b>最终一致性</b>——允许短暂不一致，但要保证「最终一致、且不一致窗口尽可能短、可收敛」。</div>
+</section>
+
+<!-- ===== 2 三种写策略 ===== -->
+<section id="s2">
+  <h2><span class="num">2</span>三种写入策略，哪个会翻车？</h2>
+  <p class="lead">写操作时「先动谁」决定了不一致的概率与形态。逐一点评，并用翻车时序说明。</p>
+
+  <h3>策略 C：先更新 DB，再更新缓存 <span style="color:var(--red);font-size:.9rem;">（最不推荐）</span></h3>
+  <p>两个写操作。并发写时顺序可能交错成 <code>写A-DB → 写B-DB → 写B-缓存 → 写A-缓存</code>，结果缓存是 A 的旧值、DB 是 B 的新值，且长期脏读（缓存没 TTL 就永不自愈）。</p>
+
+  <h3>策略 A：先删除缓存，再更新 DB <span style="color:var(--orange);font-size:.9rem;">（有经典翻车）</span></h3>
+  <p>危险场景：写线程删完缓存后、更新 DB 前，一个读线程进来——缓存 miss → 读 DB 拿到<b>旧值</b> → 写回缓存。随后写线程更新 DB 为新值。结果：<b>缓存旧、DB 新，不一致</b>。</p>
+
+  <h3>策略 B：先更新 DB，再删除缓存（Cache-Aside 标准写法）<span style="color:var(--green);font-size:.9rem;">（推荐基线）</span></h3>
+  <p>Facebook《Scaling Memcache》等主流实践。读时回填、写时「删」而非「更新」缓存（删除更不易出错）。它的残留竞态窗口极小（见下方交互），通常配合「删除失败重试 / binlog 兜底」即可。</p>
+
+  <div class="note"><b>为什么「删」比「更新」好？</b> 更新缓存要把计算结果算出来再写，成本高且易因并发写顺序而出错；删除让下次读自动回填最新值，逻辑简单、天然收敛。</div>
+
+  <h3>交互：看一次「先删缓存→再更新DB」的翻车</h3>
+  <div class="controls">
+    <button class="btn" onclick="playRace('A')">▶ 播放「策略A」翻车</button>
+    <button class="btn ghost" onclick="playRace('B')">▶ 播放「策略B」残留窗口</button>
+    <button class="btn ghost" onclick="resetRace()">↺ 重置</button>
+  </div>
+  <div class="lanes" id="lanes">
+    <div class="lane"><div class="who write">写线程 W</div>
+      <div class="track" id="trk-w"><div class="playhead" id="ph-w"></div></div></div>
+    <div class="lane"><div class="who read">读线程 R</div>
+      <div class="track" id="trk-r"><div class="playhead" id="ph-r"></div></div></div>
+  </div>
+  <div class="explain" id="raceExplain">点击上方按钮播放时序动画。每个节点代表一个原子动作，粉色游标表示「当前时间」，动画会逐步揭示交错过程与最终状态。</div>
+
+  <div class="note warn" id="raceResult" style="display:none;"></div>
+</section>
+
+<!-- ===== 3 方案全景 ===== -->
+<section id="s3">
+  <h2><span class="num">3</span>方案全景：按「解决层级」分四层</h2>
+  <p class="lead">不是只有「延迟双删」。从「改写入顺序」到「彻底解耦」，越往上越优雅、越可靠。</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 760 250" width="760" height="250">
+    <rect x="20" y="20" width="720" height="60" rx="12" fill="rgba(255,107,107,.10)" stroke="#ff6b6b"/>
+    <text x="40" y="46" fill="#ff8585" font-size="13" font-weight="700">L1 · 写入策略层（最简单，治标）</text>
+    <text x="40" y="68" fill="#d6d8e6" font-size="12">Cache-Aside 标准写法 / 先更新DB再删缓存 / 给缓存设 TTL 兜底</text>
+
+    <rect x="20" y="95" width="720" height="60" rx="12" fill="rgba(250,204,21,.10)" stroke="#facc15"/>
+    <text x="40" y="121" fill="#facc15" font-size="13" font-weight="700">L2 · 删除兜底层（经验补偿）</text>
+    <text x="40" y="143" fill="#d6d8e6" font-size="12">延迟双删 / 删除失败重试 / 延时消息队列再删一次</text>
+
+    <rect x="20" y="170" width="720" height="60" rx="12" fill="rgba(0,212,255,.10)" stroke="#00d4ff"/>
+    <text x="40" y="196" fill="#00d4ff" font-size="13" font-weight="700">L3 · 数据订阅层（业界主流·解耦·最终一致）</text>
+    <text x="40" y="218" fill="#d6d8e6" font-size="12">Canal/Debezium 订阅 binlog + MQ 异步淘汰/更新 Redis</text>
+
+    <rect x="20" y="245" width="720" height="0" rx="12" fill="none"/>
+  </svg>
+  <svg viewBox="0 0 760 70" width="760" height="70" style="margin-top:6px">
+    <rect x="20" y="10" width="720" height="50" rx="12" fill="rgba(34,197,94,.10)" stroke="#22c55e"/>
+    <text x="40" y="30" fill="#4ade80" font-size="13" font-weight="700">L4 · 强一致层（牺牲并发换准确）</text>
+    <text x="40" y="50" fill="#d6d8e6" font-size="12">分布式读写锁串行化 / 读时强制回源DB / Redisson 锁</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ===== 4 延迟双删 交互 ===== -->
+<section id="s4">
+  <h2><span class="num">4</span>延迟双删：原理、坑、与交互演示</h2>
+  <p class="lead">延迟双删是 L2 层最经典的经验方案：在「先删缓存→更新DB」或标准写法基础上，<b>延迟一段时间后再删一次缓存</b>，用来清掉并发读回填的旧值。</p>
+
+  <h3>流程</h3>
+  <pre><span class="cm">// 写操作</span>
+<span class="fn">deleteCache</span>(key);          <span class="cm">// ① 先删缓存</span>
+<span class="fn">updateDB</span>(key, newVal);     <span class="cm">// ② 更新数据库</span>
+<span class="fn">sleep</span>(N);                 <span class="cm">// ③ 休眠 N 毫秒（关键）</span>
+<span class="fn">deleteCache</span>(key);          <span class="cm">// ④ 再删一次，清掉期间被回填的旧值</span></pre>
+
+  <div class="note"><b>延迟 N 取多少？</b> 经验值通常 500ms~1s，原则是 <code>N &gt; 一次「读 miss → 回源DB → 写回缓存」的耗时</code>。但要命中正好覆盖窗口很难——N 太小清不掉，N 太大则期间读到的仍是（可能）旧缓存且线程被阻塞。</div>
+
+  <h3>交互：调节延迟，看能否盖住「读回填窗口」</h3>
+  <div class="controls">
+    <label>读回填耗时（ms）：<span id="readT">300</span></label>
+    <input type="range" id="readSlider" min="100" max="1200" value="300" oninput="updRead()">
+    <label style="margin-left:14px;">双删延迟 N（ms）：<span id="delN">500</span></label>
+    <input type="range" id="delSlider" min="0" max="1500" value="500" oninput="updDel()">
+  </div>
+  <div class="svgbox">
+    <svg viewBox="0 0 760 230" width="760" height="230" id="ddSvg">
+      <line x1="60" y1="110" x2="720" y2="110" stroke="#3a3a5a" stroke-width="2"/>
+      <text x="40" y="40" fill="#ff8e53" font-size="12">写线程 W</text>
+      <text x="40" y="150" fill="#00d4ff" font-size="12">读线程 R</text>
+      <!-- 写: 删缓存 (静态, ~50ms) -->
+      <rect id="w1" x="68" y="28" width="46" height="22" rx="5" fill="rgba(255,107,107,.8)"/>
+      <text x="91" y="43" fill="#fff" font-size="10" text-anchor="middle">删缓存</text>
+      <!-- 写: 更新DB (JS 定位) -->
+      <rect id="w2" x="90" y="28" width="120" height="22" rx="5" fill="rgba(255,142,83,.7)"/>
+      <text x="150" y="43" fill="#fff" font-size="10" text-anchor="middle">更新DB</text>
+      <!-- 写: 延迟N (JS 定位) -->
+      <rect id="w3" x="210" y="28" width="0" height="22" rx="5" fill="rgba(250,204,21,.45)" stroke="#facc15" stroke-dasharray="3 3"/>
+      <text id="w3t" x="210" y="20" fill="#facc15" font-size="10" text-anchor="middle"></text>
+      <!-- 写: 再删缓存 (JS 定位) -->
+      <rect id="w4" x="230" y="28" width="46" height="22" rx="5" fill="rgba(255,107,107,.85)"/>
+      <text id="w4t" x="253" y="43" fill="#fff" font-size="10" text-anchor="middle">再删</text>
+      <!-- 读: 读DB (JS 定位) -->
+      <rect id="r1" x="100" y="138" width="100" height="22" rx="5" fill="rgba(0,212,255,.45)"/>
+      <text x="150" y="153" fill="#fff" font-size="10" text-anchor="middle">读DB(旧值)</text>
+      <!-- 读: 写回缓存 (JS 定位) -->
+      <rect id="r2" x="230" y="138" width="70" height="22" rx="5" fill="rgba(0,212,255,.7)"/>
+      <text id="r2t" x="265" y="153" fill="#fff" font-size="10" text-anchor="middle">写回旧值</text>
+      <!-- DB 更新完成标记 (JS 定位) -->
+      <line id="mk" x1="210" y1="14" x2="210" y2="172" stroke="#9aa0b4" stroke-dasharray="2 3"/>
+      <text id="mkt" x="214" y="14" fill="#9aa0b4" font-size="10">DB更新完成</text>
+      <!-- 读回写点标记 (JS 定位) -->
+      <line id="mk2" x1="230" y1="120" x2="230" y2="172" stroke="#ff6b6b" stroke-dasharray="2 3"/>
+    </svg>
+  </div>
+  <div class="explain" id="ddExplain">写线程：删缓存(50ms) → 更新DB(90~200ms) → 睡 N ms → 再删缓存。读线程：缓存 miss 后从 100ms 起回源DB(耗时=读回填耗时)，完成后把<b>旧值</b>写回缓存。只要「第二次删除」晚于「读线程写回旧值」的时刻，旧值就会被清掉。拖动两个滑块，看判定如何变化。</div>
+  <div class="note" id="ddVerdict" style="margin-top:8px;"></div>
+
+  <div class="note warn"><b>延迟双删的硬伤：</b>
+  <br>① <b>sleep 阻塞线程</b>：在 Web 请求里 <code>sleep</code> 占用连接/线程，高并发下是灾难 → 应改用「延时消息」异步执行第二次删除。
+  <br>② <b>延迟靠拍脑袋</b>：N 是经验值，无法精准匹配真实读耗时，极端情况下仍漏。
+  <br>③ <b>只解决单一竞态</b>：对「删除失败」「主从延迟」无能为力。
+  <br>④ 第二次删除也可能失败，需要重试机制。
+  <br>所以——它有效，但<b>不算优雅的解法</b>。更好的在下一节。</div>
+</section>
+
+<!-- ===== 5 binlog订阅 ===== -->
+<section id="s5">
+  <h2><span class="num">5</span>更好的方案：订阅 binlog 异步淘汰（业界主流）</h2>
+  <p class="lead">把「维护缓存」这件事从业务写入链路里<b>彻底剥离</b>。业务只管写 MySQL，由独立消费者监听 binlog 来同步 Redis。这是阿里、美团等大厂的标准做法。</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 780 300" width="780" height="300">
+    <defs><marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#9aa0b4"/></marker></defs>
+    <!-- 业务写 -->
+    <rect x="30" y="130" width="120" height="54" rx="12" fill="rgba(255,142,83,.12)" stroke="#ff8e53"/>
+    <text x="90" y="158" fill="#fff" font-size="12" text-anchor="middle">业务写请求</text>
+    <text x="90" y="176" fill="#9aa0b4" font-size="10" text-anchor="middle">只写 MySQL</text>
+    <!-- mysql -->
+    <rect x="210" y="130" width="110" height="54" rx="12" fill="rgba(0,212,255,.10)" stroke="#00d4ff"/>
+    <text x="265" y="158" fill="#fff" font-size="12" text-anchor="middle">MySQL 主库</text>
+    <text x="265" y="176" fill="#9aa0b4" font-size="10" text-anchor="middle">产生 binlog</text>
+    <!-- canal -->
+    <rect x="390" y="130" width="110" height="54" rx="12" fill="rgba(123,47,247,.14)" stroke="#7b2ff7"/>
+    <text x="445" y="158" fill="#fff" font-size="12" text-anchor="middle">Canal</text>
+    <text x="445" y="176" fill="#9aa0b4" font-size="10" text-anchor="middle">订阅 binlog</text>
+    <!-- mq -->
+    <rect x="570" y="60" width="110" height="50" rx="12" fill="rgba(250,204,21,.12)" stroke="#facc15"/>
+    <text x="625" y="90" fill="#fff" font-size="12" text-anchor="middle">Kafka</text>
+    <!-- consumer -->
+    <rect x="570" y="170" width="110" height="54" rx="12" fill="rgba(34,197,94,.12)" stroke="#22c55e"/>
+    <text x="625" y="196" fill="#fff" font-size="11" text-anchor="middle">消费服务</text>
+    <text x="625" y="214" fill="#9aa0b4" font-size="10" text-anchor="middle">删/更 Redis</text>
+    <!-- redis -->
+    <rect x="390" y="240" width="110" height="48" rx="12" fill="rgba(255,107,107,.12)" stroke="#ff6b6b"/>
+    <text x="445" y="268" fill="#fff" font-size="12" text-anchor="middle">Redis</text>
+    <!-- arrows -->
+    <line x1="150" y1="157" x2="205" y2="157" stroke="#9aa0b4" marker-end="url(#ar2)"/>
+    <line x1="320" y1="157" x2="385" y2="157" stroke="#9aa0b4" marker-end="url(#ar2)"/>
+    <line x1="500" y1="150" x2="565" y2="100" stroke="#facc15" marker-end="url(#ar2)"/>
+    <line x1="625" y1="110" x2="625" y2="168" stroke="#facc15" marker-end="url(#ar2)"/>
+    <line x1="570" y1="197" x2="500" y2="255" stroke="#22c55e" marker-end="url(#ar2)"/>
+    <text x="525" y="145" fill="#9aa0b4" font-size="10" text-anchor="middle">binlog</text>
+    <text x="690" y="140" fill="#facc15" font-size="10" text-anchor="middle">解耦</text>
+    <text x="450" y="232" fill="#22c55e" font-size="10" text-anchor="middle">同步</text>
+  </svg>
+  </div>
+
+  <h3>为什么它「更好」</h3>
+  <div class="grid g2">
+    <div class="mini green"><h4>✅ 业务零侵入</h4><p>业务代码只写 DB，不用在每次写入里手动删缓存、不用 sleep、不用担心删失败。缓存逻辑集中在一个消费者里。</p></div>
+    <div class="mini green"><h4>✅ 可靠、可重试</h4><p>binlog 是 MySQL 已提交日志，只要写进 DB 就一定有；MQ 保证至少消费一次，失败可重试，不会像「应用内删缓存失败」那样静默丢。</p></div>
+    <div class="mini green"><h4>✅ 顺序天然正确</h4><p>binlog 顺序即事务提交顺序，消费者按序处理，避免并发双写导致的乱序脏数据。</p></div>
+    <div class="mini green"><h4>✅ 可精准更新</h4><p>不只是「删」，还能基于 binlog 的 row 数据做<b>增量更新</b>缓存，减少读 miss 回源，性能更优。</p></div>
+  </div>
+
+  <div class="note"><b>落地要点：</b>
+  <br>· 用 <b>Canal</b>（阿里，伪装 MySQL 从库拉 binlog）或 <b>Debezium</b>（基于 Kafka Connect）；
+  <br>· MQ 选 Kafka/RocketMQ，消费者幂等（同一主键多次消费结果一致）；
+  <br>· 仍建议 Redis 数据带 <b>TTL 兜底</b>，防止消费者挂掉期间无限期脏；
+  <br>· 延迟是「秒级」的最终一致，对绝大多数业务足够。</div>
+
+  <div class="note good"><b>结论：</b>延迟双删是「在业务写链路里打补丁」；binlog 订阅是「把缓存一致性当成一条独立的数据管道来治理」。后者在可靠性、可维护性、可扩展性上全面优于前者，是<b>生产环境首选</b>。延迟双删可作为没有基建时的过渡方案。</div>
+</section>
+
+<!-- ===== 6 进阶方案 ===== -->
+<section id="s6">
+  <h2><span class="num">6</span>其他进阶方案（按场景选用）</h2>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab(this,'t1')">版本号 / CAS</div>
+    <div class="tab" onclick="switchTab(this,'t2')">延时消息队列</div>
+    <div class="tab" onclick="switchTab(this,'t3')">分布式读写锁</div>
+    <div class="tab" onclick="switchTab(this,'t4')">读时补偿 / 读穿校验</div>
+    <div class="tab" onclick="switchTab(this,'t5')">写时强制回源</div>
+  </div>
+
+  <div class="pane active" id="t1">
+    <h3>版本号 / CAS 机制</h3>
+    <p>缓存值里带上 <code>version</code> 或 <code>updated_at</code> 时间戳。写入时比对版本，<b>只允许新版本覆盖旧版本</b>，防止并发下「旧值后到」覆盖新值。</p>
+    <pre><span class="cm">// 缓存结构</span>
+{ <span class="st">"data"</span>: ..., <span class="st">"version"</span>: 1001 }
+
+<span class="cm">// 写回缓存前比对</span>
+<span class="kw">if</span> (cached.version &lt; newVersion) {
+    redis.set(key, newValueWithVersion);  <span class="cm">// 仅在更新时</span>
+} <span class="kw">else</span> { <span class="cm">// 丢弃迟到的旧值，避免回退</span> }</pre>
+    <p class="lead">适合「先更新DB再删缓存」仍有极小竞态、或需要防乱序的场景。注意 version 要来自 DB 的事务版本或自增时间戳。</p>
+  </div>
+
+  <div class="pane" id="t2">
+    <h3>延时消息队列（延迟双删的优雅版）</h3>
+    <p>把「第二次删除」从同步 <code>sleep</code> 改成发一条<b>延时消息</b>（RocketMQ 延时等级 / Kafka 延时插件 / Redis ZSet 定时），到点再由独立消费者删缓存。请求线程不再被阻塞。</p>
+    <pre><span class="cm">// 写操作</span>
+updateDB(key, newVal);
+deleteCache(key);                 <span class="cm">// 立即删一次</span>
+mq.sendDelay(<span class="st">"deleteCache:"</span>+key, delay=500ms);  <span class="cm">// 异步再删</span></pre>
+    <p class="lead">解决了延迟双删「阻塞线程」的硬伤，是延迟双删的工程化升级。但延迟仍是经验值，未根治「拍脑袋」问题。</p>
+  </div>
+
+  <div class="pane" id="t3">
+    <h3>分布式读写锁（强一致，牺牲并发）</h3>
+    <p>对同一条数据，写时加「写锁」、读时加「读锁」（Redisson <code>ReadWriteLock</code> 或基于 Redis/ZK 的锁），让读写串行化，从根上消除竞态。</p>
+    <pre>RLock writeLock = redisson.getWriteLock(key);
+writeLock.lock();
+<span class="kw">try</span> { updateDB(key, v); deleteCache(key); }
+<span class="kw">finally</span> { writeLock.unlock(); }</pre>
+    <p class="lead">一致性最强（接近线性一致），但<b>并发度骤降</b>，只适合一致性要求极高、且热点不集中的关键数据（如账户余额）。绝大多数业务不值得。</p>
+  </div>
+
+  <div class="pane" id="t4">
+    <h3>读时补偿 / 读穿校验</h3>
+    <p>读请求命中缓存后，额外校验「缓存版本/时间戳」是否落后于 DB（或是否带过期标记）；发现可疑旧值则异步回源刷新，或返回 DB 真值。</p>
+    <pre><span class="kw">if</span> (cached != <span class="kw">null</span>) {
+    <span class="kw">if</span> (cached.isStaleOrSuspicious()) {
+        asyncRefreshFromDB(key);  <span class="cm">// 后台修正</span>
+    }
+    <span class="kw">return</span> cached.data;
+}</pre>
+    <p class="lead">作为「最终一致」的额外收敛手段，与 binlog 方案互补，缩短用户可见的不一致窗口。</p>
+  </div>
+
+  <div class="pane" id="t5">
+    <h3>写时强制回源（绕过缓存）</h3>
+    <p>对一致性要求极高的写后读（如支付后查余额），写完后让后续读<b>强制走 DB</b>（参考前文「主从延迟」专题的「写后读走主库」思路），不碰可能脏的缓存，直至确认同步完成。</p>
+    <p class="lead">本质是「用一致性换性能」的局部策略，只针对少数关键路径，避免全局锁带来的性能崩塌。</p>
+  </div>
+</section>
+
+<!-- ===== 7 对比 ===== -->
+<section id="s7">
+  <h2><span class="num">7</span>方案对比总表</h2>
+  <table>
+    <thead><tr><th>方案</th><th>一致性强度</th><th>业务侵入</th><th>复杂度</th><th>性能影响</th><th>适用场景</th></tr></thead>
+    <tbody>
+      <tr><td><b>Cache-Aside（先更DB再删缓存）</b></td><td><span class="badge b-mid">最终·弱窗</span></td><td><span class="badge b-ok">低</span></td><td><span class="badge b-ok">低</span></td><td><span class="badge b-ok">小</span></td><td>绝大多数读写缓存场景（基线）</td></tr>
+      <tr><td>延迟双删</td><td><span class="badge b-mid">最终·改善</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-bad">sleep阻塞</span></td><td>无 binlog 基建时的过渡</td></tr>
+      <tr><td>延时消息再删</td><td><span class="badge b-mid">最终·改善</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-ok">小</span></td><td>延迟双删的升级版</td></tr>
+      <tr><td><b>binlog 订阅（Canal+MQ）</b></td><td><span class="badge b-ok">最终·可靠</span></td><td><span class="badge b-ok">零</span></td><td><span class="badge b-mid">中高</span></td><td><span class="badge b-ok">极小</span></td><td><b>生产首选·大型系统</b></td></tr>
+      <tr><td>版本号 / CAS</td><td><span class="badge b-mid">防乱序</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-ok">小</span></td><td>防并发旧值覆盖</td></tr>
+      <tr><td>分布式读写锁</td><td><span class="badge b-ok">强一致</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-bad">高</span></td><td><span class="badge b-bad">大(降并发)</span></td><td>极关键数据(余额等)</td></tr>
+      <tr><td>读时补偿 / 强制回源</td><td><span class="badge b-mid">收敛窗口</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-mid">中</span></td><td><span class="badge b-mid">中</span></td><td>关键路径局部兜底</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>共同底线：</b>无论选哪种，都给缓存加<b>合理的 TTL 过期</b>作为最后兜底——即使所有同步机制失效，脏数据也会在过期后自愈。</div>
+</section>
+
+<!-- ===== 8 选型 ===== -->
+<section id="s8">
+  <h2><span class="num">8</span>实战选型决策树 & 一句话总结</h2>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 720 320" width="720" height="320">
+    <!-- nodes -->
+    <rect x="250" y="20" width="220" height="44" rx="10" fill="rgba(255,255,255,.06)" stroke="#7b2ff7"/>
+    <text x="360" y="47" fill="#fff" font-size="12" text-anchor="middle">用缓存吗？一致性要求多高？</text>
+
+    <rect x="40" y="110" width="200" height="44" rx="10" fill="rgba(34,197,94,.12)" stroke="#22c55e"/>
+    <text x="140" y="137" fill="#fff" font-size="11" text-anchor="middle">大型系统 / 高一致诉求</text>
+    <rect x="260" y="110" width="200" height="44" rx="10" fill="rgba(250,204,21,.12)" stroke="#facc15"/>
+    <text x="360" y="137" fill="#fff" font-size="11" text-anchor="middle">一般业务最终一致</text>
+    <rect x="480" y="110" width="200" height="44" rx="10" fill="rgba(255,107,107,.12)" stroke="#ff6b6b"/>
+    <text x="580" y="137" fill="#fff" font-size="11" text-anchor="middle">强一致(余额等)</text>
+
+    <rect x="40" y="200" width="200" height="50" rx="10" fill="rgba(34,197,94,.18)" stroke="#22c55e"/>
+    <text x="140" y="222" fill="#fff" font-size="11" text-anchor="middle">→ binlog 订阅</text>
+    <text x="140" y="240" fill="#9aa0b4" font-size="10" text-anchor="middle">(Canal+MQ) 首选</text>
+    <rect x="260" y="200" width="200" height="50" rx="10" fill="rgba(250,204,21,.18)" stroke="#facc15"/>
+    <text x="360" y="222" fill="#fff" font-size="11" text-anchor="middle">→ Cache-Aside + TTL</text>
+    <text x="360" y="240" fill="#9aa0b4" font-size="10" text-anchor="middle">+ 删除重试/延时再删</text>
+    <rect x="480" y="200" width="200" height="50" rx="10" fill="rgba(255,107,107,.18)" stroke="#ff6b6b"/>
+    <text x="580" y="222" fill="#fff" font-size="11" text-anchor="middle">→ 读写锁 / 强制回源</text>
+    <text x="580" y="240" fill="#9aa0b4" font-size="10" text-anchor="middle">关键路径局部用</text>
+
+    <!-- connectors -->
+    <line x1="360" y1="64" x2="140" y2="108" stroke="#9aa0b4"/>
+    <line x1="360" y1="64" x2="360" y2="108" stroke="#9aa0b4"/>
+    <line x1="360" y1="64" x2="580" y2="108" stroke="#9aa0b4"/>
+    <line x1="140" y1="154" x2="140" y2="198" stroke="#22c55e"/>
+    <line x1="360" y1="154" x2="360" y2="198" stroke="#facc15"/>
+    <line x1="580" y1="154" x2="580" y2="198" stroke="#ff6b6b"/>
+  </svg>
+  </div>
+
+  <div class="note good">
+    <p style="margin:0;"><b>一句话总结：</b></p>
+    <p style="margin:6px 0 0;">① 写缓存永远选 <b>「先更新 DB，再删除缓存」</b>（Cache-Aside），别双写、别先删再更（除非配延迟双删）。</p>
+    <p style="margin:6px 0 0;">② 想要真正省心 → <b>binlog 订阅（Canal + MQ）</b>，业务零侵入、可靠、可重试，是延迟双删的全面升级。</p>
+    <p style="margin:6px 0 0;">③ 任何方案都加 <b>TTL 兜底</b>；关键路径可用读写锁 / 写后强制回源补强。</p>
+    <p style="margin:6px 0 0;">④ 延迟双删有效但「打补丁式」——理解它，然后尽量用更优方案替代。</p>
+  </div>
+</section>
+
+<footer>MySQL × Redis 一致性 · 图文交互讲解 · 无外部依赖，可离线打开</footer>
+</div>
+
+<script>
+/* ---------- 通用 tab ---------- */
+function switchTab(el,id){
+  const sec=el.closest('section');
+  sec.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  sec.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+
+/* ---------- 翻车 race 动画 ---------- */
+const STEPS={
+  A:[ // 先删缓存 再更新DB —— 翻车
+    {w:0.05, r:null, cls:'cache', icon:'✕', msg:'<span class="tag">W</span> 删除缓存（缓存空）。'},
+    {w:null, r:0.18, cls:'db', icon:'R', msg:'<span class="tag">R</span> 读线程缓存 miss，准备读 DB（此刻 DB 仍是旧值）。'},
+    {w:null, r:0.30, cls:'db', icon:'R', msg:'<span class="tag">R</span> 读到 DB 旧值。'},
+    {w:0.35, r:null, cls:'db', icon:'✎', msg:'<span class="tag">W</span> 更新 DB 为新值。'},
+    {w:null, r:0.55, cls:'cache', icon:'✎', msg:'<span class="tag">R</span> 把旧值写回缓存！'},
+    {w:null, r:null, cls:'', icon:'', final:true,
+     msg:'<span class="tag">结果</span> 缓存=旧值，DB=新值 → <b style="color:#ff8585">长期不一致</b>。这正是「先删缓存再更DB」的经典翻车。'}
+  ],
+  B:[ // 先更新DB 再删缓存 —— 残留极小窗口
+    {w:0.10, r:null, cls:'db', icon:'✎', msg:'<span class="tag">W</span> 更新 DB 为新值。'},
+    {w:null, r:0.20, cls:'db', icon:'R', msg:'<span class="tag">R</span> 缓存 miss，开始读 DB（读到新值）。'},
+    {w:0.30, r:null, cls:'cache', icon:'✕', msg:'<span class="tag">W</span> 删除缓存（此时缓存本就空，无影响）。'},
+    {w:null, r:0.45, cls:'cache', icon:'✎', msg:'<span class="tag">R</span> 把新值写回缓存 → 一致 ✅'},
+    {w:null, r:null, cls:'', icon:'', final:true,
+     msg:'<span class="tag">说明</span> 正常路径一致。残留竞态仅发生在「读已拿到旧缓存值、正要返回，同时写更新DB并删缓存」的极窄窗口，概率低且多为可自愈的瞬时脏读。'}
+  ]
+};
+let raceTimer=null, raceIdx=0, raceKey=null;
+function playRace(k){
+  clearInterval(raceTimer); raceKey=k; raceIdx=0;
+  document.querySelectorAll('.ev').forEach(e=>e.classList.remove('on'));
+  document.getElementById('raceResult').style.display='none';
+  const steps=STEPS[k];
+  placeEvents(k);
+  document.getElementById('raceExplain').innerHTML='▶ 开始播放：<b>'+ (k==='A'?'先删缓存→再更新DB（翻车演示）':'先更新DB→再删缓存（标准写法）') +'</b>';
+  runStep();
+  function runStep(){
+    if(raceIdx>=steps.length){return;}
+    const s=steps[raceIdx];
+    if(s.w!=null) markEvent('w',s.w,s.cls,s.icon);
+    if(s.r!=null) markEvent('r',s.r,s.cls,s.icon);
+    document.getElementById('raceExplain').innerHTML=s.msg;
+    if(s.final){
+      const rb=document.getElementById('raceResult');
+      rb.style.display='block';
+      rb.className='note '+(k==='A'?'warn':'good');
+      rb.innerHTML=s.msg;
+    }
+    raceIdx++;
+    raceTimer=setTimeout(runStep,1100);
+  }
+}
+function placeEvents(k){
+  // 场景A：W在0.05删,0.35更; R在0.18读,0.30读,0.55写回
+  // 场景B：W在0.10更,0.30删; R在0.20读,0.45写回
+  clearLane('trk-w'); clearLane('trk-r');
+  const W = k==='A'
+    ? [[0.05,'cache','✕'],[0.35,'db','✎']]
+    : [[0.10,'db','✎'],[0.30,'cache','✕']];
+  const R = k==='A'
+    ? [[0.18,'db','R'],[0.30,'db','R'],[0.55,'cache','✎']]
+    : [[0.20,'db','R'],[0.45,'cache','✎']];
+  W.forEach(([p,c,i])=>addEvent('trk-w','w',p,c,i));
+  R.forEach(([p,c,i])=>addEvent('trk-r','r',p,c,i));
+}
+function addEvent(trackId,who,p,cls,icon){
+  const t=document.getElementById(trackId);
+  const d=document.createElement('div');
+  d.className='ev '+cls;
+  d.style.left=(p*100)+'%';
+  d.textContent=icon;
+  d.id=who+'-'+Math.round(p*100);
+  t.appendChild(d);
+}
+function markEvent(who,p,cls,icon){
+  const el=document.getElementById(who+'-'+Math.round(p*100));
+  if(el) el.classList.add('on');
+}
+function clearLane(id){document.getElementById(id).querySelectorAll('.ev').forEach(e=>e.remove());}
+function resetRace(){
+  clearInterval(raceTimer);
+  document.querySelectorAll('.ev').forEach(e=>e.remove());
+  document.getElementById('raceExplain').innerHTML='点击上方按钮播放时序动画。每个节点代表一个原子动作，粉色游标表示「当前时间」，动画会逐步揭示交错过程与最终状态。';
+  document.getElementById('raceResult').style.display='none';
+}
+
+/* ---------- 延迟双删交互（坐标与判定严格自洽） ---------- */
+const SCALE=X=>60+(X/1500)*660;        // ms -> px（横轴 0~1500ms）
+const W_DEL=50;                         // 写线程：删缓存发生点(ms)
+const W_DB0=90, W_DB1=200;             // 写线程：更新DB 区间(ms)
+const R_DB0=100;                       // 读线程：开始读DB(ms，缓存miss后)
+function updRead(){document.getElementById('readT').textContent=document.getElementById('readSlider').value;drawDD();}
+function updDel(){document.getElementById('delN').textContent=document.getElementById('delSlider').value;drawDD();}
+function drawDD(){
+  const readT=+document.getElementById('readSlider').value;  // 读线程回源DB耗时
+  const delN=+document.getElementById('delSlider').value;    // 双删延迟N
+  const svg=document.getElementById('ddSvg');
+  // 写线程：更新DB
+  setRect(svg,'w2',SCALE(W_DB0),28,SCALE(W_DB1)-SCALE(W_DB0),22);
+  // 写线程：延迟区（更新DB完成 -> +N）
+  const w3x=SCALE(W_DB1);
+  setRect(svg,'w3',w3x,28,SCALE(delN)-SCALE(0),22);
+  svg.querySelector('#w3t').setAttribute('x',w3x+Math.max(8,SCALE(delN)/2));
+  svg.querySelector('#w3t').textContent=delN>0?delN+'ms':'';
+  // 写线程：再删缓存
+  const w4x=SCALE(W_DB1+delN);
+  setRect(svg,'w4',w4x,28,46,22);
+  svg.querySelector('#w4t').setAttribute('x',w4x+23);
+  // 读线程：读DB区间
+  setRect(svg,'r1',SCALE(R_DB0),138,SCALE(readT)-SCALE(0),22);
+  // 读线程：写回旧值（读DB完成后）
+  const r2x=SCALE(R_DB0+readT);
+  setRect(svg,'r2',r2x,138,70,22);
+  svg.querySelector('#r2t').setAttribute('x',r2x+35);
+  // 标记：DB更新完成 / 读回写点
+  svg.querySelector('#mk').setAttribute('x1',SCALE(W_DB1));
+  svg.querySelector('#mk').setAttribute('x2',SCALE(W_DB1));
+  svg.querySelector('#mkt').setAttribute('x',SCALE(W_DB1)+4);
+  svg.querySelector('#mk2').setAttribute('x1',r2x);
+  svg.querySelector('#mk2').setAttribute('x2',r2x);
+
+  // 判定：第二次删除必须晚于「读线程写回旧值」的时刻，才能清掉它
+  const readBackAt=R_DB0+readT;        // 读线程把旧值写回缓存的时刻
+  const secondDelAt=W_DB1+delN;        // 第二次删除的时刻
+  const verdict=document.getElementById('ddVerdict');
+  if(secondDelAt > readBackAt){
+    verdict.className='note good';
+    verdict.innerHTML='<b>✅ 覆盖成功：</b>第二次删除在 <b>'+secondDelAt+'ms</b>，晚于读线程写回旧值的 <b>'+readBackAt+'ms</b> → 旧值被清掉，最终一致。当前 N='+delN+'ms 足够（需 N &gt; '+(readBackAt-W_DB1)+'ms）。';
+  }else{
+    verdict.className='note warn';
+    verdict.innerHTML='<b>⚠️ 未覆盖：</b>第二次删除在 <b>'+secondDelAt+'ms</b>，早于/等于读线程写回旧值的 <b>'+readBackAt+'ms</b> → 旧值残留，仍不一致！请把 N 调到 &gt; '+(readBackAt-W_DB1)+'ms。';
+  }
+}
+function setRect(svg,id,x,y,w,h){
+  const el=svg.querySelector('#'+id);
+  el.setAttribute('x',x);el.setAttribute('y',y);
+  el.setAttribute('width',Math.max(0,w));el.setAttribute('height',h);
+}
+drawDD();
+</script>
+</body>
+</html>
