@@ -10,7 +10,9 @@ NC='\033[0m' # No Color
 total=0
 missing=0
 found=0
+skipped=0
 missing_files=""
+skipped_files=""
 
 echo "开始检查HTML文件链接..."
 echo "=============================="
@@ -78,7 +80,14 @@ while IFS= read -r -d '' html_file; do
         found=$((found + 1))
     else
         if [[ -z "$checked" ]]; then
-            echo -e "${YELLOW}跳过: $relative_path (未找到任何上级 index.html)${NC}"
+            skip_info="$relative_path (未找到任何上级 index.html)"
+            echo -e "${YELLOW}跳过: $skip_info${NC}"
+            skipped=$((skipped + 1))
+            if [[ -z "$skipped_files" ]]; then
+                skipped_files="$skip_info"
+            else
+                skipped_files="$skipped_files, $skip_info"
+            fi
         else
             missing_info="$relative_path -> 未在以下 index 中找到链接:$checked"
             echo -e "${RED}✗ $missing_info${NC}"
@@ -100,6 +109,10 @@ echo -e "${GREEN}已链接: $found${NC}"
 echo -e "${RED}未链接: $missing${NC}"
 if [[ $missing -gt 0 ]]; then
     echo -e "${RED}未链接文件: $missing_files${NC}"
+fi
+echo -e "${YELLOW}跳过(无上级 index.html): $skipped${NC}"
+if [[ $skipped -gt 0 ]]; then
+    echo -e "${YELLOW}跳过文件: $skipped_files${NC}"
 fi
 
 if [[ $missing -gt 0 ]]; then
