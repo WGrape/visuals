@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>最常用的限流器 · 原理 / 实现 / 使用 / 区别 一文讲透</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg2: #111827;
+    --bg3: #1a2235;
+    --card: rgba(255,255,255,0.04);
+    --card-hover: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.14);
+    --fg: #e2e8f0;
+    --fg2: #94a3b8;
+    --fg3: #64748b;
+    --accent: #38bdf8;
+    /* 六种限流器配色 */
+    --c-fixed: #38bdf8;     /* 固定窗口 蓝 */
+    --c-slide-win: #a78bfa; /* 滑动窗口 紫 */
+    --c-slide-log: #f472b6; /* 滑动日志 粉 */
+    --c-token: #34d399;     /* 令牌桶 绿 */
+    --c-leaky: #fbbf24;     /* 漏桶 橙 */
+    --c-redis: #f87171;     /* 分布式 红 */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg); color: var(--fg); min-height: 100vh; line-height: 1.75;
+    display: flex;
+  }
+  code {
+    background: rgba(56,189,248,0.12); color: #7dd3fc;
+    padding: 2px 7px; border-radius: 5px; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px;
+  }
+  pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; margin: 14px 0; }
+  pre code { background: none; padding: 0; color: #cbd5e1; font-size: 12.5px; line-height: 1.7; }
+
+  /* ========== Sidebar ========== */
+  .sidebar {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 250px; height: 100vh; overflow-y: auto; flex-shrink: 0;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    padding: 24px 14px;
+  }
+  .sidebar .logo { display: block; font-size: 15px; font-weight: 800; color: #fff; text-decoration: none; margin-bottom: 4px; padding: 0 8px; }
+  .sidebar .sub { font-size: 11px; color: var(--fg3); padding: 0 8px 16px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .nav-group { font-size: 11px; font-weight: 700; color: var(--fg3); text-transform: uppercase; letter-spacing: .05em; padding: 12px 8px 6px; }
+  .sidebar a.nav-link {
+    display: block; color: var(--fg2); text-decoration: none; font-size: 13px;
+    padding: 7px 12px; border-radius: 8px; margin: 2px 0; transition: all .2s; border-left: 2px solid transparent;
+  }
+  .sidebar a.nav-link:hover { color: #fff; background: var(--card); }
+  .sidebar a.nav-link.active { color: var(--accent); background: rgba(56,189,248,.08); border-left-color: var(--accent); font-weight: 600; }
+
+  /* ========== Main ========== */
+  .main { flex: 1; min-width: 0; }
+  .hero { text-align: center; padding: 56px 24px 36px; position: relative; overflow: hidden; border-bottom: 1px solid var(--border); }
+  .hero::before { content:''; position:absolute; top:-140px; left:50%; transform:translateX(-50%); width:640px; height:640px; background:radial-gradient(circle, rgba(56,189,248,.08), transparent 70%); pointer-events:none; }
+  .hero h1 { font-size: 2.2rem; font-weight: 800; letter-spacing: -.02em; margin-bottom: 14px; background: linear-gradient(135deg,#38bdf8,#a78bfa,#34d399); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--fg2); font-size: 1.05rem; max-width: 700px; margin: 0 auto 20px; }
+  .pill-row { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
+  .pill { font-size:12px; font-weight:600; padding:6px 14px; border-radius:18px; border:1px solid var(--border); background:var(--card); }
+
+  .content { max-width: 980px; margin: 0 auto; padding: 0 28px 60px; }
+  .section { margin: 56px 0; padding-top: 20px; }
+  .sec-head { display:flex; align-items:center; gap:14px; margin-bottom: 8px; }
+  .sec-badge { width:42px; height:42px; flex-shrink:0; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; }
+  .sec-head h2 { font-size: 1.5rem; font-weight: 700; }
+  .sec-desc { color: var(--fg2); font-size:.95rem; margin-top:4px; padding-left:56px; }
+
+  .card { background: var(--card); border:1px solid var(--border); border-radius:14px; padding:22px; margin:16px 0; transition: all .25s; }
+  .card:hover { border-color: var(--border2); background: var(--card-hover); }
+  .card h3 { font-size:1.05rem; font-weight:700; margin-bottom:10px; }
+  .card-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin:18px 0; }
+  .card-mini { background: var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; transition: all .25s; }
+  .card-mini:hover { transform: translateY(-3px); border-color: var(--border2); }
+  .card-mini h4 { font-size:.95rem; font-weight:700; margin-bottom:6px; }
+  .card-mini p { font-size:.83rem; color: var(--fg2); line-height:1.6; }
+
+  .diagram { width:100%; max-width:760px; margin:24px auto; display:block; border-radius:12px; }
+  .diagram-sm { width:100%; max-width:560px; margin:20px auto; display:block; border-radius:12px; }
+
+  .highlight-box { background: linear-gradient(135deg, rgba(56,189,248,.08), rgba(167,139,250,.06)); border-left:4px solid var(--accent); border-radius:0 12px 12px 0; padding:18px 22px; margin:20px 0; }
+  .highlight-box.danger { background: linear-gradient(135deg, rgba(248,113,113,.08), rgba(251,191,36,.06)); border-left-color: var(--c-redis); }
+  .highlight-box.success { background: linear-gradient(135deg, rgba(52,211,153,.08), rgba(56,189,248,.06)); border-left-color: var(--c-token); }
+  .highlight-box h4 { font-size:.98rem; font-weight:700; margin-bottom:6px; }
+  .highlight-box p { color: var(--fg2); font-size:.9rem; }
+
+  .tag { display:inline-block; font-size:11px; font-weight:700; padding:3px 10px; border-radius:6px; letter-spacing:.03em; }
+
+  .compare-table { width:100%; border-collapse:collapse; margin:18px 0; font-size:.85rem; }
+  .compare-table th { background: var(--bg3); color:var(--fg); font-weight:700; padding:12px 14px; text-align:left; border:1px solid var(--border); }
+  .compare-table td { padding:10px 14px; border:1px solid var(--border); color:var(--fg2); vertical-align: top; }
+  .compare-table tr:hover td { background: var(--card); }
+
+  .pros-cons { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:14px 0; }
+  .pros, .cons { border-radius:12px; padding:16px 18px; }
+  .pros { background: rgba(52,211,153,.06); border:1px solid rgba(52,211,153,.25); }
+  .cons { background: rgba(248,113,113,.06); border:1px solid rgba(248,113,113,.25); }
+  .pros h4 { color: var(--c-token); font-size:.9rem; margin-bottom:8px; }
+  .cons h4 { color: var(--c-redis); font-size:.9rem; margin-bottom:8px; }
+  .pros ul, .cons ul { font-size:.83rem; color:var(--fg2); padding-left:16px; line-height:1.8; }
+
+  .usage { background: var(--bg2); border:1px solid var(--border2); border-radius:12px; padding:16px 18px; margin:14px 0; }
+  .usage h4 { font-size:.9rem; font-weight:700; color:var(--accent); margin-bottom:8px; display:flex; align-items:center; gap:8px; }
+  .usage .step-tip { font-size:.83rem; color:var(--fg2); margin-top:6px; }
+
+  .footer { text-align:center; padding:40px 24px; color:var(--fg3); font-size:.83rem; border-top:1px solid var(--border); }
+  .footer a { color: var(--accent); text-decoration:none; }
+
+  ::-webkit-scrollbar { width:6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius:3px; }
+
+  @media (max-width: 860px) {
+    body { flex-direction: column; }
+    .sidebar { position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    .hero h1 { font-size:1.6rem; }
+    .pros-cons { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====== Sidebar ====== -->
+<aside class="sidebar">
+  <a href="#" class="logo">⚡ 限流器实战</a>
+  <div class="sub">原理 · 实现 · 使用 · 区别</div>
+
+  <div class="nav-group">开篇</div>
+  <a href="#intro" class="nav-link">什么是限流器</a>
+  <a href="#overview" class="nav-link">六种限流器总览</a>
+
+  <div class="nav-group">本地限流器</div>
+  <a href="#fixed-window" class="nav-link">① 固定窗口计数器</a>
+  <a href="#sliding-window" class="nav-link">② 滑动窗口计数器</a>
+  <a href="#sliding-log" class="nav-link">③ 滑动日志</a>
+  <a href="#token-bucket" class="nav-link">④ 令牌桶</a>
+  <a href="#leaky-bucket" class="nav-link">⑤ 漏桶</a>
+
+  <div class="nav-group">分布式</div>
+  <a href="#redis-lua" class="nav-link">⑥ Redis + Lua 限流</a>
+
+  <div class="nav-group">总结</div>
+  <a href="#compare" class="nav-link">七维度全面对比</a>
+  <a href="#decision" class="nav-link">选型决策树</a>
+  <a href="#usage-tips" class="nav-link">生产使用建议</a>
+</aside>
+
+<!-- ====== Main ====== -->
+<div class="main">
+
+<div class="hero">
+  <h1>最常用的限流器，一文讲透</h1>
+  <p>从<strong>固定窗口</strong>到<strong>令牌桶</strong>、<strong>漏桶</strong>，再到<strong>分布式限流</strong>。每种都给出：原理图解、完整实现代码、使用方式、核心优缺点，最后用一张表说清它们之间的本质区别。</p>
+  <div class="pill-row">
+    <span class="pill" style="border-color:rgba(56,189,248,.3);color:var(--c-fixed)">🔵 固定窗口</span>
+    <span class="pill" style="border-color:rgba(167,139,250,.3);color:var(--c-slide-win)">🟣 滑动窗口</span>
+    <span class="pill" style="border-color:rgba(244,114,182,.3);color:var(--c-slide-log)">🩷 滑动日志</span>
+    <span class="pill" style="border-color:rgba(52,211,153,.3);color:var(--c-token)">🟢 令牌桶</span>
+    <span class="pill" style="border-color:rgba(251,191,36,.3);color:var(--c-leaky)">🟠 漏桶</span>
+    <span class="pill" style="border-color:rgba(248,113,113,.3);color:var(--c-redis)">🔴 分布式</span>
+  </div>
+</div>
+
+<div class="content">
+
+<!-- ============ 开篇：什么是限流器 ============ -->
+<section class="section" id="intro">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#38bdf8,#0ea5e9);">📌</div>
+    <h2>什么是限流器</h2>
+  </div>
+  <p class="sec-desc">限流（Rate Limiting）是一种通过<strong>主动拒绝或排队</strong>超出阈值的请求，来保护系统资源不被压垮的手段。</p>
+
+  <div class="highlight-box">
+    <h4>🎯 限流器要解决的核心问题</h4>
+    <p>任何一个系统的资源都是有限的：CPU、内存、线程池、数据库连接、第三方 API 配额。<strong>限流器的本质就是「流量整形」</strong>——让进入系统的请求速率不超过系统能承受的速率，从而避免雪崩、击穿、级联故障。</p>
+  </div>
+
+  <div class="card-grid">
+    <div class="card-mini"><h4 style="color:var(--c-fixed)">🛡️ 保护系统</h4><p>防止突发流量打满线程池 / 数据库连接池</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-slide-win)">⚖️ 公平分配</h4><p>多租户 / 多用户之间公平地瓜分资源</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-token)">💰 成本控制</h4><p>限制对收费第三方 API 的调用次数</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-leaky)">🚫 防刷防爬</h4><p>抵御恶意刷接口、爬虫、DDoS 攻击</p></div>
+  </div>
+
+  <div class="highlight-box success">
+    <h4>✅ 本文主线</h4>
+    <p>接下来逐一拆解 5 种本地限流器 + 1 种分布式限流器。每种都按 <strong>「原理 → 代码实现 → 怎么用 → 优缺点」</strong> 四步展开，最后用一张对比表 + 决策树帮你选型。</p>
+  </div>
+</section>
+
+
+<!-- ============ 总览 ============ -->
+<section class="section" id="overview">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#a78bfa,#7c3aed);">🗺️</div>
+    <h2>六种限流器总览</h2>
+  </div>
+  <p class="sec-desc">它们都回答同一个问题「现在还能不能放这个请求进来」，但底层数据结构、突发处理能力、精度、实现复杂度各不相同。</p>
+
+  <svg class="diagram" viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s1"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-opacity="0.12"/></filter></defs>
+    <!-- 时间窗口类 -->
+    <text x="200" y="36" text-anchor="middle" fill="#94a3b8" font-size="13" font-weight="700">🕐 基于「时间窗口」</text>
+    <rect x="40" y="55" width="200" height="60" rx="12" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.4)" filter="url(#s1)"/>
+    <text x="140" y="82" text-anchor="middle" fill="#38bdf8" font-size="13" font-weight="700">① 固定窗口</text>
+    <text x="140" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">最简单 / 有边界突刺</text>
+    <rect x="280" y="55" width="200" height="60" rx="12" fill="rgba(167,139,250,.1)" stroke="rgba(167,139,250,.4)" filter="url(#s1)"/>
+    <text x="380" y="82" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="700">② 滑动窗口</text>
+    <text x="380" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">平滑 / 近似精确</text>
+    <rect x="520" y="55" width="200" height="60" rx="12" fill="rgba(244,114,182,.1)" stroke="rgba(244,114,182,.4)" filter="url(#s1)"/>
+    <text x="620" y="82" text-anchor="middle" fill="#f472b6" font-size="13" font-weight="700">③ 滑动日志</text>
+    <text x="620" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">最精确 / 最耗内存</text>
+
+    <!-- 桶类 -->
+    <text x="200" y="160" text-anchor="middle" fill="#94a3b8" font-size="13" font-weight="700">🪣 基于「令牌/漏斗」</text>
+    <rect x="160" y="180" width="200" height="60" rx="12" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.4)" filter="url(#s1)"/>
+    <text x="260" y="207" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">④ 令牌桶</text>
+    <text x="260" y="227" text-anchor="middle" fill="#94a3b8" font-size="10">允许突发 / 最常用</text>
+    <rect x="400" y="180" width="200" height="60" rx="12" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.4)" filter="url(#s1)"/>
+    <text x="500" y="207" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">⑤ 漏桶</text>
+    <text x="500" y="227" text-anchor="middle" fill="#94a3b8" font-size="10">平滑输出 / 无突发</text>
+
+    <!-- 分布式 -->
+    <text x="200" y="285" text-anchor="middle" fill="#94a3b8" font-size="13" font-weight="700">🌐 基于「共享存储」</text>
+    <rect x="280" y="290" width="200" height="0" rx="0" fill="none"/>
+    <rect x="280" y="290" width="200" height="0" rx="0" fill="none"/>
+    <rect x="280" y="248" width="200" height="0" rx="0" fill="none"/>
+    <rect x="280" y="272" width="200" height="44" rx="12" fill="rgba(248,113,113,.1)" stroke="rgba(248,113,113,.4)" filter="url(#s1)"/>
+    <text x="380" y="299" text-anchor="middle" fill="#f87171" font-size="13" font-weight="700">⑥ Redis + Lua</text>
+  </svg>
+</section>
+
+
+<!-- ============ ① 固定窗口 ============ -->
+<section class="section" id="fixed-window">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#38bdf8,#0ea5e9);">①</div>
+    <h2>固定窗口计数器</h2>
+  </div>
+  <p class="sec-desc">把时间切成等长片段，每个片段内维护一个计数器，超过阈值就拒绝，片段结束重置。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-fixed)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">将时间轴划分为固定大小的窗口（如 1 秒 / 1 分钟）。每个窗口起始时计数器归零，每来一个请求计数器 +1；当计数器 ≥ 阈值时，后续请求被拒绝，直到进入下一个窗口重新计数。实现最简单、内存占用最低，但存在<strong>窗口边界突刺</strong>问题。</p>
+  </div>
+
+  <svg class="diagram-sm" viewBox="0 0 560 240" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="fwOk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#10b981"/></linearGradient>
+      <linearGradient id="fwBad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f87171"/><stop offset="1" stop-color="#dc2626"/></linearGradient>
+    </defs>
+    <line x1="40" y1="190" x2="520" y2="190" stroke="#475569" stroke-width="2"/>
+    <text x="40" y="210" fill="#94a3b8" font-size="10">t0</text><text x="260" y="210" fill="#94a3b8" font-size="10">t1</text><text x="490" y="210" fill="#94a3b8" font-size="10">t2</text>
+    <line x1="260" y1="30" x2="260" y2="190" stroke="#475569" stroke-dasharray="4,4"/>
+    <text x="150" y="22" text-anchor="middle" fill="#94a3b8" font-size="11">窗口① (限额100)</text>
+    <text x="390" y="22" text-anchor="middle" fill="#94a3b8" font-size="11">窗口② (限额100)</text>
+    <rect x="60" y="80" width="170" height="110" rx="6" fill="url(#fwOk)" opacity=".8"/>
+    <text x="145" y="140" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">100 ✅</text>
+    <!-- 边界突刺 -->
+    <rect x="240" y="80" width="40" height="110" rx="4" fill="url(#fwBad)" opacity=".85"/>
+    <rect x="280" y="80" width="40" height="110" rx="4" fill="url(#fwBad)" opacity=".85"/>
+    <rect x="350" y="200" width="180" height="32" rx="8" fill="rgba(248,113,113,.15)" stroke="rgba(248,113,113,.4)"/>
+    <text x="440" y="221" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">⚠️ 临界 1 秒涌入 200!</text>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-fixed)">💻 实现代码（Java，线程安全）</h3>
+    <pre><code>public class FixedWindowRateLimiter {
+    private final int limit;          // 窗口内允许的最大请求数
+    private final long windowSizeMs;  // 窗口大小（毫秒）
+    private int counter;              // 当前窗口计数器
+    private long windowStart;         // 当前窗口起始时间戳
+
+    public FixedWindowRateLimiter(int limit, long windowSizeMs) {
+        this.limit = limit;
+        this.windowSizeMs = windowSizeMs;
+        this.windowStart = System.currentTimeMillis();
+        this.counter = 0;
+    }
+
+    /** 尝试获取一个配额，成功返回 true */
+    public synchronized boolean tryAcquire() {
+        long now = System.currentTimeMillis();
+        // 1. 若已跨入新窗口，则重置计数器与窗口起点
+        if (now - windowStart >= windowSizeMs) {
+            windowStart = now;
+            counter = 0;
+        }
+        // 2. 未超阈值则放行并计数
+        if (counter &lt; limit) {
+            counter++;
+            return true;
+        }
+        // 3. 超过阈值，拒绝
+        return false;
+    }
+}</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// 限制：每 1 秒最多 100 个请求
+FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(100, 1000);
+
+void handleRequest(Request req) {
+    if (limiter.tryAcquire()) {
+        doBusiness(req);          // 正常处理
+    } else {
+        return HttpStatus.TOO_MANY_REQUESTS;  // 429 拒绝
+    }
+}</code></pre>
+    <div class="step-tip">💡 <code>synchronized</code> 保证单 JVM 内线程安全；集群环境需替换为 Redis 等共享存储（见第 ⑥ 节）。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>实现极简，几行代码搞定</li><li>内存占用 O(1)，只需一个整数</li><li>性能极高，无额外数据结构</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>边界突刺：两个窗口交界可瞬时 2 倍流量</li><li>无法应对窗口内流量倾斜</li><li>精度较低，仅适合粗粒度限流</li></ul></div>
+  </div>
+</section>
+
+
+<!-- ============ ② 滑动窗口 ============ -->
+<section class="section" id="sliding-window">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#a78bfa,#7c3aed);">②</div>
+    <h2>滑动窗口计数器</h2>
+  </div>
+  <p class="sec-desc">把大窗口拆成若干小桶（bucket），随时间滚动丢弃过期桶，用桶之和近似「任意时刻向前看一个窗口」的精确计数。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-slide-win)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">固定窗口的问题是边界突变。滑动窗口把一个大窗口（如 60 秒）细分为 N 个小桶（如 60 个 1 秒桶），只保留最近 N 个桶的计数总和。随着时间推进，窗口像「滑块」一样平滑移动，从而消除边界突刺。它是<strong>精度与成本的折中</strong>：桶越多越精确，内存略增。</p>
+  </div>
+
+  <svg class="diagram-sm" viewBox="0 0 560 220" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s2"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.12"/></filter></defs>
+    <text x="280" y="22" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="700">滑动窗口 = 滚动的 N 个小桶</text>
+    <!-- 窗口框 -->
+    <rect x="60" y="60" width="380" height="70" rx="8" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.5)" stroke-width="2" filter="url(#s2)"/>
+    <text x="250" y="52" text-anchor="middle" fill="#94a3b8" font-size="10">← 当前窗口（最近 60s）→</text>
+    <!-- 桶 -->
+    <g font-size="9" text-anchor="middle" fill="#e2e8f0">
+      <rect x="70" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="95" y="100">12</text>
+      <rect x="126" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="151" y="100">8</text>
+      <rect x="182" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="207" y="100">15</text>
+      <rect x="238" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="263" y="100">9</text>
+      <rect x="294" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="319" y="100">11</text>
+      <rect x="350" y="75" width="50" height="40" rx="4" fill="rgba(167,139,250,.2)"/><text x="375" y="100">7</text>
+    </g>
+    <!-- 已过期桶 -->
+    <rect x="20" y="75" width="30" height="40" rx="4" fill="rgba(100,116,139,.2)" stroke-dasharray="3,2"/>
+    <text x="35" y="100" font-size="9" fill="#64748b" text-anchor="middle">6</text>
+    <text x="35" y="135" font-size="9" fill="#64748b" text-anchor="middle">已丢弃</text>
+    <line x1="60" y1="60" x2="60" y2="130" stroke="#a78bfa" stroke-width="2"/>
+    <text x="60" y="148" font-size="9" fill="#a78bfa" text-anchor="middle">窗口左边界随</text>
+    <text x="60" y="162" font-size="9" fill="#a78bfa" text-anchor="middle">时间右移</text>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-slide-win)">💻 实现代码（Java，滚动桶）</h3>
+    <pre><code>public class SlidingWindowRateLimiter {
+    private final int limit;          // 窗口内最大请求数
+    private final long windowMs;      // 总窗口大小（毫秒）
+    private final int bucketCount;    // 小桶数量
+    private final long bucketMs;      // 每个小桶的时间跨度
+    private final int[] buckets;      // 各桶计数
+    private int idx;                  // 当前写入桶下标
+    private long windowStart;         // 当前窗口起点
+    private int total;                // 窗口内总计数（缓存）
+
+    public SlidingWindowRateLimiter(int limit, long windowMs, int bucketCount) {
+        this.limit = limit;
+        this.windowMs = windowMs;
+        this.bucketCount = bucketCount;
+        this.bucketMs = windowMs / bucketCount;
+        this.buckets = new int[bucketCount];
+        this.windowStart = System.currentTimeMillis();
+        this.idx = 0; this.total = 0;
+    }
+
+    public synchronized boolean tryAcquire() {
+        long now = System.currentTimeMillis();
+        long elapsed = now - windowStart;
+        // 1. 推进窗口：把过期的桶清零并从 total 扣除
+        while (elapsed &gt;= bucketMs) {
+            idx = (idx + 1) % bucketCount;
+            total -= buckets[idx];
+            buckets[idx] = 0;
+            windowStart += bucketMs;
+            elapsed -= bucketMs;
+        }
+        // 2. 窗口内未满则放行并计数
+        if (total &lt; limit) {
+            buckets[idx]++;
+            total++;
+            return true;
+        }
+        return false;  // 超限拒绝
+    }
+}</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// 限制：60 秒内最多 1000 次，拆成 60 个 1 秒桶
+SlidingWindowRateLimiter limiter =
+        new SlidingWindowRateLimiter(1000, 60_000, 60);
+
+if (limiter.tryAcquire()) handle(req);
+else return 429;</code></pre>
+    <div class="step-tip">💡 桶数建议 = 窗口秒数（如 1 分钟用 60 桶），精度与固定窗口相当又平滑。桶数越多越精确但内存略增。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>消除固定窗口的边界突刺</li><li>实现仍较简单，内存 O(N) 可控</li><li>精度可调（桶越多越准）</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>桶内仍是固定窗口，极端边界仍有微小误差</li><li>相比固定窗口略占内存</li><li>分布式需额外同步各桶计数</li></ul></div>
+  </div>
+</section>
+
+
+<!-- ============ ③ 滑动日志 ============ -->
+<section class="section" id="sliding-log">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#f472b6,#db2777);">③</div>
+    <h2>滑动日志</h2>
+  </div>
+  <p class="sec-desc">精确记录每个请求的时间戳，判断时只统计「窗口内」的日志条数。这是理论上最精确的限流，但内存开销最大。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-slide-log)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">每来一个请求，就把当前时间戳追加进一个有序集合（队列 / 跳表 / Redis ZSet）。判断时，先删除所有早于 <code>now - window</code> 的过期日志，再看剩余条数是否超过阈值。由于始终基于「真实时间戳」统计，<strong>不存在窗口边界误差，精度 100%</strong>。代价是：每个请求都要存一条日志，高 QPS 下内存和时间开销显著。</p>
+  </div>
+
+  <svg class="diagram-sm" viewBox="0 0 560 220" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s3"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.12"/></filter></defs>
+    <text x="280" y="22" text-anchor="middle" fill="#f472b6" font-size="12" font-weight="700">滑动日志：真实时间戳集合</text>
+    <!-- 时间轴 -->
+    <line x1="50" y1="120" x2="510" y2="120" stroke="#475569" stroke-width="2"/>
+    <text x="50" y="140" fill="#64748b" font-size="9">now-window</text>
+    <text x="500" y="140" fill="#64748b" font-size="9">now</text>
+    <!-- 窗口框 -->
+    <rect x="120" y="70" width="360" height="100" rx="8" fill="rgba(244,114,182,.08)" stroke="rgba(244,114,182,.5)" stroke-width="2" filter="url(#s3)"/>
+    <text x="300" y="62" text-anchor="middle" fill="#94a3b8" font-size="10">← 有效窗口 →</text>
+    <!-- 日志点 -->
+    <g fill="#f472b6">
+      <circle cx="140" cy="120" r="5"/><circle cx="175" cy="120" r="5"/>
+      <circle cx="210" cy="120" r="5"/><circle cx="245" cy="120" r="5"/>
+      <circle cx="280" cy="120" r="5"/><circle cx="315" cy="120" r="5"/>
+      <circle cx="350" cy="120" r="5"/><circle cx="385" cy="120" r="5"/>
+    </g>
+    <!-- 过期点 -->
+    <circle cx="80" cy="120" r="5" fill="#64748b"/>
+    <circle cx="100" cy="120" r="5" fill="#64748b"/>
+    <text x="90" y="160" font-size="9" fill="#64748b" text-anchor="middle">已过期</text>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-slide-log)">💻 实现代码（Java，基于 Queue）</h3>
+    <pre><code>public class SlidingLogRateLimiter {
+    private final int limit;          // 窗口内最大请求数
+    private final long windowMs;      // 窗口大小（毫秒）
+    private final Queue&lt;Long&gt; logs = new LinkedList&lt;&gt;();
+
+    public SlidingLogRateLimiter(int limit, long windowMs) {
+        this.limit = limit;
+        this.windowMs = windowMs;
+    }
+
+    public synchronized boolean tryAcquire() {
+        long now = System.currentTimeMillis();
+        // 1. 移除窗口外的过期时间戳
+        while (!logs.isEmpty() &amp;&amp; now - logs.peek() &gt;= windowMs) {
+            logs.poll();
+        }
+        // 2. 窗口内未满则记录并放行
+        if (logs.size() &lt; limit) {
+            logs.offer(now);
+            return true;
+        }
+        return false;  // 超限拒绝
+    }
+}</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// 限制：每 60 秒最多 1000 次（精确计数每一个请求）
+SlidingLogRateLimiter limiter = new SlidingLogRateLimiter(1000, 60_000);
+
+if (limiter.tryAcquire()) handle(req);
+else return 429;</code></pre>
+    <div class="step-tip">💡 分布式场景常用 <strong>Redis ZSet</strong> 实现（见第 ⑥ 节滑动日志 Lua），用时间戳作 score，<code>ZREMRANGEBYSCORE</code> 清理过期项，<code>ZCARD</code> 计数。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>精度最高，无窗口边界误差</li><li>天然支持任意时间窗口</li><li>逻辑直观，便于理解</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>内存 O(请求数)，高 QPS 下巨大</li><li>每次判断都要清理 + 计数，O(n) 开销</li><li>分布式下存储成本高</li></ul></div>
+  </div>
+</section>
+
+
+<!-- ============ ④ 令牌桶 ============ -->
+<section class="section" id="token-bucket">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#34d399,#10b981);">④</div>
+    <h2>令牌桶</h2>
+  </div>
+  <p class="sec-desc">系统以恒定速率往桶里放令牌，请求必须取到令牌才能执行。<strong>桶有容量上限，因此允许一定程度的突发流量</strong>——这是生产环境最常用、最推荐的限流算法。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-token)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">有一个容量为 <code>capacity</code> 的桶，以 <code>refillRate</code>（个/秒）的恒定速率生成令牌（不超过容量）。每个请求来时尝试拿走 1 个令牌：有就放行，没有就拒绝（或排队）。当流量低时令牌会积攒，一旦突发流量到来，<strong>桶里积攒的令牌允许瞬间处理一波突发</strong>，随后速率被限制回 refillRate。Guava <code>RateLimiter</code>、Sentinel 都基于此思想。</p>
+  </div>
+
+  <svg class="diagram-sm" viewBox="0 0 560 240" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s4"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.12"/></filter></defs>
+    <text x="280" y="22" text-anchor="middle" fill="#34d399" font-size="12" font-weight="700">令牌桶：恒定补充 + 允许突发</text>
+    <!-- 桶 -->
+    <rect x="200" y="50" width="160" height="150" rx="14" fill="rgba(52,211,153,.06)" stroke="rgba(52,211,153,.5)" stroke-width="2" filter="url(#s4)"/>
+    <!-- 令牌 -->
+    <g fill="#34d399" font-size="14" text-anchor="middle">
+      <circle cx="230" cy="80" r="8"/><circle cx="270" cy="80" r="8"/><circle cx="310" cy="80" r="8"/>
+      <circle cx="230" cy="110" r="8"/><circle cx="270" cy="110" r="8"/>
+    </g>
+    <text x="280" y="170" text-anchor="middle" fill="#94a3b8" font-size="10">容量 = 5</text>
+    <text x="280" y="188" text-anchor="middle" fill="#94a3b8" font-size="10">速率 = 2 个/秒</text>
+    <!-- 补充箭头 -->
+    <line x1="280" y1="50" x2="280" y2="30" stroke="#34d399" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="290" y="36" fill="#34d399" font-size="10">补充</text>
+    <!-- 请求拿令牌 -->
+    <line x1="160" y1="130" x2="200" y2="130" stroke="#fbbf24" stroke-width="2" marker-end="url(#ar4b)"/>
+    <text x="155" y="122" fill="#fbbf24" font-size="10">请求</text>
+    <defs>
+      <marker id="ar4" markerWidth="8" markerHeight="6" refX="4" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#34d399"/></marker>
+      <marker id="ar4b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6 Z" fill="#fbbf24"/></marker>
+    </defs>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-token)">💻 实现代码（Java，支持预热/突发）</h3>
+    <pre><code>public class TokenBucketRateLimiter {
+    private final long capacity;       // 桶容量（最大突发令牌数）
+    private final double refillRate;   // 补充速率（个/秒）
+    private double tokens;             // 当前令牌数
+    private long lastRefill;           // 上次补充时间
+
+    public TokenBucketRateLimiter(long capacity, double refillRate) {
+        this.capacity = capacity;
+        this.refillRate = refillRate;
+        this.tokens = capacity;        // 初始充满，允许启动突发
+        this.lastRefill = System.currentTimeMillis();
+    }
+
+    public synchronized boolean tryAcquire(int n) {
+        refill();                      // 先按时间补充令牌
+        if (tokens &gt;= n) {
+            tokens -= n;               // 取走 n 个令牌
+            return true;
+        }
+        return false;                  // 令牌不足，拒绝
+    }
+
+    private void refill() {
+        long now = System.currentTimeMillis();
+        double elapsedSec = (now - lastRefill) / 1000.0;
+        tokens = Math.min(capacity, tokens + elapsedSec * refillRate);
+        lastRefill = now;
+    }
+}</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// 容量 10（允许瞬间突发 10 个），每秒补充 2 个
+TokenBucketRateLimiter limiter = new TokenBucketRateLimiter(10, 2.0);
+
+if (limiter.tryAcquire(1)) handle(req);
+else return 429;</code></pre>
+    <div class="step-tip">💡 生产推荐直接用成熟库：Java 用 <code>Guava RateLimiter</code>（支持 <code>acquire()</code> 阻塞等待 / <code>tryAcquire()</code> 非阻塞）；分布式用 Sentinel / Redis 令牌桶。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>允许可控的突发流量（用户体验好）</li><li>速率平滑，O(1) 计算，性能好</li><li>实现简单，生态成熟（Guava/Sentinel）</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>突发可能瞬间打满下游（需配合容量规划）</li><li>单机版本无全局视角，需分布式改造</li></ul></div>
+  </div>
+</section>
+
+
+<!-- ============ ⑤ 漏桶 ============ -->
+<section class="section" id="leaky-bucket">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#fbbf24,#f59e0b);">⑤</div>
+    <h2>漏桶</h2>
+  </div>
+  <p class="sec-desc">请求像水一样流入桶中，桶以恒定速率从底部漏出（处理）。<strong>漏桶强制输出速率恒定，不允许突发</strong>，适合需要严格平滑流量的场景。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-leaky)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">把请求看作流入桶里的水，桶底有个小孔以恒定速率 <code>leakRate</code> 漏出（即被处理）。若请求流入速度超过漏出速度，水（请求）会在桶里堆积；当水位超过桶容量 <code>capacity</code> 时，多余的请求被直接拒绝。与令牌桶相反：<strong>漏桶「削峰填谷」、强制恒定输出</strong>，不提供突发能力，因此能更好地保护下游。</p>
+  </div>
+
+  <svg class="diagram-sm" viewBox="0 0 560 240" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s5"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.12"/></filter></defs>
+    <text x="280" y="22" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="700">漏桶：恒定漏出，不允突发</text>
+    <!-- 桶 -->
+    <rect x="200" y="60" width="160" height="140" rx="10" fill="rgba(251,191,36,.06)" stroke="rgba(251,191,36,.5)" stroke-width="2" filter="url(#s5)"/>
+    <!-- 水位 -->
+    <rect x="205" y="120" width="150" height="75" rx="6" fill="rgba(251,191,36,.25)"/>
+    <text x="280" y="165" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">水位(排队请求)</text>
+    <!-- 进水 -->
+    <line x1="160" y1="100" x2="200" y2="100" stroke="#38bdf8" stroke-width="2" marker-end="url(#ar5)"/>
+    <text x="155" y="92" fill="#38bdf8" font-size="10">流入</text>
+    <!-- 漏水 -->
+    <line x1="280" y1="200" x2="280" y2="225" stroke="#34d399" stroke-width="2" marker-end="url(#ar5b)"/>
+    <text x="290" y="222" fill="#34d399" font-size="10">恒定漏出</text>
+    <defs>
+      <marker id="ar5" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6 Z" fill="#38bdf8"/></marker>
+      <marker id="ar5b" markerWidth="8" markerHeight="6" refX="4" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#34d399"/></marker>
+    </defs>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-leaky)">💻 实现代码（Java，漏桶计量版）</h3>
+    <pre><code>public class LeakyBucketRateLimiter {
+    private final int capacity;        // 桶容量（最大排队请求数）
+    private final double leakRate;     // 漏出速率（个/秒）
+    private double water;              // 当前水量（积压请求数）
+    private long lastLeak;             // 上次漏水时间
+
+    public LeakyBucketRateLimiter(int capacity, double leakRate) {
+        this.capacity = capacity;
+        this.leakRate = leakRate;
+        this.water = 0;
+        this.lastLeak = System.currentTimeMillis();
+    }
+
+    public synchronized boolean tryAcquire(int n) {
+        leak();                        // 先按时间漏水
+        if (water + n &lt;= capacity) {   // 加水后不超过容量则放行
+            water += n;
+            return true;
+        }
+        return false;                  // 桶满，拒绝
+    }
+
+    private void leak() {
+        long now = System.currentTimeMillis();
+        double elapsedSec = (now - lastLeak) / 1000.0;
+        water = Math.max(0, water - elapsedSec * leakRate);
+        lastLeak = now;
+    }
+}</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// 容量 100（最多积压 100 个），每秒恒定处理 20 个
+LeakyBucketRateLimiter limiter = new LeakyBucketRateLimiter(100, 20.0);
+
+if (limiter.tryAcquire(1)) handle(req);
+else return 429;  // 或返回友好提示「系统繁忙请稍后」</code></pre>
+    <div class="step-tip">💡 漏桶的「队列版」会把超额请求暂存队列、按恒定速率消费，实现真正的流量整形（Traffic Shaping），但会增加请求延迟。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>强制恒定输出速率，完美削峰</li><li>对下游最友好，不会被突发打爆</li><li>可平滑网络/接口流量</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>不支持突发，流量高峰时大量请求被拒或排队</li><li>队列版会增加延迟</li><li>突发友好性差（对比令牌桶）</li></ul></div>
+  </div>
+
+  <div class="highlight-box">
+    <h4>🆚 令牌桶 vs 漏桶 一句话区别</h4>
+    <p><strong>令牌桶</strong>：桶里攒令牌，请求「取」令牌 → <strong>允许突发、然后限速</strong>。<br><strong>漏桶</strong>：桶里攒请求，恒定「漏」出去 → <strong>强制匀速、削平突发</strong>。两者都能限平均速率，差别在「突发怎么处理」。</p>
+  </div>
+</section>
+
+
+<!-- ============ ⑥ 分布式 ============ -->
+<section class="section" id="redis-lua">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#f87171,#dc2626);">⑥</div>
+    <h2>Redis + Lua 分布式限流</h2>
+  </div>
+  <p class="sec-desc">单机限流器在集群中无法统计全局流量。必须用<strong>共享存储 + 原子操作</strong>。Redis + Lua 脚本是最经典的分布式限流方案（对应面试常问的「集群限流」）。</p>
+
+  <div class="card">
+    <h3 style="color:var(--c-redis)">📐 原理</h3>
+    <p style="font-size:.9rem;color:var(--fg2)">多台应用实例共享一个 Redis。把计数器 / 时间戳存到 Redis，用 <strong>Lua 脚本</strong>保证「读-判断-写」的原子性（避免多实例并发导致的超发）。根据算法不同，可用 <code>INCR + EXPIRE</code>（固定窗口）或 <code>ZSet</code>（滑动日志 / 滑动窗口）。</p>
+  </div>
+
+  <svg class="diagram" viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg">
+    <defs><filter id="s6"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.12"/></filter></defs>
+    <rect x="40" y="60" width="120" height="60" rx="10" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.4)" filter="url(#s6)"/>
+    <text x="100" y="95" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="700">实例 A</text>
+    <rect x="200" y="60" width="120" height="60" rx="10" fill="rgba(167,139,250,.1)" stroke="rgba(167,139,250,.4)" filter="url(#s6)"/>
+    <text x="260" y="95" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="700">实例 B</text>
+    <rect x="360" y="60" width="120" height="60" rx="10" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.4)" filter="url(#s6)"/>
+    <text x="420" y="95" text-anchor="middle" fill="#34d399" font-size="12" font-weight="700">实例 C</text>
+    <rect x="540" y="55" width="130" height="70" rx="10" fill="rgba(248,113,113,.1)" stroke="rgba(248,113,113,.5)" filter="url(#s6)"/>
+    <text x="605" y="85" text-anchor="middle" fill="#f87171" font-size="12" font-weight="700">Redis</text>
+    <text x="605" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Lua 原子脚本</text>
+    <line x1="160" y1="90" x2="535" y2="90" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <line x1="320" y1="90" x2="535" y2="90" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <line x1="480" y1="90" x2="535" y2="90" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="350" y="140" text-anchor="middle" fill="#94a3b8" font-size="11">所有实例共用同一计数器 → 全局限流</text>
+  </svg>
+
+  <div class="card">
+    <h3 style="color:var(--c-redis)">💻 实现代码 A：固定窗口分布式（INCR + Lua）</h3>
+    <pre><code>-- KEYS[1] = 限流 key    ARGV[1] = 阈值    ARGV[2] = 窗口毫秒
+local current = redis.call('GET', KEYS[1])
+if current and tonumber(current) &gt;= tonumber(ARGV[1]) then
+    return 0              -- 已超阈值，拒绝
+end
+local new = redis.call('INCR', KEYS[1])
+if new == 1 then
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])  -- 首请求设置窗口过期
+end
+return 1                  -- 放行</code></pre>
+  </div>
+
+  <div class="card">
+    <h3 style="color:var(--c-redis)">💻 实现代码 B：滑动日志分布式（ZSet + Lua，最精确）</h3>
+    <pre><code>-- KEYS[1] = 限流 key
+-- ARGV[1] = 当前时间戳(ms)  ARGV[2] = 窗口(ms)  ARGV[3] = 阈值
+-- 1. 删除窗口外的过期请求
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1] - ARGV[2])
+-- 2. 统计窗口内剩余数量
+local count = redis.call('ZCARD', KEYS[1])
+if count &gt;= tonumber(ARGV[3]) then
+    return 0              -- 超限拒绝
+end
+-- 3. 记录本次请求（用唯一 member 防覆盖）
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1] .. '-' .. math.random())
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1                  -- 放行</code></pre>
+  </div>
+
+  <div class="usage">
+    <h4>🔧 怎么使用</h4>
+    <pre><code>// Java 侧：用 RedisTemplate 执行上面的 Lua 脚本
+DefaultRedisScript&lt;Long&gt; script = new DefaultRedisScript&lt;&gt;(luaText, Long.class);
+Long allowed = redis.execute(script,
+        Collections.singletonList("rate:order:" + userId),
+        "1000", "60000");   // 阈值 1000，窗口 60s
+if (allowed == 1) handle(req); else return 429;</code></pre>
+    <div class="step-tip">💡 不想手写 Lua？直接用成熟方案：<strong>Redis-Cell</strong>（CL.THROTTLE 模块，基于漏桶）、<strong>Sentinel 集群流控</strong>、或 <strong>Redisson RRateLimiter</strong>（令牌桶）。</div>
+  </div>
+
+  <div class="pros-cons">
+    <div class="pros"><h4>✅ 优点</h4><ul><li>支持集群全局精确限流</li><li>Lua 保证原子性，无并发超发</li><li>方案成熟，生态完善</li></ul></div>
+    <div class="cons"><h4>❌ 缺点</h4><ul><li>每次请求多一次 Redis 网络往返（延迟 + 成本）</li><li>Redis 本身需高可用，否则成单点</li><li>实现比单机复杂</li></ul></div>
+  </div>
+</section>
+
+
+<!-- ============ 对比 ============ -->
+<section class="section" id="compare">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#38bdf8,#a78bfa,#f87171);">📊</div>
+    <h2>七维度全面对比</h2>
+  </div>
+  <p class="sec-desc">把六种限流器放在同一张表里，差异一目了然。</p>
+
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>维度</th>
+        <th style="color:var(--c-fixed)">固定窗口</th>
+        <th style="color:var(--c-slide-win)">滑动窗口</th>
+        <th style="color:var(--c-slide-log)">滑动日志</th>
+        <th style="color:var(--c-token)">令牌桶</th>
+        <th style="color:var(--c-leaky)">漏桶</th>
+        <th style="color:var(--c-redis)">Redis+Lua</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>实现难度</strong></td><td>⭐ 极简</td><td>⭐⭐</td><td>⭐⭐</td><td>⭐⭐</td><td>⭐⭐</td><td>⭐⭐⭐⭐</td></tr>
+      <tr><td><strong>空间复杂度</strong></td><td>O(1)</td><td>O(N)桶</td><td>O(请求数)</td><td>O(1)</td><td>O(1)</td><td>O(请求数)</td></tr>
+      <tr><td><strong>时间复杂度</strong></td><td>O(1)</td><td>O(1)</td><td>O(n)清理</td><td>O(1)</td><td>O(1)</td><td>O(1)~O(n)</td></tr>
+      <tr><td><strong>限流精度</strong></td><td>低</td><td>中</td><td>最高</td><td>高</td><td>高</td><td>取决于算法</td></tr>
+      <tr><td><strong>是否允许突发</strong></td><td>会（边界2倍）</td><td>部分</td><td>否</td><td><strong>是✅</strong></td><td><strong>否❌</strong></td><td>取决于算法</td></tr>
+      <tr><td><strong>流量平滑度</strong></td><td>差</td><td>较好</td><td>最好</td><td>较好</td><td><strong>最好✅</strong></td><td>较好</td></tr>
+      <tr><td><strong>边界突刺</strong></td><td><strong>有❌</strong></td><td>无</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
+      <tr><td><strong>适用环境</strong></td><td>单机粗粒度</td><td>单机较精细</td><td>精确/低频</td><td>通用/突发</td><td>严格整形</td><td><strong>集群✅</strong></td></tr>
+    </tbody>
+  </table>
+
+  <div class="highlight-box danger">
+    <h4>🔑 最核心的三组区别</h4>
+    <p>① <strong>精度 vs 成本</strong>：滑动日志最精确但最费内存，固定窗口最省但最不准。<br>② <strong>突发 vs 平滑</strong>：令牌桶允许突发，漏桶强制平滑——这取决于你要保护谁。<br>③ <strong>单机 vs 集群</strong>：前五种默认单机，集群必须用 Redis+Lua 等共享存储方案。</p>
+  </div>
+</section>
+
+
+<!-- ============ 决策树 ============ -->
+<section class="section" id="decision">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#34d399,#0891b2);">🌲</div>
+    <h2>选型决策树</h2>
+  </div>
+  <p class="sec-desc">按需求一步步选，不再纠结。</p>
+
+  <div class="flow-steps" style="display:flex;flex-direction:column;gap:0;margin:24px 0;position:relative;">
+    <div class="card" style="border-left:4px solid var(--c-redis);">
+      <h4 style="color:var(--c-redis)">Q1：是否需要集群全局限流？</h4>
+      <p style="font-size:.88rem;color:var(--fg2)">是 → <strong>Redis + Lua</strong>（选 ZSet 滑动日志做精确限流，或 Redisson 令牌桶）。<br>否 → 进入下一步选单机算法。</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--c-token);">
+      <h4 style="color:var(--c-token)">Q2：是否要允许突发流量（用户体验优先）？</h4>
+      <p style="font-size:.88rem;color:var(--fg2)">是 → <strong>令牌桶</strong>（Guava / Sentinel 直接可用）。<br>否，要强制平滑输出（下游保护优先）→ <strong>漏桶</strong>。</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--c-slide-win);">
+      <h4 style="color:var(--c-slide-win)">Q3：对精度要求高吗？</h4>
+      <p style="font-size:.88rem;color:var(--fg2)">极高 + 低频 → <strong>滑动日志</strong>。<br>一般（能接受微小误差）→ <strong>滑动窗口</strong>。<br>粗粒度、极简 → <strong>固定窗口</strong>。</p>
+    </div>
+  </div>
+
+  <div class="highlight-box success">
+    <h4>🏆 默认推荐</h4>
+    <p>绝大多数业务场景：<strong>单机用令牌桶（Guava RateLimiter），集群用 Redis 令牌桶 / Sentinel</strong>。它兼顾突发友好、性能高、生态成熟。除非你需要「严格匀速」（选漏桶）或「绝对精确」（选滑动日志）。</p>
+  </div>
+</section>
+
+
+<!-- ============ 生产建议 ============ -->
+<section class="section" id="usage-tips">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#fbbf24,#f59e0b);">🛠️</div>
+    <h2>生产使用建议</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card-mini"><h4 style="color:var(--c-redis)">🌐 别只靠单机</h4><p>集群环境务必用分布式限流，否则每台机器各自为战，全局仍会超发（详见上一篇《限流为什么不能只在网关层做》）。</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-token)">🎯 阈值靠压测</h4><p>限流阈值不是拍脑袋，来自容量模型：接口并发力 + 下游承受力 + 拒绝后体验。</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-leaky)">🔄 多维限流</h4><p>按用户 / IP / 接口分别限流，核心接口（支付/下单）用独立更严格阈值。</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-fixed)">📉 优雅拒绝</h4><p>返回 429 + Retry-After 头，或排队 / 降级兜底，别直接抛错，保证体验。</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-slide-win)">📊 可观测</h4><p>埋点限流触发次数、拒绝率，配告警，避免限流误伤正常流量而不自知。</p></div>
+    <div class="card-mini"><h4 style="color:var(--c-slide-log)">🧪 预热保护</h4><p>冷启动服务用令牌桶「预热模式」，逐步放开速率，避免一上线就被打挂。</p></div>
+  </div>
+
+  <div class="highlight-box">
+    <h4>📚 延伸阅读</h4>
+    <p>想搞清「为什么不能只在网关做限流」、内部服务如何做四层限流，参见同目录文章：
+    <a href="why-not-only-gateway.html" style="color:var(--accent);">《限流为什么不能只在网关层做》</a>。
+    高可用总入口：<a href="../index.html" style="color:var(--accent);">high-availability/index.html</a>。</p>
+  </div>
+</section>
+
+</div><!-- /.content -->
+
+<footer class="footer">
+  <p>最常用的限流器 · 原理 / 实现 / 使用 / 区别</p>
+  <p style="margin-top:6px;">限流系列 · <a href="why-not-only-gateway.html">上篇：为什么不能只在网关层做</a> · <a href="../index.html">高可用首页</a></p>
+</footer>
+
+</div><!-- /.main -->
+
+<!-- ====== Scroll-spy ====== -->
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const links = Array.from(document.querySelectorAll('.sidebar a.nav-link'));
+  const sections = links.map(l => document.querySelector(l.getAttribute('href'))).filter(Boolean);
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const id = entry.target.getAttribute('id');
+        links.forEach(l => l.classList.remove('active'));
+        const active = links.find(l => l.getAttribute('href') === '#' + id);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+
+  sections.forEach(s => observer.observe(s));
+});
+</script>
+
+</body>
+</html>

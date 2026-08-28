@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>限流为什么不能只在网关层做 · 分布式系统多层级限流深度解析</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg2: #111827;
+    --bg3: #1a2235;
+    --card: rgba(255,255,255,0.04);
+    --card-hover: rgba(255,255,255,0.07);
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.12);
+    --fg: #e2e8f0;
+    --fg2: #94a3b8;
+    --fg3: #64748b;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --accent3: #34d399;
+    --danger: #f87171;
+    --warning: #fbbf24;
+    --c-gateway: #38bdf8;   /* 网关层 蓝 */
+    --c-service: #a78bfa;   /* 服务层 紫 */
+    --c-resource: #f87171;  /* 资源层 红 */
+    --c-core: #fbbf24;      /* 核心 橙 */
+    --c-safe: #34d399;      /* 安全 绿 */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+    overflow-x: hidden;
+    line-height: 1.75;
+  }
+  code {
+    background: rgba(56,189,248,0.12);
+    color: #7dd3fc;
+    padding: 2px 7px; border-radius: 5px;
+    font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px;
+  }
+  pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; margin: 14px 0; }
+  pre code { background: none; padding: 0; }
+
+  /* ========== Nav ========== */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11,17,32,0.88);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 10px 20px; justify-content: center;
+  }
+  .nav a {
+    color: var(--fg2); text-decoration: none;
+    font-size: 13px; padding: 5px 14px; border-radius: 20px;
+    border: 1px solid transparent; transition: all .25s;
+  }
+  .nav a:hover { color: #fff; background: var(--card-hover); }
+
+  /* ========== Hero ========== */
+  .hero { text-align: center; padding: 60px 24px 36px; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ''; position: absolute; top: -120px; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 600px; background: radial-gradient(circle, rgba(56,189,248,0.08), transparent 70%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.4rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 16px;
+    background: linear-gradient(135deg, #38bdf8, #a78bfa, #f87171);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero p { color: var(--fg2); font-size: 1.08rem; max-width: 720px; margin: 0 auto 24px; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 24px; }
+  .pill {
+    font-size: 13px; font-weight: 600; padding: 7px 18px; border-radius: 20px;
+    border: 1px solid var(--border); background: var(--card); transition: all .25s;
+  }
+  .pill:hover { transform: translateY(-2px); background: var(--card-hover); }
+
+  /* ========== Layout ========== */
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  .section { margin: 72px 0; opacity: 0; transform: translateY(30px); transition: all .6s ease; }
+  .section.visible { opacity: 1; transform: translateY(0); }
+  .sec-head { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+  .sec-badge {
+    width: 44px; height: 44px; flex-shrink: 0; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 700;
+  }
+  .sec-head h2 { font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }
+  .sec-desc { color: var(--fg2); font-size: 0.95rem; margin-top: 6px; padding-left: 58px; }
+
+  /* ========== Cards ========== */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px; margin: 18px 0; transition: all .25s;
+  }
+  .card:hover { border-color: var(--border2); background: var(--card-hover); }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 20px 0; }
+  .card-mini {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; text-align: center; transition: all .25s;
+  }
+  .card-mini:hover { transform: translateY(-3px); border-color: var(--border2); }
+  .card-mini .icon { font-size: 28px; margin-bottom: 10px; }
+  .card-mini h3 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .card-mini p { font-size: 0.85rem; color: var(--fg2); line-height: 1.6; }
+
+  /* ========== SVG Diagrams ========== */
+  .diagram { width: 100%; max-width: 800px; margin: 28px auto; display: block; border-radius: 12px; }
+  .diagram-full { width: 100%; max-width: 960px; margin: 28px auto; display: block; border-radius: 12px; }
+
+  /* ========== Highlight Box ========== */
+  .highlight-box {
+    background: linear-gradient(135deg, rgba(56,189,248,0.08), rgba(167,139,250,0.06));
+    border-left: 4px solid var(--accent); border-radius: 0 12px 12px 0;
+    padding: 20px 24px; margin: 24px 0;
+  }
+  .highlight-box.danger {
+    background: linear-gradient(135deg, rgba(248,113,113,0.08), rgba(251,191,36,0.06));
+    border-left-color: var(--danger);
+  }
+  .highlight-box.success {
+    background: linear-gradient(135deg, rgba(52,211,153,0.08), rgba(56,189,248,0.06));
+    border-left-color: var(--c-safe);
+  }
+  .highlight-box h4 { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+  .highlight-box p { color: var(--fg2); font-size: 0.92rem; }
+
+  /* ========== Comparison Table ========== */
+  .compare-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9rem; }
+  .compare-table th {
+    background: var(--bg3); color: var(--fg); font-weight: 700;
+    padding: 14px 16px; text-align: left; border: 1px solid var(--border);
+  }
+  .compare-table td {
+    padding: 12px 16px; border: 1px solid var(--border); color: var(--fg2);
+  }
+  .compare-table tr:hover td { background: var(--card); }
+
+  /* ========== Flow Steps ========== */
+  .flow-steps { display: flex; flex-direction: column; gap: 0; margin: 24px 0; position: relative; }
+  .flow-step {
+    display: flex; align-items: flex-start; gap: 16px; padding: 18px 20px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    position: relative; transition: all .25s;
+  }
+  .flow-step:hover { border-color: var(--border2); background: var(--card-hover); }
+  .flow-step:not(:last-child)::after {
+    content: ''; position: absolute; left: 29px; bottom: -18px;
+    width: 2px; height: 18px; background: var(--border2);
+  }
+  .step-num {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 800; flex-shrink: 0;
+  }
+  .step-content h4 { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
+  .step-content p { font-size: 0.87rem; color: var(--fg2); }
+
+  /* ========== Tag ========== */
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    padding: 3px 10px; border-radius: 6px; letter-spacing: 0.03em;
+  }
+
+  /* ========== Footer ========== */
+  .footer { text-align: center; padding: 48px 24px; color: var(--fg3); font-size: 0.85rem; border-top: 1px solid var(--border); margin-top: 60px; }
+
+  /* ========== Scrollbar ========== */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ========== Responsive ========== */
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 1.7rem; }
+    .sec-head h2 { font-size: 1.3rem; }
+    .wrap { padding: 0 16px; }
+    .card-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====== Nav ====== -->
+<nav class="nav">
+  <a href="#question">面试问题</a>
+  <a href="#why-not-gateway">为何不够</a>
+  <a href="#internal-services">内部服务</a>
+  <a href="#capacity-model">容量模型</a>
+  <a href="#multi-layer">多层限流</a>
+  <a href="#algorithms">算法对比</a>
+  <a href="#scenarios">场景策略</a>
+  <a href="#summary">总结</a>
+</nav>
+
+<!-- ====== Hero ====== -->
+<div class="hero">
+  <h1>限流为什么不能只在网关层做？</h1>
+  <p>分布式系统中，网关限流只是第一道防线。真正消耗资源的是内部服务——线程池、数据库连接、下游调用。只有构建<strong>多层级限流体系</strong>，才能实现真正的系统保护。</p>
+  <div class="pill-row">
+    <span class="pill" style="border-color:rgba(56,189,248,.3);color:var(--c-gateway)">🔵 单机限流</span>
+    <span class="pill" style="border-color:rgba(167,139,250,.3);color:var(--c-service)">🟣 集群限流</span>
+    <span class="pill" style="border-color:rgba(248,113,113,.3);color:var(--danger)">🔴 突发流量</span>
+    <span class="pill" style="border-color:rgba(251,191,36,.3);color:var(--c-core)">🟠 核心接口</span>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ==================== Section 1: 面试问题背景 ==================== -->
+<section class="section" id="question">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#38bdf8,#0ea5e9);">Q</div>
+    <h2>面试问题背景</h2>
+  </div>
+  <p class="sec-desc">这是一道高频后端面试题，考察的是对分布式系统限流架构的深层理解。</p>
+
+  <div class="highlight-box">
+    <h4>💬 面试官追问的四个方向</h4>
+    <p>当你说出「网关限流」后，面试官会继续追问：<strong>单机限流 vs 集群限流</strong>、<strong>突发流量处理</strong>、<strong>核心接口保护</strong>——这四个方向缺一不可。</p>
+  </div>
+
+  <!-- 四个方向的卡片 -->
+  <div class="card-grid">
+    <div class="card-mini">
+      <div class="icon">🖥️</div>
+      <h3 style="color:var(--c-gateway)">单机限流</h3>
+      <p>Guava RateLimiter、Semaphore 本地限流，轻量但无全局视角</p>
+    </div>
+    <div class="card-mini">
+      <div class="icon">🌐</div>
+      <h3 style="color:var(--c-service)">集群限流</h3>
+      <p>Redis + Lua 滑动窗口 / 令牌桶，分布式环境下保证总量控制</p>
+    </div>
+    <div class="card-mini">
+      <div class="icon">⚡</div>
+      <h3 style="color:var(--danger)">突发流量</h3>
+      <p>冷启动、热点事件导致的瞬时流量洪峰，需要预热与缓冲机制</p>
+    </div>
+    <div class="card-mini">
+      <div class="icon">🛡️</div>
+      <h3 style="color:var(--c-core)">核心接口</h3>
+      <p>支付、下单等高价值接口需要更严格的独立限流策略</p>
+    </div>
+  </div>
+
+  <!-- 架构总览图 -->
+  <svg class="diagram-full" viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="gGw" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#38bdf8"/><stop offset="100%" stop-color="#0ea5e9"/></linearGradient>
+      <linearGradient id="gSvc" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient>
+      <linearGradient id="gDb" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f87171"/><stop offset="100%" stop-color="#dc2626"/></linearGradient>
+      <filter id="shadow"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-opacity="0.15"/></filter>
+    </defs>
+    <!-- 客户端 -->
+    <rect x="30" y="170" width="90" height="50" rx="10" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+    <text x="75" y="200" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">客户端</text>
+    
+    <!-- 网关层 -->
+    <rect x="170" y="145" width="140" height="100" rx="14" fill="url(#gGw)" filter="url(#shadow)" opacity="0.9"/>
+    <text x="240" y="185" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">API 网关</text>
+    <text x="240" y="208" text-anchor="middle" fill="rgba(255,255,255,.75)" font-size="11">全局入口限流</text>
+    <text x="240" y="228" text-anchor="middle" fill="rgba(255,255,255,.6)" font-size="10">⚠️ 只挡粗粒度流量</text>
+    
+    <!-- 服务A -->
+    <rect x="370" y="80" width="130" height="80" rx="12" fill="url(#gSvc)" filter="url(#shadow)" opacity="0.85"/>
+    <text x="435" y="115" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">服务 A</text>
+    <text x="435" y="138" text-anchor="middle" fill="rgba(255,255,255,.7)" font-size="10">订单服务</text>
+    
+    <!-- 服务B -->
+    <rect x="370" y="200" width="130" height="80" rx="12" fill="url(#gSvc)" filter="url(#shadow)" opacity="0.85"/>
+    <text x="435" y="235" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">服务 B</text>
+    <text x="435" y="258" text-anchor="middle" fill="rgba(255,255,255,.7)" font-size="10">用户服务</text>
+    
+    <!-- 服务C -->
+    <rect x="370" y="320" width="130" height="70" rx="12" fill="url(#gSvc)" filter="url(#shadow)" opacity="0.85"/>
+    <text x="435" y="352" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">服务 C</text>
+    <text x="435" y="372" text-anchor="middle" fill="rgba(255,255,255,.7)" font-size="10">支付服务</text>
+    
+    <!-- 数据库 -->
+    <rect x="560" y="160" width="120" height="90" rx="12" fill="url(#gDb)" filter="url(#shadow)" opacity="0.85"/>
+    <text x="620" y="200" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">MySQL</text>
+    <text x="620" y="222" text-anchor="middle" fill="rgba(255,255,255,.7)" font-size="10">连接池耗尽?</text>
+    
+    <!-- Redis -->
+    <rect x="560" y="280" width="120" height="65" rx="12" fill="#dc2626" filter="url(#shadow)" opacity="0.7"/>
+    <text x="620" y="318" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">Redis</text>
+    
+    <!-- 下游 -->
+    <rect x="720" y="200" width="130" height="70" rx="12" fill="#f59e0b" filter="url(#shadow)" opacity="0.75"/>
+    <text x="785" y="232" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">第三方 API</text>
+    <text x="785" y="252" text-anchor="middle" fill="rgba(255,255,255,.7)" font-size="10">有自身限额!</text>
+    
+    <!-- 连接线 -->
+    <path d="M120 195 L165 195" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M310 180 L365 120" stroke="#475569" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <path d="M310 210 L365 240" stroke="#475569" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <path d="M310 230 L365 350" stroke="#475569" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <path d="M500 120 L555 190" stroke="#475569" stroke-width="1.5"/>
+    <path d="M500 240 L555 205" stroke="#475569" stroke-width="1.5"/>
+    <path d="M500 355 L555 315" stroke="#475569" stroke-width="1.5"/>
+    <path d="M680 205 L715 225" stroke="#475569" stroke-width="1.5"/>
+    
+    <!-- 危险标注 -->
+    <rect x="340" y="380" width="220" height="32" rx="8" fill="rgba(248,113,113,.15)" stroke="rgba(248,113,113,.4)" stroke-width="1"/>
+    <text x="450" y="401" text-anchor="middle" fill="#f87171" font-size="12" font-weight="600">⚠️ 这些地方网关管不到！</text>
+    
+    <defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#475569"/></marker></defs>
+  </svg>
+</section>
+
+
+<!-- ==================== Section 2: 为什么网关限流不够 ==================== -->
+<section class="section" id="why-not-gateway">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#f87171,#dc2626);">❗</div>
+    <h2>为什么网关限流远远不够</h2>
+  </div>
+  <p class="sec-desc">网关是系统的「大门保安」，但它看不到屋子里面发生了什么。</p>
+
+  <div class="highlight-box danger">
+    <h4>🔴 核心论点：网关只能做「粗粒度」拦截</h4>
+    <p>网关限流的本质是按<strong>路由维度</strong>（如每秒 1000 QPS 到订单服务）做总量控制。但一个请求进入服务后，可能触发多次数据库查询、多个下游 RPC 调用——这些<strong>真正的资源消耗点</strong>，网关完全不可见。</p>
+  </div>
+
+  <!-- 三大原因 -->
+  <div class="flow-steps">
+    <div class="flow-step">
+      <div class="step-num" style="background:rgba(56,189,248,.15);color:var(--c-gateway);">1</div>
+      <div class="step-content">
+        <h4 style="color:var(--c-gateway)">网关看到的只是「请求数」，不是「资源消耗」</h4>
+        <p>一个简单查询可能只占 5ms CPU，而一个复杂聚合接口可能占用 500ms + 3次 DB 查询 + 2次 RPC。同样 1 个 QPS，资源消耗差 <strong>100 倍</strong>。网关无法区分。</p>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num" style="background:rgba(167,139,250,.15);color:var(--c-service);">2</div>
+      <div class="step-content">
+        <h4 style="color:var(--c-service)">内部服务间调用绕过了网关</h4>
+        <p>微服务架构中，服务 A 调用服务 B 是<strong>内部 RPC</strong>，不经过 API 网关。如果服务 A 出现故障重试风暴或逻辑 bug 导致循环调用，网关完全感知不到，直接把服务 B 打挂。</p>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num" style="background:rgba(248,113,113,.15);color:var(--danger);">3</div>
+      <div class="step-content">
+        <h4 style="color:var(--danger)">不同接口的资源敏感度不同</h4>
+        <p>「查看商品列表」和「提交订单」不能共用同一个限流阈值。前者可以降级返回缓存，后者涉及库存扣减和资金流转。<strong>核心接口需要独立的、更精细的限流策略</strong>。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 对比图：网关视角 vs 服务视角 -->
+  <svg class="diagram-full" viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="gLeft" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(56,189,248,.1)"/><stop offset="100%" stop-color="rgba(56,189,248,.02)"/></linearGradient>
+      <linearGradient id="gRight" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(167,139,250,.1)"/><stop offset="100%" stop-color="rgba(167,139,250,.02)"/></linearGradient>
+    </defs>
+    <!-- 左侧：网关视角 -->
+    <rect x="30" y="30" width="400" height="340" rx="16" fill="url(#gLeft)" stroke="rgba(56,189,248,.25)" stroke-width="1.5"/>
+    <text x="230" y="62" text-anchor="middle" fill="#38bdf8" font-size="16" font-weight="700">🔵 网关视角（只能看到这些）</text>
+    
+    <rect x="60" y="85" width="340" height="45" rx="8" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.3)"/>
+    <text x="230" y="113" text-anchor="middle" fill="#e2e8f0" font-size="13">来源 IP / 用户 ID → QPS 计数</text>
+    
+    <rect x="60" y="145" width="340" height="45" rx="8" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.3)"/>
+    <text x="230" y="173" text-anchor="middle" fill="#e2e8f0" font-size="13">目标路由路径 → 分流配额</text>
+    
+    <rect x="60" y="205" width="340" height="45" rx="8" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.3)"/>
+    <text x="230" y="233" text-anchor="middle" fill="#e2e8f0" font-size="13">HTTP Header / 参数 → 粗粒度规则</text>
+    
+    <rect x="60" y="290" width="340" height="60" rx="8" fill="rgba(248,113,113,.1)" stroke="rgba(248,113,113,.3)" stroke-dasharray="5,3"/>
+    <text x="230" y="315" text-anchor="middle" fill="#f87171" font-size="12" font-weight="600">❌ 看不到：DB 连接数</text>
+    <text x="230" y="336" text-anchor="middle" fill="#f87171" font-size="12" font-weight="600">❌ 看不到：线程池状态</text>
+    
+    <!-- 右侧：服务视角 -->
+    <rect x="470" y="30" width="400" height="340" rx="16" fill="url(#gRight)" stroke="rgba(167,139,250,.25)" stroke-width="1.5"/>
+    <text x="670" y="62" text-anchor="middle" fill="#a78bfa" font-size="16" font-weight="700">🟣 服务视角（真正需要保护的）</text>
+    
+    <rect x="500" y="85" width="340" height="42" rx="8" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.3)"/>
+    <text x="670" y="111" text-anchor="middle" fill="#34d399" font-size="13">✅ 线程池活跃数 / 队列长度</text>
+    
+    <rect x="500" y="140" width="340" height="42" rx="8" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.3)"/>
+    <text x="670" y="166" text-anchor="middle" fill="#34d399" font-size="13">✅ 数据库连接池使用率</text>
+    
+    <rect x="500" y="195" width="340" height="42" rx="8" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.3)"/>
+    <text x="670" y="221" text-anchor="middle" fill="#34d399" font-size="13">✅ 下游依赖 RT / 错误率</text>
+    
+    <rect x="500" y="250" width="340" height="42" rx="8" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.3)"/>
+    <text x="670" y="276" text-anchor="middle" fill="#34d399" font-size="13">✅ JVM GC 频率 / 内存水位</text>
+    
+    <rect x="500" y="305" width="340" height="42" rx="8" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.3)"/>
+    <text x="670" y="331" text-anchor="middle" fill="#34d399" font-size="13">✅ 单接口级别的 QPS / 并发</text>
+    
+    <!-- 中间箭头 -->
+    <path d="M440 200 L460 200" stroke="#fbbf24" stroke-width="3" marker-end="url(#arrow2)"/>
+    <text x="450" y="188" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">差距</text>
+    <defs><marker id="arrow2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fbbf24"/></marker></defs>
+  </svg>
+</section>
+
+
+<!-- ==================== Section 3: 内部服务才是资源消耗大户 ==================== -->
+<section class="section" id="internal-services">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#a78bfa,#7c3aed);">⚙️</div>
+    <h2>内部服务才是真正消耗资源的地方</h2>
+  </div>
+  <p class="sec-desc">一个请求经过网关后，在内部服务中会触发大量资源操作——这些才是限流的真正目标。</p>
+
+  <div class="highlight-box success">
+    <h4>🟢 关键认知：限流的本质是保护「有限资源」</h4>
+    <p>系统中的每一种资源都是有限的：线程池大小、数据库连接数、Redis 连接池、第三方 API 配额。限流的目的是<strong>让资源消耗不超过承载能力</strong>，而不是简单地限制请求数量。</p>
+  </div>
+
+  <!-- 四大资源消耗点 -->
+  <svg class="diagram-full" viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter id="sdw2"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.12"/></filter>
+    </defs>
+    <!-- 中心标题 -->
+    <rect x="330" y="130" width="240" height="100" rx="16" fill="#1e293b" stroke="rgba(251,191,36,.5)" stroke-width="2" filter="url(#sdw2)"/>
+    <text x="450" y="172" text-anchor="middle" fill="#fbbf24" font-size="15" font-weight="700">🎯 内部服务</text>
+    <text x="450" y="196" text-anchor="middle" fill="rgba(251,191,36,.8)" font-size="12">(真正消耗资源的地方)</text>
+    <text x="450" y="218" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">← 必须在此处限流！</text>
+    
+    <!-- 具体接口 -->
+    <rect x="50" y="60" width="150" height="70" rx="12" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.4)" filter="url(#sdw2)"/>
+    <text x="125" y="92" text-anchor="middle" fill="#38bdf8" font-size="13" font-weight="700">📄 具体接口</text>
+    <text x="125" y="114" text-anchor="middle" fill="#94a3b8" font-size="11">每个 API 方法级别</text>
+    <line x1="200" y1="95" x2="325" y2="160" stroke="rgba(56,189,248,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 线程池 -->
+    <rect x="50" y="155" width="150" height="70" rx="12" fill="rgba(167,139,250,.1)" stroke="rgba(167,139,250,.4)" filter="url(#sdw2)"/>
+    <text x="125" y="187" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="700">🔄 线程池</text>
+    <text x="125" y="209" text-anchor="middle" fill="#94a3b8" font-size="11">Tomcat/业务线程池</text>
+    <line x1="200" y1="190" x2="325" y2="185" stroke="rgba(167,139,250,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- DB连接 -->
+    <rect x="50" y="250" width="150" height="70" rx="12" fill="rgba(248,113,113,.1)" stroke="rgba(248,113,113,.4)" filter="url(#sdw2)"/>
+    <text x="125" y="282" text-anchor="middle" fill="#f87171" font-size="13" font-weight="700">🗄️ DB 连接池</text>
+    <text x="125" y="304" text-anchor="middle" fill="#94a3b8" font-size="11">HikariCP / Druid</text>
+    <line x1="200" y1="285" x2="325" y2="210" stroke="rgba(248,113,113,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 下游依赖 -->
+    <rect x="700" y="60" width="150" height="70" rx="12" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.4)" filter="url(#sdw2)"/>
+    <text x="775" y="92" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">🔗 下游依赖</text>
+    <text x="775" y="114" text-anchor="middle" fill="#94a3b8" font-size="11">RPC / HTTP 第三方</text>
+    <line x1="700" y1="95" x2="575" y2="160" stroke="rgba(251,191,36,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 内部RPC -->
+    <rect x="700" y="155" width="150" height="70" rx="12" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.4)" filter="url(#sdw2)"/>
+    <text x="775" y="187" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">📡 内部 RPC</text>
+    <text x="775" y="209" text-anchor="middle" fill="#94a3b8" font-size="11">Feign / Dubbo 调用</text>
+    <line x1="700" y1="190" x2="575" y2="185" stroke="rgba(52,211,153,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 缓存 -->
+    <rect x="700" y="250" width="150" height="70" rx="12" fill="rgba(244,114,182,.1)" stroke="rgba(244,114,182,.4)" filter="url(#sdw2)"/>
+    <text x="775" y="282" text-anchor="middle" fill="#f472b6" font-size="13" font-weight="700">💾 缓存层</text>
+    <text x="775" y="304" text-anchor="middle" fill="#94a3b8" font-size="11">Redis / 本地缓存</text>
+    <line x1="700" y1="285" x2="575" y2="210" stroke="rgba(244,114,182,.4)" stroke-width="1.5" stroke-dasharray="4,3"/>
+  </svg>
+
+  <div class="card" style="margin-top:28px;">
+    <h4 style="font-size:1rem;font-weight:700;margin-bottom:12px;">💡 经典故障案例：网关限流 10000 QPS，服务还是被打挂了</h4>
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>环节</th>
+          <th>配置</th>
+          <th>实际瓶颈</th>
+          <th>问题</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>API 网关</code></td>
+          <td>限流 10,000 QPS</td>
+          <td>网络带宽</td>
+          <td style="color:var(--c-safe)">✅ 正常工作</td>
+        </tr>
+        <tr>
+          <td><code>订单服务</code></td>
+          <td>无线程池保护</td>
+          <td>Tomcat 默认 200 线程</td>
+          <td style="color:var(--danger)">❌ 全部阻塞在 DB 查询上</td>
+        </tr>
+        <tr>
+          <td><code>MySQL</code></td>
+          <td>连接池 max=100</td>
+          <td>慢 SQL 占满连接</td>
+          <td style="color:var(--danger)">❌ 新请求全部排队等待</td>
+        </tr>
+        <tr>
+          <td><code>库存服务(RPC)</code></td>
+          <td>无限流</td>
+          <td>被上游打爆</td>
+          <td style="color:var(--danger)">❌ 雪崩传播</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+
+<!-- ==================== Section 4: 容量模型 ==================== -->
+<section class="section" id="capacity-model">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#fbbf24,#f59e0b);">📊</div>
+    <h2>容量模型 —— 限流参数的本源依据</h2>
+  </div>
+  <p class="sec-desc">限流阈值不是拍脑袋决定的，而是基于系统容量模型科学计算出来的。</p>
+
+  <!-- 容量模型图 -->
+  <svg class="diagram" viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter id="sdw3"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-opacity="0.12"/></filter>
+    </defs>
+    <!-- 主框 -->
+    <rect x="180" y="30" width="340" height="240" rx="18" fill="#1e293b" stroke="rgba(251,191,36,.4)" stroke-width="2" filter="url(#sdw3)"/>
+    <text x="350" y="68" text-anchor="middle" fill="#fbbf24" font-size="17" font-weight="700">📐 容量模型 (Capacity Model)</text>
+    
+    <!-- 三个指标 -->
+    <rect x="210" y="95" width="135" height="70" rx="10" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.35)"/>
+    <text x="277" y="122" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="700">🕐 每秒允许</text>
+    <text x="277" y="148" text-anchor="middle" fill="#e2e8f0" font-size="20" font-weight="800">10,000</text>
+    
+    <rect x="360" y="95" width="135" height="70" rx="10" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.35)"/>
+    <text x="427" y="122" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="700">⚡ 突发流量</text>
+    <text x="427" y="148" text-anchor="middle" fill="#e2e8f0" font-size="20" font-weight="800">+2,000</text>
+    
+    <rect x="285" y="180" width="135" height="70" rx="10" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.35)"/>
+    <text x="352" y="207" text-anchor="middle" fill="#34d399" font-size="12" font-weight="700">🔄 超限恢复</text>
+    <text x="352" y="233" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">平滑过渡</text>
+  </svg>
+
+  <div class="highlight-box">
+    <h4>🧮 容量模型的三大决定因素</h4>
+    <p>设置限流参数时，必须同时考虑以下三个维度，任何一个被忽略都会导致限流失效：</p>
+  </div>
+
+  <div class="card-grid" style="grid-template-columns:repeat(3,1fr);">
+    <div class="card" style="text-align:center;">
+      <div style="font-size:32px;margin-bottom:8px;">🔗</div>
+      <h4 style="color:var(--c-gateway);margin-bottom:8px;">接口并发承受力</h4>
+      <p style="font-size:.85rem;color:var(--fg2);">当前硬件条件下，该接口最大能承受多少并发而不出现明显延迟上升？通过压测获得基准数据。</p>
+    </div>
+    <div class="card" style="text-align:center;">
+      <div style="font-size:32px;margin-bottom:8px;">📉</div>
+      <h4 style="color:var(--c-service);margin-bottom:8px;">下游调用承受力</h4>
+      <p style="font-size:.85rem;color:var(--fg2);">依赖的 MySQL、Redis、第三方 API 各自有何限制？木桶效应——最短板决定了整体上限。</p>
+    </div>
+    <div class="card" style="text-align:center;">
+      <div style="font-size:32px;margin-bottom:8px;">😤</div>
+      <h4 style="color:var(--c-core);margin-bottom:8px;">拒绝后用户体验</h4>
+      <p style="font-size:.85rem;color:var(--fg2);">触发限流后返回什么？429 Too Many Requests？排队等待？降级兜底？直接影响用户满意度。</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ==================== Section 5: 多层级限流体系 ==================== -->
+<section class="section" id="multi-layer">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#34d399,#10b981);">🏗️</div>
+    <h2>多层级限流体系设计</h2>
+  </div>
+  <p class="sec-desc">正确的做法是在系统的每一层都部署适合该层的限流策略，形成纵深防御。</p>
+
+  <!-- 多层架构图 -->
+  <svg class="diagram-full" viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter id="sdw4"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.12"/></filter>
+      <linearGradient id="layer1" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(56,189,248,.15)"/><stop offset="100%" stop-color="rgba(56,189,248,.05)"/></linearGradient>
+      <linearGradient id="layer2" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(167,139,250,.15)"/><stop offset="100%" stop-color="rgba(167,139,250,.05)"/></linearGradient>
+      <linearGradient id="layer3" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(251,191,36,.15)"/><stop offset="100%" stop-color="rgba(251,191,36,.05)"/></linearGradient>
+      <linearGradient id="layer4" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="rgba(248,113,113,.15)"/><stop offset="100%" stop-color="rgba(248,113,113,.05)"/></linearGradient>
+    </defs>
+    
+    <!-- Layer 1: 网关层 -->
+    <rect x="50" y="20" width="800" height="105" rx="14" fill="url(#layer1)" stroke="rgba(56,189,248,.3)" stroke-width="1.5"/>
+    <text x="80" y="48" fill="#38bdf8" font-size="14" font-weight="700">Layer 1 · 网关层限流</text>
+    <text x="80" y="68" fill="#94a3b8" font-size="11">全局入口流量控制 | Nginx / Spring Cloud Gateway / Kong</text>
+    <rect x="80" y="80" width="160" height="32" rx="8" fill="rgba(56,189,248,.15)"/>
+    <text x="160" y="101" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">按路由/IP/用户 限流</text>
+    <rect x="260" y="80" width="160" height="32" rx="8" fill="rgba(56,189,248,.15)"/>
+    <text x="340" y="101" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">防 DDoS / 爬虫</text>
+    <rect x="440" y="80" width="160" height="32" rx="8" fill="rgba(56,189,248,.15)"/>
+    <text x="520" y="101" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">黑白名单过滤</text>
+    <rect x="620" y="80" width="200" height="32" rx="8" fill="rgba(56,189,248,.15)"/>
+    <text x="720" y="101" text-anchor="middle" fill="#94a3b8" font-size="11">粗粒度：全局限流阈值</text>
+    
+    <!-- Layer 2: 服务层 -->
+    <rect x="50" y="140" width="800" height="105" rx="14" fill="url(#layer2)" stroke="rgba(167,139,250,.3)" stroke-width="1.5"/>
+    <text x="80" y="168" fill="#a78bfa" font-size="14" font-weight="700">Layer 2 · 服务层限流</text>
+    <text x="80" y="188" fill="#94a3b8" font-size="11">应用实例级别 | Sentinel / Resilience4j / Guava RateLimiter</text>
+    <rect x="80" y="200" width="175" height="32" rx="8" fill="rgba(167,139,250,.15)"/>
+    <text x="167" y="221" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">单机 QPS 限制</text>
+    <rect x="270" y="200" width="175" height="32" rx="8" fill="rgba(167,139,250,.15)"/>
+    <text x="357" y="221" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">线程池隔离</text>
+    <rect x="460" y="200" width="175" height="32" rx="8" fill="rgba(167,139,250,.15)"/>
+    <text x="547" y="221" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="600">信号量隔离</text>
+    <rect x="650" y="200" width="170" height="32" rx="8" fill="rgba(167,139,250,.15)"/>
+    <text x="735" y="221" text-anchor="middle" fill="#94a3b8" font-size="11">细粒度：实例级精确控制</text>
+    
+    <!-- Layer 3: 接口层 -->
+    <rect x="50" y="260" width="800" height="105" rx="14" fill="url(#layer3)" stroke="rgba(251,191,36,.3)" stroke-width="1.5"/>
+    <text x="80" y="288" fill="#fbbf24" font-size="14" font-weight="700">Layer 3 · 接口/方法级限流</text>
+    <text x="80" y="308" fill="#94a3b8" font-size="11">具体 API 方法级别 | @SentResource / 注解式配置</text>
+    <rect x="80" y="320" width="170" height="32" rx="8" fill="rgba(251,191,36,.15)"/>
+    <text x="165" y="341" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">热点参数限流</text>
+    <rect x="265" y="320" width="170" height="32" rx="8" fill="rgba(251,191,36,.15)"/>
+    <text x="350" y="341" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">核心接口独立阈值</text>
+    <rect x="450" y="320" width="170" height="32" rx="8" fill="rgba(251,191,36,.15)"/>
+    <text x="535" y="341" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">集群总量控制</text>
+    <rect x="635" y="320" width="185" height="32" rx="8" fill="rgba(251,191,36,.15)"/>
+    <text x="727" y="341" text-anchor="middle" fill="#94a3b8" font-size="11">最细粒度：方法级精准限流</text>
+    
+    <!-- Layer 4: 资源层 -->
+    <rect x="50" y="380" width="800" height="105" rx="14" fill="url(#layer4)" stroke="rgba(248,113,113,.3)" stroke-width="1.5"/>
+    <text x="80" y="408" fill="#f87171" font-size="14" font-weight="700">Layer 4 · 资源层保护</text>
+    <text x="80" y="428" fill="#94a3b8" font-size="11">基础设施层面 | 连接池配置 / 熔断器 / 降级策略</text>
+    <rect x="80" y="440" width="155" height="32" rx="8" fill="rgba(248,113,113,.15)"/>
+    <text x="157" y="461" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">DB 连接池上限</text>
+    <rect x="250" y="440" width="155" height="32" rx="8" fill="rgba(248,113,113,.15)"/>
+    <text x="327" y="461" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">Redis 连接池上限</text>
+    <rect x="420" y="440" width="155" height="32" rx="8" fill="rgba(248,113,113,.15)"/>
+    <text x="497" y="461" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">熔断器 (Circuit Breaker)</text>
+    <rect x="590" y="440" width="155" height="32" rx="8" fill="rgba(248,113,113,.15)"/>
+    <text x="667" y="461" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">自动降级策略</text>
+    <rect x="760" y="440" width="70" height="32" rx="8" fill="rgba(248,113,113,.15)"/>
+    <text x="795" y="461" text-anchor="middle" fill="#94a3b8" font-size="10">最后防线</text>
+    
+    <!-- 层间箭头 -->
+    <path d="M450 128 L450 138" stroke="#475569" stroke-width="2" marker-end="url(#arr3)"/>
+    <path d="M450 248 L450 258" stroke="#475569" stroke-width="2" marker-end="url(#arr3)"/>
+    <path d="M450 368 L450 378" stroke="#475569" stroke-width="2" marker-end="url(#arr3)"/>
+    <defs><marker id="arr3" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><path d="M0,0 L7,2.5 L0,5 Z" fill="#475569"/></marker></defs>
+  </svg>
+
+  <div class="highlight-box success" style="margin-top:24px;">
+    <h4>✅ 四层协同的效果</h4>
+    <p>每一层解决不同粒度的问题：<strong>网关层</strong>挡住恶意流量和全局超载 → <strong>服务层</strong>保护单个实例不被击穿 → <strong>接口层</strong>为核心 API 提供精细保护 → <strong>资源层</strong>作为最后防线防止底层资源枯竭。任何一层失守，下一层还能兜底。</p>
+  </div>
+</section>
+
+
+<!-- ==================== Section 6: 限流算法对比 ==================== -->
+<section class="section" id="algorithms">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#f472b6,#db2777);">⚙️</div>
+    <h2>限流算法选型与边界问题</h2>
+  </div>
+  <p class="sec-desc">不同算法适用于不同场景，选择错误会导致严重的边界效应。</p>
+
+  <!-- 固定窗口问题演示 -->
+  <svg class="diagram" viewBox="0 0 750 300" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="barOk" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#34d399"/><stop offset="100%" stop-color="#10b981"/></linearGradient>
+      <linearGradient id="barBad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#f87171"/><stop offset="100%" stop-color="#dc2626"/></linearGradient>
+    </defs>
+    <text x="375" y="28" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">⚠️ 固定窗口算法的「边界突刺」问题</text>
+    
+    <!-- 时间轴 -->
+    <line x1="60" y1="250" x2="700" y2="250" stroke="#475569" stroke-width="2"/>
+    <text x="60" y="270" fill="#94a3b8" font-size="11">00:00</text>
+    <text x="210" y="270" fill="#94a3b8" font-size="11">00:01</text>
+    <text x="360" y="270" fill="#94a3b8" font-size="11">00:02</text>
+    <text x="510" y="270" fill="#94a3b8" font-size="11">00:03</text>
+    <text x="650" y="270" fill="#94a3b8" font-size="11">00:04</text>
+    
+    <!-- 窗口分隔线 -->
+    <line x1="210" y1="50" x2="210" y2="250" stroke="#475569" stroke-width="1" stroke-dasharray="4,4"/>
+    <line x1="360" y1="50" x2="360" y2="250" stroke="#475569" stroke-width="1" stroke-dasharray="4,4"/>
+    <line x1="510" y1="50" x2="510" y2="250" stroke="#475569" stroke-width="1" stroke-dasharray="4,4"/>
+    
+    <!-- Window 1: 正常 -->
+    <text x="135" y="70" text-anchor="middle" fill="#94a3b8" font-size="11">窗口 1 (限额 100)</text>
+    <rect x="75" y="85" width="120" height="100" rx="6" fill="url(#barOk)" opacity="0.8"/>
+    <text x="135" y="140" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">100 请求 ✅</text>
+    
+    <!-- Window 2: 边界突刺! -->
+    <text x="435" y="70" text-anchor="middle" fill="#f87171" font-size="11">窗口 2 (临界点!)</text>
+    <!-- 窗口末尾突发 -->
+    <rect x="375" y="85" width="60" height="100" rx="6" fill="url(#barBad)" opacity="0.8"/>
+    <text x="405" y="140" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">100</text>
+    <!-- 窗口开头又来一波 -->
+    <rect x="440" y="85" width="60" height="100" rx="6" fill="url(#barBad)" opacity="0.8"/>
+    <text x="470" y="140" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">100</text>
+    
+    <!-- 突刺标注 -->
+    <rect x="365" y="200" width="175" height="36" rx="8" fill="rgba(248,113,113,.15)" stroke="rgba(248,113,113,.4)"/>
+    <text x="452" y="223" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">⚠️ 1秒内涌入了 200!</text>
+    
+    <!-- 说明文字 -->
+    <text x="135" y="295" text-anchor="middle" fill="#34d399" font-size="11">正常：每窗口 ≤ 100</text>
+    <text x="452" y="295" text-anchor="middle" fill="#f87171" font-size="11">突变：临界点 2倍突刺!</text>
+  </svg>
+
+  <!-- 算法对比表 -->
+  <table class="compare-table" style="margin-top:24px;">
+    <thead>
+      <tr>
+        <th>算法</th>
+        <th>原理</th>
+        <th>优点</th>
+        <th>缺点 / 注意事项</th>
+        <th>适用场景</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="tag" style="background:rgba(56,189,248,.15);color:#38bdf8;">固定窗口</span></td>
+        <td>统计固定时间窗口内请求数</td>
+        <td>实现简单，内存占用低</td>
+        <td style="color:var(--danger);">边界突刺问题</td>
+        <td>非严格精度要求的场景</td>
+      </tr>
+      <tr>
+        <td><span class="tag" style="background:rgba(167,139,250,.15);color:#a78bfa;">滑动窗口</span></td>
+        <td>将大窗口切分为小格子滚动</td>
+        <td>精度高于固定窗口</td>
+        <td>内存稍高，实现复杂度中等</td>
+        <td>大多数生产环境首选</td>
+      </tr>
+      <tr>
+        <td><span class="tag" style="background:rgba(52,211,153,.15);color:#34d399;">令牌桶</span></td>
+        <td>以固定速率放入令牌，请求取令牌</td>
+        <td>允许突发流量，平滑限流</td>
+        <td>突发量受桶容量限制</td>
+        <td>允许一定弹性的业务</td>
+      </tr>
+      <tr>
+        <td><span class="tag" style="background:rgba(251,191,36,.15);color:#fbbf24;">漏桶</span></td>
+        <td>请求进队列，固定速率处理</td>
+        <td>绝对匀速输出</td>
+        <td>不适应突发，可能有延迟</td>
+        <td>需要严格速率控制的场景</td>
+      </tr>
+      <tr>
+        <td><span class="tag" style="background:rgba(248,113,113,.15);color:#f87171;">滑动日志</span></td>
+        <td>记录每个请求时间戳，滑动统计</td>
+        <td>最高精度</td>
+        <td style="color:var(--danger);">内存消耗大，O(n)复杂度</td>
+        <td>超高精度要求场景</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="highlight-box" style="margin-top:20px;">
+    <h4>🎯 选型建议</h4>
+    <p><strong>网关层</strong>：令牌桶或滑动窗口（兼顾精度与性能）→ <strong>服务层</strong>：滑动窗口 + 热点参数限流 → <strong>接口层</strong>：Sentinel 的热点规则（支持参数级别）→ <strong>资源层</strong>：熔断器（半开/全开/关闭三态自动切换）。</p>
+  </div>
+</section>
+
+
+<!-- ==================== Section 7: 场景化策略 ==================== -->
+<section class="section" id="scenarios">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#06b6d4,#0891b2);">🎯</div>
+    <h2>典型场景与应对策略</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4 style="color:var(--danger);margin-bottom:10px;font-size:1rem;">🔴 秒杀 / 抢购场景</h4>
+      <ul style="font-size:.88rem;color:var(--fg2);padding-left:18px;line-height:1.9;">
+        <li>前端：按钮置灰 + 验证码拦截机器人</li>
+        <li>网关层：按用户ID 严格限流（如 1次/秒）</li>
+        <li>服务层：Redis 预扣库存（原子递减）</li>
+        <li>接口层：队列削峰 + 异步下单</li>
+        <li>资源层：只读副本分流读流量</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="color:var(--c-gateway);margin-bottom:10px;font-size:1rem;">🔵 开放 API 平台</h4>
+      <ul style="font-size:.88rem;color:var(--fg2);padding-left:18px;line-height:1.9;">
+        <li>网关层：AppKey + AppSecret 鉴权 + 分级限流</li>
+        <li> Bronze: 100 QPM / Silver: 1000 QPM / Gold: 10000 QPM</li>
+        <li>服务层：按租户 ID 做隔离限流</li>
+        <li>接口层：核心写接口额外降低阈值</li>
+        <li>监控：实时告警 + 自动升降级</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="color:var(--c-service);margin-bottom:10px;font-size:1rem;">🟣 微服务内部调用</h4>
+      <ul style="font-size:.88rem;color:var(--fg2);padding-left:18px;line-height:1.9;">
+        <li>Feign/Dubbo 调用方：设置超时 + 重试次数上限</li>
+        <li>被调用方：信号量隔离（快失败）</li>
+        <li>熔断器：错误率 > 50% 触发熔断</li>
+        <li>降级：返回默认值 / 缓存数据 / 友好提示</li>
+        <li>禁止链路重试风暴（重试指数退避）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="color:var(--c-core);margin-bottom:10px;font-size:1rem;">🟠 第三方依赖保护</h4>
+      <ul style="font-size:.88rem;color:var(--fg2);padding-left:18px;line-height:1.9;">
+        <li>外部 API 有自己的限额（如微信支付）</li>
+        <li>本地限流必须 < 外部限额（留 buffer）</li>
+        <li>适配器模式统一封装 + 限流 + 降级</li>
+        <li>调用失败时的 fallback 策略</li>
+        <li>监控外部服务的可用性和延迟趋势</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+
+<!-- ==================== Section 8: 总结 ==================== -->
+<section class="section" id="summary">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:linear-gradient(135deg,#38bdf8,#a78bfa,#f87171);">🏆</div>
+    <h2>总结：面试高分回答框架</h2>
+  </div>
+
+  <div class="highlight-box success">
+    <h4>✅ 一句话结论</h4>
+    <p><strong>网关限流只能做粗粒度的全局流量控制，真正消耗资源的是内部服务的线程池、数据库连接、下游调用——这些必须在服务内部进行精细化限流保护。</strong>正确的架构是多层级限流：网关层 → 服务层 → 接口层 → 资源层，四层协同形成纵深防御。</p>
+  </div>
+
+  <!-- 回答框架图 -->
+  <svg class="diagram" viewBox="0 0 750 380" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter id="sdw5"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-opacity="0.12"/></filter>
+    </defs>
+    <!-- 中心 -->
+    <rect x="275" y="140" width="200" height="100" rx="16" fill="#1e293b" stroke="rgba(56,189,248,.4)" stroke-width="2" filter="url(#sdw5)"/>
+    <text x="375" y="180" text-anchor="middle" fill="#38bdf8" font-size="15" font-weight="700">系统高可用</text>
+    <text x="375" y="205" text-anchor="middle" fill="#94a3b8" font-size="11">多层级限流保护</text>
+    
+    <!-- 四个角 -->
+    <!-- 限流 -->
+    <rect x="40" y="30" width="140" height="60" rx="10" fill="rgba(56,189,248,.1)" stroke="rgba(56,189,248,.4)"/>
+    <text x="110" y="57" text-anchor="middle" fill="#38bdf8" font-size="13" font-weight="700">限流</text>
+    <text x="110" y="76" text-anchor="middle" fill="#94a3b8" font-size="10">流量控制</text>
+    <line x1="180" y1="60" x2="270" y2="160" stroke="rgba(56,189,248,.3)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 熔断 -->
+    <rect x="570" y="30" width="140" height="60" rx="10" fill="rgba(248,113,113,.1)" stroke="rgba(248,113,113,.4)"/>
+    <text x="640" y="57" text-anchor="middle" fill="#f87171" font-size="13" font-weight="700">熔断</text>
+    <text x="640" y="76" text-anchor="middle" fill="#94a3b8" font-size="10">故障隔离</text>
+    <line x1="570" y1="60" x2="480" y2="160" stroke="rgba(248,113,113,.3)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 降级 -->
+    <rect x="40" y="290" width="140" height="60" rx="10" fill="rgba(251,191,36,.1)" stroke="rgba(251,191,36,.4)"/>
+    <text x="110" y="317" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">降级</text>
+    <text x="110" y="336" text-anchor="middle" fill="#94a3b8" font-size="10">优雅退让</text>
+    <line x1="180" y1="310" x2="270" y2="220" stroke="rgba(251,191,36,.3)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    
+    <!-- 超时 -->
+    <rect x="570" y="290" width="140" height="60" rx="10" fill="rgba(52,211,153,.1)" stroke="rgba(52,211,153,.4)"/>
+    <text x="640" y="317" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">超时</text>
+    <text x="640" y="336" text-anchor="middle" fill="#94a3b8" font-size="10">防止阻塞</text>
+    <line x1="570" y1="310" x2="480" y2="220" stroke="rgba(52,211,153,.3)" stroke-width="1.5" stroke-dasharray="4,3"/>
+  </svg>
+
+  <div class="card" style="margin-top:24px;">
+    <h4 style="font-size:1rem;font-weight:700;margin-bottom:14px;">📝 面试回答要点清单</h4>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:.9rem;">
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>先肯定网关限流的价值（第一道防线）</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>指出网关的三大盲区（资源不可见/内部调用绕过/粒度太粗）</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>引出内部服务的四大资源消耗点</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>给出容量模型的三个计算维度</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>画出四层限流架构图并解释每层职责</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>对比五种算法，指出固定窗口的边界突刺问题</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>结合具体场景（秒杀/开放API/微服务）给出方案</span></div>
+      <div style="display:flex;align-items:flex-start;gap:8px;"><span style="color:var(--c-safe);">✅</span><span>强调限流+熔断+降级+超时四位一体</span></div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /.wrap -->
+
+<!-- ====== Footer ====== -->
+<footer class="footer">
+  <p>限流为什么不能只在网关层做 · 分布式系统高可用系列</p>
+  <p style="margin-top:6px;">参考来源：@小哲说八股 · 后端开发 / 面试题 / 系统设计 / 限流算法 / 分布式系统</p>
+</footer>
+
+<!-- ====== IntersectionObserver Animation ====== -->
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) entry.target.classList.add('visible');
+    });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.section').forEach(el => observer.observe(el));
+
+  // Nav scroll spy highlight
+  const sections = document.querySelectorAll('.section[id]');
+  const navLinks = document.querySelectorAll('.nav a');
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(sec => {
+      const top = sec.offsetTop - 100;
+      if (scrollY >= top) current = sec.getAttribute('id');
+    });
+    navLinks.forEach(link => {
+      link.style.color = '';
+      link.style.background = '';
+      if (link.getAttribute('href') === '#' + current) {
+        link.style.color = '#38bdf8';
+        link.style.background = 'rgba(56,189,248,.1)';
+      }
+    });
+  }, { passive: true });
+
+  // Smooth scroll for nav links
+  navLinks.forEach(link => {
+    link.addEventListener('click', e => {
+      e.preventDefault();
+      const target = document.querySelector(link.getAttribute('href'));
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+});
+</script>
+
+</body>
+</html>
