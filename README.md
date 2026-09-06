@@ -40,25 +40,25 @@ Visuals 致力于通过可视化的方式，让复杂的计算机科学概念变
 ```
 visuals/
 ├── index.html                          # 首页
-├── algorithm/                          # 数据结构与算法
+├── computer-algorithm/                 # 数据结构与算法
 ├── artificial-intelligence/            # 人工智能
 ├── bigdata-system/                     # 大数据系统
 ├── business-design/                    # 业务设计
 ├── cloud-architecture/                 # 云服务架构
-├── compiler-principles/                # 编译原理
+├── computer-compiler-principles/          # 编译原理
 ├── computer-composition/               # 计算机组成原理
 ├── computer-network/                   # 计算机网络
 ├── container/                          # 容器技术
-├── cryptography/                       # 密码学
+├── computer-principles/                 # 计算机原理（拓扑学、密码学）
 ├── database-system/                    # 数据库系统
 ├── distributed-system/                 # 分布式系统
 ├── game-design/                        # 游戏设计
 ├── high-availability/                  # 高可用系统
 ├── high-concurrency/                   # 高并发系统
 ├── iot-design/                         # 物联网设计
-├── operating-system/                   # 操作系统
-├── programming-language/               # 编程语言
-├── software-engineering/               # 软件工程
+├── computer-operating-system/            # 操作系统
+├── computer-programming-language/        # 编程语言
+├── computer-software-engineering/      # 软件工程
 ├── third-party-integration/            # 第三方对接
 ├── assets/                             # 公共资源
 └── check_html_link.sh                  # HTML 链接检查脚本
@@ -95,14 +95,14 @@ chmod +x check_html_link.sh
 
 - 自动遍历项目中所有 HTML 文件
 - 检查文件是否在对应的上级 `index.html` 中有链接引用
-- 支持多级目录结构（如 `algorithm/trees/binary_tree.html` 会检查 `algorithm/index.html`）
+- 支持多级目录结构（如 `computer-algorithm/trees/binary_tree.html` 会检查 `computer-algorithm/index.html`）
 - 用颜色标记检查结果（绿色=已链接，红色=未链接，黄色=跳过）
 - 显示统计摘要：总计、已链接、未链接数量
 
 **检查规则：**
 
 - `game-design/flash-technology-explained.html` → 检查 `game-design/index.html`
-- `algorithm/trees/binary_tree_traversal.html` → 检查 `algorithm/index.html`
+- `computer-algorithm/trees/binary_tree_traversal.html` → 检查 `computer-algorithm/index.html`
 - `high-concurrency/kafka/kafka-partition-explained.html` → 检查 `high-concurrency/index.html`
 
 ## 贡献指南
