@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>线程池动态调整：为什么需要、解决什么问题、怎么做</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-purple: #a371f7;
+            --accent-red: #f85149;
+            --accent-cyan: #39c5cf;
+            --border-color: #30363d;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+        a { color: var(--accent-blue); text-decoration: none; }
+
+        /* 顶部返回条 */
+        .topbar {
+            display: flex; align-items: center; gap: 16px;
+            padding: 14px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            font-size: .95rem;
+        }
+        .topbar a { color: var(--text-secondary); }
+        .topbar a:hover { color: var(--accent-blue); }
+
+        .hero {
+            background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+            padding: 64px 20px 48px;
+            text-align: center;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .hero .tag {
+            display: inline-block; padding: 4px 14px; border-radius: 999px;
+            background: rgba(88,166,255,.12); color: var(--accent-blue);
+            font-size: .85rem; margin-bottom: 18px; border: 1px solid rgba(88,166,255,.3);
+        }
+        .hero h1 {
+            font-size: 2.4rem; margin-bottom: 14px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .hero p { color: var(--text-secondary); font-size: 1.05rem; max-width: 680px; margin: 0 auto; }
+
+        .layout { display: flex; gap: 40px; max-width: 1400px; margin: 0 auto; padding: 40px 20px; }
+
+        /* 粘性侧边栏 + scroll-spy */
+        .sidebar {
+            position: sticky; top: 20px; align-self: flex-start;
+            width: 250px; flex-shrink: 0; max-height: calc(100vh - 40px); overflow-y: auto;
+            border-right: 1px solid var(--border-color); padding-right: 16px;
+        }
+        .sidebar .nav-title { font-size: .8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+        .sidebar a {
+            display: block; padding: 9px 12px; margin-bottom: 4px; border-radius: 8px;
+            color: var(--text-secondary); font-size: .92rem; border-left: 2px solid transparent;
+            transition: all .15s ease;
+        }
+        .sidebar a:hover { background: var(--bg-secondary); color: var(--text-primary); }
+        .sidebar a.active {
+            background: rgba(88,166,255,.12); color: var(--accent-blue);
+            border-left-color: var(--accent-blue); font-weight: 600;
+        }
+
+        .content { flex: 1; min-width: 0; }
+
+        section { margin-bottom: 56px; scroll-margin-top: 20px; }
+        .section-num {
+            display: inline-block; font-size: .8rem; color: var(--accent-blue);
+            border: 1px solid rgba(88,166,255,.35); border-radius: 6px; padding: 2px 10px; margin-bottom: 10px;
+        }
+        h2 { font-size: 1.7rem; margin-bottom: 18px; }
+        h3 { font-size: 1.25rem; margin: 26px 0 12px; color: var(--accent-cyan); }
+        p { margin-bottom: 14px; color: var(--text-primary); }
+        strong { color: #fff; }
+        ul, ol { margin: 0 0 14px 22px; }
+        li { margin-bottom: 8px; }
+
+        .card {
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 14px; padding: 26px; margin-bottom: 22px;
+        }
+        .card h3 { margin-top: 0; }
+
+        /* 提示框 */
+        .tip { border-radius: 12px; padding: 16px 18px; margin: 18px 0; border-left: 4px solid; }
+        .tip .tip-title { font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+        .tip.info { background: rgba(88,166,255,.08); border-color: var(--accent-blue); }
+        .tip.info .tip-title { color: var(--accent-blue); }
+        .tip.warn { background: rgba(248,81,73,.08); border-color: var(--accent-red); }
+        .tip.warn .tip-title { color: var(--accent-red); }
+        .tip.success { background: rgba(63,185,80,.08); border-color: var(--accent-green); }
+        .tip.success .tip-title { color: var(--accent-green); }
+
+        /* 公式块 */
+        .formula {
+            background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px;
+            padding: 20px 24px; margin: 18px 0; text-align: center; font-size: 1.2rem;
+            font-family: 'SFMono-Regular', Consolas, monospace; color: var(--accent-orange);
+        }
+        .formula .note { display: block; font-size: .85rem; color: var(--text-secondary); margin-top: 8px; font-family: inherit; }
+
+        /* 表格 */
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: .92rem; }
+        th, td { border: 1px solid var(--border-color); padding: 11px 14px; text-align: left; vertical-align: top; }
+        th { background: var(--bg-tertiary); color: var(--accent-blue); font-weight: 600; }
+        tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+
+        /* 代码块 */
+        pre {
+            background: #010409; border: 1px solid var(--border-color); border-radius: 12px;
+            padding: 18px 20px; overflow-x: auto; margin: 16px 0; font-size: .88rem;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; line-height: 1.6;
+        }
+        code { font-family: 'SFMono-Regular', Consolas, monospace; }
+        pre code { color: #c9d1d9; }
+        .kw { color: #ff7b72; } .fn { color: #d2a8ff; } .str { color: #a5d6ff; } .cm { color: #8b949e; } .num { color: #79c0ff; }
+
+        /* SVG 容器 */
+        .diagram { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px; padding: 18px; margin: 18px 0; text-align: center; }
+        .diagram svg { max-width: 100%; height: auto; }
+        .diagram .cap { color: var(--text-secondary); font-size: .85rem; margin-top: 10px; }
+
+        /* 动画 */
+        .reveal { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+        .reveal.visible { opacity: 1; transform: none; }
+
+        /* 演示区 */
+        .demo-controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 18px; }
+        .demo-controls label { font-size: .9rem; color: var(--text-secondary); display: flex; align-items: center; gap: 10px; }
+        input[type=range] { accent-color: var(--accent-blue); }
+        .btn {
+            background: var(--accent-blue); color: #0d1117; border: none; border-radius: 8px;
+            padding: 9px 18px; font-weight: 600; cursor: pointer; font-size: .9rem;
+        }
+        .btn.secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn:hover { opacity: .9; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 12px; margin: 16px 0; }
+        .metric { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 14px; text-align: center; }
+        .metric .v { font-size: 1.5rem; font-weight: 700; }
+        .metric .l { font-size: .78rem; color: var(--text-secondary); margin-top: 4px; }
+        #sim { width: 100%; max-width: 780px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px; display: block; margin: 0 auto; }
+        .legend { display: flex; gap: 18px; justify-content: center; font-size: .82rem; color: var(--text-secondary); margin-top: 10px; flex-wrap: wrap; }
+        .legend span { display: inline-flex; align-items: center; gap: 6px; }
+        .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+        footer { text-align: center; padding: 30px; color: var(--text-secondary); font-size: .85rem; border-top: 1px solid var(--border-color); }
+
+        @media (max-width: 900px) {
+            .layout { flex-direction: column; }
+            .sidebar { position: static; width: 100%; max-height: none; border-right: none; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 20px; }
+            .hero h1 { font-size: 1.8rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <a href="../index.html">← 高并发</a>
+        <span style="color:var(--border-color)">/</span>
+        <a href="../index.html">visuals</a>
+        <span style="color:var(--border-color)">/</span>
+        <span style="color:var(--text-primary)">线程池动态调整</span>
+    </div>
+
+    <div class="hero">
+        <span class="tag">高并发 · 池化技术</span>
+        <h1>线程池动态调整</h1>
+        <p>固定大小的线程池在时变流量面前要么撑不住、要么浪费资源。本文讲清：<strong>为什么需要动态调整</strong>、它<strong>解决什么问题</strong>、以及<strong>具体怎么调</strong>（含可运行的 Java 代码与交互式模拟器）。</p>
+    </div>
+
+    <div class="layout">
+        <!-- 侧边栏导航 -->
+        <aside class="sidebar">
+            <div class="nav-title">目录</div>
+            <a href="#intro">引言：一次真实的翻车</a>
+            <a href="#why">一、为什么需要动态调整</a>
+            <a href="#solve">二、动态调整解决什么问题</a>
+            <a href="#how">三、怎么动态调整</a>
+            <a href="#practice">四、业界实践</a>
+            <a href="#demo">五、交互演示：动态模拟器</a>
+            <a href="#pitfalls">六、避坑与最佳实践</a>
+            <a href="#summary">七、一图总结</a>
+        </aside>
+
+        <main class="content">
+            <!-- 引言 -->
+            <section id="intro" class="reveal">
+                <span class="section-num">引言</span>
+                <h2>一次真实的翻车现场</h2>
+                <div class="card">
+                    <p>某服务把业务线程池配成固定 <code>core=8, max=8</code>，队列用 <code>LinkedBlockingQueue（无界）</code>。平时风平浪静。直到一次大促 + 一个下游 Redis 变慢：</p>
+                    <ul>
+                        <li>8 个线程很快被慢调用占满；</li>
+                        <li>新请求全堆进无界队列，内存一路上涨；</li>
+                        <li>Redis 恢复后，积压的几万个任务被集中执行，GC 被打爆，整机 STW；</li>
+                        <li>最终 OOM，服务雪崩。</li>
+                    </ul>
+                    <p>根因不是"线程数算错了"，而是<strong>线程池是死的，流量是活的</strong>。如果线程池能根据队列堆积自动扩容、低峰自动缩容，这场事故大概率不会发生。</p>
+                </div>
+                <div class="tip warn">
+                    <div class="tip-title">⚠️ 核心结论</div>
+                    线程池的本质是"用固定资源去对抗变化的工作负载"。只要工作负载会变化（流量潮汐、突发、任务画像漂移），<strong>静态配置就一定会在某个时刻错配</strong>。动态调整就是让线程池"跟着负载走"。
+                </div>
+            </section>
+
+            <!-- 一、为什么需要 -->
+            <section id="why" class="reveal">
+                <span class="section-num">第一章</span>
+                <h2>一、为什么需要动态调整？</h2>
+
+                <h3>1.1 静态线程池的死穴：根本矛盾</h3>
+                <p>线程池大小定下来之后，它面对的是<strong>时变的流量</strong>：</p>
+                <ul>
+                    <li><strong>日内潮汐</strong>：白天高峰、凌晨低谷，峰值可能是谷值的 10 倍以上；</li>
+                    <li><strong>突发流量</strong>：大促、热点事件、定时任务集中触发；</li>
+                    <li><strong>任务画像漂移</strong>：有的请求命中缓存（纯计算），有的走 DB/RPC（重 IO），同一个线程池在不同时刻的"计算/等待"比例完全不同。</li>
+                </ul>
+                <p>固定一个大小，意味着你只能为"某一个假设的场景"优化，其他场景必然错配。</p>
+
+                <h3>1.2 经典公式的局限</h3>
+                <p>线程数估算常用这个公式：</p>
+                <div class="formula">
+                    N<sub>threads</sub> ≈ N<sub>cpu</sub> × (1 + W / C)
+                    <span class="note">W = 线程等待时间（IO 阻塞），C = 线程计算时间。IO 越重（W 越大），需要越多线程。</span>
+                </div>
+                <ul>
+                    <li>CPU 密集型（W≈0）：N ≈ N<sub>cpu</sub>；</li>
+                    <li>IO 密集型（W≫C）：N 可以远大于 N<sub>cpu</sub>（如 2×~数十倍）。</li>
+                </ul>
+                <div class="tip info">
+                    <div class="tip-title">💡 公式为什么不够用</div>
+                    这个公式假设 <strong>W/C 是恒定常数</strong>。但真实系统里，一个请求可能这次命中本地缓存（C 大、W 小），下次走跨机房 DB（W 大）。<strong>W/C 本身是动态变化的</strong>，用固定的 N 去套变化的 W/C，必然在某一侧失准。
+                </div>
+
+                <h3>1.3 太小 vs 太大：两种错配的代价</h3>
+                <div class="diagram">
+                    <svg viewBox="0 0 680 240" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6 Z" fill="#8b949e"/>
+                            </marker>
+                        </defs>
+                        <!-- 太小 -->
+                        <rect x="20" y="20" width="300" height="200" rx="12" fill="#161b22" stroke="#f85149"/>
+                        <text x="170" y="48" fill="#f85149" font-size="15" text-anchor="middle" font-weight="bold">线程数太小</text>
+                        <line x1="120" y1="70" x2="120" y2="190" stroke="#8b949e" marker-end="url(#ar)"/>
+                        <text x="135" y="95" fill="#e6edf3" font-size="12">队列堆积</text>
+                        <text x="135" y="115" fill="#e6edf3" font-size="12">延迟飙升</text>
+                        <text x="135" y="135" fill="#e6edf3" font-size="12">触发拒绝</text>
+                        <text x="135" y="155" fill="#e6edf3" font-size="12">吞吐上不去</text>
+                        <!-- 太大 -->
+                        <rect x="360" y="20" width="300" height="200" rx="12" fill="#161b22" stroke="#d29922"/>
+                        <text x="510" y="48" fill="#d29922" font-size="15" text-anchor="middle" font-weight="bold">线程数太大</text>
+                        <line x1="460" y1="70" x2="460" y2="190" stroke="#8b949e" marker-end="url(#ar)"/>
+                        <text x="475" y="95" fill="#e6edf3" font-size="12">上下文切换 ↑</text>
+                        <text x="475" y="115" fill="#e6edf3" font-size="12">内存占用 ↑(每线程~1MB)</text>
+                        <text x="475" y="135" fill="#e6edf3" font-size="12">锁/缓存竞争 ↑</text>
+                        <text x="475" y="155" fill="#e6edf3" font-size="12">吞吐反下降</text>
+                    </svg>
+                    <div class="cap">图 1：两种静态错配的代价——夹在中间的"刚好"几乎不存在于变化负载中。</div>
+                </div>
+                <p><strong>结论</strong>：理想的"刚好"只存在于某一瞬间。你需要的是一个能在区间内滑动的线程池，而不是一个定死的数值。</p>
+            </section>
+
+            <!-- 二、解决什么问题 -->
+            <section id="solve" class="reveal">
+                <span class="section-num">第二章</span>
+                <h2>二、动态调整解决什么问题？</h2>
+
+                <div class="card">
+                    <h3>① 突发流量下的延迟尖刺</h3>
+                    <p>高峰来临时，队列开始堆积。动态扩容把线程数顶上去，让任务"立刻被处理"而不是"排队等死"，延迟分位（p95/p99）显著平滑。</p>
+                </div>
+                <div class="card">
+                    <h3>② 低峰期的资源浪费</h3>
+                    <p>凌晨流量只有高峰的 1/10，却还占着同样多的线程：空转、吃内存、增加 GC 压力。动态缩容把资源还回去，单机能塞下更多实例。</p>
+                </div>
+                <div class="card">
+                    <h3>③ 线程池"雪崩"</h3>
+                    <p>一个慢依赖（DB/下游 RT 升高）会逐步占满所有线程 → 队列堆积 → 新请求超时/被拒绝，且线程被占导致<strong>其他不依赖该慢服务的请求也一起挂</strong>。动态扩容 + 隔离 + 超时，能在慢依赖恢复前尽量兜底。</p>
+                </div>
+                <div class="diagram">
+                    <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6 Z" fill="#f85149"/>
+                            </marker>
+                        </defs>
+                        <rect x="10" y="80" width="120" height="44" rx="8" fill="#161b22" stroke="#58a6ff"/>
+                        <text x="70" y="107" fill="#e6edf3" font-size="12" text-anchor="middle">下游变慢</text>
+                        <line x1="130" y1="102" x2="190" y2="102" stroke="#f85149" marker-end="url(#ar2)"/>
+                        <rect x="195" y="80" width="120" height="44" rx="8" fill="#161b22" stroke="#f85149"/>
+                        <text x="255" y="107" fill="#e6edf3" font-size="12" text-anchor="middle">线程被占满</text>
+                        <line x1="315" y1="102" x2="375" y2="102" stroke="#f85149" marker-end="url(#ar2)"/>
+                        <rect x="380" y="80" width="120" height="44" rx="8" fill="#161b22" stroke="#f85149"/>
+                        <text x="440" y="107" fill="#e6edf3" font-size="12" text-anchor="middle">队列堆积</text>
+                        <line x1="500" y1="102" x2="560" y2="102" stroke="#f85149" marker-end="url(#ar2)"/>
+                        <rect x="565" y="80" width="110" height="44" rx="8" fill="#161b22" stroke="#f85149"/>
+                        <text x="620" y="100" fill="#e6edf3" font-size="12" text-anchor="middle">拒绝/超时</text>
+                        <text x="620" y="120" fill="#f85149" font-size="12" text-anchor="middle">→ 雪崩</text>
+                    </svg>
+                    <div class="cap">图 2：慢依赖引发的线程池雪崩因果链。动态扩容能在第 2→3 步打断它。</div>
+                </div>
+                <div class="card">
+                    <h3>④ 任务画像变化无法自适应</h3>
+                    <p>系统从 CPU 密集转为 IO 密集（或反之）时，最优线程数会大幅漂移。动态调整依据实时指标（而非写死的假设）再平衡。</p>
+                </div>
+                <div class="card">
+                    <h3>⑤ 减少拒绝策略的触发</h3>
+                    <p><code>RejectedExecutionException</code> 触发后，caller-runs / 丢弃都是"降级体验"。扩容让队列少溢出，把"硬拒绝"变成"软吸收"。</p>
+                </div>
+
+                <div class="tip success">
+                    <div class="tip-title">✅ 一句话总结</div>
+                    动态调整把"线程池大小"从一个<strong>部署期决策</strong>变成了一个<strong>运行期受控变量</strong>，让资源供给实时跟随真实负载，而不是跟随我们对负载的猜测。
+                </div>
+            </section>
+
+            <!-- 三、怎么动态调整 -->
+            <section id="how" class="reveal">
+                <span class="section-num">第三章</span>
+                <h2>三、怎么动态调整？</h2>
+
+                <h3>3.1 底层机制：ThreadPoolExecutor 的可调参数</h3>
+                <p>JDK 的 <code>ThreadPoolExecutor</code> 本身就把线程数暴露成了"运行时可改"的：</p>
+                <table>
+                    <tr><th>方法</th><th>作用</th></tr>
+                    <tr><td><code>setCorePoolSize(int)</code></td><td>改核心线程数。调大→立即尝试 prestart；调小→未来不再补充（已在跑/空闲未超时的核心线程不会立刻被杀）。</td></tr>
+                    <tr><td><code>setMaximumPoolSize(int)</code></td><td>改最大线程数上限。</td></tr>
+                    <tr><td><code>setKeepAliveTime(long, TimeUnit)</code></td><td>非核心线程空闲多久后被回收。</td></tr>
+                    <tr><td><code>allowCoreThreadTimeOut(boolean)</code></td><td>默认 false：核心线程永不回收；设 true：核心线程也可超时回收（缩容到 0 的关键）。</td></tr>
+                </table>
+
+                <div class="tip warn">
+                    <div class="tip-title">⚠️ 最大的坑：任务提交的增长顺序</div>
+                    提交一个任务时，ThreadPoolExecutor 的顺序是：<br>
+                    <strong>① 当前线程 &lt; core → 新建线程</strong> → <strong>② 否则入队</strong> → <strong>③ 队列满且 &lt; max → 新建线程到 max</strong> → <strong>④ 否则拒绝</strong>。<br>
+                    这意味着：如果你用<strong>无界队列</strong>，第 ③ 步永远到不了，线程数会<strong>永远卡在 core</strong>，maximumPoolSize 形同虚设！想要"先排队缓冲、满了再扩容"，必须用<strong>有界队列 + 较大的 max</strong>。
+                </div>
+
+                <div class="diagram">
+                    <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <marker id="ar3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6 Z" fill="#58a6ff"/>
+                            </marker>
+                        </defs>
+                        <rect x="20" y="70" width="180" height="56" rx="10" fill="#161b22" stroke="#3fb950"/>
+                        <text x="110" y="95" fill="#e6edf3" font-size="13" text-anchor="middle" font-weight="bold">① 线程数 &lt; core</text>
+                        <text x="110" y="114" fill="#8b949e" font-size="11" text-anchor="middle">直接新建线程</text>
+                        <line x1="200" y1="98" x2="245" y2="98" stroke="#58a6ff" marker-end="url(#ar3)"/>
+                        <rect x="250" y="70" width="180" height="56" rx="10" fill="#161b22" stroke="#58a6ff"/>
+                        <text x="340" y="95" fill="#e6edf3" font-size="13" text-anchor="middle" font-weight="bold">② 否则入队</text>
+                        <text x="340" y="114" fill="#8b949e" font-size="11" text-anchor="middle">有界队列缓冲</text>
+                        <line x1="430" y1="98" x2="475" y2="98" stroke="#58a6ff" marker-end="url(#ar3)"/>
+                        <rect x="480" y="70" width="180" height="56" rx="10" fill="#161b22" stroke="#d29922"/>
+                        <text x="570" y="95" fill="#e6edf3" font-size="13" text-anchor="middle" font-weight="bold">③ 队列满 &amp; &lt; max</text>
+                        <text x="570" y="114" fill="#8b949e" font-size="11" text-anchor="middle">新建线程到 max</text>
+                        <line x1="140" y1="126" x2="140" y2="160" stroke="#8b949e" marker-end="url(#ar3)"/>
+                        <rect x="60" y="162" width="160" height="30" rx="8" fill="#161b22" stroke="#f85149"/>
+                        <text x="140" y="182" fill="#f85149" font-size="12" text-anchor="middle">④ 拒绝策略</text>
+                    </svg>
+                    <div class="cap">图 3：任务提交增长顺序。无界队列会让 ③ 永远不触发。</div>
+                </div>
+
+                <h3>3.2 反馈信号：盯哪些指标</h3>
+                <p>动态调整是"闭环控制"，首先得有"眼睛"——监控指标：</p>
+                <ul>
+                    <li><strong>队列长度</strong> <code>executor.getQueue().size()</code>：最直观的"压力计"；</li>
+                    <li><strong>活跃线程数</strong> <code>getActiveCount()</code> 与 <code>getPoolSize()</code>：当前并发度；</li>
+                    <li><strong>任务排队等待时间</strong>：submit 到真正开始执行（反映队列拥堵）；</li>
+                    <li><strong>任务执行耗时</strong>（埋点 / Micrometer）：判断是不是慢调用；</li>
+                    <li><strong>拒绝次数</strong>：扩容失效的硬信号；</li>
+                    <li><strong>延迟分位 p95/p99</strong>：最该盯的 SLO；</li>
+                    <li><strong>饱和度</strong> = activeCount / maxPoolSize。</li>
+                </ul>
+
+                <h3>3.3 调整算法：四种思路</h3>
+                <table>
+                    <tr><th>方法</th><th>思路</th><th>优点</th><th>缺点</th></tr>
+                    <tr><td><strong>阈值规则法</strong></td><td>队列 &gt; H → 扩容；队列 = 0 持续 T → 缩容</td><td>简单、易落地、可解释</td><td>阈值难调，易在边界抖动</td></tr>
+                    <tr><td><strong>PID 反馈控制</strong></td><td>以"队列长度误差"为输入，比例+积分+微分输出线程数增量</td><td>平滑、抗抖、类温控系统</td><td>需调 Kp/Ki/Kd，较复杂</td></tr>
+                    <tr><td><strong>Little's Law 反推</strong></td><td>L = λW，目标延迟 W* → 需要并发 ≈ λ·W*</td><td>理论指导、有依据</td><td>依赖 λ、W 的准确估计</td></tr>
+                    <tr><td><strong>预测式（潮汐）</strong></td><td>按历史同时段流量提前扩容（如 9 点前预热）</td><td>提前量足、无滞后</td><td>需历史数据、对突发无效</td></tr>
+                </table>
+                <div class="formula">
+                    L = λ × W
+                    <span class="note">Little's Law：系统中平均请求数 = 到达率 × 平均停留时间。想要停留时间 W ≤ W*，则需并发 ≈ λ·W*，据此反推线程数。</span>
+                </div>
+
+                <h3>3.4 一个可运行的动态调整实现（Java）</h3>
+                <p>核心思想：定时采集指标 → 决策 → 调用 setter，并加<strong>步长限制 + 迟滞</strong>防抖动。</p>
+                <pre><code><span class="cm">// 假设已有一个 ThreadPoolExecutor，core=4, max=64，使用有界队列</span>
+<span class="type">ThreadPoolExecutor</span> executor = ...;
+<span class="kw">int</span> core = <span class="num">4</span>, max = <span class="num">64</span>;
+<span class="type">ScheduledExecutorService</span> adjuster = Executors.<span class="fn">newSingleThreadScheduledExecutor</span>();
+
+adjuster.<span class="fn">scheduleAtFixedRate</span>(() -> {
+    <span class="kw">int</span> q      = executor.<span class="fn">getQueue</span>().<span class="fn">size</span>();
+    <span class="kw">int</span> pool   = executor.<span class="fn">getPoolSize</span>();
+    <span class="kw">int</span> target = pool;
+
+    <span class="kw">if</span> (q &gt; core) {                       <span class="cm">// 队列堆积 → 扩容（每周期 +4，带步长）</span>
+        target = Math.<span class="fn">min</span>(max, pool + <span class="num">4</span>);
+    } <span class="kw">else if</span> (q == <span class="num">0</span> &amp;&amp; pool &gt; core) {  <span class="cm">// 空闲 → 缩容（每周期 -2）</span>
+        target = Math.<span class="fn">max</span>(core, pool - <span class="num">2</span>);
+    }
+
+    <span class="kw">if</span> (target != pool) {
+        <span class="cm">// 同时调 core 和 max，才能"双向"伸缩</span>
+        executor.<span class="fn">setCorePoolSize</span>(target);
+        executor.<span class="fn">setMaximumPoolSize</span>(Math.<span class="fn">max</span>(target, max));
+    }
+}, <span class="num">0</span>, <span class="num">5</span>, TimeUnit.<span class="type">SECONDS</span>);</code></pre>
+                <div class="tip warn">
+                    <div class="tip-title">⚠️ 缩容不生效的经典坑</div>
+                    仅 <code>setCorePoolSize</code> 调小，<strong>不会主动杀正在跑的线程</strong>，只是"未来不补充"。若核心线程默认不允许超时，已存在的空闲核心线程会一直留着 → 表现成"只增不减"。要让缩容真正发生，需<strong>配小 keepAliveTime 或 allowCoreThreadTimeOut(true)</strong>。
+                </div>
+
+                <h3>3.5 缩容到底做了什么</h3>
+                <ul>
+                    <li>线程数 &gt; corePoolSize，且某线程空闲超过 keepAliveTime → 回收该线程；</li>
+                    <li>核心线程默认不回收；<code>allowCoreThreadTimeOut(true)</code> 后可回收到 0；</li>
+                    <li><code>setCorePoolSize</code> 缩小：不会中断正在执行的任务，只影响"新建/补充"行为；</li>
+                    <li>所以缩容是<strong>渐进、平滑</strong>的，不会瞬间把在跑的任务掐掉。</li>
+                </ul>
+            </section>
+
+            <!-- 四、业界实践 -->
+            <section id="practice" class="reveal">
+                <span class="section-num">第四章</span>
+                <h2>四、业界实践</h2>
+                <table>
+                    <tr><th>实现</th><th>动态相关特性</th><th>要点</th></tr>
+                    <tr><td><strong>Tomcat</strong></td><td>maxThreads（默认200）、minSpareThreads、maxIdleTime</td><td>accept 队列 + 工作线程池，低峰保留 minSpare 备用线程。</td></tr>
+                    <tr><td><strong>Netty</strong></td><td>EventLoopGroup 线程数 ≈ 2×CPU；ioRatio 调节 IO/任务时间</td><td>其"自适应"更多在业务线程池；EventLoop 本身固定以保证无锁。</td></tr>
+                    <tr><td><strong>Dubbo</strong></td><td>fixed / cached / limited / eager 四种线程池</td><td>eager：任务优先建线程而非入队（core==max，队列几乎不存），先扩线程抗突发。</td></tr>
+                    <tr><td><strong>Hystrix</strong></td><td>线程池隔离（每依赖独立池 + 熔断 + 降级）</td><td>思想被 resilience4j / Sentinel 继承；已进入维护模式。</td></tr>
+                    <tr><td><strong>DynamicTp / Hippo4j</strong></td><td>运行时动态调参 + 监控看板 + 告警</td><td>生产环境"动态调整"最实用落地：不停机改 core/max/queue/keepAlive，配监控与阈值告警。</td></tr>
+                </table>
+                <div class="tip info">
+                    <div class="tip-title">💡 生产建议</div>
+                    绝大多数业务不需要自己写 PID 控制器。直接用 <strong>DynamicTp / Hippo4j</strong> 这类动态线程池框架：把线程池参数做成运行期可配置 + 配监控告警，既拿到了"动态调整"的能力，又避免了自研的坑。自研更适合对延迟极端敏感、负载特征特殊的场景。
+                </div>
+            </section>
+
+            <!-- 五、交互演示 -->
+            <section id="demo" class="reveal">
+                <span class="section-num">第五章</span>
+                <h2>五、交互演示：动态线程池模拟器</h2>
+                <p>拖动"流量"滑块模拟请求到达速率，切换"动态调整"开关，观察线程池大小、队列、完成数、拒绝数的变化。</p>
+                <div class="card">
+                    <div class="demo-controls">
+                        <label>流量（任务/周期）：
+                            <input type="range" id="traffic" min="1" max="40" value="14">
+                            <span id="trafficVal">14</span>
+                        </label>
+                        <label><input type="checkbox" id="dyn"> 动态调整（开/关）</label>
+                        <button class="btn" id="startBtn">▶ 开始</button>
+                        <button class="btn secondary" id="resetBtn">↺ 重置</button>
+                    </div>
+                    <div class="metrics">
+                        <div class="metric"><div class="v" id="mPool" style="color:var(--accent-blue)">6</div><div class="l">线程数 (max 24)</div></div>
+                        <div class="metric"><div class="v" id="mQueue" style="color:var(--accent-orange)">0</div><div class="l">队列长度 (cap 60)</div></div>
+                        <div class="metric"><div class="v" id="mBusy" style="color:var(--accent-green)">0</div><div class="l">忙碌线程</div></div>
+                        <div class="metric"><div class="v" id="mDone" style="color:var(--accent-purple)">0</div><div class="l">已完成</div></div>
+                        <div class="metric"><div class="v" id="mRej" style="color:var(--accent-red)">0</div><div class="l">已拒绝</div></div>
+                        <div class="metric"><div class="v" id="mLat" style="color:var(--accent-cyan)">0</div><div class="l">平均延迟(周期)</div></div>
+                    </div>
+                    <canvas id="sim" width="780" height="300"></canvas>
+                    <div class="legend">
+                        <span><span class="dot" style="background:#3fb950"></span>忙碌线程</span>
+                        <span><span class="dot" style="background:#21262d;border:1px solid #30363d"></span>空闲线程(在池内)</span>
+                        <span><span class="dot" style="background:#0d1117;border:1px solid #21262d"></span>未启用(达max才显)</span>
+                    </div>
+                </div>
+                <div class="tip info">
+                    <div class="tip-title">💡 怎么玩出对比</div>
+                    • <strong>关掉动态调整</strong>、把流量拉到 25+：队列很快堆满 60，开始大量拒绝，延迟飙升。<br>
+                    • <strong>打开动态调整</strong>：线程数会自动从 6 涨到能吸收流量的水平，队列保持低位，拒绝消失。<br>
+                    • 再把流量拉回低谷：线程数会自动缩回 core（需 keepAlive / allowCoreThreadTimeOut 才能真的降）。
+                </div>
+            </section>
+
+            <!-- 六、避坑 -->
+            <section id="pitfalls" class="reveal">
+                <span class="section-num">第六章</span>
+                <h2>六、避坑与最佳实践</h2>
+                <div class="card">
+                    <ol>
+                        <li><strong>队列必须有界</strong>：否则 max 永远用不上，且 OOM 风险（引言的事故就是无界队列造成的）。</li>
+                        <li><strong>监控必须上</strong>：没有指标就没有"眼睛"，动态调整无从谈起；至少盯队列长度、活跃线程、拒绝次数、p99。</li>
+                        <li><strong>带迟滞 + 步长限制</strong>：避免队列在阈值附近抖动导致线程数频繁伸缩（惊群）。</li>
+                        <li><strong>缩容要允许核心线程超时</strong>：否则"只增不减"，低峰资源回收不下来。</li>
+                        <li><strong>压测定基线</strong>：动态是兜底，不是替代容量规划；core/max 的起点仍要压测确定。</li>
+                        <li><strong>配合超时 + 熔断 + 隔离</strong>：动态扩容解决不了慢依赖根因，慢调用要靠超时和隔离（如 Hystrix/Sentinel 舱壁）兜底。</li>
+                        <li><strong>告警</strong>：队列持续 &gt; 阈值、拒绝次数 &gt; 0、p99 恶化，都要即时告警。</li>
+                    </ol>
+                </div>
+            </section>
+
+            <!-- 七、总结 -->
+            <section id="summary" class="reveal">
+                <span class="section-num">第七章</span>
+                <h2>七、一图总结</h2>
+                <div class="diagram">
+                    <svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <marker id="ar4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6 Z" fill="#58a6ff"/>
+                            </marker>
+                        </defs>
+                        <rect x="20" y="100" width="130" height="56" rx="10" fill="#161b22" stroke="#39c5cf"/>
+                        <text x="85" y="125" fill="#e6edf3" font-size="12" text-anchor="middle" font-weight="bold">① 监控指标</text>
+                        <text x="85" y="143" fill="#8b949e" font-size="10" text-anchor="middle">队列/活跃/延迟</text>
+                        <line x1="150" y1="128" x2="195" y2="128" stroke="#58a6ff" marker-end="url(#ar4)"/>
+
+                        <rect x="200" y="100" width="130" height="56" rx="10" fill="#161b22" stroke="#a371f7"/>
+                        <text x="265" y="125" fill="#e6edf3" font-size="12" text-anchor="middle" font-weight="bold">② 决策算法</text>
+                        <text x="265" y="143" fill="#8b949e" font-size="10" text-anchor="middle">阈值/PID/预测</text>
+                        <line x1="330" y1="128" x2="375" y2="128" stroke="#58a6ff" marker-end="url(#ar4)"/>
+
+                        <rect x="380" y="100" width="130" height="56" rx="10" fill="#161b22" stroke="#58a6ff"/>
+                        <text x="445" y="125" fill="#e6edf3" font-size="12" text-anchor="middle" font-weight="bold">③ 调整参数</text>
+                        <text x="445" y="143" fill="#8b949e" font-size="10" text-anchor="middle">setCore/Max</text>
+                        <line x1="510" y1="128" x2="555" y2="128" stroke="#58a6ff" marker-end="url(#ar4)"/>
+
+                        <rect x="560" y="100" width="110" height="56" rx="10" fill="#161b22" stroke="#3fb950"/>
+                        <text x="615" y="125" fill="#e6edf3" font-size="12" text-anchor="middle" font-weight="bold">④ 线程池</text>
+                        <text x="615" y="143" fill="#8b949e" font-size="10" text-anchor="middle">大小变化</text>
+
+                        <path d="M615,100 C615,50 85,50 85,98" fill="none" stroke="#8b949e" stroke-dasharray="5,4" marker-end="url(#ar4)"/>
+                        <text x="350" y="40" fill="#8b949e" font-size="11" text-anchor="middle">闭环：调整后负载变化，再回到监控</text>
+
+                        <text x="340" y="200" fill="#e6edf3" font-size="13" text-anchor="middle">静态错配 → 动态闭环：让线程数跟着负载走</text>
+                        <text x="340" y="224" fill="#8b949e" font-size="11" text-anchor="middle">前提：有界队列 + 监控 + 迟滞 + 允许核心线程超时</text>
+                    </svg>
+                    <div class="cap">图 4：动态调整的本质是一个"监控→决策→调整→再监控"的闭环控制。</div>
+                </div>
+                <div class="tip success">
+                    <div class="tip-title">✅ 记住三句话</div>
+                    1. <strong>为什么</strong>：负载是活的，固定大小必然在某一刻错配。<br>
+                    2. <strong>解决什么</strong>：突发延迟尖刺、低峰浪费、雪崩、任务画像漂移、硬拒绝。<br>
+                    3. <strong>怎么做</strong>：有界队列 + 监控指标 + 闭环调整（阈值/PID/预测）+ 允许缩容；生产优先用 DynamicTp / Hippo4j。
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <footer>
+        线程池动态调整 · 高并发池化技术 · <a href="../index.html">返回高并发首页</a>
+    </footer>
+
+    <script>
+        // ===== 侧边栏 scroll-spy =====
+        const navLinks = document.querySelectorAll('.sidebar a');
+        const spySections = document.querySelectorAll('section[id]');
+        const spyObserver = new IntersectionObserver((entries) => {
+            entries.forEach(e => {
+                if (e.isIntersecting) {
+                    const id = e.target.id;
+                    navLinks.forEach(l => l.classList.remove('active'));
+                    const link = document.querySelector('.sidebar a[href="#' + id + '"]');
+                    if (link) link.classList.add('active');
+                }
+            });
+        }, { rootMargin: '-15% 0px -75% 0px' });
+        spySections.forEach(s => spyObserver.observe(s));
+
+        // ===== 入场动画 =====
+        const revealObserver = new IntersectionObserver((entries) => {
+            entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+        }, { threshold: 0.08 });
+        document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+
+        // ===== 动态线程池模拟器 =====
+        const canvas = document.getElementById('sim');
+        const ctx = canvas.getContext('2d');
+        const CORE = 6, MAX = 24, QCAP = 60;
+        let sim = null, timer = null;
+
+        function resetSim() {
+            sim = {
+                dynamic: document.getElementById('dyn').checked,
+                traffic: +document.getElementById('traffic').value,
+                pool: CORE, queue: [], proc: [],
+                completed: 0, rejected: 0, latSum: 0, latCount: 0
+            };
+            updateMetrics();
+            draw();
+        }
+
+        function step() {
+            const s = sim;
+            s.dynamic = document.getElementById('dyn').checked;
+            s.traffic = +document.getElementById('traffic').value;
+
+            // 1. 到达
+            for (let i = 0; i < s.traffic; i++) {
+                if (s.queue.length >= QCAP) { s.rejected++; }
+                else { s.queue.push({ born: s.tick || 0 }); }
+            }
+            // 2. 动态调整
+            if (s.dynamic) {
+                if (s.queue.length > CORE && s.pool < MAX) s.pool = Math.min(MAX, s.pool + 1);
+                else if (s.queue.length === 0 && s.pool > CORE) s.pool = Math.max(CORE, s.pool - 1);
+            }
+            // 3. 填充处理槽（最多 pool 个并发）
+            while (s.proc.length < s.pool && s.queue.length > 0) {
+                const t = s.queue.shift();
+                const waited = (s.tick || 0) - t.born;
+                const service = 2 + Math.floor(Math.random() * 4); // 2~5 周期
+                s.proc.push({ remaining: service, total: service, waited: waited });
+            }
+            // 4. 推进处理
+            for (let i = s.proc.length - 1; i >= 0; i--) {
+                s.proc[i].remaining--;
+                if (s.proc[i].remaining <= 0) {
+                    const p = s.proc.splice(i, 1)[0];
+                    s.latSum += p.waited + p.total;
+                    s.latCount++;
+                    s.completed++;
+                }
+            }
+            s.tick = (s.tick || 0) + 1;
+            updateMetrics();
+            draw();
+        }
+
+        function updateMetrics() {
+            const s = sim;
+            document.getElementById('mPool').textContent = s.pool;
+            document.getElementById('mQueue').textContent = s.queue.length;
+            document.getElementById('mBusy').textContent = s.proc.length;
+            document.getElementById('mDone').textContent = s.completed;
+            document.getElementById('mRej').textContent = s.rejected;
+            document.getElementById('mLat').textContent = s.latCount ? (s.latSum / s.latCount).toFixed(1) : 0;
+        }
+
+        function draw() {
+            const s = sim;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // 线程格（最多 MAX 个，3 行 × 8 列）
+            const cols = 8, cw = 92, ch = 50, x0 = 14, y0 = 18;
+            for (let i = 0; i < MAX; i++) {
+                const r = Math.floor(i / cols), c = i % cols;
+                const x = x0 + c * cw, y = y0 + r * ch;
+                const busy = i < s.proc.length;
+                const active = i < s.pool;
+                ctx.fillStyle = busy ? '#3fb950' : (active ? '#21262d' : '#0d1117');
+                ctx.fillRect(x, y, 80, 36);
+                ctx.strokeStyle = busy ? '#3fb950' : (active ? '#30363d' : '#21262d');
+                ctx.strokeRect(x, y, 80, 36);
+                ctx.fillStyle = busy ? '#0d1117' : '#8b949e';
+                ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+                ctx.fillText(busy ? '忙' : ('T' + (i + 1)), x + 40, y + 22);
+            }
+            // 队列条
+            const qy = y0 + 3 * ch + 14;
+            ctx.fillStyle = '#8b949e'; ctx.textAlign = 'left'; ctx.font = '13px sans-serif';
+            ctx.fillText('队列', x0, qy - 6);
+            const barX = x0 + 44, barW = 600, barH = 22;
+            ctx.fillStyle = '#161b22'; ctx.fillRect(barX, qy, barW, barH);
+            const ratio = Math.min(1, s.queue.length / QCAP);
+            const col = ratio > 0.8 ? '#f85149' : (ratio > 0.5 ? '#d29922' : '#58a6ff');
+            ctx.fillStyle = col; ctx.fillRect(barX, qy, barW * ratio, barH);
+            ctx.strokeStyle = '#30363d'; ctx.strokeRect(barX, qy, barW, barH);
+            ctx.fillStyle = '#e6edf3'; ctx.textAlign = 'right';
+            ctx.fillText(s.queue.length + ' / ' + QCAP, barX + barW, qy + barH + 16);
+            // 模式标注
+            ctx.fillStyle = s.dynamic ? '#3fb950' : '#f85149'; ctx.textAlign = 'left'; ctx.font = '13px sans-serif';
+            ctx.fillText(s.dynamic ? '● 动态调整：开' : '● 动态调整：关', barX, qy + barH + 16);
+        }
+
+        document.getElementById('traffic').addEventListener('input', (e) => {
+            document.getElementById('trafficVal').textContent = e.target.value;
+        });
+        document.getElementById('startBtn').addEventListener('click', () => {
+            if (timer) { clearInterval(timer); timer = null; document.getElementById('startBtn').textContent = '▶ 开始'; }
+            else { resetSim(); timer = setInterval(step, 120); document.getElementById('startBtn').textContent = '⏸ 暂停'; }
+        });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            if (timer) { clearInterval(timer); timer = null; document.getElementById('startBtn').textContent = '▶ 开始'; }
+            resetSim();
+        });
+
+        resetSim();
+    </script>
+</body>
+</html>

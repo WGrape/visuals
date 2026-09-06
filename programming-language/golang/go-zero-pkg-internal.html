@@ -74,6 +74,7 @@
   <a href="#gozero">go-zero 实际布局</a>
   <a href="#layout">标准项目布局</a>
   <a href="#rules">规范清单</a>
+  <a href="#thirdparty">第三方服务放哪</a>
   <a href="#others">其他项目</a>
   <a href="#summary">结论</a>
 </div>
@@ -259,6 +260,148 @@
     </div>
   </div>
 
+  <!-- ============ THIRDPARTY ============ -->
+  <div class="section" id="thirdparty">
+    <span class="section-tag tag-coral">落地场景</span>
+    <h2>第三方服务（OCR / 支付 / 短信）客户端放哪</h2>
+    <p class="subtitle">internal/pkg 分工最常被问到的实际应用——用「是否跨服务复用」一票定生死。</p>
+
+    <div class="keyline">
+      <p><b>一句话：</b>对第三方服务（OCR、支付、短信、对象存储、地图……）的客户端封装，<b>默认放 <code class="inline">internal/</code></b>——因为它本质是当前服务的实现细节（怎么调、怎么容错、怎么适配字段）。只有当你要把它做成「多个服务甚至外部项目都能 import 的通用 SDK」时，才提升为 <code class="inline">pkg/</code>；更彻底的做法是直接独立成一个 module / 私有 repo。</p>
+    </div>
+
+    <table class="cmp-table">
+      <thead><tr><th>场景</th><th>放哪</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td>只有当前这个 go-zero 服务用 OCR</td><td><code class="inline">internal/ocr/</code>（或 internal/client/ocr）</td><td>服务私有实现，不该被别的模块 import</td></tr>
+        <tr><td>2 个以上服务都要调同一个 OCR</td><td><code class="inline">pkg/ocr/</code> 或独立 <code class="inline">module/repo</code></td><td>跨服务复用 → 提升为公开库；独立 module 依赖关系最干净</td></tr>
+        <tr><td>OCR 厂商自己提供了 Go SDK（go get 来的）</td><td>不自己建包，直接在 svc 装配</td><td>第三方 module 已是公开库，你只需在 ServiceContext 里 new 一个 client</td></tr>
+      </tbody>
+    </table>
+
+    <div class="card">
+      <h3>① 推荐目录（单服务自用 → internal）</h3>
+      <div class="tree">user/
+└── internal/
+    ├── ocr/              ← 第三方 OCR 客户端封装（本服务私有，放 internal）
+    │   └── client.go     ← 接口 + 实现，读 config 里的 endpoint/key
+    ├── config/
+    ├── handler/
+    ├── logic/
+    ├── svc/
+    └── types/
+
+<span class="cm"># 若多个服务复用，则抽到仓库根的 pkg（或独立 module）</span>
+pkg/
+└── ocr/                 ← 多服务共享的 OCR 客户端 SDK</div>
+    </div>
+
+    <div class="card">
+      <h3>② config 里加 OCR 配置（密钥走 ${ENV}，呼应多环境篇）</h3>
+      <pre><span class="cm">// internal/config/config.go —— 在 RestConf 旁加 OCR 配置</span>
+<span class="kw">type</span> <span class="typ">Config</span> <span class="kw">struct</span> {
+    rest.<span class="typ">RestConf</span>
+    <span class="typ">OCR</span> <span class="kw">struct</span> {
+        <span class="typ">Endpoint</span> <span class="typ">string</span> <span class="str">`json:",optional"`</span>
+        <span class="typ">ApiKey</span>   <span class="typ">string</span> <span class="str">`json:",optional"`</span>
+    }
+}
+<span class="cm"># etc/user-api.yaml</span>
+<span class="typ">OCR</span>:
+  <span class="typ">Endpoint</span>: ${OCR_ENDPOINT}   <span class="cm"># 真实值由部署时 env / Secret 注入</span>
+  <span class="typ">ApiKey</span>:   ${OCR_API_KEY}</pre>
+    </div>
+
+    <div class="card">
+      <h3>③ OCR 客户端实现（internal/ocr/client.go）</h3>
+      <pre><span class="kw">package</span> ocr
+
+<span class="kw">import</span> (
+    <span class="str">"bytes"</span>
+    <span class="str">"context"</span>
+    <span class="str">"encoding/json"</span>
+    <span class="str">"net/http"</span>
+    <span class="str">"time"</span>
+)
+
+<span class="cm">// Client 抽象成接口，单测时可轻松 mock</span>
+<span class="kw">type</span> <span class="typ">Client</span> <span class="kw">interface</span> {
+    <span class="fn">Recognize</span>(ctx context.Context, imageURL <span class="typ">string</span>) (<span class="typ">string</span>, <span class="typ">error</span>)
+}
+
+<span class="kw">type</span> <span class="typ">ocrClient</span> <span class="kw">struct</span> {
+    endpoint <span class="typ">string</span>
+    apiKey   <span class="typ">string</span>
+    http     *http.Client
+}
+
+<span class="kw">func</span> <span class="fn">NewClient</span>(endpoint, apiKey <span class="typ">string</span>) <span class="typ">Client</span> {
+    <span class="kw">return</span> &ocrClient{
+        endpoint: endpoint,
+        apiKey:   apiKey,
+        http:     &http.Client{<span class="typ">Timeout</span>: 10 * time.Second},
+    }
+}
+
+<span class="kw">func</span> (c *ocrClient) <span class="fn">Recognize</span>(ctx context.Context, imageURL <span class="typ">string</span>) (<span class="typ">string</span>, <span class="typ">error</span>) {
+    body, _ := json.<span class="fn">Marshal</span>(<span class="kw">map</span>[<span class="typ">string</span>]<span class="typ">string</span>{<span class="str">"image_url"</span>: imageURL})
+    req, err := http.<span class="fn">NewRequestWithContext</span>(ctx, http.MethodPost,
+        c.endpoint+<span class="str">"/recognize"</span>, bytes.<span class="fn">NewReader</span>(body))
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="str">""</span>, err
+    }
+    req.Header.<span class="fn">Set</span>(<span class="str">"Authorization"</span>, <span class="str">"Bearer "</span>+c.apiKey)
+    req.Header.<span class="fn">Set</span>(<span class="str">"Content-Type"</span>, <span class="str">"application/json"</span>)
+
+    resp, err := c.http.<span class="fn">Do</span>(req)
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="str">""</span>, err
+    }
+    <span class="kw">defer</span> resp.Body.<span class="fn">Close</span>()
+
+    <span class="kw">var</span> out <span class="kw">struct</span> { <span class="typ">Text</span> <span class="typ">string</span> <span class="str">`json:"text"`</span> }
+    <span class="kw">if</span> err := json.<span class="fn">NewDecoder</span>(resp.Body).<span class="fn">Decode</span>(&out); err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="str">""</span>, err
+    }
+    <span class="kw">return</span> out.Text, <span class="kw">nil</span>
+}</pre>
+      <div class="note">go-zero 也内置 <code class="inline">httpc</code> 封装（见「调用外部接口」篇），可用 <code class="inline">httpc.Service.Do</code> 替换上面的原生 <code class="inline">net/http</code>，获得熔断/超时统一治理；这里用标准库只为示例最稳、零歧义。客户端用接口抽象，方便 logic 层单测时注入 mock。</div>
+    </div>
+
+    <div class="card">
+      <h3>④ 在 svc 里集中装配（呼应初始化写在哪 / svc 篇）</h3>
+      <p>客户端是「长生命周期依赖」，<strong>不要在每个 logic 里现 new</strong>（每次请求重建连接、浪费且难统一超时/重试）。在 <code class="inline">ServiceContext</code> 里 new 一次、注入进去：</p>
+      <pre><span class="cm">// internal/svc/servicecontext.go</span>
+<span class="kw">type</span> <span class="typ">ServiceContext</span> <span class="kw">struct</span> {
+    <span class="typ">Config</span>    config.<span class="typ">Config</span>
+    <span class="typ">OcrClient</span> ocr.<span class="typ">Client</span>   <span class="cm">// 注入 OCR 客户端</span>
+}
+
+<span class="kw">func</span> <span class="fn">NewServiceContext</span>(c config.<span class="typ">Config</span>) *<span class="typ">ServiceContext</span> {
+    <span class="kw">return</span> &ServiceContext{
+        <span class="typ">Config</span>: c,
+        <span class="typ">OcrClient</span>: ocr.<span class="fn">NewClient</span>(c.<span class="typ">OCR</span>.Endpoint, c.<span class="typ">OCR</span>.ApiKey),
+    }
+}</pre>
+    </div>
+
+    <div class="card">
+      <h3>⑤ logic 里通过 svcCtx 调用（呼应 ctx 篇）</h3>
+      <pre><span class="cm">// internal/logic/xxxlogic.go</span>
+<span class="kw">func</span> (l *XxxLogic) <span class="fn">Xxx</span>(req *types.<span class="typ">Req</span>) (*types.<span class="typ">Resp</span>, <span class="typ">error</span>) {
+    <span class="cm">// 从注入的 svcCtx 拿 OCR 客户端，请求级上下文用 l.ctx 透传</span>
+    text, err := l.svcCtx.<span class="typ">OcrClient</span>.<span class="fn">Recognize</span>(l.ctx, req.ImageURL)
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="kw">nil</span>, err
+    }
+    <span class="kw">return</span> &types.Resp{Text: text}, <span class="kw">nil</span>
+}</pre>
+      <div class="note">完整链路：<code class="inline">etc/*.yaml（${ENV} 注入密钥）→ config 解析 → svc 装配 ocr.NewClient → logic 通过 svcCtx 调用</code>。这套「依赖在 svc 装配、请求级数据走 ctx」正是 go-zero 的统一范式（呼应 svc 深度解析 / ctx 传递规范篇）。</div>
+    </div>
+
+    <div class="warn"><strong>别把第三方客户端放 logic 包顶层当全局 var。</strong>呼应「全局变量与 svc」篇：客户端应通过 config→svc 注入，别在包里写 <code class="inline">var ocrClient = ...</code> 包级全局变量——那样配置加载顺序、测试隔离都会失控。</div>
+  </div>
+
   <!-- ============ OTHERS ============ -->
   <div class="section" id="others">
     <span class="section-tag tag-purple">对比</span>
@@ -312,7 +455,7 @@
 </div>
 
 <div class="footer">
-  go-zero 的 pkg 与 internal 目录 · 系列教程之一 · 与 svc 目录规范 / 全局变量专题互补
+  go-zero 的 pkg 与 internal 目录 · 系列教程之一 · 与 svc 目录规范 / 全局变量与 svc / go-zero 初始化写在哪 / go-zero ctx 传递规范 / go-zero 调用外部接口 / go-zero 多环境区分 互补
 </div>
 
 </body>
