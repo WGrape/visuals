@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Milvus 架构与原理 · 完全图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Milvus 架构与原理</h1>
+  <p>四层架构、核心组件、实现原理与写入 / 查询 / 建索引三大核心流程</p>
+  <div>
+    <span class="tag">云原生</span>
+    <span class="tag">存储计算分离</span>
+    <span class="tag">日志即数据</span>
+    <span class="tag">MPP 并行</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#overview">① 架构总览</a>
+  <a href="#layers">② 四层拆解</a>
+  <a href="#model">③ 数据模型</a>
+  <a href="#principle">④ 实现原理</a>
+  <a href="#write">⑤ 写入流程</a>
+  <a href="#query">⑥ 查询流程</a>
+  <a href="#index">⑦ 建索引流程</a>
+</nav>
+
+<main>
+
+<!-- ① -->
+<section id="overview">
+  <h2><span class="n">①</span>架构总览：一条核心设计哲学</h2>
+  <div class="lead"><b>「日志即数据」+ 存储计算彻底分离。</b> Milvus 把一切状态变更都先写进<b>日志（消息队列）</b>，再异步落盘到对象存储；计算节点无状态、可随时扩缩。整个系统按职责切成四层，每层独立扩展、独立容灾。</div>
+
+  <svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <!-- Access Layer -->
+    <rect x="230" y="20" width="220" height="56" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="340" y="44" fill="#9ec5ff" font-size="13.5" text-anchor="middle" font-weight="bold">接入层 Access</text>
+    <text x="340" y="63" fill="#cdd6f4" font-size="11.5" text-anchor="middle">Proxy（无状态网关）</text>
+    <!-- Coordinator -->
+    <rect x="230" y="110" width="220" height="92" rx="10" fill="#1f2433" stroke="#d2a8ff"/>
+    <text x="340" y="132" fill="#e0c0ff" font-size="13.5" text-anchor="middle" font-weight="bold">协调服务 Coordinator</text>
+    <text x="340" y="154" fill="#cdd6f4" font-size="11" text-anchor="middle">RootCoord · QueryCoord</text>
+    <text x="340" y="172" fill="#cdd6f4" font-size="11" text-anchor="middle">DataCoord · IndexCoord</text>
+    <text x="340" y="190" fill="#94a3b8" font-size="10.5" text-anchor="middle">系统的「大脑」</text>
+    <!-- Worker -->
+    <rect x="230" y="232" width="220" height="110" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="340" y="256" fill="#a6f0ab" font-size="13.5" text-anchor="middle" font-weight="bold">执行节点 Worker</text>
+    <text x="340" y="278" fill="#cdd6f4" font-size="11" text-anchor="middle">QueryNode（检索）</text>
+    <text x="340" y="296" fill="#cdd6f4" font-size="11" text-anchor="middle">DataNode（落盘/合并）</text>
+    <text x="340" y="314" fill="#cdd6f4" font-size="11" text-anchor="middle">IndexNode（建索引）</text>
+    <!-- Storage -->
+    <rect x="230" y="372" width="220" height="78" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="340" y="394" fill="#7fe3ea" font-size="13.5" text-anchor="middle" font-weight="bold">存储层 Storage</text>
+    <text x="340" y="414" fill="#cdd6f4" font-size="10.8" text-anchor="middle">etcd(元数据) · Pulsar/Kafka(日志)</text>
+    <text x="340" y="432" fill="#cdd6f4" font-size="10.8" text-anchor="middle">S3 / MinIO(对象存储)</text>
+    <line x1="340" y1="76" x2="340" y2="108" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar)"/>
+    <line x1="340" y1="202" x2="340" y2="230" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar)"/>
+    <line x1="340" y1="342" x2="340" y2="370" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar)"/>
+  </svg>
+  <p class="muted center">数据流自上而下：请求经 Proxy 入系统，协调服务分配任务，Worker 执行，状态最终沉淀到存储层；控制流（元数据、调度）与数据流分离。</p>
+</section>
+
+<!-- ② -->
+<section id="layers">
+  <h2><span class="n">②</span>四层组件逐一拆解</h2>
+
+  <h3>接入层（Access Layer）</h3>
+  <div class="grid">
+    <div class="card"><h4>Proxy（无状态）</h4><p>系统唯一门面：校验请求、路由、把各 QueryNode 的中间结果做全局归并（reduce/聚合）后返回。前面通常挂 Nginx / K8s Ingress 做负载均衡。</p></div>
+  </div>
+
+  <h3>协调服务（Coordinator Service）—— 系统的大脑</h3>
+  <div class="grid">
+    <div class="card"><h4 style="color:var(--purple)">RootCoord</h4><p>处理 DDL/DCL（建/删 Collection、Partition、Index），维护中心授时 TSO，推进时间窗口。</p></div>
+    <div class="card"><h4 style="color:var(--purple)">QueryCoord</h4><p>管理 QueryNode 拓扑与负载均衡，负责把「增长段」交接成「密封段」。</p></div>
+    <div class="card"><h4 style="color:var(--purple)">DataCoord</h4><p>管理 DataNode 拓扑、维护数据元信息，触发 flush / compaction 等后台操作。</p></div>
+    <div class="card"><h4 style="color:var(--purple)">IndexCoord</h4><p>管理 IndexNode 拓扑，下发并跟踪索引构建任务、维护索引元信息。</p></div>
+  </div>
+
+  <h3>执行节点（Worker Node）—— 系统的四肢</h3>
+  <div class="grid">
+    <div class="card"><h4 style="color:var(--accent2)">QueryNode</h4><p>订阅日志 broker 获取增量（growing segment），从对象存储加载历史段，执行标量+向量混合检索。</p></div>
+    <div class="card"><h4 style="color:var(--accent2)">DataNode</h4><p>订阅日志、处理写入/删除，把日志快照打包持久化到对象存储，执行 compaction。</p></div>
+    <div class="card"><h4 style="color:var(--accent2)">IndexNode</h4><p>执行索引构建。资源密集，可 serverless 模式按需拉起，不必常驻。</p></div>
+  </div>
+
+  <h3>存储层（Storage）—— 系统的骨骼</h3>
+  <table>
+    <thead><tr><th>组件</th><th>职责</th><th>典型选型</th></tr></thead>
+    <tbody>
+      <tr><td><b>元数据存储 Meta</b></td><td>Schema、节点状态、消费 checkpoint，需强一致 + 高可用</td><td>etcd</td></tr>
+      <tr><td><b>消息存储 Log Broker</b></td><td>持久化流式写入、解耦读写、支持回放（日志即数据）</td><td>Pulsar / Kafka（分布式）；RocksDB（单机）</td></tr>
+      <tr><td><b>对象存储 Object</b></td><td>日志快照、向量/标量索引文件、中间结果</td><td>MinIO / S3 / GCS</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ③ -->
+<section id="model">
+  <h2><span class="n">③</span>数据模型：这些概念必须分清</h2>
+  <table>
+    <thead><tr><th>Milvus 概念</th><th>类比关系型库</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><b>Collection</b></td><td>表（Table）</td><td>一组实体的逻辑集合，含向量字段与标量字段</td></tr>
+      <tr><td><b>Entity</b></td><td>行（Row）</td><td>一条数据 = 若干 field 组成</td></tr>
+      <tr><td><b>Field</b></td><td>列（Column）</td><td>可以是向量，也可以是标量（int/float/string/bool/JSON）</td></tr>
+      <tr><td><b>Primary Key</b></td><td>主键</td><td>唯一标识实体；可自定义，否则自动生成</td></tr>
+      <tr><td><b>Partition</b></td><td>分区</td><td>物理切分，减少读取范围（按业务维度划分）</td></tr>
+      <tr><td><b>Sharding</b></td><td>分片</td><td>默认 2 个，按主键哈希把写入打散到多节点并行</td></tr>
+      <tr><td><b>Segment</b></td><td>数据文件</td><td>数据组织与调度的基本单位（见下）</td></tr>
+      <tr><td><b>Channel (P/V)</b></td><td>日志主题</td><td>PChannel 物理、VChannel 逻辑，记录增删改日志</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Segment：数据调度的最小单元</h3>
+  <svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="s" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="20" y="50" width="180" height="56" rx="10" fill="#1f2433" stroke="#f0a868"/>
+    <text x="110" y="74" fill="#f0a868" font-size="12.5" text-anchor="middle" font-weight="bold">Growing Segment</text>
+    <text x="110" y="92" fill="#cdd6f4" font-size="10.8" text-anchor="middle">活跃段 · 增量写入</text>
+    <text x="110" y="106" fill="#94a3b8" font-size="10" text-anchor="middle">常在内存 · 多未建索引</text>
+    <rect x="250" y="50" width="180" height="56" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="340" y="74" fill="#a6f0ab" font-size="12.5" text-anchor="middle" font-weight="bold">Sealed Segment</text>
+    <text x="340" y="92" fill="#cdd6f4" font-size="10.8" text-anchor="middle">密封段 · 不可变</text>
+    <text x="340" y="106" fill="#94a3b8" font-size="10" text-anchor="middle">已落对象存储</text>
+    <rect x="480" y="50" width="180" height="56" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="570" y="74" fill="#9ec5ff" font-size="12.5" text-anchor="middle" font-weight="bold">Indexed Segment</text>
+    <text x="570" y="92" fill="#cdd6f4" font-size="10.8" text-anchor="middle">建好索引</text>
+    <text x="570" y="106" fill="#94a3b8" font-size="10" text-anchor="middle">QueryNode 加载检索</text>
+    <line x1="200" y1="78" x2="248" y2="78" stroke="#94a3b8" stroke-width="2" marker-end="url(#s)"/>
+    <line x1="430" y1="78" x2="478" y2="78" stroke="#94a3b8" stroke-width="2" marker-end="url(#s)"/>
+    <text x="340" y="135" fill="#94a3b8" font-size="11" text-anchor="middle">达到阈值 → DataCoord 封口 → IndexCoord 触发建索引 → QueryCoord 分配到 QueryNode</text>
+  </svg>
+</section>
+
+<!-- ④ -->
+<section id="principle">
+  <h2><span class="n">④</span>实现原理：为什么这么设计</h2>
+  <div class="grid">
+    <div class="card"><h4 style="color:var(--accent)">日志即数据</h4><p>所有变更先写日志 broker，再异步快照到对象存储。节点宕机靠「回放日志」恢复增量，读写彻底解耦。</p></div>
+    <div class="card"><h4 style="color:var(--cyan)">存储计算分离</h4><p>计算节点无状态、可随 K8s 弹性伸缩；数据在对象存储，扩容不必迁移数据。</p></div>
+    <div class="card"><h4 style="color:var(--accent2)">Knowhere 引擎</h4><p>统一的向量执行引擎，封装 FAISS/Annoy/HNSW 与量化算法，屏蔽底层差异，并原生支持 SIMD。</p></div>
+    <div class="card"><h4 style="color:var(--purple)">SIMD 加速</h4><p>距离计算（L2/IP）用 SSE/AVX2/AVX512 单指令多数据并行，是向量检索性能的关键。</p></div>
+    <div class="card"><h4 style="color:var(--warn)">谓词下推</h4><p>混合查询时先把标量过滤（Bitset）应用到各段，再在候选集上做向量检索，大幅减少计算量。</p></div>
+    <div class="card"><h4 style="color:var(--danger)">一致性 / Time Travel</h4><p>RootCoord 的 TSO 提供全局有序时间戳，支持强一致到最终一致多档，以及按时间戳回看历史。</p></div>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="write">
+  <h2><span class="n">⑤</span>核心流程一：写入（Insert）</h2>
+  <svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="w" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="15" y="95" width="95" height="46" rx="9" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="62" y="123" fill="#cdd6f4" font-size="11.5" text-anchor="middle">Client</text>
+    <rect x="140" y="95" width="95" height="46" rx="9" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="187" y="123" fill="#cdd6f4" font-size="11.5" text-anchor="middle">Proxy</text>
+    <rect x="265" y="95" width="110" height="46" rx="9" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="320" y="119" fill="#7fe3ea" font-size="11.5" text-anchor="middle">Log Broker</text>
+    <text x="320" y="133" fill="#94a3b8" font-size="9.5" text-anchor="middle">(Pulsar/Kafka)</text>
+    <rect x="405" y="95" width="95" height="46" rx="9" fill="#1f2433" stroke="#7ee787"/>
+    <text x="452" y="119" fill="#a6f0ab" font-size="11.5" text-anchor="middle">DataNode</text>
+    <text x="452" y="133" fill="#94a3b8" font-size="9.5" text-anchor="middle">落盘</text>
+    <rect x="530" y="95" width="135" height="46" rx="9" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="597" y="119" fill="#7fe3ea" font-size="11.5" text-anchor="middle">对象存储</text>
+    <text x="597" y="133" fill="#94a3b8" font-size="9.5" text-anchor="middle">(S3/MinIO)</text>
+    <line x1="110" y1="118" x2="138" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#w)"/>
+    <line x1="235" y1="118" x2="263" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#w)"/>
+    <line x1="375" y1="118" x2="403" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#w)"/>
+    <line x1="500" y1="118" x2="528" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#w)"/>
+    <text x="320" y="180" fill="#94a3b8" font-size="11" text-anchor="middle">① 写 WAL → ② DataNode 打包快照 → ③ 达到阈值封口为 Sealed Segment → ④ IndexNode 异步建索引</text>
+  </svg>
+  <ol style="margin:8px 0 0 22px;color:var(--muted)">
+    <li style="margin:6px 0">Client 发 Insert，Proxy 校验并写入 <b>Log Broker</b>（WAL，保证持久）。</li>
+    <li style="margin:6px 0">DataNode 订阅日志，把数据打包成 <b>日志快照</b> 持久化到对象存储。</li>
+    <li style="margin:6px 0">增量数据以 <b>Growing Segment</b> 形式存在于 QueryNode 内存；达阈值后 DataCoord 将其<b>封口（Seal）</b>。</li>
+    <li style="margin:6px 0">IndexCoord 调度 IndexNode 对 Sealed Segment <b>异步建索引</b>，索引文件写回对象存储。</li>
+  </ol>
+</section>
+
+<!-- ⑥ -->
+<section id="query">
+  <h2><span class="n">⑥</span>核心流程二：查询（Search）</h2>
+  <svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="q" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="15" y="20" width="90" height="44" rx="9" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="60" y="47" fill="#cdd6f4" font-size="11.5" text-anchor="middle">Client</text>
+    <rect x="140" y="20" width="90" height="44" rx="9" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="185" y="47" fill="#cdd6f4" font-size="11.5" text-anchor="middle">Proxy</text>
+    <rect x="300" y="20" width="100" height="44" rx="9" fill="#1f2433" stroke="#7ee787"/>
+    <text x="350" y="47" fill="#a6f0ab" font-size="11.5" text-anchor="middle">QueryNode</text>
+    <rect x="430" y="20" width="100" height="44" rx="9" fill="#1f2433" stroke="#7ee787"/>
+    <text x="480" y="47" fill="#a6f0ab" font-size="11.5" text-anchor="middle">QueryNode</text>
+    <rect x="560" y="20" width="100" height="44" rx="9" fill="#1f2433" stroke="#7ee787"/>
+    <text x="610" y="47" fill="#a6f0ab" font-size="11.5" text-anchor="middle">QueryNode</text>
+    <!-- arrows down -->
+    <line x1="185" y1="42" x2="350" y2="20" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <line x1="185" y1="42" x2="480" y2="20" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <line x1="185" y1="42" x2="610" y2="20" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <!-- back to proxy -->
+    <path d="M350,64 C300,110 185,110 185,66" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <path d="M480,64 C430,120 185,120 185,66" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <path d="M610,64 C560,130 185,130 185,66" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <!-- proxy to client -->
+    <line x1="140" y1="42" x2="105" y2="20" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#q)"/>
+    <text x="350" y="160" fill="#94a3b8" font-size="11" text-anchor="middle">① 广播：Proxy 把查询同时发给所有 QueryNode（MPP 并行）</text>
+    <text x="350" y="182" fill="#94a3b8" font-size="11" text-anchor="middle">② 各节点：先标量过滤(Bitset) → 再在本地段做向量检索 → 返回局部 TopK</text>
+    <text x="350" y="204" fill="#94a3b8" font-size="11" text-anchor="middle">③ 归并：Proxy 收齐各节点结果，全局排序后返回最终 TopK</text>
+    <text x="350" y="232" fill="#f0a868" font-size="11" text-anchor="middle">注：未建索引的 Growing Segment 走「暴力全扫」兜底，建索引后才走 ANN</text>
+  </svg>
+  <p>查询采用 <b>大规模并行处理（MPP）</b>：Proxy 不自己算，而是把请求广播给所有相关 QueryNode，各自算完局部 TopK 再归并。这就是为什么节点越多、检索越快。</p>
+</section>
+
+<!-- ⑦ -->
+<section id="index">
+  <h2><span class="n">⑦</span>核心流程三：建索引（Index Build）</h2>
+  <div class="lead">索引不是写入时同步建的，而是对 <b>Sealed Segment</b> 异步、按需构建——这正是 Milvus 能把「写入」和「检索性能」解耦的关键。</div>
+  <ol style="margin:8px 0 0 22px;color:var(--muted)">
+    <li style="margin:6px 0">DataCoord 封口段后，IndexCoord 生成索引任务下发给 <b>IndexNode</b>。</li>
+    <li style="margin:6px 0">IndexNode 从对象存储把段数据载入内存（涉及大量 K-means / 图遍历，吃算力）。</li>
+    <li style="margin:6px 0">构建完成后，索引文件（质心 / 编码 / 图边 + 内部 ID，<b>不是完整向量</b>）序列化写回对象存储。</li>
+    <li style="margin:6px 0">QueryCoord 通知各 QueryNode 加载新索引；此后该段检索走 ANN，未就绪前走暴力。</li>
+  </ol>
+  <div class="note">为控制资源，IndexNode 可 <b>serverless 化</b>（按需拉起、用完即释放）；索引类型按向量字段指定（一个向量字段一种索引），切换索引时旧索引自动删除。</div>
+  <div class="warn">关于 Milvus 支持哪些具体的向量索引算法（IVF / HNSW / DiskANN …）、原理与选型，请见同目录的 <b>《向量索引》</b> 文档。</div>
+</section>
+
+</main>
+
+<footer>
+  本页依据 Milvus 官方文档（milvus.io/docs，2.x 架构）与社区架构解析整理。核心：Milvus 是「日志即数据 + 存储计算分离」的云原生向量数据库，四层（接入/协调/执行/存储）职责清晰，写入、查询、建索引三条核心流程相互独立又可并行扩展。具体组件名称与默认参数以你部署版本的官方文档为准。
+</footer>
+
+</body>
+</html>

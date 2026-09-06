@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZAB 协议 — ZooKeeper 的原子广播</title>
+  <style>
+    :root { --bg-primary:#0f1117;--bg-secondary:#1a1d27;--bg-card:#1e2235;--bg-highlight:#252a3d;--text-primary:#e8eaf6;--text-secondary:#9ca3c0;--text-muted:#5c6080;--accent-blue:#4f87ff;--accent-purple:#9b6fff;--accent-teal:#2dd4bf;--accent-amber:#fbbf24;--accent-red:#f87171;--accent-green:#4ade80;--border:rgba(255,255,255,0.07);--border-accent:rgba(79,135,255,0.3); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif; background: var(--bg-primary); color: var(--text-primary); font-size: 14px; line-height: 1.7; }
+    .topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: rgba(15,17,23,0.9); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar .logo { font-size: 15px; font-weight: 700; text-decoration: none; background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-purple) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .topbar a.back { color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 14px 0; }
+    header { background: linear-gradient(135deg, #0f1117 0%, #1a1530 50%, #0f1117 100%); border-bottom: 1px solid var(--border); padding: 84px 40px 50px; text-align: center; position: relative; overflow: hidden; }
+    header::before { content: ''; position: absolute; top: -60px; left: 50%; transform: translateX(-50%); width: 600px; height: 300px; background: radial-gradient(ellipse, rgba(79,135,255,0.12) 0%, transparent 70%); pointer-events: none; }
+    .header-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(79,135,255,0.1); border: 1px solid rgba(79,135,255,0.25); border-radius: 20px; padding: 4px 14px; font-size: 12px; color: var(--accent-blue); margin-bottom: 20px; }
+    header h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.5px; background: linear-gradient(135deg, #ffffff 0%, #a8b8ff 50%, #4f87ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 12px; }
+    header p { color: var(--text-secondary); font-size: 16px; max-width: 640px; margin: 0 auto; }
+    nav { position: sticky; top: 53px; z-index: 100; background: rgba(15,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; gap: 4px; overflow-x: auto; }
+    nav a { color: var(--text-secondary); text-decoration: none; padding: 14px 16px; font-size: 13px; white-space: nowrap; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }
+    nav a:hover, nav a.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+    main { max-width: 1000px; margin: 0 auto; padding: 48px 40px 80px; }
+    section { margin-bottom: 72px; }
+    h2 { font-size: 26px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+    h2 .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .section-lead { color: var(--text-secondary); font-size: 15px; margin-bottom: 28px; line-height: 1.6; }
+    h3 { font-size: 17px; font-weight: 600; color: var(--text-primary); margin: 28px 0 12px; }
+    p { color: var(--text-secondary); margin-bottom: 14px; line-height: 1.8; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+    .card-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-box { border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 12px; align-items: flex-start; }
+    .info-box.blue { background: rgba(79,135,255,0.08); border: 1px solid rgba(79,135,255,0.2); }
+    .info-box.amber { background: rgba(251,191,36,0.07); border: 1px solid rgba(251,191,36,0.2); }
+    .info-box.red { background: rgba(248,113,113,0.07); border: 1px solid rgba(248,113,113,0.2); }
+    .info-box.green { background: rgba(74,222,128,0.07); border: 1px solid rgba(74,222,128,0.2); }
+    .info-box.purple { background: rgba(155,111,255,0.07); border: 1px solid rgba(155,111,255,0.2); }
+    .info-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .info-body { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-body strong { color: var(--text-primary); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 13px; }
+    th { background: var(--bg-highlight); color: var(--text-secondary); font-weight: 500; padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    td:first-child { color: var(--text-primary); font-weight: 500; }
+    .stepper { position: relative; padding-left: 32px; }
+    .step { position: relative; margin-bottom: 24px; padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; }
+    .step::before { content: attr(data-n); position: absolute; left: -32px; top: 16px; width: 22px; height: 22px; border-radius: 50%; background: var(--bg-highlight); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--text-muted); }
+    .stepper::before { content: ''; position: absolute; left: 10px; top: 28px; bottom: 28px; width: 1px; background: var(--border); }
+    .step.ok::before { background: rgba(74,222,128,0.15); border-color: rgba(74,222,128,0.3); color: var(--accent-green); }
+    .keyline { border-left: 3px solid var(--accent-blue); padding: 4px 0 4px 16px; margin: 16px 0; color: var(--text-secondary); font-size: 14px; }
+    .keyline strong { color: var(--text-primary); }
+    footer { text-align: center; padding: 32px 40px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity 0.5s, transform 0.5s; }
+    .reveal.visible { opacity: 1; transform: none; }
+    code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
+  </style>
+</head>
+<body>
+<div class="topbar"><a href="../index.html" class="logo">☁️ 分布式系统</a><a href="../index.html" class="back">← 返回分布式系统</a></div>
+<header>
+  <div class="header-badge">🐘 ZooKeeper · 面试常考</div>
+  <h1>ZAB 协议</h1>
+  <p>ZAB（ZooKeeper Atomic Broadcast）是 ZooKeeper 专用的<strong>原子广播协议</strong>，本质也是一种共识算法，专门为"主从架构 + 按顺序提交事务"量身打造。</p>
+</header>
+<nav id="main-nav">
+  <a href="#what" class="active">ZAB 是什么</a>
+  <a href="#roles">三种角色</a>
+  <a href="#modes">两种模式</a>
+  <a href="#broadcast">消息广播</a>
+  <a href="#vs">ZAB vs Paxos/Raft</a>
+  <a href="#interview">面试要点</a>
+</nav>
+<main>
+  <section id="what" class="reveal">
+    <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🧩</span> 一、ZAB 是什么</h2>
+    <p class="section-lead">ZAB 保证：所有<strong>正常节点以相同顺序</strong>应用事务（Proposal），且在 Leader 崩溃后能恢复一致。它面向的是"一个 Leader 提出、Follower 按顺序确认"的主从模型，比通用 Paxos 更贴合 ZK 实际使用方式。</p>
+    <div class="keyline"><strong>一句话</strong>：ZAB = 崩溃恢复（选新 Leader + 数据对齐）+ 原子广播（Leader 把事务按 zxid 顺序发给 Follower，多数派确认后提交）。</div>
+  </section>
+
+  <section id="roles" class="reveal">
+    <h2><span class="icon" style="background:rgba(155,111,255,0.15)">🎭</span> 二、三种角色</h2>
+    <div class="compare-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:8px;">
+      <div class="card"><div class="card-title">Leader</div><div class="card-desc">唯一的事务发起者，负责广播提案、收集 ACK。</div></div>
+      <div class="card"><div class="card-title">Follower</div><div class="card-desc">接收提案、投票、参与选举；参与半数确认。</div></div>
+      <div class="card"><div class="card-title">Observer</div><div class="card-desc">只读副本，不参与投票，用于横向扩展读能力。</div></div>
+    </div>
+  </section>
+
+  <section id="modes" class="reveal">
+    <h2><span class="icon" style="background:rgba(45,212,191,0.15)">🔄</span> 三、两种模式</h2>
+    <div class="stepper">
+      <div class="step ok" data-n="1"><div class="step-title">崩溃恢复（Recovery）</div><div class="step-desc">Leader 挂掉或集群启动时使用。通过<strong>选举</strong>选出数据最全（zxid 最大）的 Follower 当新 Leader，并让所有节点数据对齐到新 Leader，保证"已提交的不丢、未提交的不生效"。</div></div>
+      <div class="step ok" data-n="2"><div class="step-title">消息广播（Broadcast）</div><div class="step-desc">正常运行时，Leader 把写请求转成带 zxid 的事务提案，发给所有 Follower，收到半数 ACK 后提交并通知大家应用。</div></div>
+    </div>
+  </section>
+
+  <section id="broadcast" class="reveal">
+    <h2><span class="icon" style="background:rgba(251,191,36,0.15)">📡</span> 四、消息广播流程（类似 2PC 但只要求半数）</h2>
+    <div class="card">
+      <div style="text-align:center;">
+        <svg viewBox="0 0 720 200" width="100%" style="max-width:720px;">
+          <rect x="320" y="75" width="90" height="50" rx="8" fill="rgba(248,113,113,0.4)" stroke="var(--accent-red)"/><text x="365" y="102" fill="#fff" font-size="12" text-anchor="middle">Leader</text>
+          <rect x="80" y="30" width="90" height="44" rx="8" fill="rgba(79,135,255,0.35)" stroke="var(--accent-blue)"/><text x="125" y="55" fill="#fff" font-size="11" text-anchor="middle">Follower</text>
+          <rect x="80" y="120" width="90" height="44" rx="8" fill="rgba(79,135,255,0.35)" stroke="var(--accent-blue)"/><text x="125" y="145" fill="#fff" font-size="11" text-anchor="middle">Follower</text>
+          <rect x="560" y="75" width="90" height="50" rx="8" fill="rgba(74,222,128,0.35)" stroke="var(--accent-green)"/><text x="605" y="102" fill="#fff" font-size="12" text-anchor="middle">Client</text>
+          <line x1="410" y1="92" x2="170" y2="52" stroke="var(--accent-blue)" stroke-width="2"/><text x="270" y="62" fill="var(--accent-blue)" font-size="10" text-anchor="middle">PROPOSAL(zxid)</text>
+          <line x1="410" y1="108" x2="170" y2="142" stroke="var(--accent-blue)" stroke-width="2"/><text x="270" y="135" fill="var(--accent-blue)" font-size="10" text-anchor="middle">PROPOSAL(zxid)</text>
+          <line x1="170" y1="52" x2="320" y2="90" stroke="var(--accent-amber)" stroke-width="2"/><text x="240" y="70" fill="var(--accent-amber)" font-size="10" text-anchor="middle">ACK</text>
+          <line x1="170" y1="142" x2="320" y2="112" stroke="var(--accent-amber)" stroke-width="2"/><text x="240" y="150" fill="var(--accent-amber)" font-size="10" text-anchor="middle">ACK</text>
+          <line x1="410" y1="100" x2="555" y2="100" stroke="var(--accent-green)" stroke-width="2"/><text x="480" y="92" fill="var(--accent-green)" font-size="10" text-anchor="middle">COMMIT</text>
+        </svg>
+      </div>
+    </div>
+    <div class="info-box green"><span class="info-icon">✅</span><div class="info-body"><strong>zxid 是关键</strong>：64 位，高 32 位是 epoch（每次新 Leader 递增），低 32 位是计数器。zxid 全局单调，用于排序与选举比较。</div></div>
+  </section>
+
+  <section id="vs" class="reveal">
+    <h2><span class="icon" style="background:rgba(248,113,113,0.15)">⚖️</span> 五、ZAB vs Paxos / Raft</h2>
+    <table>
+      <tr><th>维度</th><th>ZAB</th><th>Paxos</th><th>Raft</th></tr>
+      <tr><td>定位</td><td>ZK 专用</td><td>通用共识理论</td><td>通用共识（工程化）</td></tr>
+      <tr><td>模型</td><td>主从 + 顺序广播</td><td>角色可重叠</td><td>强主 + 日志复制</td></tr>
+      <tr><td>顺序</td><td>严格按 zxid 顺序</td><td>单值达成</td><td>按日志索引顺序</td></tr>
+      <tr><td>关系</td><td colspan="3">三者都能容忍少数故障；ZAB/Raft 可视为"为顺序日志定制的 Multi-Paxos 变体"</td></tr>
+    </table>
+  </section>
+
+  <section id="interview" class="reveal">
+    <h2><span class="icon" style="background:rgba(74,222,128,0.15)">🎯</span> 六、面试高频追问</h2>
+    <div class="stepper">
+      <div class="step" data-n="Q1"><div class="step-title">ZAB 和 Paxos 是一回事吗？</div><div class="step-desc">不是同一协议，但目标相同（容错共识）。ZAB 专为"主从 + 顺序事务广播"设计，更强调事务的顺序性与崩溃恢复；Paxos 更通用抽象。</div></div>
+      <div class="step" data-n="Q2"><div class="step-title">崩溃恢复怎么保证不丢已提交数据？</div><div class="step-desc">选举时只让"拥有最高 zxid（数据最全）"的节点当 Leader，且恢复阶段会同步补齐缺失的事务，确保已被半数确认的事务不会丢失。</div></div>
+      <div class="step" data-n="Q3"><div class="step-title">Observer 有什么用？</div><div class="step-desc">Observer 不加进投票法定人数，因此增删 Observer 不影响"半数"门槛，可在不影响写性能的前提下扩展读吞吐。</div></div>
+    </div>
+    <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">延伸阅读：<a href="paxos.html" style="color:var(--accent-blue);text-decoration:none;">Paxos</a> · <a href="raft-log-replication.html" style="color:var(--accent-blue);text-decoration:none;">Raft 日志复制</a> · <a href="../coordination/zookeeper.html" style="color:var(--accent-blue);text-decoration:none;">ZooKeeper 详解</a></p>
+  </section>
+</main>
+<footer><p>ZAB 协议 · ZooKeeper 原子广播</p><p style="margin-top:6px;"><a href="../index.html" style="color:var(--accent-blue);text-decoration:none;">← 返回分布式系统总目录</a></p></footer>
+<script>
+  const reveals = document.querySelectorAll('.reveal');
+  const io = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } }); }, { threshold: 0.08 });
+  reveals.forEach(el => io.observe(el));
+  const navLinks = Array.from(document.querySelectorAll('#main-nav a'));
+  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href')));
+  const spy = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) { const id = '#' + e.target.id; navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id)); } }); }, { rootMargin: '-60px 0px -70% 0px' });
+  sections.forEach(s => s && spy.observe(s));
+</script>
+</body>
+</html>

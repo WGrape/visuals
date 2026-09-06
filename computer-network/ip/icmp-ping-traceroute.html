@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ICMP · ping 与 traceroute 原理图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>ICMP · ping 与 traceroute 原理</h1>
+  <p class="sub">网络出了问题的“报警器”与“探测器”，也是面试最爱问的排查工具</p>
+  <div class="tags">
+    <span class="tag">ICMP 差错报告</span>
+    <span class="tag">Echo Request / Reply</span>
+    <span class="tag">TTL 递增</span>
+    <span class="tag">网络排查</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#what">① ICMP 是什么</a>
+  <a href="#type">② 报文两大类</a>
+  <a href="#ping">③ ping 的原理</a>
+  <a href="#trace">④ traceroute 的原理</a>
+  <a href="#diff">⑤ 两者区别与坑</a>
+  <a href="#debug">⑥ ping 不通怎么排查</a>
+  <a href="#qa">⑦ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="what">
+  <h2><span class="n">①</span>ICMP 是什么：IP 的“辅助与报警系统”</h2>
+  <div class="lead">
+    <b>ICMP（Internet Control Message Protocol，网际控制报文协议）</b>是网络层协议，用来在 IP 主机与路由器之间传递<b>控制信息与差错报告</b>。它<b>不传输用户数据</b>，而是告诉发送方“出了什么事”。
+  </div>
+  <div class="grid">
+    <div class="card"><h4>为什么需要它</h4><p>IP 协议本身是<b>尽力而为、无反馈</b>的：包丢了就是丢了，发送方毫不知情。ICMP 补上了这个“回话”能力。</p></div>
+    <div class="card"><h4>封装位置</h4><p>ICMP 报文<b>封装在 IP 数据报里</b>，IP 头部的协议号字段为 <b>1</b>。它<b>没有端口号</b>，也不属于 TCP/UDP。</p></div>
+    <div class="card"><h4>第几层</h4><p>属于<b>网络层</b>。虽然它像 TCP/UDP 一样被 IP 承载，但功能上是<b>IP 的辅助协议</b>，不是传输层。</p></div>
+  </div>
+
+  <svg viewBox="0 0 680 150" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">ICMP 报文的封装位置</text>
+    <rect x="40" y="45" width="600" height="36" rx="6" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="340" y="67" font-size="11.5" fill="#2c3e50" text-anchor="middle">以太网帧头（含 MAC 地址）</text>
+    <rect x="40" y="81" width="600" height="36" rx="6" fill="#eef2ff" stroke="#667eea"/>
+    <text x="340" y="103" font-size="11.5" fill="#2c3e50" text-anchor="middle">IP 头部（协议号 = 1 表示 ICMP）</text>
+    <rect x="40" y="117" width="600" height="26" rx="6" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="134" font-size="11.5" fill="#2e7d32" text-anchor="middle">ICMP 报文（类型 + 代码 + 校验和 + 数据）</text>
+  </svg>
+  <div class="warn"><b>重要认知：</b>ICMP 是<b>网络层协议</b>，<b>不使用 TCP 或 UDP，也没有端口概念</b>。所以“ping 某个端口”这种说法本身就是错的——ping 通不通与 80/443 端口开不开<b>没有直接关系</b>。这是面试极常见的陷阱题。</div>
+</section>
+
+<section id="type">
+  <h2><span class="n">②</span>ICMP 报文的两大类</h2>
+  <table>
+    <tr><th>类别</th><th>作用</th><th>典型类型</th></tr>
+    <tr><td><b>差错报告报文</b></td><td>向源主机报告传输中的错误</td><td>目的不可达、超时、参数错误、重定向</td></tr>
+    <tr><td><b>查询报文</b></td><td>主动询问并获取信息（一问一答）</td><td>Echo 请求/应答（ping）、时间戳请求/应答</td></tr>
+  </table>
+
+  <h3>常见 ICMP 类型与代码</h3>
+  <table>
+    <tr><th>Type</th><th>Code</th><th>含义</th><th>谁会发</th></tr>
+    <tr><td><b>0</b></td><td>0</td><td><b>Echo Reply</b>（回显应答）</td><td>目标主机回应 ping</td></tr>
+    <tr><td><b>8</b></td><td>0</td><td><b>Echo Request</b>（回显请求）</td><td>ping 发起方</td></tr>
+    <tr><td><b>3</b></td><td>0~15</td><td><b>目的不可达</b>（网络/主机/端口/协议等）</td><td>路由器或目标主机</td></tr>
+    <tr><td><b>11</b></td><td>0</td><td><b>超时（TTL 减到 0）</b></td><td>路由器（traceroute 依赖它）</td></tr>
+    <tr><td><b>5</b></td><td>0~3</td><td>重定向（有更好的路由）</td><td>路由器</td></tr>
+    <tr><td><b>12</b></td><td>0~2</td><td>参数错误</td><td>路由器或主机</td></tr>
+  </table>
+  <div class="note"><b>traceroute 的关键就是 Type 11（TTL 超时）</b>；<b>ping 的基础是 Type 8 / Type 0</b>。这两个记住就够应付大多数问题。</div>
+</section>
+
+<section id="ping">
+  <h2><span class="n">③</span>ping 的原理：一问一答算 RTT</h2>
+  <p><code>ping</code> 利用 ICMP 的 <b>Echo Request（Type 8）</b>与 <b>Echo Reply（Type 0）</b>：源主机发出请求，目标主机收到后<b>原样返回</b>应答。源主机通过两者的时间差算出 <b>RTT（往返时延）</b>。</p>
+
+  <svg viewBox="0 0 680 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">ping：Echo Request → Echo Reply，时间差即 RTT</text>
+
+    <rect x="50" y="50" width="140" height="46" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="120" y="68" font-size="10.5" fill="#2c3e50" text-anchor="middle">源主机</text>
+    <text x="120" y="85" font-size="9.5" fill="#667eea" text-anchor="middle">192.168.1.10</text>
+
+    <rect x="490" y="50" width="140" height="46" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="560" y="68" font-size="10.5" fill="#2c3e50" text-anchor="middle">目标主机</text>
+    <text x="560" y="85" font-size="9.5" fill="#4caf50" text-anchor="middle">8.8.8.8</text>
+
+    <line x1="195" y1="72" x2="485" y2="72" stroke="#667eea" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="64" font-size="10.5" fill="#2c3e50" text-anchor="middle">Echo Request（Type 8）：记录发送时间 t1</text>
+
+    <line x1="485" y1="110" x2="195" y2="110" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="102" font-size="10.5" fill="#2c3e50" text-anchor="middle">Echo Reply（Type 0）：记录收到时间 t2</text>
+
+    <rect x="180" y="135" width="320" height="40" rx="9" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="159" font-size="12.5" fill="#2e7d32" text-anchor="middle">RTT = t2 − t1</text>
+
+    <text x="340" y="195" font-size="10.5" fill="#5a6c7d" text-anchor="middle">报文里带标识符与序号，用于配对请求与应答、识别丢包</text>
+  </svg>
+
+  <h3>一次 ping 输出怎么读</h3>
+  <pre><code>$ ping -c <span class="s">4</span> 8.8.8.8
+PING 8.8.8.8 (8.8.8.8): <span class="s">56</span> data bytes
+<span class="s">64</span> bytes from 8.8.8.8: icmp_seq=<span class="s">0</span> ttl=<span class="s">117</span> time=<span class="s">15.3</span> ms
+<span class="s">64</span> bytes from 8.8.8.8: icmp_seq=<span class="s">1</span> ttl=<span class="s">117</span> time=<span class="s">14.8</span> ms
+<span class="s">64</span> bytes from 8.8.8.8: icmp_seq=<span class="s">3</span> ttl=<span class="s">117</span> time=<span class="s">16.1</span> ms
+
+--- 8.8.8.8 ping statistics ---
+<span class="s">4</span> packets transmitted, <span class="s">3</span> packets received, <span class="s">25.0</span>% packet loss
+round-trip min/avg/max/stddev = <span class="s">14.8</span>/<span class="s">15.4</span>/<span class="s">16.1</span>/<span class="s">0.5</span> ms</code></pre>
+  <table>
+    <tr><th>字段</th><th>含义</th></tr>
+    <tr><td><code>icmp_seq</code></td><td>序号。上例缺了 2 → 说明<b>第 3 个包丢了</b>（25% 丢包）。</td></tr>
+    <tr><td><code>ttl</code></td><td>应答报文<b>剩余 TTL</b>。可用于粗略推断对方经过的跳数（初始值常见 64/128/255）。</td></tr>
+    <tr><td><code>time</code></td><td>本次 RTT。</td></tr>
+    <tr><td>packet loss</td><td>丢包率，网络质量的关键指标。</td></tr>
+  </table>
+  <div class="note"><b>TTL 反推跳数：</b>如果收到的 TTL 是 117，而对方初始 TTL 大概率是 128（Windows）或 64（Linux），那么 <code>128 − 117 = 11</code>，说明大约经过了 <b>11 跳</b>。</div>
+</section>
+
+<section id="trace">
+  <h2><span class="n">④</span>traceroute 的原理：靠 TTL 递增“套出”每一跳</h2>
+  <div class="key">
+    <b>核心技巧：</b>IP 报文每经过一个路由器，<b>TTL 减 1</b>；当 TTL 减到 <b>0</b> 时，路由器会丢弃该报文，并<b>向源主机发一个 ICMP 超时报文（Type 11）</b>——而这个报文里就带着<b>该路由器的 IP</b>。<br>
+    于是：依次发 <code>TTL=1, 2, 3, ...</code> 的探测包，就能<b>一跳一跳地拿到沿途每个路由器的 IP</b>。
+  </div>
+
+  <svg viewBox="0 0 680 270" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="20" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">traceroute：TTL 从 1 开始递增，每跳返回 ICMP 超时</text>
+
+    <rect x="40" y="45" width="110" height="40" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="95" y="69" font-size="10.5" fill="#2c3e50" text-anchor="middle">源主机</text>
+
+    <rect x="215" y="45" width="100" height="40" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="265" y="69" font-size="10.5" fill="#2c3e50" text-anchor="middle">路由器 R1</text>
+
+    <rect x="380" y="45" width="100" height="40" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="430" y="69" font-size="10.5" fill="#2c3e50" text-anchor="middle">路由器 R2</text>
+
+    <rect x="530" y="45" width="110" height="40" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="585" y="69" font-size="10.5" fill="#2c3e50" text-anchor="middle">目标主机</text>
+
+    <line x1="152" y1="65" x2="213" y2="65" stroke="#c9d2dd" stroke-width="1.5"/>
+    <line x1="317" y1="65" x2="378" y2="65" stroke="#c9d2dd" stroke-width="1.5"/>
+    <line x1="482" y1="65" x2="528" y2="65" stroke="#c9d2dd" stroke-width="1.5"/>
+
+    <text x="95" y="105" font-size="10" fill="#667eea" text-anchor="middle">TTL=1</text>
+    <line x1="95" y1="112" x2="265" y2="112" stroke="#e91e63" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="265" y1="132" x2="95" y2="132" stroke="#ffa726" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <text x="180" y="126" font-size="9.5" fill="#e65100" text-anchor="middle">TTL 归零 → ICMP 超时（拿到 R1 的 IP）</text>
+
+    <text x="95" y="165" font-size="10" fill="#667eea" text-anchor="middle">TTL=2</text>
+    <line x1="95" y1="172" x2="430" y2="172" stroke="#e91e63" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="430" y1="190" x2="95" y2="190" stroke="#ffa726" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <text x="262" y="186" font-size="9.5" fill="#e65100" text-anchor="middle">到 R2 时 TTL 归零 → ICMP 超时（拿到 R2 的 IP）</text>
+
+    <text x="95" y="225" font-size="10" fill="#667eea" text-anchor="middle">TTL=3</text>
+    <line x1="95" y1="232" x2="585" y2="232" stroke="#4caf50" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="248" font-size="10" fill="#2e7d32" text-anchor="middle">到达目标 → 返回 ICMP 端口不可达 / Echo Reply → 探测结束</text>
+
+    <text x="340" y="265" font-size="9.5" fill="#5a6c7d" text-anchor="middle">每跳通常发 3 个探测包，因此会看到 3 个延时值</text>
+  </svg>
+
+  <div class="note">
+    <b>实现差异（常考）：</b>
+    <ul>
+      <li><b>Windows <code>tracert</code></b>：发的是 <b>ICMP Echo Request</b>，逐步增大 TTL。</li>
+      <li><b>Linux/macOS <code>traceroute</code></b>：默认发的是 <b>UDP 报文</b>（目的端口用较大的不常用端口），目标主机收到后返回 <b>ICMP 端口不可达（Type 3, Code 3）</b>作为结束信号。</li>
+    </ul>
+    两者中间跳都依赖 <b>ICMP TTL 超时（Type 11）</b>。
+  </div>
+  <pre><code>$ traceroute -n 8.8.8.8
+ <span class="s">1</span>  192.168.1.1      <span class="s">1.2</span> ms   <span class="s">1.1</span> ms   <span class="s">1.3</span> ms
+ <span class="s">2</span>  100.64.0.1       <span class="s">8.4</span> ms   <span class="s">7.9</span> ms   <span class="s">8.1</span> ms
+ <span class="s">3</span>  61.135.169.1     <span class="s">9.2</span> ms   <span class="s">9.5</span> ms   <span class="s">9.0</span> ms
+ <span class="s">4</span>  *  *  *                          <span class="c"># 星号：该跳设备不回应 ICMP，不代表故障</span>
+ <span class="s">5</span>  8.8.8.8         <span class="s">15.1</span> ms  <span class="s">14.8</span> ms  <span class="s">15.3</span> ms</code></pre>
+  <div class="warn"><b>星号（*）不代表网络断了。</b>很多运营商路由器为了安全和性能<b>不回应 ICMP</b>，所以 traceroute 拿不到它们的 IP。判断是否真的有问题，要看<b>最终能否到达目标</b>以及延时是否异常。</div>
+</section>
+
+<section id="diff">
+  <h2><span class="n">⑤</span>ping 与 traceroute 的区别</h2>
+  <table>
+    <tr><th>对比项</th><th>ping</th><th>traceroute</th></tr>
+    <tr><td>目的</td><td>测<b>是否可达</b> + RTT + 丢包率</td><td>看<b>经过了哪些跳</b>，定位在哪一跳出问题</td></tr>
+    <tr><td>依赖</td><td>ICMP Echo Request / Reply</td><td>TTL 递增 + ICMP 超时 / 端口不可达</td></tr>
+    <tr><td>输出</td><td>通断、延时、丢包</td><td>逐跳 IP 与延时</td></tr>
+    <tr><td>典型用途</td><td>“能不能连上？”</td><td>“卡在第几跳？”</td></tr>
+  </table>
+</section>
+
+<section id="debug">
+  <h2><span class="n">⑥</span>ping 不通，怎么一步步排查</h2>
+  <ol>
+    <li><b>ping 127.0.0.1</b> → 验证<b>本机 TCP/IP 协议栈</b>是否正常。不通说明系统网络栈有问题。</li>
+    <li><b>ping 本机 IP</b> → 验证<b>网卡</b>是否正常工作。</li>
+    <li><b>ping 同网段其他主机</b> → 验证<b>局域网链路与交换机</b>。不通可能是网线、VLAN、交换机端口问题。</li>
+    <li><b>ping 网关</b> → 验证<b>到出口路由器的链路</b>。不通检查网关配置、ARP 是否正常。</li>
+    <li><b>ping 外网 IP（如 8.8.8.8）</b> → 验证<b>出口与运营商链路</b>。不通可能是 NAT、路由、运营商问题。</li>
+    <li><b>ping 域名（如 google.com）</b> → 验证 <b>DNS 解析</b>。IP 能通但域名不通 = DNS 问题。</li>
+    <li><b>traceroute 目标</b> → 定位<b>具体卡在哪一跳</b>。</li>
+  </ol>
+  <div class="key"><b>关键区分：</b><br>
+  • <b>能 ping 通 IP 但打不开网页</b> → 多半是<b>应用层/端口/防火墙</b>问题（ping 用的是 ICMP，与 80/443 端口无关）。<br>
+  • <b>能 ping 通 IP 但 ping 不通域名</b> → <b>DNS 解析问题</b>。<br>
+  • <b>ping 显示“Destination Host Unreachable”</b> → 通常是<b>同网段 ARP 没解析到</b>或本机路由表无匹配项。</div>
+  <pre><code><span class="c"># 常用组合排查命令</span>
+ip addr / ifconfig          <span class="c"># 看本机 IP 与网卡状态</span>
+ip route / route -n         <span class="c"># 看路由表（有没有到目标的路由）</span>
+ip neigh / arp -a           <span class="c"># 看 ARP 缓存（网关 MAC 解析到没）</span>
+nslookup / dig 域名          <span class="c"># 测 DNS 解析</span>
+telnet host port / nc -zv   <span class="c"># 测 TCP 端口是否开放（ping 测不了这个）</span>
+traceroute host             <span class="c"># 看卡在第几跳</span></code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑦</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：ICMP 是哪一层协议？</div>
+  <b>网络层</b>。它封装在 IP 数据报中（协议号 1），是 IP 的辅助协议，用于差错报告与控制消息。<b>不属于传输层，也没有端口概念。</b></div>
+
+  <div class="q"><div class="qt">Q2：ping 用的是 TCP 还是 UDP？</div>
+  <b>都不是</b>。ping 用的是 <b>ICMP 的 Echo Request（Type 8）与 Echo Reply（Type 0）</b>，走网络层，不涉及 TCP/UDP 端口。</div>
+
+  <div class="q"><div class="qt">Q3：为什么能 ping 通，但服务访问不了？</div>
+  ping 通只说明 <b>IP 层可达</b>（ICMP 没被禁）。服务访问不了通常是<b>传输层或应用层</b>问题：端口未监听、防火墙拦截、服务进程异常。<b>ping 通 ≠ 端口开放。</b></div>
+
+  <div class="q"><div class="qt">Q4：traceroute 的原理是什么？</div>
+  利用 <b>TTL 递增</b>：每经过一跳 TTL 减 1，减到 0 时路由器丢弃报文并回 <b>ICMP 超时（Type 11）</b>，其中携带该路由器 IP。依次发送 TTL=1,2,3... 的探测包，即可逐跳拿到路径。</div>
+
+  <div class="q"><div class="qt">Q5：traceroute 里出现 * * * 是什么意思？</div>
+  该跳设备在<b>超时时间内没有回应 ICMP</b>（很多路由器为安全/性能禁用了 ICMP 响应）。<b>不代表故障</b>，需结合最终是否到达目标判断。</div>
+
+  <div class="q"><div class="qt">Q6：Windows 的 tracert 和 Linux 的 traceroute 有区别吗？</div>
+  有。tracert 发 <b>ICMP Echo Request</b>；Linux traceroute 默认发 <b>UDP 报文</b>，靠目标返回 <b>ICMP 端口不可达</b>判定结束。中间跳都依赖 ICMP TTL 超时。</div>
+
+  <div class="q"><div class="qt">Q7：ping 的输出里 TTL 有什么用？</div>
+  可粗略推断<b>经过的跳数</b>：用常见初始值（64/128/255）减去收到的 TTL。同时 TTL 也能粗略判断对方操作系统类型（Linux 常见 64，Windows 常见 128）。</div>
+
+  <div class="q"><div class="qt">Q8：为什么有些网站禁 ping？</div>
+  禁用 ICMP Echo 可以<b>减少被扫描发现的概率</b>、降低 ICMP Flood 攻击面。所以<b>禁 ping 不等于服务器宕机</b>，排查时要用 telnet/nc 测端口。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>ICMP 是网络层的报警与控制协议（协议号 1、无端口）；ping 靠 Echo 请求/应答测可达与 RTT；traceroute 靠 TTL 递增触发 ICMP 超时，逐跳拿到路由路径。排查顺序：本机 → 网卡 → 同网段 → 网关 → 外网 IP → 域名 → traceroute 定位。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 RFC 792（ICMP）、RFC 4443（ICMPv6）与常见 ping / traceroute 实现整理；不同系统命令参数略有差异。</p>
+  <p style="margin-top:8px">相关阅读：<a href="arp-protocol.html">ARP 协议</a> · <a href="ip-fragmentation-mtu.html">MTU 与 IP 分片</a> · <a href="nat-principle.html">NAT 原理</a></p>
+</footer>
+
+</div>
+</body>
+</html>

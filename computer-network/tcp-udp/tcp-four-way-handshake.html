@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 四次挥手 · TIME_WAIT 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>TCP 四次挥手 · TIME_WAIT 完全图解</h1>
+  <p class="sub">为什么是四次？TIME_WAIT 为什么要等 2MSL？CLOSE_WAIT 堆积怎么办？</p>
+  <div class="tags">
+    <span class="tag">四次挥手</span>
+    <span class="tag">TIME_WAIT / 2MSL</span>
+    <span class="tag">CLOSE_WAIT 泄漏</span>
+    <span class="tag">面试高频</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#why">① 为什么需要挥手</a>
+  <a href="#flow">② 四次挥手全流程</a>
+  <a href="#fsm">③ 状态机变迁</a>
+  <a href="#timewait">④ TIME_WAIT 与 2MSL</a>
+  <a href="#closewait">⑤ CLOSE_WAIT 堆积</a>
+  <a href="#qa">⑥ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="why">
+  <h2><span class="n">①</span>为什么需要“挥手”：连接是全双工的</h2>
+  <div class="lead">
+    TCP 是<b>全双工</b>的：客户端→服务端、服务端→客户端是<b>两条独立的通道</b>。关闭连接时，每个方向都必须单独关闭——这就是“挥手要四次、握手只要三次”的根本原因。
+  </div>
+  <p>建立连接时，服务端的 <code>SYN</code>（我要连你）和 <code>ACK</code>（我收到你的请求）可以<b>合并在同一个报文</b>里发出，所以三次搞定。但关闭时，一方说“我没数据要发了（FIN）”，另一方<b>只能先回一个 ACK</b>——因为它<b>可能还有数据没发完</b>，不能立刻也发 FIN。于是 ACK 和 FIN 得分开两次发，总共四次。</p>
+
+  <svg viewBox="0 0 680 240" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="26" font-size="13" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">全双工：两条独立通道，各自单独关闭</text>
+    <rect x="60" y="60" width="150" height="52" rx="9" fill="#eef2ff" stroke="#667eea" stroke-width="1"/>
+    <text x="135" y="80" font-size="12.5" fill="#2c3e50" text-anchor="middle">客户端</text>
+    <text x="135" y="98" font-size="11.5" fill="#667eea" text-anchor="middle">Client</text>
+    <rect x="470" y="60" width="150" height="52" rx="9" fill="#f3e8ff" stroke="#764ba2" stroke-width="1"/>
+    <text x="545" y="80" font-size="12.5" fill="#2c3e50" text-anchor="middle">服务端</text>
+    <text x="545" y="98" font-size="11.5" fill="#764ba2" text-anchor="middle">Server</text>
+    <line x1="215" y1="80" x2="465" y2="80" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="72" font-size="11" fill="#2e7d32" text-anchor="middle">通道A：C → S</text>
+    <line x1="465" y1="104" x2="215" y2="104" stroke="#e91e63" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="120" font-size="11" fill="#c2185b" text-anchor="middle">通道B：S → C</text>
+    <text x="340" y="160" font-size="12.5" fill="#2c3e50" text-anchor="middle">建立：SYN+ACK 可合并 → 三次握手</text>
+    <text x="340" y="185" font-size="12.5" fill="#2c3e50" text-anchor="middle">关闭：A 关了 B 可能还有数据 → ACK 与 FIN 不能合并</text>
+    <text x="340" y="215" font-size="13" fill="#667eea" text-anchor="middle" font-weight="bold">所以：握手三次，挥手四次</text>
+  </svg>
+
+  <div class="note"><b>补充：</b>挥手其实<b>也可能变成三次</b>——如果被动关闭方在收到 FIN 时<b>恰好也没有数据要发</b>，它可以把 ACK 和自己的 FIN 合并发送（延迟确认场景），这时就退化成三次。但标准流程讲四次。</div>
+</section>
+
+<section id="flow">
+  <h2><span class="n">②</span>四次挥手全流程（时序图）</h2>
+  <p>假设<b>客户端</b>主动关闭（实际上服务端也可以主动 close）。每一步的报文与状态如下：</p>
+
+  <svg viewBox="0 0 680 430" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <rect x="70" y="20" width="140" height="46" rx="9" fill="#eef2ff" stroke="#667eea"/>
+    <text x="140" y="40" font-size="12.5" fill="#2c3e50" text-anchor="middle">主动关闭方</text>
+    <text x="140" y="57" font-size="11" fill="#667eea" text-anchor="middle">Client</text>
+    <rect x="470" y="20" width="140" height="46" rx="9" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="540" y="40" font-size="12.5" fill="#2c3e50" text-anchor="middle">被动关闭方</text>
+    <text x="540" y="57" font-size="11" fill="#764ba2" text-anchor="middle">Server</text>
+    <line x1="140" y1="66" x2="140" y2="400" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <line x1="540" y1="66" x2="540" y2="400" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="140" y="92" font-size="10.5" fill="#2e7d32" text-anchor="middle">ESTABLISHED</text>
+    <text x="540" y="92" font-size="10.5" fill="#2e7d32" text-anchor="middle">ESTABLISHED</text>
+
+    <line x1="150" y1="120" x2="530" y2="120" stroke="#667eea" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="112" font-size="11.5" fill="#2c3e50" text-anchor="middle">① FIN=1, seq=u</text>
+    <text x="150" y="140" font-size="10.5" fill="#c2185b" text-anchor="middle">FIN_WAIT_1</text>
+
+    <line x1="530" y1="175" x2="150" y2="175" stroke="#764ba2" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="167" font-size="11.5" fill="#2c3e50" text-anchor="middle">② ACK=1, ack=u+1</text>
+    <text x="540" y="158" font-size="10.5" fill="#c2185b" text-anchor="middle">CLOSE_WAIT</text>
+    <text x="150" y="195" font-size="10.5" fill="#c2185b" text-anchor="middle">FIN_WAIT_2</text>
+
+    <text x="540" y="222" font-size="10.5" fill="#5a6c7d" text-anchor="middle">（继续发送剩余数据）</text>
+    <line x1="500" y1="238" x2="500" y2="238" stroke="none"/>
+
+    <line x1="530" y1="262" x2="150" y2="262" stroke="#764ba2" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="254" font-size="11.5" fill="#2c3e50" text-anchor="middle">③ FIN=1, seq=v（数据发完了）</text>
+    <text x="540" y="282" font-size="10.5" fill="#c2185b" text-anchor="middle">LAST_ACK</text>
+
+    <line x1="150" y1="315" x2="530" y2="315" stroke="#667eea" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="307" font-size="11.5" fill="#2c3e50" text-anchor="middle">④ ACK=1, ack=v+1</text>
+    <text x="150" y="335" font-size="10.5" fill="#c2185b" text-anchor="middle">TIME_WAIT</text>
+    <text x="540" y="335" font-size="10.5" fill="#2e7d32" text-anchor="middle">CLOSED</text>
+
+    <text x="150" y="372" font-size="11" fill="#5a6c7d" text-anchor="middle">等 2MSL</text>
+    <text x="150" y="392" font-size="10.5" fill="#2e7d32" text-anchor="middle">CLOSED</text>
+    <text x="340" y="418" font-size="12" fill="#667eea" text-anchor="middle" font-weight="bold">四次挥手：每方向一次 FIN + 一次 ACK</text>
+  </svg>
+
+  <table>
+    <tr><th>步骤</th><th>方向</th><th>报文</th><th>发送方进入</th><th>接收方进入</th></tr>
+    <tr><td>①</td><td>C → S</td><td><code>FIN=1, seq=u</code></td><td>FIN_WAIT_1</td><td>CLOSE_WAIT</td></tr>
+    <tr><td>②</td><td>S → C</td><td><code>ACK=1, ack=u+1</code></td><td>—</td><td>FIN_WAIT_2（接收方）</td></tr>
+    <tr><td>③</td><td>S → C</td><td><code>FIN=1, seq=v</code></td><td>LAST_ACK</td><td>—</td></tr>
+    <tr><td>④</td><td>C → S</td><td><code>ACK=1, ack=v+1</code></td><td>TIME_WAIT</td><td>CLOSED</td></tr>
+  </table>
+
+  <div class="note"><b>记忆口诀：</b>“我关我的（FIN）→ 你确认（ACK）→ 你关你的（FIN）→ 我确认（ACK）”。<b>只有主动关闭方才会进入 TIME_WAIT</b>。</div>
+</section>
+
+<section id="fsm">
+  <h2><span class="n">③</span>状态机变迁：关键状态都什么意思</h2>
+  <div class="grid">
+    <div class="card"><h4>FIN_WAIT_1 / FIN_WAIT_2</h4><p>主动方发出 FIN 后等对方 ACK；收到后进入 FIN_WAIT_2，此时<b>半关闭</b>：还能收对方数据，但不能再发。</p></div>
+    <div class="card"><h4>CLOSE_WAIT</h4><p>被动方收到 FIN 后进入，含义是<b>“对方要关了，等我自己的应用层 close()”</b>。停留过久＝程序忘了关 socket。</p></div>
+    <div class="card"><h4>LAST_ACK</h4><p>被动方发完自己的 FIN，等最后一个 ACK。收到即 CLOSED。</p></div>
+    <div class="card"><h4>TIME_WAIT</h4><p>主动方发出最后 ACK 后进入，要<b>等 2MSL</b> 才真正释放。见下一节。</p></div>
+  </div>
+
+  <svg viewBox="0 0 680 200" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">被动关闭方视角（服务端）</text>
+    <rect x="40" y="55" width="120" height="44" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="100" y="77" font-size="11" fill="#2e7d32" text-anchor="middle">ESTABLISHED</text>
+    <rect x="200" y="55" width="120" height="44" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="260" y="77" font-size="11" fill="#e65100" text-anchor="middle">CLOSE_WAIT</text>
+    <rect x="360" y="55" width="120" height="44" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="420" y="77" font-size="11" fill="#e65100" text-anchor="middle">LAST_ACK</text>
+    <rect x="520" y="55" width="120" height="44" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="580" y="77" font-size="11" fill="#2e7d32" text-anchor="middle">CLOSED</text>
+    <line x1="162" y1="77" x2="198" y2="77" stroke="#5a6c7d" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <line x1="322" y1="77" x2="358" y2="77" stroke="#5a6c7d" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <line x1="482" y1="77" x2="518" y2="77" stroke="#5a6c7d" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <text x="180" y="100" font-size="10" fill="#5a6c7d" text-anchor="middle">收FIN</text>
+    <text x="340" y="100" font-size="10" fill="#5a6c7d" text-anchor="middle">close()</text>
+    <text x="500" y="100" font-size="10" fill="#5a6c7d" text-anchor="middle">收ACK</text>
+    <rect x="150" y="120" width="380" height="52" rx="9" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="340" y="140" font-size="12" fill="#c2185b" text-anchor="middle" font-family="system-ui,sans-serif">CLOSE_WAIT 停留 = 应用层没调 close()</text>
+    <text x="340" y="160" font-size="11.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">服务端出现大量 CLOSE_WAIT → 几乎一定是代码 bug（连接泄漏）</text>
+  </svg>
+</section>
+
+<section id="timewait">
+  <h2><span class="n">④</span>TIME_WAIT：为什么要等 2MSL</h2>
+  <p><b>MSL（Maximum Segment Lifetime）</b>是报文在网络中的最大生存时间，Linux 默认 30 秒，所以 <b>TIME_WAIT 默认持续 60 秒（2MSL）</b>。等这么久有两个硬核理由：</p>
+
+  <div class="grid">
+    <div class="card"><h4>理由一：可靠地终止连接</h4><p>最后那个 ACK 可能<b>丢失</b>。如果丢了，被动方会<b>重发 FIN</b>。主动方若已直接关闭，就只能回 RST，对方会认为出错。留着 TIME_WAIT 才能<b>重发 ACK</b>，让连接正常收尾。</p></div>
+    <div class="card"><h4>理由二：消散旧连接的迷途报文</h4><p>若不等待就复用同一四元组（源IP:源端口, 目的IP:目的端口）建新连接，<b>上一次连接迟到的旧报文</b>可能被新连接误收。等 2MSL 保证旧报文在网络中自然消亡。</p></div>
+  </div>
+
+  <svg viewBox="0 0 680 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">场景：最后的 ACK 丢了会怎样</text>
+    <rect x="60" y="50" width="130" height="42" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="125" y="71" font-size="11" fill="#2c3e50" text-anchor="middle">Client</text>
+    <rect x="490" y="50" width="130" height="42" rx="8" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="555" y="71" font-size="11" fill="#2c3e50" text-anchor="middle">Server</text>
+    <line x1="195" y1="120" x2="485" y2="120" stroke="#667eea" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="340" y="112" font-size="11" fill="#2c3e50" text-anchor="middle">ACK ✗ 丢失</text>
+    <line x1="485" y1="152" x2="195" y2="152" stroke="#e91e63" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="340" y="144" font-size="11" fill="#c2185b" text-anchor="middle">超时重传 FIN</text>
+    <text x="125" y="184" font-size="11" fill="#2e7d32" text-anchor="middle">TIME_WAIT 中 → 重发 ACK</text>
+    <text x="555" y="184" font-size="11" fill="#2e7d32" text-anchor="middle">收到 ACK → CLOSED</text>
+    <text x="340" y="205" font-size="11.5" fill="#667eea" text-anchor="middle">若没有 TIME_WAIT：Client 已关闭 → 回 RST → 服务端异常报错</text>
+  </svg>
+
+  <h3>TIME_WAIT 过多有什么危害</h3>
+  <ul>
+    <li><b>占用端口资源</b>：每个 TIME_WAIT 占一个本地端口，客户端高并发短连接时可能<b>端口耗尽</b>（尤其压测机、爬虫、Nginx 反代上游）。</li>
+    <li><b>占用内存与连接表项</b>：内核要维护该连接的控制块，量大了有开销。</li>
+  </ul>
+  <div class="note">
+    <b>注意：</b>很多人误以为 TIME_WAIT 是“服务端的问题”。其实<b>谁主动 close，谁产生 TIME_WAIT</b>。Web 服务器若主动关连接（如 Nginx 对上游主动断连），服务端才会大量堆积。
+  </div>
+
+  <h3>怎么优化（面试答这几个）</h3>
+  <table>
+    <tr><th>手段</th><th>做法</th><th>说明</th></tr>
+    <tr><td>复用连接</td><td>开启 <code>Keep-Alive</code> / 连接池</td><td><b>首选</b>：从源头减少主动关闭</td></tr>
+    <tr><td>让对方先关</td><td>业务设计上让客户端主动断开</td><td>把 TIME_WAIT 转移给客户端</td></tr>
+    <tr><td>端口复用</td><td><code>net.ipv4.tcp_tw_reuse = 1</code></td><td>允许把 TIME_WAIT 连接用于<b>新出站</b>连接（需时间戳支持）</td></tr>
+    <tr><td>放宽端口范围</td><td><code>ip_local_port_range</code></td><td>从默认约 2.8 万扩到 6 万</td></tr>
+    <tr><td>缩短等待</td><td>调小 <code>tcp_fin_timeout</code></td><td>治标不治本，需谨慎</td></tr>
+  </table>
+  <div class="warn"><b>避坑：</b><code>tcp_tw_recycle</code> 已在 Linux 4.12+ <b>被移除</b>——它会导致 NAT 环境下大量连接被拒。别再把这个当答案说，会被认为知识过时。</div>
+</section>
+
+<section id="closewait">
+  <h2><span class="n">⑤</span>CLOSE_WAIT 堆积：几乎一定是代码 bug</h2>
+  <div class="key">
+    <b>核心判断：</b>服务端出现<b>大量 CLOSE_WAIT</b>，说明“对端已经把连接关了，但<b>本端应用程序没有调用 close()</b>”。这是<b>连接泄漏</b>，与内核参数无关，调参解决不了。
+  </div>
+  <p>常见原因：</p>
+  <ul>
+    <li>HTTP 客户端拿到响应后<b>没有关闭连接 / 没有放回连接池</b>（如忘记 <code>resp.Body.Close()</code>）。</li>
+    <li>异常处理分支里<b>漏了 close</b>，正常路径关了、异常路径没关。</li>
+    <li>使用了连接池但<b>连接未归还</b>，池子泄漏。</li>
+    <li>线程池 / 协程阻塞，导致 close 逻辑根本没执行到。</li>
+  </ul>
+  <pre><code><span class="c"># 排查命令：统计各状态连接数</span>
+netstat -n | awk <span class="s">'/^tcp/ {++S[$NF]} END {for(a in S) print a, S[a]}'</span>
+
+<span class="c"># 看哪些进程持有大量 CLOSE_WAIT</span>
+ss -tanp | grep CLOSE-WAIT
+
+<span class="c"># 典型输出（危险信号）</span>
+<span class="c"># CLOSE_WAIT  8234</span>
+<span class="c"># ESTABLISHED  120</span>
+<span class="c"># TIME_WAIT    45</span></code></pre>
+  <p><b>修复方向：</b>在 <code>finally</code> / <code>defer</code> 里保证资源释放；使用带超时和最大空闲数的连接池；给 HTTP client 设置合理超时。</p>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑥</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：为什么挥手需要四次，握手只要三次？</div>
+  因为 TCP 全双工，每个方向要单独关闭。握手时服务端的 SYN 和 ACK 可以合并发送；挥手时被动方收到 FIN 后<b>可能还有数据没发完</b>，只能先回 ACK，等数据发完再发自己的 FIN，所以 ACK 与 FIN 分开发，共四次。</div>
+
+  <div class="q"><div class="qt">Q2：TIME_WAIT 为什么是 2MSL 而不是 1MSL？</div>
+  2MSL = 一个 MSL 保证<b>自己发出的 ACK 能到达对端</b>，另一个 MSL 保证<b>若 ACK 丢失，对端重发的 FIN 能到达自己</b>。正好覆盖“最坏情况的往返”，从而可靠终止连接并让旧报文消散。</div>
+
+  <div class="q"><div class="qt">Q3：TIME_WAIT 出现在哪一端？</div>
+  <b>主动关闭方</b>。谁先调用 close()/发第一个 FIN，谁最后进入 TIME_WAIT。</div>
+
+  <div class="q"><div class="qt">Q4：服务器上有大量 TIME_WAIT，一定是出问题了吗？</div>
+  不一定。若服务端是<b>主动关闭方</b>（如反向代理主动断上游），TIME_WAIT 多是<b>正常现象</b>，只要不导致端口耗尽就无需恐慌。真正危险的是<b>CLOSE_WAIT 堆积</b>——那是泄漏。</div>
+
+  <div class="q"><div class="qt">Q5：TIME_WAIT 和 CLOSE_WAIT 的区别，一句话概括？</div>
+  TIME_WAIT 是<b>主动关闭方</b>的正常等待状态（内核行为）；CLOSE_WAIT 是<b>被动关闭方</b>等应用层 close（<b>应用层 bug</b>）。</div>
+
+  <div class="q"><div class="qt">Q6：如果最后的 ACK 丢了会怎样？</div>
+  被动方超时重传 FIN；主动方仍在 TIME_WAIT，会<b>重发 ACK</b> 并重置 2MSL 计时器，从而可靠关闭。</div>
+
+  <div class="q"><div class="qt">Q7：为什么不能让客户端直接发 RST 关闭？</div>
+  RST 是<b>异常终止</b>：会丢弃接收缓冲区中未读的数据，且不给对端“优雅收尾”的机会，容易造成数据截断和错误日志。正常关闭应走 FIN。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>全双工 → 两方向各关一次 → 四次挥手；主动方等 2MSL（TIME_WAIT）保证可靠终止 + 旧报文消散；被动方停在 CLOSE_WAIT 说明应用没 close，是 bug。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 TCP 协议标准（RFC 793）与 Linux 内核实现整理；<code>tcp_tw_recycle</code> 已于 Linux 4.12 移除，相关内核参数请以实际系统版本为准。</p>
+  <p style="margin-top:8px">相关阅读：<a href="tcp-reliable-transmission.html">TCP 可靠传输</a> · <a href="tcp-connection-queue.html">连接队列与 SYN Flood</a> · <a href="tcp_congestion_control.html">拥塞控制</a></p>
+</footer>
+
+</div>
+</body>
+</html>

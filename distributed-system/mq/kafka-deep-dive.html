@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kafka 深入 — Partition / Replica / ISR / HW / 零拷贝</title>
+  <style>
+    :root { --bg-primary:#0f1117;--bg-secondary:#1a1d27;--bg-card:#1e2235;--bg-highlight:#252a3d;--text-primary:#e8eaf6;--text-secondary:#9ca3c0;--text-muted:#5c6080;--accent-blue:#4f87ff;--accent-purple:#9b6fff;--accent-teal:#2dd4bf;--accent-amber:#fbbf24;--accent-red:#f87171;--accent-green:#4ade80;--border:rgba(255,255,255,0.07);--border-accent:rgba(79,135,255,0.3); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif; background: var(--bg-primary); color: var(--text-primary); font-size: 14px; line-height: 1.7; }
+    .topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: rgba(15,17,23,0.9); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar .logo { font-size: 15px; font-weight: 700; text-decoration: none; background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-purple) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .topbar a.back { color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 14px 0; }
+    header { background: linear-gradient(135deg, #0f1117 0%, #1a1530 50%, #0f1117 100%); border-bottom: 1px solid var(--border); padding: 84px 40px 50px; text-align: center; position: relative; overflow: hidden; }
+    header::before { content: ''; position: absolute; top: -60px; left: 50%; transform: translateX(-50%); width: 600px; height: 300px; background: radial-gradient(ellipse, rgba(79,135,255,0.12) 0%, transparent 70%); pointer-events: none; }
+    .header-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(79,135,255,0.1); border: 1px solid rgba(79,135,255,0.25); border-radius: 20px; padding: 4px 14px; font-size: 12px; color: var(--accent-blue); margin-bottom: 20px; }
+    header h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.5px; background: linear-gradient(135deg, #ffffff 0%, #a8b8ff 50%, #4f87ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 12px; }
+    header p { color: var(--text-secondary); font-size: 16px; max-width: 640px; margin: 0 auto; }
+    nav { position: sticky; top: 53px; z-index: 100; background: rgba(15,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; gap: 4px; overflow-x: auto; }
+    nav a { color: var(--text-secondary); text-decoration: none; padding: 14px 16px; font-size: 13px; white-space: nowrap; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }
+    nav a:hover, nav a.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+    main { max-width: 1000px; margin: 0 auto; padding: 48px 40px 80px; }
+    section { margin-bottom: 72px; }
+    h2 { font-size: 26px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+    h2 .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .section-lead { color: var(--text-secondary); font-size: 15px; margin-bottom: 28px; line-height: 1.6; }
+    h3 { font-size: 17px; font-weight: 600; color: var(--text-primary); margin: 28px 0 12px; }
+    p { color: var(--text-secondary); margin-bottom: 14px; line-height: 1.8; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+    .card-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-box { border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 12px; align-items: flex-start; }
+    .info-box.blue { background: rgba(79,135,255,0.08); border: 1px solid rgba(79,135,255,0.2); }
+    .info-box.amber { background: rgba(251,191,36,0.07); border: 1px solid rgba(251,191,36,0.2); }
+    .info-box.red { background: rgba(248,113,113,0.07); border: 1px solid rgba(248,113,113,0.2); }
+    .info-box.green { background: rgba(74,222,128,0.07); border: 1px solid rgba(74,222,128,0.2); }
+    .info-box.purple { background: rgba(155,111,255,0.07); border: 1px solid rgba(155,111,255,0.2); }
+    .info-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .info-body { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-body strong { color: var(--text-primary); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 13px; }
+    th { background: var(--bg-highlight); color: var(--text-secondary); font-weight: 500; padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    td:first-child { color: var(--text-primary); font-weight: 500; }
+    .stepper { position: relative; padding-left: 32px; }
+    .step { position: relative; margin-bottom: 24px; padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; }
+    .step::before { content: attr(data-n); position: absolute; left: -32px; top: 16px; width: 22px; height: 22px; border-radius: 50%; background: var(--bg-highlight); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--text-muted); }
+    .stepper::before { content: ''; position: absolute; left: 10px; top: 28px; bottom: 28px; width: 1px; background: var(--border); }
+    .step.ok::before { background: rgba(74,222,128,0.15); border-color: rgba(74,222,128,0.3); color: var(--accent-green); }
+    .keyline { border-left: 3px solid var(--accent-blue); padding: 4px 0 4px 16px; margin: 16px 0; color: var(--text-secondary); font-size: 14px; }
+    .keyline strong { color: var(--text-primary); }
+    footer { text-align: center; padding: 32px 40px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity 0.5s, transform 0.5s; }
+    .reveal.visible { opacity: 1; transform: none; }
+    code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
+    svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
+  </style>
+</head>
+<body>
+<div class="topbar"><a href="../index.html" class="logo">☁️ 分布式系统</a><a href="../index.html" class="back">← 返回分布式系统</a></div>
+<header>
+  <div class="header-badge">🚀 Kafka 深入 · 面试高频</div>
+  <h1>Kafka 深入剖析</h1>
+  <p>从 Topic / Partition / Replica / ISR / HW 到零拷贝，把 Kafka 为什么能"高吞吐、高可靠、顺序、不丢"讲透。面试官最爱追问的细节都在这里。</p>
+</header>
+<nav id="main-nav">
+  <a href="#model" class="active">核心模型</a>
+  <a href="#partition">Partition 与 顺序</a>
+  <a href="#replica">副本与 ISR</a>
+  <a href="#hw">HW / LEO</a>
+  <a href="#produce">生产消费流程</a>
+  <a href="#zero">零拷贝</a>
+  <a href="#interview">面试要点</a>
+</nav>
+<main>
+  <section id="model" class="reveal">
+    <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🗂️</span>核心模型</h2>
+    <p class="section-lead">Kafka 的"高吞吐"来自一个朴素设计：<strong>日志就是数组，追加即可，绝不随机改</strong>。</p>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 640 200" xmlns="http://www.w3.org/2000/svg">
+        <g font-size="11">
+          <rect x="20" y="20" width="600" height="40" rx="8" fill="rgba(79,135,255,0.1)" stroke="var(--accent-blue)"/>
+          <text x="320" y="45" fill="#fff" text-anchor="middle" font-weight="600">Topic：order-events</text>
+          <rect x="20" y="75" width="190" height="50" rx="8" fill="rgba(45,212,191,0.15)" stroke="var(--accent-teal)"/><text x="115" y="105" fill="#fff" text-anchor="middle">Partition-0</text>
+          <rect x="225" y="75" width="190" height="50" rx="8" fill="rgba(45,212,191,0.15)" stroke="var(--accent-teal)"/><text x="320" y="105" fill="#fff" text-anchor="middle">Partition-1</text>
+          <rect x="430" y="75" width="190" height="50" rx="8" fill="rgba(45,212,191,0.15)" stroke="var(--accent-teal)"/><text x="525" y="105" fill="#fff" text-anchor="middle">Partition-2</text>
+          <text x="320" y="155" fill="var(--text-muted)" text-anchor="middle" font-size="10">每个 Partition 是一个有序、不可变的日志（append-only）</text>
+          <text x="320" y="180" fill="var(--text-muted)" text-anchor="middle" font-size="10">消息按 offset 递增编号；多 partition 实现并行与横向扩展</text>
+        </g>
+      </svg>
+    </div>
+    <div class="keyline"><strong>关键概念：</strong>Producer 按 key 哈希到 partition；Consumer Group 中每个 consumer 分配若干 partition；<strong>partition 数 = 最大并行消费度</strong>。</div>
+  </section>
+
+  <section id="partition" class="reveal">
+    <h2><span class="icon" style="background:rgba(155,111,255,0.15)">🔢</span>Partition 与顺序保证</h2>
+    <div class="card">
+      <div class="card-title">顺序的边界</div>
+      <div class="card-desc">
+        <p>Kafka 只保证<strong>单个 partition 内</strong>消息有序。跨 partition 不保序。</p>
+        <p style="margin-bottom:0">因此：要"同一订单顺序"（如创建→支付→发货），就把订单ID 作为 key，使其哈希到<strong>固定 partition</strong>，单线程消费该 partition 即可。</p>
+      </div>
+    </div>
+    <div class="info-box amber"><span class="info-icon">⚖️</span><div class="info-body"><strong>权衡：</strong>partition 越多 → 并行度越高、吞吐越大，但顺序粒度越粗（只能保证"同 key 顺序"）。不要为了全局顺序而无脑用单 partition——那是反模式。</div></div>
+  </section>
+
+  <section id="replica" class="reveal">
+    <h2><span class="icon" style="background:rgba(45,212,191,0.15)">🪞</span>副本机制与 ISR</h2>
+    <p class="section-lead">每个 Partition 有多个副本（Replica），分布在不同 broker 上。其中一个是 Leader，其余是 Follower。</p>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 640 210" xmlns="http://www.w3.org/2000/svg">
+        <g font-size="11">
+          <rect x="40" y="30" width="170" height="150" rx="10" fill="rgba(79,135,255,0.08)" stroke="var(--accent-blue)"/>
+          <text x="125" y="52" fill="#fff" text-anchor="middle" font-weight="600">Broker-0</text>
+          <text x="125" y="80" fill="var(--text-secondary)" text-anchor="middle">P0-Leader</text>
+          <text x="125" y="105" fill="var(--text-secondary)" text-anchor="middle">P1-Follower</text>
+          <text x="125" y="130" fill="var(--text-secondary)" text-anchor="middle">P2-Follower</text>
+          <rect x="235" y="30" width="170" height="150" rx="10" fill="rgba(155,111,255,0.08)" stroke="var(--accent-purple)"/>
+          <text x="320" y="52" fill="#fff" text-anchor="middle" font-weight="600">Broker-1</text>
+          <text x="320" y="80" fill="var(--text-secondary)" text-anchor="middle">P0-Follower</text>
+          <text x="320" y="105" fill="var(--text-secondary)" text-anchor="middle">P1-Leader</text>
+          <text x="320" y="130" fill="var(--text-secondary)" text-anchor="middle">P2-Follower</text>
+          <rect x="430" y="30" width="170" height="150" rx="10" fill="rgba(155,111,255,0.08)" stroke="var(--accent-purple)"/>
+          <text x="515" y="52" fill="#fff" text-anchor="middle" font-weight="600">Broker-2</text>
+          <text x="515" y="80" fill="var(--text-secondary)" text-anchor="middle">P0-Follower</text>
+          <text x="515" y="105" fill="var(--text-secondary)" text-anchor="middle">P1-Follower</text>
+          <text x="515" y="130" fill="var(--text-secondary)" text-anchor="middle">P2-Leader</text>
+          <!-- 同步箭头 -->
+          <path d="M125 70 L320 80" stroke="var(--accent-green)" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#g)"/>
+          <path d="M320 95 L125 95" stroke="var(--accent-green)" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#g)"/>
+          <path d="M515 115 L320 110" stroke="var(--accent-green)" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#g)"/>
+          <text x="320" y="185" fill="var(--text-muted)" text-anchor="middle" font-size="10">每个 partition 的 Leader 负责读写，Follower 向 Leader 拉取同步</text>
+        </g>
+        <defs><marker id="g" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--accent-green)"/></marker></defs>
+      </svg>
+    </div>
+    <div class="keyline"><strong>ISR（In-Sync Replicas，同步副本集合）：</strong>与 Leader 保持"同步"的副本（落后不超过 <code>replica.lag.time.max.ms</code>）。只有 ISR 中的副本才有资格被选举为新 Leader。</div>
+    <div class="info-box blue"><span class="info-icon">🧠</span><div class="info-body"><strong>为什么有 ISR：</strong>避免"一个远远落后的 Follower 被提升为 Leader 后丢数据"。只有 ISR 成员能当 Leader，保证新 Leader 拥有全部已提交数据。</div></div>
+  </section>
+
+  <section id="hw" class="reveal">
+    <h2><span class="icon" style="background:rgba(251,191,36,0.15)">📏</span>HW 与 LEO</h2>
+    <p class="section-lead">这两个水位线决定了"消费者能读到哪、数据是否算提交"，是 Kafka 不丢不重的核心。</p>
+    <table>
+      <tr><th>概念</th><th>全称</th><th>含义</th></tr>
+      <tr><td>LEO</td><td>Log End Offset</td><td>每个副本日志的<strong>下一条</strong>写入位置（即当前最大 offset+1）</td></tr>
+      <tr><td>HW</td><td>High Watermark</td><td>ISR 中<strong>最小的 LEO</strong>，即"所有 ISR 都有的最后一条"——消费者只能读到 HW 之前</td></tr>
+    </table>
+    <div class="keyline"><strong>为什么用 HW：</strong>一条消息要被所有 ISR 副本都写入后，才对消费者"可见"（即推进 HW）。这样哪怕 Leader 宕机，新 Leader 也一定含有 HW 之前的数据，<strong>不会读到未提交/会丢失的消息</strong>。</div>
+    <div class="info-box red"><span class="info-icon">⚠️</span><div class="info-body"><strong>经典坑：</strong>若按 LEO 对消费者可见，Leader 宕机后新 Leader 没这条 → 消息"消失"（幻读）。HW 机制正是为堵这个洞。0.11 后引入 Leader Epoch 进一步消除 HW 带来的边界问题。</div></div>
+  </section>
+
+  <section id="produce" class="reveal">
+    <h2><span class="icon" style="background:rgba(74,222,128,0.15)">🔄</span>生产 / 消费流程</h2>
+    <div class="stepper">
+      <div class="step ok" data-n="1"><strong>Producer 发送</strong>：按 key 选 partition（默认轮询或哈希），消息先攒在 batch，后台线程发送。</div>
+      <div class="step ok" data-n="2"><strong>Leader 写入</strong>：Leader 把消息追加到本地 log，并更新 LEO。</div>
+      <div class="step ok" data-n="3"><strong>Follower 同步</strong>：Follower 拉取 Leader 日志，写入本地，更新各自 LEO。</div>
+      <div class="step ok" data-n="4"><strong>推进 HW</strong>：Leader 取 ISR 中最小 LEO 作为新 HW，消息对消费者可见。</div>
+      <div class="step ok" data-n="5"><strong>Consumer 拉取</strong>：Consumer 按位移(offset)从 partition 拉取，处理完提交位移，下次从新位移继续。</div>
+    </div>
+    <div class="info-box green"><span class="info-icon">✅</span><div class="info-body"><strong>acks 配置：</strong><code>acks=0</code>（不等确认，快但可能丢）；<code>acks=1</code>（Leader 写入即确认，Leader 宕机可能丢）；<code>acks=all</code>（ISR 全写才确认，最可靠）。可靠性要求高用 all。</div></div>
+  </section>
+
+  <section id="zero" class="reveal">
+    <h2><span class="icon" style="background:rgba(248,113,113,0.15)">⚡</span>零拷贝（Zero-Copy）：吞吐之本</h2>
+    <p class="section-lead">Kafka 消费时要把磁盘日志发给网络，传统路径要经过"内核→用户→内核"多次拷贝。Kafka 用 sendfile 系统调用跳过用户态。</p>
+    <div class="keyline"><strong>传统 I/O：</strong>磁盘 → 内核页缓存 → 用户缓冲区 → socket 缓冲区 → 网卡（4 次拷贝 + 2 次上下文切换）。<br><strong>零拷贝 sendfile：</strong>磁盘 → 内核页缓存 → 网卡（2 次拷贝，DMA 直达，CPU 几乎不参与）。</div>
+    <div class="info-box purple"><span class="info-icon">🚀</span><div class="info-body"><strong>为什么 Kafka 能扛百万/s：</strong>顺序磁盘写（磁盘顺序写比内存随机写还快）+ 零拷贝读 + 批处理（batch）+ 页缓存。四个武器叠加，吞吐远超传统 MQ。</div></div>
+  </section>
+
+  <section id="interview" class="reveal">
+    <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🎯</span>面试要点速记</h2>
+    <div class="stepper">
+      <div class="step ok" data-n="1"><strong>模型：</strong>Topic 分多个 Partition，每个 Partition 是有序 append-only 日志，按 offset 编号。</div>
+      <div class="step ok" data-n="2"><strong>顺序：</strong>仅 partition 内有序；同 key 哈希到同 partition 实现业务顺序。</div>
+      <div class="step ok" data-n="3"><strong>副本：</strong>Leader 读写，Follower 拉同步；ISR=同步副本集合，仅 ISR 可当选 Leader。</div>
+      <div class="step ok" data-n="4"><strong>HW/LEO：</strong>LEO=各副本末端；HW=ISR 最小 LEO，消费者只可见 HW 之前，防丢数据。</div>
+      <div class="step ok" data-n="5"><strong>acks：</strong>0/1/all 三档，all 最可靠；配合 retries 防网络抖动丢消息。</div>
+      <div class="step ok" data-n="6"><strong>零拷贝：</strong>sendfile 减少拷贝与上下文切换；+ 顺序写 + 批处理 = 高吞吐。</div>
+    </div>
+    <div class="info-box amber"><span class="info-icon">🔥</span><div class="info-body"><strong>必考题：</strong>"Kafka 怎么保证不丢消息？"——生产端 acks=all+重试、服务端 多副本(ISR)+刷盘、消费端 先处理后提交 offset。再追问"顺序/高吞吐"就接 partition 与零拷贝。</div></div>
+  </section>
+</main>
+<footer>分布式系统 · Kafka 深入 — Partition / Replica / ISR / HW / 零拷贝 | 面试核心图解</footer>
+<script>
+  const observer = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); }); }, { threshold: 0.08 });
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+  const nav = document.getElementById('main-nav'); const navLinks = Array.from(nav.querySelectorAll('a'));
+  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href')));
+  const spy = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) { const id = '#' + e.target.id; navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id)); } }); }, { rootMargin: '-60px 0px -70% 0px' });
+  sections.forEach(s => s && spy.observe(s));
+</script>
+</body>
+</html>

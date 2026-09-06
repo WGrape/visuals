@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTU 与 IP 分片 · 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>MTU 与 IP 分片 · 完全图解</h1>
+  <p class="sub">MSS 和 MTU 差多少？为什么要拼命避免分片？PMTU 黑洞是什么鬼</p>
+  <div class="tags">
+    <span class="tag">MTU 1500</span>
+    <span class="tag">MSS 1460</span>
+    <span class="tag">DF / MF / 片偏移</span>
+    <span class="tag">PMTUD 黑洞</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#mtu">① MTU 是什么</a>
+  <a href="#mss">② MSS 与 MTU 的关系</a>
+  <a href="#frag">③ IP 分片怎么工作</a>
+  <a href="#avoid">④ 为什么要避免分片</a>
+  <a href="#pmtu">⑤ 路径 MTU 发现</a>
+  <a href="#blackhole">⑥ PMTU 黑洞</a>
+  <a href="#qa">⑦ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="mtu">
+  <h2><span class="n">①</span>MTU：一条链路一次能装多少</h2>
+  <div class="lead">
+    <b>MTU（Maximum Transmission Unit，最大传输单元）</b>是<b>数据链路层</b>的概念，指一个数据帧<b>能承载的最大数据部分（payload）字节数</b>。以太网的 MTU 标准是 <b>1500 字节</b>。
+  </div>
+  <p>当一个 IP 数据报比链路的 MTU 大时，就<b>装不进一个帧里</b>，必须进行处理——这就是 IP 分片的由来。</p>
+
+  <svg viewBox="0 0 680 200" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">以太网帧的 1500 字节限制</text>
+    <rect x="40" y="45" width="600" height="40" rx="6" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="340" y="69" font-size="11.5" fill="#2c3e50" text-anchor="middle">以太网帧总长 1518 字节</text>
+    <rect x="40" y="95" width="90" height="36" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="85" y="116" font-size="9.5" fill="#2c3e50" text-anchor="middle">帧头 14</text>
+    <rect x="130" y="95" width="420" height="36" rx="5" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="116" font-size="11.5" fill="#2e7d32" text-anchor="middle">数据部分（IP 数据报）最大 1500 ← 这就是 MTU</text>
+    <rect x="550" y="95" width="90" height="36" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="595" y="116" font-size="9.5" fill="#2c3e50" text-anchor="middle">FCS 4</text>
+    <text x="340" y="152" font-size="11" fill="#5a6c7d" text-anchor="middle">14 + 1500 + 4 = 1518 字节</text>
+    <rect x="40" y="165" width="600" height="28" rx="7" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="340" y="183" font-size="11" fill="#e65100" text-anchor="middle">超过 1500 的 IP 数据报 → 必须分片，或由发送端提前切小</text>
+  </svg>
+
+  <div class="grid">
+    <div class="card"><h4>常见 MTU 值</h4><p>以太网 <b>1500</b>；PPPoE 拨号 <b>1492</b>（多 8 字节 PPPoE 头）；部分隧道/VPN 会<b>更小</b>（因为要再封装一层头）。</p></div>
+    <div class="card"><h4>巨型帧（Jumbo Frame）</h4><p>数据中心内部网络可把 MTU 调到 <b>9000</b>，减少包数量与中断开销，提升吞吐。但<b>要求整条路径都支持</b>。</p></div>
+  </div>
+</section>
+
+<section id="mss">
+  <h2><span class="n">②</span>MSS 与 MTU：差的那 40 字节去哪了</h2>
+  <div class="key">
+    <b>公式（背下来）：</b><code>MSS = MTU − IP头部(20) − TCP头部(20) = 1500 − 40 = 1460</code><br>
+    <b>MSS（Maximum Segment Size）</b>是 <b>TCP 层</b>的概念，表示一个 TCP 报文段中<b>数据部分（不含头）的最大长度</b>。
+  </div>
+  <div class="note"><b>为什么要减掉 40？</b>因为 IP 数据报 = IP 头(20) + TCP 头(20) + 数据。要让整个 IP 数据报 ≤ 1500，数据部分就最多 1460。（若有 IP 或 TCP 选项，头部会变长，MSS 相应更小。）</div>
+
+  <svg viewBox="0 0 680 190" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">MTU 与 MSS 的包含关系</text>
+    <rect x="40" y="45" width="600" height="34" rx="6" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="340" y="66" font-size="11" fill="#7a8b9c" text-anchor="middle">以太网帧载荷上限 = MTU = 1500 字节</text>
+    <rect x="40" y="85" width="600" height="34" rx="6" fill="#eef2ff" stroke="#667eea"/>
+    <text x="340" y="106" font-size="11" fill="#2c3e50" text-anchor="middle">IP 数据报（总长 ≤ 1500）</text>
+    <rect x="40" y="125" width="120" height="36" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="100" y="147" font-size="10" fill="#e65100" text-anchor="middle">IP 头 20</text>
+    <rect x="160" y="125" width="120" height="36" rx="5" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="220" y="147" font-size="10" fill="#2c3e50" text-anchor="middle">TCP 头 20</text>
+    <rect x="280" y="125" width="360" height="36" rx="5" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="460" y="147" font-size="11" fill="#2e7d32" text-anchor="middle">数据部分 ≤ 1460 ← 这就是 MSS</text>
+    <text x="340" y="178" font-size="11.5" fill="#667eea" text-anchor="middle">20 + 20 + 1460 = 1500</text>
+  </svg>
+
+  <div class="warn"><b>MSS 在哪协商？</b>在 <b>TCP 三次握手的 SYN 报文</b>里，通过 TCP 选项互相通告。双方取<b>较小值</b>使用。<b>目的就是让 TCP 层提前把数据切好，从而避免 IP 层分片</b>——这是理解本节的核心。</div>
+</section>
+
+<section id="frag">
+  <h2><span class="n">③</span>IP 分片：靠三个字段拼回去</h2>
+  <p>当 IP 数据报大于链路 MTU 且允许分片时，路由器会把它切开。为了在目的地能正确重组，IP 头部有三个专门的字段：</p>
+  <table>
+    <tr><th>字段</th><th>位数</th><th>作用</th></tr>
+    <tr><td><b>标识（Identification）</b></td><td>16</td><td>同一个原始数据报的所有分片<b>共享同一个 ID</b>，目的地据此判断哪些片属于一起。</td></tr>
+    <tr><td><b>标志（Flags）</b></td><td>3</td><td><b>DF（Don't Fragment）</b>：置 1 表示<b>不许分片</b>；<b>MF（More Fragments）</b>：置 1 表示“后面还有分片”，最后一个片 MF=0。</td></tr>
+    <tr><td><b>片偏移（Fragment Offset）</b></td><td>13</td><td>该分片的数据在原数据报中的<b>位置</b>，单位是 <b>8 字节</b>。因此除最后一片外，每片数据长度必须是 8 的倍数。</td></tr>
+  </table>
+
+  <svg viewBox="0 0 680 240" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">4000 字节的 IP 数据报被切成 3 片（MTU 1500）</text>
+
+    <rect x="40" y="42" width="600" height="32" rx="5" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="340" y="63" font-size="11" fill="#2c3e50" text-anchor="middle">原始 IP 数据报：总长 4020（IP头20 + 数据4000）</text>
+
+    <rect x="40" y="88" width="190" height="46" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="135" y="106" font-size="10" fill="#2c3e50" text-anchor="middle">分片 1</text>
+    <text x="135" y="124" font-size="9" fill="#667eea" text-anchor="middle">偏移 0 · MF=1 · 1480 数据</text>
+
+    <rect x="245" y="88" width="190" height="46" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="340" y="106" font-size="10" fill="#2c3e50" text-anchor="middle">分片 2</text>
+    <text x="340" y="124" font-size="9" fill="#667eea" text-anchor="middle">偏移 185 · MF=1 · 1480 数据</text>
+
+    <rect x="450" y="88" width="190" height="46" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="545" y="106" font-size="10" fill="#2c3e50" text-anchor="middle">分片 3</text>
+    <text x="545" y="124" font-size="9" fill="#667eea" text-anchor="middle">偏移 370 · MF=0 · 1040 数据</text>
+
+    <text x="135" y="152" font-size="9" fill="#5a6c7d" text-anchor="middle">1480 + 20 = 1500</text>
+    <text x="340" y="152" font-size="9" fill="#5a6c7d" text-anchor="middle">1480 + 20 = 1500</text>
+    <text x="545" y="152" font-size="9" fill="#5a6c7d" text-anchor="middle">1040 + 20 = 1060</text>
+
+    <rect x="40" y="170" width="600" height="56" rx="9" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="190" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">片偏移单位是 8 字节：1480 ÷ 8 = 185，所以第二片偏移 = 185</text>
+    <text x="340" y="212" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">重组只在目的地主机进行，中间路由器不重组</text>
+  </svg>
+  <div class="note"><b>重组在哪发生？</b>只在<b>最终目的主机</b>。中间路由器只负责切，不负责拼——这让路由器可以独立转发每个分片（甚至走不同路径）。</div>
+</section>
+
+<section id="avoid">
+  <h2><span class="n">④</span>为什么大家拼命想避免分片</h2>
+  <div class="grid">
+    <div class="card"><h4>丢一片 = 全报废</h4><p>IP 层<b>没有重传机制</b>。任何一个分片丢失，目的主机就无法重组，<b>整个原始数据报被丢弃</b>。对 TCP 来说，这意味着<b>整个 TCP 段重传</b>（而不是只重传丢的那一片）。</p></div>
+    <div class="card"><h4>重组有开销与风险</h4><p>目的主机要缓存分片、启动定时器等待，消耗内存；还可能被<b>分片攻击</b>（如泪滴攻击 Teardrop）利用。</p></div>
+    <div class="card"><h4>IPv6 直接不让中间分片</h4><p>IPv6 <b>取消了路由器分片能力</b>：中间路由器遇到太大的包<b>直接丢弃</b>并回 ICMPv6 错误，只由<b>源端</b>负责分片。因此必须依赖 PMTUD。</p></div>
+  </div>
+  <div class="key"><b>所以核心策略是：</b>TCP 在握手时用 <b>MSS</b> 协商好尺寸，<b>从源头就把数据切成不会触发分片的大小</b>——把问题消灭在 IP 层之前。这也是 MSS 存在的意义。</div>
+</section>
+
+<section id="pmtu">
+  <h2><span class="n">⑤</span>路径 MTU 发现（PMTUD）</h2>
+  <p>互联网上一段路径可能经过<b>多条不同 MTU 的链路</b>（比如经过 PPPoE 的 1492、隧道的 1400）。整条路径上<b>最小的那个 MTU</b> 叫做 <b>路径 MTU（PMTU）</b>。源主机需要知道它，才能发出“刚刚好不分片”的包。</p>
+
+  <div class="lead">
+    <b>PMTUD 的做法：</b>发送方把 IP 包的 <b>DF 标志置 1（不许分片）</b>。如果路径上某台路由器发现这个包大于自己出接口的 MTU，它就<b>丢弃该包</b>，并回一个 <b>ICMP「需要分片」差错报文（Type 3, Code 4）</b>，里面带上<b>它自己的 MTU</b>。源主机收到后<b>调小发送尺寸</b>并重试，逐步探测出整条路径的 PMTU。
+  </div>
+
+  <svg viewBox="0 0 680 230" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="20" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">PMTUD：DF=1 的包遇到小 MTU 链路 → 回 ICMP 告知</text>
+
+    <rect x="30" y="45" width="110" height="40" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="85" y="69" font-size="10" fill="#2c3e50" text-anchor="middle">源主机</text>
+
+    <rect x="190" y="45" width="120" height="40" rx="8" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="250" y="62" font-size="10" fill="#2c3e50" text-anchor="middle">路由器 A</text>
+    <text x="250" y="78" font-size="9" fill="#7a8b9c" text-anchor="middle">MTU 1500 ✓</text>
+
+    <rect x="360" y="45" width="130" height="40" rx="8" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="425" y="62" font-size="10" fill="#c2185b" text-anchor="middle">路由器 B</text>
+    <text x="425" y="78" font-size="9" fill="#e91e63" text-anchor="middle">MTU 1400 ✗ 太小</text>
+
+    <rect x="540" y="45" width="110" height="40" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="595" y="69" font-size="10" fill="#2c3e50" text-anchor="middle">目标主机</text>
+
+    <line x1="142" y1="65" x2="188" y2="65" stroke="#667eea" stroke-width="2" marker-end="url(#ar)"/>
+    <line x1="312" y1="65" x2="358" y2="65" stroke="#667eea" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="250" y="105" font-size="9.5" fill="#5a6c7d" text-anchor="middle">DF=1, 1500 字节</text>
+
+    <line x1="358" y1="120" x2="142" y2="120" stroke="#e91e63" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="250" y="112" font-size="9.5" fill="#c2185b" text-anchor="middle">ICMP Type3/Code4：“需要分片，我的 MTU=1400”</text>
+
+    <line x1="142" y1="155" x2="188" y2="155" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+    <line x1="312" y1="155" x2="358" y2="155" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+    <line x1="492" y1="155" x2="538" y2="155" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="147" font-size="9.5" fill="#2e7d32" text-anchor="middle">源主机重发：DF=1, 1400 字节 → 顺利通过</text>
+
+    <rect x="30" y="178" width="620" height="38" rx="9" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="201" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">结果：源主机记下 PMTU=1400，后续都按这个尺寸发，不再分片</text>
+  </svg>
+</section>
+
+<section id="blackhole">
+  <h2><span class="n">⑥</span>PMTU 黑洞：防火墙好心办坏事</h2>
+  <div class="warn">
+    <b>问题来了：</b>很多网络管理员出于“安全”考虑，在防火墙上<b>一律丢弃 ICMP 报文</b>。于是路由器发回的「需要分片」ICMP 被<b>无情丢掉</b>，源主机<b>永远收不到</b>，也就不知道该调小尺寸。
+  </div>
+  <p><b>结果：</b>源主机一直发 DF=1 的大包，路由器的链路一直装不下，包被一直丢弃——连接看起来“建立了却传不了数据”。这就是著名的 <b>PMTU 黑洞（PMTU Black Hole）</b>。</p>
+
+  <div class="key">
+    <b>典型症状（面试描述题）：</b>
+    <ul>
+      <li>能 <b>ping 通</b>（小包没问题），但<b>打不开网页 / 下载不了大文件</b>（大包过不去）。</li>
+      <li>三次握手能建立，但<b>一传数据就卡住</b>。</li>
+      <li>部分网站正常、部分不正常。</li>
+    </ul>
+    <b>排查与解决：</b>用 <code>ping -s &lt;size&gt; -M do</code> 手动测不同大小的 DF 包；在防火墙上<b>放行 ICMP Type 3 Code 4</b>；或在服务器上<b>调小 MSS</b>（MSS Clamping，如设为 1400 / 1360）。
+  </div>
+  <pre><code><span class="c"># 手动探测 PMTU：DF=1，payload 1472 + IP头20 + ICMP头8 = 1500</span>
+ping -M do -s <span class="s">1472</span> 8.8.8.8      <span class="c"># 通 → MTU ≥ 1500</span>
+ping -M do -s <span class="s">1400</span> 8.8.8.8      <span class="c"># 逐步调小找到临界值</span>
+
+<span class="c"># 若返回 "Frag needed and DF set" → 说明被 PMTU 限制</span>
+
+<span class="c"># 常见缓解：MSS Clamping（在网关/防火墙上改小 MSS）</span>
+iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN \
+         -j TCPMSS --set-mss <span class="s">1360</span></code></pre>
+  <div class="note"><b>为什么 VPN / 隧道经常遇到这个问题？</b>因为隧道会在原 IP 包外面<b>再封装一层头</b>（如 GRE、IPsec、WireGuard），实际可用 MTU 变小。若没相应调小 MSS，就容易触发 PMTU 黑洞，表现为“连上 VPN 后某些网站打不开”。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑦</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：MTU 和 MSS 分别是什么？关系是？</div>
+  <b>MTU</b> 是数据链路层一次能承载的最大数据量（以太网 1500）；<b>MSS</b> 是 TCP 段中数据部分的最大长度。<code>MSS = MTU − IP头(20) − TCP头(20)</code>，以太网下为 <b>1460</b>。</div>
+
+  <div class="q"><div class="qt">Q2：MSS 在哪里协商？</div>
+  在 TCP <b>三次握手的 SYN 报文</b>中通过 TCP 选项互相通告，双方取较小值。目的是让 TCP 层提前切好数据，<b>避免 IP 层分片</b>。</div>
+
+  <div class="q"><div class="qt">Q3：IP 分片靠哪几个字段重组？</div>
+  <b>标识（Identification）</b>判断哪些片属于同一个包；<b>MF 标志</b>判断是否还有后续分片；<b>片偏移</b>确定该片在原数据中的位置（单位是 <b>8 字节</b>）。重组只在<b>目的主机</b>进行。</div>
+
+  <div class="q"><div class="qt">Q4：为什么要尽量避免 IP 分片？</div>
+  IP 层<b>没有重传机制</b>：丢一个分片 → 整个 IP 数据报无法重组被丢弃 → TCP 要<b>重传整个段</b>，效率极低。此外重组消耗资源且存在分片攻击风险。IPv6 更是<b>取消了路由器分片</b>。</div>
+
+  <div class="q"><div class="qt">Q5：什么是 PMTUD？</div>
+  <b>路径 MTU 发现</b>：发送方置 DF=1 禁止分片；路径上 MTU 不足的路由器丢弃并回 <b>ICMP Type 3 Code 4（需要分片）</b>并告知自己的 MTU；源主机据此调小发送尺寸，最终得到整条路径的 PMTU。</div>
+
+  <div class="q"><div class="qt">Q6：什么是 PMTU 黑洞？怎么解决？</div>
+  防火墙<b>屏蔽了 ICMP</b>，源主机收不到“需要分片”通知，一直发过大的 DF 包导致数据传不动。<b>症状：ping 通但网页打不开、大文件传不了。</b>解决：防火墙放行 ICMP Type 3 Code 4；或用 <b>MSS Clamping</b> 调小 MSS。</div>
+
+  <div class="q"><div class="qt">Q7：IPv6 在分片上有什么不同？</div>
+  IPv6 <b>中间路由器不再分片</b>，遇到超大的包直接丢弃并回 ICMPv6「Packet Too Big」。分片只由<b>源端</b>进行，因此 <b>PMTUD 成为必需</b>而非可选。</div>
+
+  <div class="q"><div class="qt">Q8：为什么连上 VPN 后有些网站打不开？</div>
+  VPN/隧道会在原包外<b>再封装一层头</b>，使实际可用 MTU 变小。若未同步调小 MSS 且 ICMP 被拦，就会触发 <b>PMTU 黑洞</b>：小包（握手）能过、大包（数据）过不去。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>MTU 1500（链路）、MSS 1460（TCP 数据）；MSS 在握手时协商，目的就是提前切好、躲开 IP 分片；分片靠标识+MF+片偏移重组、丢一片全丢所以很贵；PMTUD 靠 DF=1 探测路径最小 MTU，而 ICMP 被拦就会造成“ping 通但打不开网页”的 PMTU 黑洞。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 RFC 791（IP 分片字段）、RFC 1191（路径 MTU 发现）、RFC 8200（IPv6）整理；具体 MTU 数值因链路类型而异。</p>
+  <p style="margin-top:8px">相关阅读：<a href="arp-protocol.html">ARP 协议</a> · <a href="icmp-ping-traceroute.html">ICMP 与 ping/traceroute</a> · <a href="../tcp-udp/tcp-header-format.html">TCP 头部格式</a></p>
+</footer>
+
+</div>
+</body>
+</html>

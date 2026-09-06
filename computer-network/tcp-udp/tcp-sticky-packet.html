@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 粘包与拆包 · 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>TCP 粘包与拆包 · 完全图解</h1>
+  <p class="sub">为什么 TCP 会“粘”？UDP 为什么不粘？三种主流解决方案与代码实战</p>
+  <div class="tags">
+    <span class="tag">字节流 vs 数据报</span>
+    <span class="tag">Nagle 算法</span>
+    <span class="tag">MSS / MTU</span>
+    <span class="tag">应用层协议设计</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#what">① 粘包拆包是什么</a>
+  <a href="#why">② 为什么会粘/拆</a>
+  <a href="#udp">③ UDP 为什么不粘</a>
+  <a href="#solve">④ 三种解决方案</a>
+  <a href="#code">⑤ 代码实战</a>
+  <a href="#qa">⑥ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="what">
+  <h2><span class="n">①</span>先说清楚：什么是粘包、拆包</h2>
+  <div class="lead">
+    <b>根本前提：TCP 是「字节流」协议，没有消息边界。</b>发送端调用 3 次 write，接收端<b>不保证</b>分 3 次 read 到同样的数据。TCP 只保证<b>字节顺序正确、不丢不重</b>，至于哪些字节算“一条消息”，它<b>不关心</b>。
+  </div>
+  <div class="grid">
+    <div class="card"><h4>粘包（Sticky）</h4><p>发送端多次写入的小报文，被<b>合并成一个</b>大包发出 / 被接收端<b>一次读到</b>，多条消息“粘”在一起。</p></div>
+    <div class="card"><h4>拆包（Split）</h4><p>一条消息太大，被<b>拆成多个</b> TCP 段发送，接收端需要<b>多次读取</b>才能拼出完整消息。</p></div>
+  </div>
+
+  <svg viewBox="0 0 680 300" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="24" font-size="13" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">发送端写 3 次，接收端读到的可能是各种组合</text>
+
+    <text x="60" y="56" font-size="12" fill="#667eea">发送端 write()</text>
+    <rect x="60" y="66" width="80" height="30" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="100" y="85" font-size="10.5" fill="#2c3e50" text-anchor="middle">msg1</text>
+    <rect x="146" y="66" width="80" height="30" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="186" y="85" font-size="10.5" fill="#2c3e50" text-anchor="middle">msg2</text>
+    <rect x="232" y="66" width="80" height="30" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="272" y="85" font-size="10.5" fill="#2c3e50" text-anchor="middle">msg3</text>
+
+    <line x1="320" y1="81" x2="360" y2="81" stroke="#c9d2dd" stroke-width="1.5"/>
+
+    <text x="380" y="56" font-size="12" fill="#764ba2">接收端 read()</text>
+    <rect x="380" y="66" width="240" height="30" rx="5" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="500" y="85" font-size="10.5" fill="#c2185b" text-anchor="middle">msg1+msg2+msg3（粘包：一次全收到）</text>
+
+    <text x="60" y="132" font-size="12" fill="#667eea">另一种情况</text>
+    <rect x="60" y="142" width="80" height="30" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="100" y="161" font-size="10.5" fill="#2c3e50" text-anchor="middle">msg1</text>
+    <rect x="146" y="142" width="80" height="30" rx="5" fill="#eef2ff" stroke="#667eea"/>
+    <text x="186" y="161" font-size="10.5" fill="#2c3e50" text-anchor="middle">msg2</text>
+    <line x1="320" y1="157" x2="360" y2="157" stroke="#c9d2dd" stroke-width="1.5"/>
+    <rect x="380" y="142" width="110" height="30" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="435" y="161" font-size="10.5" fill="#e65100" text-anchor="middle">msg1 + 半个 msg2</text>
+    <rect x="496" y="142" width="124" height="30" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="558" y="161" font-size="10.5" fill="#e65100" text-anchor="middle">剩下半个 msg2</text>
+    <text x="500" y="188" font-size="10.5" fill="#e65100" text-anchor="middle">（拆包：一条消息被切成两次读到）</text>
+
+    <rect x="60" y="215" width="560" height="62" rx="10" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="238" font-size="12.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">TCP 只保证：字节不丢、不重、顺序正确</text>
+    <text x="340" y="261" font-size="12.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">TCP 不保证：一次 write 对应一次 read（没有消息边界）</text>
+  </svg>
+</section>
+
+<section id="why">
+  <h2><span class="n">②</span>为什么会粘 / 会拆：四个真实原因</h2>
+  <table>
+    <tr><th>现象</th><th>成因</th><th>说明</th></tr>
+    <tr><td><b>粘包</b></td><td><b>Nagle 算法</b></td><td>为减少小包，TCP 会攒够 MSS 或等到前一个包的 ACK 才发送，把多次小写入合并。</td></tr>
+    <tr><td><b>粘包</b></td><td><b>发送缓冲区合并</b></td><td>写入速度快于发送速度，多个小消息在发送缓冲区里被拼成一个 TCP 段。</td></tr>
+    <tr><td><b>粘包</b></td><td><b>接收端读取不及时</b></td><td>接收缓冲区里积压了多条消息，应用层一次 read 把它们全读走。</td></tr>
+    <tr><td><b>拆包</b></td><td><b>超过 MSS / MTU</b></td><td>消息大于 MSS（通常 1460 字节），必须分段发送。</td></tr>
+    <tr><td><b>拆包</b></td><td><b>拥塞窗口限制</b></td><td>即使没超 MSS，拥塞窗口也可能让数据分批发出。</td></tr>
+  </table>
+
+  <div class="note"><b>Nagle 算法一句话：</b>在收到前一个数据的 ACK 前，<b>最多只允许一个未被确认的小包</b>在网络中。它把连续的零碎小写入攒起来一起发，显著提升网络利用率——但代价就是粘包。实时性要求高的场景可用 <code>TCP_NODELAY</code> 关掉它。</div>
+
+  <svg viewBox="0 0 680 200" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">MSS 与消息大小的关系：超过就被拆</text>
+    <rect x="40" y="50" width="600" height="34" rx="6" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <text x="340" y="71" font-size="11.5" fill="#2c3e50" text-anchor="middle">应用层消息：3000 字节</text>
+    <rect x="40" y="100" width="290" height="30" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="185" y="119" font-size="10.5" fill="#e65100" text-anchor="middle">TCP 段 1：1460 字节（MSS）</text>
+    <rect x="350" y="100" width="290" height="30" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="495" y="119" font-size="10.5" fill="#e65100" text-anchor="middle">TCP 段 2：1460 字节</text>
+    <rect x="40" y="140" width="80" height="30" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="80" y="159" font-size="10.5" fill="#e65100" text-anchor="middle">段 3：80 字节</text>
+    <text x="340" y="188" font-size="11.5" fill="#5a6c7d" text-anchor="middle">MTU(1500) − IP头(20) − TCP头(20) = MSS(1460)</text>
+  </svg>
+</section>
+
+<section id="udp">
+  <h2><span class="n">③</span>UDP 为什么不粘包</h2>
+  <div class="lead">
+    <b>UDP 是「数据报」协议，保留消息边界。</b>发送端发一个数据报，接收端就收到一个完整的数据报——要么收到完整一条，要么整条丢失，<b>不会出现“半个”</b>。
+  </div>
+  <table>
+    <tr><th>对比项</th><th>TCP（字节流）</th><th>UDP（数据报）</th></tr>
+    <tr><td>消息边界</td><td>无，需要应用层自己界定</td><td>有，一次发送 = 一次接收</td></tr>
+    <tr><td>粘包/拆包</td><td><b>会</b></td><td>不会</td></tr>
+    <tr><td>可靠性</td><td>可靠（重传、排序、流控）</td><td>不可靠，可能丢包乱序</td></tr>
+    <tr><td>是否有序</td><td>有序</td><td>不保证顺序</td></tr>
+  </table>
+  <div class="warn"><b>但别误会：</b>UDP 不粘包是“天然的”，不是因为它更优秀——代价是<b>丢包、乱序、无流控</b>都要应用层自己扛。用 UDP 做可靠传输（如 QUIC）时，<b>消息边界和可靠性都得自己实现</b>。</div>
+</section>
+
+<section id="solve">
+  <h2><span class="n">④</span>三种主流解决方案（面试标准答案）</h2>
+  <p>核心思路都一样：<b>由应用层协议来定义“消息边界”</b>。TCP 不管，那就你自己管。</p>
+
+  <h3>方案一：固定长度</h3>
+  <p>每条消息都补齐到固定长度（如 100 字节），接收端每次读固定长度。</p>
+  <div class="grid"><div class="card"><h4>优点</h4><p>实现最简单，解析零成本。</p></div><div class="card"><h4>缺点</h4><p>浪费带宽（短消息要补 0），且不灵活。</p></div></div>
+
+  <h3>方案二：分隔符</h3>
+  <p>每条消息末尾加特殊分隔符（如 <code>\n</code>、<code>\r\n</code>）。接收端按分隔符切分。HTTP 头部、Redis 协议（RESP）都是这个思路。</p>
+  <div class="grid"><div class="card"><h4>优点</h4><p>简单直观，文本协议友好，人类可读可调试。</p></div><div class="card"><h4>缺点</h4><p>消息体内若出现分隔符需<b>转义</b>；还需逐字节扫描寻找分隔符。</p></div></div>
+
+  <h3>方案三：长度字段（最常用、最推荐）</h3>
+  <div class="key">
+    <b>工业界主流：</b>在消息头部放一个<b>定长的长度字段</b>，标明消息体有多少字节。接收端先读固定字节数的头，解析出长度，再按长度读取消息体。<br>
+    常见形态：<b>4 字节长度 + 消息体</b>（如 Netty 的 <code>LengthFieldBasedFrameDecoder</code>、gRPC、Thrift、Dubbo 都是这类）。
+  </div>
+
+  <svg viewBox="0 0 680 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">长度字段协议：先读头定长，再按长度读体</text>
+    <rect x="40" y="50" width="600" height="40" rx="6" fill="#f4f6f9" stroke="#c9d2dd"/>
+    <rect x="40" y="50" width="120" height="40" rx="6" fill="#eef2ff" stroke="#667eea"/>
+    <text x="100" y="74" font-size="11" fill="#2c3e50" text-anchor="middle">长度 4 字节</text>
+    <rect x="160" y="50" width="480" height="40" rx="6" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="400" y="74" font-size="11" fill="#2e7d32" text-anchor="middle">消息体（payload，长度由头部指定）</text>
+    <text x="100" y="108" font-size="10.5" fill="#667eea" text-anchor="middle">= 1024</text>
+    <text x="400" y="108" font-size="10.5" fill="#2e7d32" text-anchor="middle">正好 1024 字节</text>
+
+    <text x="340" y="140" font-size="12" fill="#2c3e50" text-anchor="middle" font-family="system-ui,sans-serif">接收端循环：</text>
+    <rect x="90" y="152" width="500" height="40" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="340" y="176" font-size="11.5" fill="#e65100" text-anchor="middle">读 4 字节 → 得到 len → 再读满 len 字节 → 一条完整消息 → 重复</text>
+  </svg>
+
+  <table>
+    <tr><th>方案</th><th>边界定义</th><th>典型应用</th><th>推荐度</th></tr>
+    <tr><td>固定长度</td><td>按固定字节切</td><td>简单硬件协议</td><td>低</td></tr>
+    <tr><td>分隔符</td><td>按 \n 等切分</td><td>HTTP 头部、Redis RESP</td><td>中（文本协议）</td></tr>
+    <tr><td><b>长度字段</b></td><td>头部声明消息体长度</td><td>gRPC、Dubbo、Netty、Thrift</td><td><b>高（二进制协议首选）</b></td></tr>
+  </table>
+</section>
+
+<section id="code">
+  <h2><span class="n">⑤</span>代码实战：长度字段法解决粘包</h2>
+  <p>下面用 Go 演示“4 字节长度 + 消息体”的读写。关键点：<b>读必须用 <code>io.ReadFull</code>，不能用 <code>Read</code></b>（Read 可能读不满就返回，这正是踩坑点）。</p>
+
+  <pre><code><span class="c">// ============ 发送端：写入 4 字节长度 + 消息体 ============</span>
+<span class="k">func</span> <span class="f">writeMsg</span>(w io.Writer, payload []<span class="t">byte</span>) <span class="t">error</span> {
+    <span class="c">// 4 字节大端表示长度</span>
+    header := <span class="f">make</span>([]<span class="t">byte</span>, <span class="s">4</span>)
+    binary.BigEndian.<span class="f">PutUint32</span>(header, <span class="f">uint32</span>(<span class="f">len</span>(payload)))
+    <span class="k">if</span> _, err := w.<span class="f">Write</span>(header); err != <span class="k">nil</span> {
+        <span class="k">return</span> err
+    }
+    _, err := w.<span class="f">Write</span>(payload)   <span class="c">// 写消息体</span>
+    <span class="k">return</span> err
+}
+
+<span class="c">// ============ 接收端：先读头，再按长度读体 ============</span>
+<span class="k">func</span> <span class="f">readMsg</span>(r io.Reader) ([]<span class="t">byte</span>, <span class="t">error</span>) {
+    header := <span class="f">make</span>([]<span class="t">byte</span>, <span class="s">4</span>)
+    <span class="c">// 关键：用 ReadFull，保证 4 字节读满才返回</span>
+    <span class="k">if</span> _, err := io.<span class="f">ReadFull</span>(r, header); err != <span class="k">nil</span> {
+        <span class="k">return</span> <span class="k">nil</span>, err
+    }
+    length := binary.BigEndian.<span class="f">Uint32</span>(header)
+
+    <span class="c">// 防御：限制最大长度，避免恶意超大包打爆内存</span>
+    <span class="k">if</span> length &gt; <span class="s">10</span>*<span class="s">1024</span>*<span class="s">1024</span> {
+        <span class="k">return</span> <span class="k">nil</span>, errors.<span class="f">New</span>(<span class="s">"message too large"</span>)
+    }
+
+    body := <span class="f">make</span>([]<span class="t">byte</span>, length)
+    <span class="k">if</span> _, err := io.<span class="f">ReadFull</span>(r, body); err != <span class="k">nil</span> {
+        <span class="k">return</span> <span class="k">nil</span>, err
+    }
+    <span class="k">return</span> body, <span class="k">nil</span>
+}</code></pre>
+
+  <div class="warn">
+    <b>三个常见坑：</b>
+    <ol>
+      <li>用 <code>Read</code> 而不是 <code>ReadFull</code>——<code>Read</code> 不保证读满，粘包就没解决。</li>
+      <li>没做<b>最大长度限制</b>——对端发一个 4GB 的长度字段，直接 OOM。这是安全问题。</li>
+      <li>忘了<b>字节序</b>——收发两端大小端不一致，长度解析出来是天文数字。</li>
+    </ol>
+  </div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑥</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：什么是 TCP 粘包？根本原因是什么？</div>
+  发送端多次写入的数据被接收端一次读到（或多个消息粘在一起）。<b>根本原因是 TCP 是字节流协议，不保留消息边界</b>，加上 Nagle 算法、缓冲区合并、MSS 分段等机制共同导致。</div>
+
+  <div class="q"><div class="qt">Q2：粘包是 TCP 的“bug”吗？</div>
+  <b>不是 bug，是设计特性。</b>TCP 的职责只是可靠、有序地传输字节流，“一条消息有多长”属于应用层语义。所以<b>解决粘包是应用层的责任</b>。</div>
+
+  <div class="q"><div class="qt">Q3：UDP 会不会粘包？</div>
+  不会。UDP 是数据报协议，<b>保留消息边界</b>，一次 send 对应一次 recv。但代价是不保证可靠、有序、不丢包。</div>
+
+  <div class="q"><div class="qt">Q4：有哪些解决粘包的方法？你推荐哪个？</div>
+  固定长度、分隔符、长度字段三种。<b>推荐长度字段法</b>（头部声明消息体长度），因为它无转义问题、无需扫描、效率高，gRPC/Dubbo/Netty 都采用；文本协议（如 HTTP、Redis）用分隔符更直观。</div>
+
+  <div class="q"><div class="qt">Q5：关掉 Nagle（TCP_NODELAY）能解决粘包吗？</div>
+  <b>不能完全解决。</b>TCP_NODELAY 只是禁止发送端攒包，但接收端缓冲区仍可能积压多条消息被一次读走，超过 MSS 仍会被拆。真正解决只能靠<b>应用层定义边界</b>。</div>
+
+  <div class="q"><div class="qt">Q6：粘包和拆包需要同时处理吗？</div>
+  需要。同一套“长度字段 + 循环读取”逻辑天然同时解决两者：粘包时按长度切分出多条，拆包时靠 ReadFull 读满才返回。</div>
+
+  <div class="q"><div class="qt">Q7：HTTP 是怎么解决“边界”问题的？</div>
+  HTTP/1.1 用 <code>Content-Length</code> 头部（长度字段法）或 <code>Transfer-Encoding: chunked</code>（分块 + 长度前缀）来界定消息体边界；HTTP/2 则用<b>二进制分帧</b>，每帧自带长度字段。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>TCP 是字节流、无消息边界 → 粘包拆包是必然；解决靠应用层自己定义边界 → 工业界首选「定长头部声明长度 + 消息体」，读取时用 ReadFull 保证读满，并限制最大长度防攻击。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 TCP 字节流语义、Nagle 算法（RFC 896）与常见工业协议（HTTP/2 分帧、gRPC、Netty LengthFieldBasedFrameDecoder）整理。</p>
+  <p style="margin-top:8px">相关阅读：<a href="tcp-reliable-transmission.html">TCP 可靠传输</a> · <a href="tcp-header-format.html">TCP 头部格式</a> · <a href="../http/http-packet-format.html">HTTP 报文格式</a></p>
+</footer>
+
+</div>
+</body>
+</html>

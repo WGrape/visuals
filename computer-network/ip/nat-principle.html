@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NAT 原理 · 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>NAT 原理 · 完全图解</h1>
+  <p class="sub">一个公网 IP 怎么撑起全家上网？端口复用的魔法与 P2P 的噩梦</p>
+  <div class="tags">
+    <span class="tag">私有地址</span>
+    <span class="tag">NAPT / PAT 端口复用</span>
+    <span class="tag">NAT 映射表</span>
+    <span class="tag">打洞 / STUN / TURN</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#why">① 为什么需要 NAT</a>
+  <a href="#type">② 三种 NAT 类型</a>
+  <a href="#napt">③ NAPT 工作原理</a>
+  <a href="#flow">④ 出/入站完整流程</a>
+  <a href="#pros">⑤ 优缺点</a>
+  <a href="#traversal">⑥ NAT 穿透</a>
+  <a href="#qa">⑦ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="why">
+  <h2><span class="n">①</span>为什么需要 NAT：IPv4 地址不够用了</h2>
+  <div class="lead">
+    IPv4 只有约 <b>43 亿</b>个地址，而联网设备远超这个数。解决办法是：<b>内网使用私有地址（可重复复用），只在出口处用少量公网地址代表整张内网</b>。负责做这个“地址翻译”的就是 <b>NAT（Network Address Translation）</b>。
+  </div>
+  <table>
+    <tr><th>私有地址段（RFC 1918）</th><th>范围</th><th>常见用途</th></tr>
+    <tr><td><code>10.0.0.0/8</code></td><td>10.0.0.0 ~ 10.255.255.255</td><td>大型企业、云上 VPC</td></tr>
+    <tr><td><code>172.16.0.0/12</code></td><td>172.16.0.0 ~ 172.31.255.255</td><td>中型网络、Docker 默认网段</td></tr>
+    <tr><td><code>192.168.0.0/16</code></td><td>192.168.0.0 ~ 192.168.255.255</td><td><b>家用路由器最常见</b></td></tr>
+  </table>
+  <div class="note"><b>关键点：</b>私有地址<b>不能在公网被路由</b>，任何运营商路由器都会丢弃目的地址为私有地址的流量。你家、我家、公司都可以同时用 <code>192.168.1.10</code>，互不冲突——因为它们<b>从不直接进入公网</b>。</div>
+</section>
+
+<section id="type">
+  <h2><span class="n">②</span>三种 NAT 类型</h2>
+  <table>
+    <tr><th>类型</th><th>做法</th><th>地址利用率</th><th>评价</th></tr>
+    <tr><td><b>静态 NAT</b></td><td>一个私网 IP <b>固定</b>映射一个公网 IP（1:1）</td><td>低</td><td>适合内网服务器对外提供服务</td></tr>
+    <tr><td><b>动态 NAT</b></td><td>从公网地址池里<b>临时分配</b>一个（1:1，但不固定）</td><td>中</td><td>池子用完就得等，很少单独用</td></tr>
+    <tr><td><b>NAPT / PAT</b></td><td>多个私网 IP <b>共用一个公网 IP</b>，靠<b>端口号</b>区分（1:N）</td><td><b>高</b></td><td><b>家用路由器、公司出口的现实方案</b></td></tr>
+  </table>
+  <div class="key"><b>现在说“NAT”，默认指的就是 NAPT（Network Address Port Translation）</b>，也叫 PAT。它才是真正解决地址枯竭的那个——因为一个公网 IP 的 65535 个端口可以同时支撑成千上万条内网连接。</div>
+</section>
+
+<section id="napt">
+  <h2><span class="n">③</span>NAPT 怎么做到“一个 IP 撑起全家”</h2>
+  <p>秘密在于：NAT 设备维护一张<b>映射表（NAT 表）</b>，把「内网 IP:端口」翻译成「公网 IP:端口」，并记录<b>四元组</b>以便回来时能找对路。</p>
+
+  <svg viewBox="0 0 680 250" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="20" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">NAPT：靠端口号区分不同内网主机的连接</text>
+
+    <rect x="30" y="42" width="130" height="34" rx="7" fill="#eef2ff" stroke="#667eea"/>
+    <text x="95" y="63" font-size="9.5" fill="#2c3e50" text-anchor="middle">手机 192.168.1.10:5001</text>
+    <rect x="30" y="82" width="130" height="34" rx="7" fill="#eef2ff" stroke="#667eea"/>
+    <text x="95" y="103" font-size="9.5" fill="#2c3e50" text-anchor="middle">电脑 192.168.1.20:5002</text>
+    <rect x="30" y="122" width="130" height="34" rx="7" fill="#eef2ff" stroke="#667eea"/>
+    <text x="95" y="143" font-size="9.5" fill="#2c3e50" text-anchor="middle">电视 192.168.1.30:5003</text>
+
+    <rect x="230" y="45" width="180" height="108" rx="9" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="320" y="66" font-size="11" fill="#e65100" text-anchor="middle">NAT 路由器</text>
+    <text x="320" y="84" font-size="9.5" fill="#5a6c7d" text-anchor="middle">公网 IP：203.0.113.5</text>
+    <text x="320" y="104" font-size="8.5" fill="#7a8b9c" text-anchor="middle">192.168.1.10:5001 → :8001</text>
+    <text x="320" y="120" font-size="8.5" fill="#7a8b9c" text-anchor="middle">192.168.1.20:5002 → :8002</text>
+    <text x="320" y="136" font-size="8.5" fill="#7a8b9c" text-anchor="middle">192.168.1.30:5003 → :8003</text>
+    <text x="320" y="152" font-size="8.5" fill="#7a8b9c" text-anchor="middle">（NAT 映射表）</text>
+
+    <rect x="490" y="72" width="160" height="54" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="570" y="92" font-size="10.5" fill="#2c3e50" text-anchor="middle">互联网</text>
+    <text x="570" y="110" font-size="9.5" fill="#4caf50" text-anchor="middle">服务器 8.8.8.8:80</text>
+
+    <line x1="162" y1="59" x2="228" y2="72" stroke="#667eea" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="162" y1="99" x2="228" y2="95" stroke="#667eea" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="162" y1="139" x2="228" y2="118" stroke="#667eea" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="412" y1="99" x2="488" y2="99" stroke="#4caf50" stroke-width="2" marker-end="url(#ar)"/>
+
+    <rect x="30" y="180" width="620" height="54" rx="9" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="200" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">对外看到的源地址全是 203.0.113.5，只是端口不同</text>
+    <text x="340" y="222" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">一个公网 IP + 65535 个端口 → 可并发支撑数万条连接</text>
+  </svg>
+
+  <h3>NAT 表长什么样</h3>
+  <table>
+    <tr><th>内网侧（私有）</th><th>公网侧（转换后）</th><th>目标</th></tr>
+    <tr><td><code>192.168.1.10:5001</code></td><td><code>203.0.113.5:8001</code></td><td><code>8.8.8.8:80</code></td></tr>
+    <tr><td><code>192.168.1.20:5002</code></td><td><code>203.0.113.5:8002</code></td><td><code>8.8.8.8:80</code></td></tr>
+    <tr><td><code>192.168.1.30:5003</code></td><td><code>203.0.113.5:8003</code></td><td><code>1.1.1.1:443</code></td></tr>
+  </table>
+  <div class="note"><b>表项何时创建与删除？</b><br>
+  • <b>出站（内网 → 公网）</b>：第一个包到达 NAT 时<b>自动创建</b>表项。<br>
+  • <b>删除</b>：连接结束（TCP FIN/RST）或<b>空闲超时</b>后回收。所以长时间无流量的 UDP 连接表项可能过期——这也是“长连接要心跳保活”的原因之一。</div>
+</section>
+
+<section id="flow">
+  <h2><span class="n">④</span>一次完整访问：出去与回来</h2>
+  <p><b>出站过程（内网主机访问外网）：</b></p>
+  <ol>
+    <li>内网主机发出包：源 <code>192.168.1.10:5001</code> → 目的 <code>8.8.8.8:80</code>。</li>
+    <li>包到达 NAT 路由器，路由器<b>查/建映射表</b>，把源改成 <code>203.0.113.5:8001</code>，并<b>重新计算校验和</b>（因为 IP/端口变了）。</li>
+    <li>包发往公网，服务器<b>只看到公网地址</b>，内网结构对外完全不可见。</li>
+  </ol>
+  <p><b>入站过程（响应回来）：</b></p>
+  <ol>
+    <li>服务器回包：源 <code>8.8.8.8:80</code> → 目的 <code>203.0.113.5:8001</code>。</li>
+    <li>NAT 路由器<b>反查映射表</b>，把目的改回 <code>192.168.1.10:5001</code>。</li>
+    <li>转发到内网主机，通信完成。</li>
+  </ol>
+  <div class="warn"><b>关键限制：NAT 表必须由内网主动发包才能建立。</b>所以<b>外网无法主动发起连接到内网主机</b>——因为它发来的包在 NAT 表里查不到对应项，会被直接丢弃。这正是 P2P、内网穿透要解决的核心难题。</div>
+</section>
+
+<section id="pros">
+  <h2><span class="n">⑤</span>NAT 的功与过</h2>
+  <div class="grid">
+    <div class="card"><h4>优点：缓解地址枯竭</h4><p>成千上万设备共用一个公网 IP，这是 IPv4 能撑到今天的<b>头号功臣</b>。</p></div>
+    <div class="card"><h4>优点：天然安全隔离</h4><p>内网拓扑对外不可见，外部<b>无法主动发起连接</b>，相当于一道隐式防火墙。</p></div>
+    <div class="card"><h4>优点：换运营商不用改内网</h4><p>内网地址与公网解耦，只需改出口配置。</p></div>
+    <div class="card"><h4>缺点：破坏端到端原则</h4><p>互联网原本设计是“任意两台主机可直接通信”，NAT 让<b>地址不再全局唯一</b>。</p></div>
+    <div class="card"><h4>缺点：外部无法主动访问</h4><p>内网搭服务（NAS、摄像头、开发机）需要<b>端口映射</b>或<b>内网穿透</b>。</p></div>
+    <div class="card"><h4>缺点：增加复杂性与开销</h4><p>要维护状态表、重写校验和；设备重启/表项满会断连；部分协议（如 FTP 的 PORT 命令）<b>内嵌 IP 地址</b>，需要 ALG 特殊处理。</p></div>
+  </div>
+  <div class="note"><b>与 IPv6 的关系：</b>IPv6 地址空间近乎无限，<b>设计上是NAT 的终极解决方案</b>——每台设备都有全球唯一地址，不再需要翻译。但现实推进缓慢，NAT 仍是当前主力，且 IPv6 环境下出于安全仍会用防火墙做等效隔离。</div>
+</section>
+
+<section id="traversal">
+  <h2><span class="n">⑥</span>NAT 穿透：让两台内网机器直接连上</h2>
+  <div class="lead">
+    两台都在 NAT 后面的主机，<b>谁都无法直接发起连接</b>（对方的 NAT 上没有表项）。<b>NAT 穿透（NAT Traversal）</b>就是要绕开这个限制，典型应用在<b>视频通话、P2P 下载、联机游戏</b>。
+  </div>
+
+  <h3>方案一：UDP 打洞（Hole Punching）</h3>
+  <p>思路：双方<b>先各自主动往外发一个包</b>（哪怕被丢弃），各自在自己的 NAT 上<b>打出一个“洞”</b>（建立表项）；然后借助一个<b>公网的中介服务器</b>交换彼此的公网 IP:端口，再往对方的“洞”里发包，就能通了。</p>
+
+  <svg viewBox="0 0 680 220" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="20" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">UDP 打洞：先各自出洞，再借中介交换地址后直连</text>
+
+    <rect x="30" y="50" width="110" height="40" rx="7" fill="#eef2ff" stroke="#667eea"/>
+    <text x="85" y="74" font-size="10" fill="#2c3e50" text-anchor="middle">主机 A（内网）</text>
+    <rect x="540" y="50" width="110" height="40" rx="7" fill="#eef2ff" stroke="#667eea"/>
+    <text x="595" y="74" font-size="10" fill="#2c3e50" text-anchor="middle">主机 B（内网）</text>
+
+    <rect x="170" y="45" width="110" height="50" rx="7" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="225" y="65" font-size="9.5" fill="#2c3e50" text-anchor="middle">NAT A</text>
+    <text x="225" y="82" font-size="9" fill="#e65100" text-anchor="middle">已打洞</text>
+    <rect x="400" y="45" width="110" height="50" rx="7" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="455" y="65" font-size="9.5" fill="#2c3e50" text-anchor="middle">NAT B</text>
+    <text x="455" y="82" font-size="9" fill="#e65100" text-anchor="middle">已打洞</text>
+
+    <rect x="285" y="50" width="110" height="40" rx="7" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="340" y="74" font-size="9.5" fill="#2c3e50" text-anchor="middle">中介服务器（公网）</text>
+
+    <line x1="142" y1="70" x2="283" y2="70" stroke="#764ba2" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <line x1="538" y1="70" x2="397" y2="70" stroke="#764ba2" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <text x="340" y="62" font-size="9" fill="#764ba2" text-anchor="middle">① 各自注册，中介记录双方公网地址</text>
+
+    <line x1="225" y1="97" x2="225" y2="140" stroke="#c9d2dd" stroke-width="1" stroke-dasharray="3 3"/>
+    <line x1="455" y1="97" x2="455" y2="140" stroke="#c9d2dd" stroke-width="1" stroke-dasharray="3 3"/>
+
+    <line x1="235" y1="150" x2="445" y2="150" stroke="#4caf50" stroke-width="2.5" marker-end="url(#ar2)"/>
+    <text x="340" y="142" font-size="10" fill="#2e7d32" text-anchor="middle">② 交换地址后 A、B 直接互发（洞已打通）</text>
+    <line x1="445" y1="172" x2="235" y2="172" stroke="#4caf50" stroke-width="2.5" marker-end="url(#ar2)"/>
+    <text x="340" y="192" font-size="10" fill="#2e7d32" text-anchor="middle">③ 后续数据 P2P 直传，不再经过中介</text>
+
+    <rect x="30" y="200" width="620" height="16" rx="4" fill="none"/>
+  </svg>
+
+  <h3>标准方案：STUN / TURN / ICE</h3>
+  <table>
+    <tr><th>组件</th><th>作用</th></tr>
+    <tr><td><b>STUN</b></td><td>让主机<b>查询自己被 NAT 转换后的公网 IP:端口</b>。轻量，用于打洞前的信息获取。</td></tr>
+    <tr><td><b>TURN</b></td><td>打洞<b>失败时的兜底：由公网服务器中转所有流量</b>。可靠但成本高、延时长。</td></tr>
+    <tr><td><b>ICE</b></td><td><b>综合框架</b>：同时尝试直连、STUN 打洞、TURN 中继，选出最优可用路径。<b>WebRTC 用的就是它。</b></td></tr>
+  </table>
+  <div class="key"><b>为什么打洞不是 100% 成功？</b>NAT 有多种行为类型（完全圆锥型 / 受限圆锥型 / 端口受限圆锥型 / <b>对称型</b>）。其中<b>对称型 NAT</b> 为<b>每个不同目标都分配不同端口</b>，导致中介看到的地址与直连时实际地址不一致，<b>基本无法打洞，只能走 TURN 中继</b>。</div>
+
+  <h3>其他常见“内网穿透”方式</h3>
+  <div class="grid">
+    <div class="card"><h4>端口映射（Port Forwarding）</h4><p>在路由器上手动配置“公网某端口 → 内网某 IP:端口”。<b>最简单直接</b>，但需要有路由器管理权限和公网 IP。</p></div>
+    <div class="card"><h4>反向代理隧道</h4><p>内网机器<b>主动</b>与公网服务器建立长连接，外部访问公网服务器再转发进来。典型工具：frp、ngrok、花生壳。</p></div>
+    <div class="card"><h4>UPnP / NAT-PMP</h4><p>让应用程序<b>自动请求路由器</b>添加端口映射，无需手动配置。便利但<b>有安全风险</b>，常被建议关闭。</p></div>
+  </div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑦</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：NAT 是什么？解决什么问题？</div>
+  <b>网络地址转换</b>，在数据包经过路由器时改写 IP（及端口）。核心解决 <b>IPv4 地址枯竭</b>：让大量内网设备通过私有地址复用少量公网地址上网。</div>
+
+  <div class="q"><div class="qt">Q2：NAPT 和普通 NAT 的区别？</div>
+  普通 NAT 是 <b>IP 对 IP</b> 的 1:1 转换；<b>NAPT（PAT）</b>同时转换 <b>IP 和端口</b>，实现多对一——多个内网设备共用一个公网 IP，靠端口号区分连接。<b>现实中家用路由器用的就是 NAPT。</b></div>
+
+  <div class="q"><div class="qt">Q3：NAT 表是怎么建立和删除的？</div>
+  <b>内网主动向外发包时自动创建</b>；连接结束（TCP FIN/RST）或<b>空闲超时</b>后删除。这也意味着长连接需要<b>心跳保活</b>，否则表项过期会被静默丢弃。</div>
+
+  <div class="q"><div class="qt">Q4：为什么外网不能主动访问内网主机？</div>
+  因为 <b>NAT 表必须由内网主动发包才能建立</b>。外部发来的包在 NAT 表中查不到映射项，会被直接丢弃。想要暴露内网服务需要<b>端口映射</b>或<b>内网穿透</b>。</div>
+
+  <div class="q"><div class="qt">Q5：NAT 有什么缺点？</div>
+  ① <b>破坏端到端通信</b>原则；② 外部无法主动访问内网；③ NAT 设备要<b>维护状态、重写校验和</b>，有性能与单点风险；④ 部分协议（如 FTP）在<b>应用层载荷里内嵌 IP</b>，需要 ALG 特殊处理。</div>
+
+  <div class="q"><div class="qt">Q6：什么是 NAT 穿透？有哪些方案？</div>
+  让两台位于不同 NAT 后的主机建立直接连接。<b>方案：UDP 打洞</b>（双方先各打出洞，再借中介交换地址直连）、<b>STUN</b>（查自己的公网地址）、<b>TURN</b>（打洞失败时服务器中转）、<b>ICE</b>（综合选路，WebRTC 使用）。</div>
+
+  <div class="q"><div class="qt">Q7：什么情况下打洞会失败？</div>
+  <b>对称型 NAT</b> 场景。它会为<b>每个不同目标分配不同的公网端口</b>，导致中介服务器看到的地址与实际直连地址不一致，无法打通。此时只能依赖 <b>TURN 中继</b>。</div>
+
+  <div class="q"><div class="qt">Q8：NAT 和代理（Proxy）有什么区别？</div>
+  <b>NAT</b> 工作在<b>网络层/传输层</b>，对应用<b>透明</b>（主机无感知），主要目的是地址复用；<b>代理</b>工作在<b>应用层</b>（如 HTTP 代理），<b>需要应用主动配置</b>，主要目的是缓存、访问控制、隐匿与加速。</div>
+
+  <div class="q"><div class="qt">Q9：IPv6 还需要 NAT 吗？</div>
+  <b>设计上不需要</b>——IPv6 地址充足，每台设备都有全球唯一地址，端到端通信恢复。但出于安全与管理考虑，实际部署仍会用<b>防火墙</b>做等效隔离（只放行需要的流量）。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>NAT 用私有地址 + 端口复用（NAPT）解决 IPv4 枯竭；映射表由内网主动发包建立，所以外网无法主动进来；代价是破坏端到端、P2P 要靠打洞/STUN/TURN/ICE；对称型 NAT 打不通，只能中继。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 RFC 1918（私有地址）、RFC 3022（传统 NAT）、RFC 5389（STUN）、RFC 5766（TURN）、RFC 8445（ICE）整理。</p>
+  <p style="margin-top:8px">相关阅读：<a href="arp-protocol.html">ARP 协议</a> · <a href="icmp-ping-traceroute.html">ICMP 与 ping/traceroute</a> · <a href="../../cloud-architecture/general/proxy-diagram.html">正向与反向代理</a></p>
+</footer>
+
+</div>
+</body>
+</html>

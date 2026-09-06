@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 可靠传输机制 · 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>TCP 可靠传输机制 · 完全图解</h1>
+  <p class="sub">序列号、确认应答、超时重传、快速重传、SACK、滑动窗口一次讲透</p>
+  <div class="tags">
+    <span class="tag">序列号 / ACK</span>
+    <span class="tag">RTO / RTT</span>
+    <span class="tag">快速重传 / SACK</span>
+    <span class="tag">滑动窗口 / 流量控制</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#overview">① 可靠的七件武器</a>
+  <a href="#seq">② 序列号与确认号</a>
+  <a href="#rto">③ 超时重传与 RTO</a>
+  <a href="#fast">④ 快速重传与 SACK</a>
+  <a href="#window">⑤ 滑动窗口</a>
+  <a href="#flow">⑥ 流量控制</a>
+  <a href="#qa">⑦ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h2><span class="n">①</span>TCP 靠什么保证可靠</h2>
+  <div class="lead">
+    网络层 IP 是<b>不可靠</b>的：会丢包、会乱序、会重复、会出错。TCP 在它之上用一套组合拳，把不可靠的信道变成了<b>可靠、有序、不丢、不重</b>的字节流。
+  </div>
+  <div class="grid">
+    <div class="card"><h4>① 序列号 + 确认应答</h4><p>每个字节编号，接收方用 ACK 告诉发送方“我收到哪了”，没被确认的就重发。</p></div>
+    <div class="card"><h4>② 超时重传</h4><p>发出后启动计时器，超时未收到 ACK 就重传；RTO 根据 RTT 动态计算。</p></div>
+    <div class="card"><h4>③ 快速重传</h4><p>不等超时，收到 <b>3 个重复 ACK</b> 就立刻重传丢失报文。</p></div>
+    <div class="card"><h4>④ 校验和</h4><p>检测报文在传输中是否损坏，损坏则丢弃（等同于丢包，触发重传）。</p></div>
+    <div class="card"><h4>⑤ 排序与去重</h4><p>接收端按序列号重排乱序到达的报文，并丢弃重复报文。</p></div>
+    <div class="card"><h4>⑥ 流量控制</h4><p>用<b>滑动窗口</b>匹配收发双方速度，防止接收方被冲垮。</p></div>
+    <div class="card"><h4>⑦ 拥塞控制</h4><p>感知网络状况，防止把网络挤爆（详见<a href="tcp_congestion_control.html">拥塞控制</a>专篇）。</p></div>
+  </div>
+  <div class="note"><b>注意区分：</b><b>流量控制</b>保护的是<b>接收方</b>（怕它处理不过来），<b>拥塞控制</b>保护的是<b>网络</b>（怕链路堵死）。两者都通过限制发送窗口实现，但出发点完全不同。</div>
+</section>
+
+<section id="seq">
+  <h2><span class="n">②</span>序列号与确认号：可靠性的地基</h2>
+  <h3>序列号（Sequence Number）</h3>
+  <p>TCP 给<b>每一个字节</b>编号，报文头的 seq 是本报文<b>第一个字节的编号</b>。比如发送 1000 字节、起始 seq=1，则下一个报文 seq=1001。</p>
+  <div class="note"><b>连接建立时的初始序列号（ISN）是随机的</b>，不是从 0 开始——这是为了防止<b>旧连接的迷途报文</b>被误认为新连接的数据，也是安全考虑（防止序列号预测攻击）。</div>
+
+  <h3>确认号（Acknowledgment Number）</h3>
+  <div class="key">
+    <b>确认号的含义，一句话背下来：</b><code>ack = N</code> 表示<b>“N 之前的所有字节我都收到了，我接下来期待第 N 个字节”</b>。<br>
+    注意：它表示的是<b>期望收到的下一个字节序号</b>，而不是“我收到的最后一个字节”。这个细节面试经常考。
+  </div>
+
+  <svg viewBox="0 0 680 220" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">确认号 ack 的语义：期待下一个字节</text>
+    <rect x="70" y="50" width="130" height="40" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="135" y="74" font-size="11.5" fill="#2c3e50" text-anchor="middle">发送方</text>
+    <rect x="480" y="50" width="130" height="40" rx="8" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="545" y="74" font-size="11.5" fill="#2c3e50" text-anchor="middle">接收方</text>
+
+    <line x1="205" y1="105" x2="475" y2="105" stroke="#667eea" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="97" font-size="11" fill="#2c3e50" text-anchor="middle">seq=1, 携带 1000 字节（1~1000）</text>
+
+    <line x1="475" y1="145" x2="205" y2="145" stroke="#764ba2" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="340" y="137" font-size="11" fill="#2c3e50" text-anchor="middle">ack=1001（1~1000 都收到了，请发第 1001 字节）</text>
+
+    <rect x="140" y="170" width="400" height="36" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="192" font-size="12" fill="#2e7d32" text-anchor="middle">ack = 已收到的连续最大字节序号 + 1</text>
+  </svg>
+
+  <p><b>累积确认（Cumulative ACK）：</b>TCP 的 ack 是累积的——<code>ack=1001</code> 意味着 1001 之前<b>全部</b>都收到了。这也带来一个问题：如果中间某个报文丢了（比如 501~1000 丢了，但 1001~1500 收到了），接收方<b>只能反复回 ack=501</b>，无法告诉发送方“后面的我其实收到了”——这正是 SACK 要解决的问题。</p>
+</section>
+
+<section id="rto">
+  <h2><span class="n">③</span>超时重传：RTO 是怎么算出来的</h2>
+  <p>发送方每发一个报文就启动一个<b>重传计时器</b>，超时（RTO, Retransmission Timeout）还没收到 ACK 就重传。</p>
+  <div class="warn"><b>难点：RTO 设多少合适？</b>设太小 → 报文其实还在路上就误判丢包，造成无谓重传、加剧拥塞；设太大 → 真丢包时要等很久，延迟飙升。所以 RTO 必须<b>自适应</b>地跟随网络 RTT 变化。</div>
+
+  <h3>RTT 与 RTO 的计算</h3>
+  <ul>
+    <li><b>RTT（Round-Trip Time）</b>：从发送到收到对应 ACK 的往返时间。</li>
+    <li><b>SRTT（平滑 RTT）</b>：<code>SRTT = (1-α)·SRTT + α·RTT</code>，α 通常取 1/8，做指数加权平均。</li>
+    <li><b>RTTVAR（RTT 偏差）</b>：衡量 RTT 波动程度，波动越大 RTO 越保守。</li>
+    <li><b>RTO</b>：<code>RTO = SRTT + 4·RTTVAR</code>（Jacobson/Karels 算法），并设定上下限。</li>
+  </ul>
+
+  <div class="key"><b>Karn 算法：</b>如果报文发生了<b>重传</b>，就不应该用这次的 ACK 来更新 RTT——因为你分不清这个 ACK 是回应原始报文还是重传报文。解决办法：重传时不更新 RTT，并且<b>退避加倍</b>（每重传一次 RTO ×2）。</div>
+
+  <svg viewBox="0 0 680 190" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">超时重传：计时器到点仍未收到 ACK</text>
+    <text x="80" y="52" font-size="11" fill="#667eea">发送方</text>
+    <text x="600" y="52" font-size="11" fill="#764ba2" text-anchor="middle">接收方</text>
+    <line x1="80" y1="72" x2="80" y2="165" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <line x1="600" y1="72" x2="600" y2="165" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <line x1="90" y1="90" x2="590" y2="90" stroke="#667eea" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="82" font-size="10.5" fill="#2c3e50" text-anchor="middle">seq=1, len=1000　→　启动计时器 RTO</text>
+    <text x="340" y="112" font-size="11" fill="#c2185b" text-anchor="middle">✗ 报文丢失（未到达）</text>
+    <rect x="150" y="122" width="380" height="24" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="340" y="138" font-size="10.5" fill="#e65100" text-anchor="middle">等待 … RTO 超时</text>
+    <line x1="90" y1="160" x2="590" y2="160" stroke="#e91e63" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="340" y="152" font-size="10.5" fill="#c2185b" text-anchor="middle">重传 seq=1, len=1000（RTO 退避加倍）</text>
+    <text x="340" y="182" font-size="11" fill="#5a6c7d" text-anchor="middle">超时重传的代价：至少要等一个 RTO 才反应，延迟明显</text>
+  </svg>
+</section>
+
+<section id="fast">
+  <h2><span class="n">④</span>快速重传：不等超时，3 个重复 ACK 就重发</h2>
+  <p>超时重传要等一个完整 RTO，太慢了。<b>快速重传（Fast Retransmit）</b>的思路是：如果接收方<b>连续收到 3 个相同的重复 ACK</b>，说明对应的报文大概率丢了（后面的报文都到了，就它没到），发送方<b>立刻重传</b>，不用等计时器。</p>
+
+  <svg viewBox="0 0 680 240" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">快速重传：3 个重复 ACK 触发立即重传</text>
+    <text x="80" y="48" font-size="11" fill="#667eea">发送方</text>
+    <text x="600" y="48" font-size="11" fill="#764ba2" text-anchor="middle">接收方</text>
+    <line x1="80" y1="62" x2="80" y2="215" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <line x1="600" y1="62" x2="600" y2="215" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <line x1="90" y1="80" x2="590" y2="80" stroke="#667eea" stroke-width="2" marker-end="url(#ar3)"/>
+    <text x="340" y="72" font-size="10.5" fill="#2c3e50" text-anchor="middle">seq=1（到达）</text>
+    <line x1="590" y1="100" x2="90" y2="100" stroke="#764ba2" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <text x="340" y="92" font-size="10.5" fill="#2c3e50" text-anchor="middle">ack=1001</text>
+
+    <line x1="90" y1="120" x2="590" y2="120" stroke="#e91e63" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#ar3)"/>
+    <text x="340" y="112" font-size="10.5" fill="#c2185b" text-anchor="middle">seq=1001 ✗ 丢失</text>
+
+    <line x1="90" y1="140" x2="590" y2="140" stroke="#667eea" stroke-width="2" marker-end="url(#ar3)"/>
+    <text x="340" y="132" font-size="10.5" fill="#2c3e50" text-anchor="middle">seq=2001（乱序到达）</text>
+    <line x1="590" y1="158" x2="90" y2="158" stroke="#ffa726" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <text x="340" y="150" font-size="10.5" fill="#e65100" text-anchor="middle">ack=1001（重复 ACK 1）</text>
+    <line x1="590" y1="176" x2="90" y2="176" stroke="#ffa726" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <text x="340" y="168" font-size="10.5" fill="#e65100" text-anchor="middle">ack=1001（重复 ACK 2）</text>
+    <line x1="590" y1="194" x2="90" y2="194" stroke="#ffa726" stroke-width="1.5" marker-end="url(#ar3)"/>
+    <text x="340" y="186" font-size="10.5" fill="#e65100" text-anchor="middle">ack=1001（重复 ACK 3 → 触发快速重传）</text>
+    <line x1="90" y1="212" x2="590" y2="212" stroke="#e91e63" stroke-width="2" marker-end="url(#ar3)"/>
+    <text x="340" y="204" font-size="10.5" fill="#c2185b" text-anchor="middle">立即重传 seq=1001（不等 RTO）</text>
+    <text x="340" y="234" font-size="11" fill="#5a6c7d" text-anchor="middle">为什么是 3 个？经验值：2 个可能是乱序，3 个基本可判定丢包</text>
+  </svg>
+
+  <h3>SACK：只重传真正丢的</h3>
+  <p>快速重传仍有浪费：发送方只知道 1001 丢了，但<b>不知道 2001 之后的报文到底有没有到</b>，可能要把后面的一起重传。<b>SACK（Selective Acknowledgment，选择性确认）</b>让接收方在 ACK 里额外携带“我已收到的<b>不连续区间</b>”，发送方就能<b>只重传真正丢失的那几段</b>。</p>
+  <div class="note"><b>SACK 效果举例：</b>丢了 seq=1001 这一段，但 2001~5000 都收到了。没有 SACK 时可能要重传 1001 及之后全部；有了 SACK，接收方能告知“我已有 2001~5000”，发送方<b>只需重传 1001~2000</b>。SACK 通过 TCP 头部选项字段协商启用。</div>
+</section>
+
+<section id="window">
+  <h2><span class="n">⑤</span>滑动窗口：为什么能一边发一边等</h2>
+  <div class="lead">
+    如果每发一个报文都要等 ACK 才能发下一个（“停止-等待”），吞吐量会惨不忍睹。<b>滑动窗口</b>允许发送方<b>连续发送多个未被确认的报文</b>，把等待时间重叠起来，大幅提升吞吐。
+  </div>
+
+  <svg viewBox="0 0 680 230" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <text x="340" y="24" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">发送缓冲区与窗口的四段划分</text>
+    <g font-size="10" text-anchor="middle">
+      <rect x="40" y="50" width="120" height="52" rx="5" fill="#e8f5e9" stroke="#4caf50"/>
+      <text x="100" y="70" fill="#2e7d32">已发送</text>
+      <text x="100" y="88" fill="#2e7d32">且已确认</text>
+
+      <rect x="160" y="50" width="180" height="52" rx="5" fill="#eef2ff" stroke="#667eea"/>
+      <text x="250" y="70" fill="#2c3e50">已发送</text>
+      <text x="250" y="88" fill="#2c3e50">未收到确认</text>
+
+      <rect x="340" y="50" width="160" height="52" rx="5" fill="#fff8e1" stroke="#ffa726"/>
+      <text x="420" y="70" fill="#e65100">允许发送</text>
+      <text x="420" y="88" fill="#e65100">尚未发送</text>
+
+      <rect x="500" y="50" width="140" height="52" rx="5" fill="#f4f6f9" stroke="#c9d2dd"/>
+      <text x="570" y="70" fill="#7a8b9c">不可发送</text>
+      <text x="570" y="88" fill="#7a8b9c">（超出窗口）</text>
+    </g>
+    <line x1="40" y1="118" x2="640" y2="118" stroke="#c9d2dd" stroke-width="1"/>
+    <line x1="160" y1="130" x2="500" y2="130" stroke="#667eea" stroke-width="2.5"/>
+    <text x="330" y="148" font-size="11.5" fill="#667eea" text-anchor="middle">发送窗口（Send Window）</text>
+    <text x="160" y="166" font-size="10" fill="#5a6c7d" text-anchor="middle">窗口左边界</text>
+    <text x="500" y="166" font-size="10" fill="#5a6c7d" text-anchor="middle">窗口右边界</text>
+
+    <rect x="40" y="180" width="600" height="34" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="340" y="201" font-size="11.5" fill="#2e7d32" text-anchor="middle" font-family="system-ui,sans-serif">收到 ACK → 左边界右移（窗口“滑动”）→ 新的字节进入可发送范围</text>
+  </svg>
+
+  <div class="note"><b>要点：</b>发送窗口<b>不是固定不动</b>的。每收到一个 ACK，左边界就右移，窗口整体向前“滑动”，从而允许发送新的数据。被确认过的数据会从发送缓冲区释放。</div>
+</section>
+
+<section id="flow">
+  <h2><span class="n">⑥</span>流量控制：别把接收方冲垮</h2>
+  <p>接收方处理速度有限。如果发送方发得太快，接收方的缓冲区会被填满，后续报文只能丢弃 → 触发重传 → 更拥堵。所以 TCP 用<b>接收窗口（rwnd, receive window）</b>做流控。</p>
+  <div class="key"><b>核心机制：</b>接收方在每个 ACK 里带上自己的<b>剩余缓冲区大小 rwnd</b>。发送方保证<b>未被确认的数据量 ≤ rwnd</b>。rwnd 由 TCP 头部的「窗口大小」字段承载。</div>
+
+  <svg viewBox="0 0 680 190" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">接收方通过 ACK 回传 rwnd，动态调节发送速率</text>
+    <rect x="60" y="45" width="130" height="40" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="125" y="69" font-size="11.5" fill="#2c3e50" text-anchor="middle">发送方</text>
+    <rect x="490" y="45" width="130" height="40" rx="8" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="555" y="69" font-size="11.5" fill="#2c3e50" text-anchor="middle">接收方</text>
+
+    <line x1="195" y1="100" x2="485" y2="100" stroke="#667eea" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="340" y="92" font-size="10.5" fill="#2c3e50" text-anchor="middle">发送数据</text>
+    <line x1="485" y1="128" x2="195" y2="128" stroke="#764ba2" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="340" y="120" font-size="10.5" fill="#2c3e50" text-anchor="middle">ACK + rwnd=3000（我还能收 3000 字节）</text>
+    <line x1="485" y1="156" x2="195" y2="156" stroke="#e91e63" stroke-width="2" marker-end="url(#ar4)"/>
+    <text x="340" y="148" font-size="10.5" fill="#c2185b" text-anchor="middle">ACK + rwnd=0（缓冲区满了，先别发）</text>
+    <text x="340" y="182" font-size="11" fill="#5a6c7d" text-anchor="middle">rwnd=0 后发送方暂停，并周期性发「窗口探测」报文询问</text>
+  </svg>
+
+  <h3>零窗口与糊涂窗口综合症</h3>
+  <div class="grid">
+    <div class="card"><h4>零窗口（Zero Window）</h4><p>rwnd=0 时发送方停止发送，并启动<b>持续计时器</b>周期性发窗口探测报文，防止“窗口更新报文丢失导致双方死锁”。</p></div>
+    <div class="card"><h4>糊涂窗口综合症（SWS）</h4><p>接收方每次只腾出几个字节就通告，发送方就发几个字节的小包，<b>有效载荷极低</b>。解决办法：接收方等腾出足够空间（MSS 或缓冲区一半）再通告；发送方攒够再发（Nagle）。</p></div>
+  </div>
+
+  <div class="warn"><b>最终发送窗口 = min(拥塞窗口 cwnd, 接收窗口 rwnd)</b>。发送方同时受<b>网络拥塞</b>和<b>接收方能力</b>两个约束，取更严格的一个。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑦</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：TCP 如何保证可靠传输？</div>
+  靠<b>序列号 + 确认应答 + 重传</b>（超时重传与快速重传）保证不丢；靠<b>序列号排序</b>保证有序、去重；靠<b>校验和</b>检测损坏；靠<b>滑动窗口 + 流量控制</b>匹配收发速度；靠<b>拥塞控制</b>避免压垮网络。</div>
+
+  <div class="q"><div class="qt">Q2：ack=N 到底是什么意思？</div>
+  “N 之前的所有字节都已收到，期待下一个是第 N 字节”。即<b>累积确认</b>，表示期望收到的下一个序号，不是已收到的最后一个。</div>
+
+  <div class="q"><div class="qt">Q3：有了超时重传为什么还要快速重传？</div>
+  超时重传要等一个完整 RTO，<b>延迟太大</b>。快速重传用「3 个重复 ACK」判断丢包，<b>不必等计时器</b>就立即重传，显著降低丢包时的延迟。</div>
+
+  <div class="q"><div class="qt">Q4：为什么是“3 个重复 ACK”而不是 2 个？</div>
+  这是<b>经验折中</b>：1~2 个重复 ACK 很可能只是<b>乱序</b>（报文晚到一会儿），3 个重复 ACK 基本可以判定为<b>丢包</b>。取 3 能在误判率和响应速度之间取得平衡。</div>
+
+  <div class="q"><div class="qt">Q5：SACK 解决了什么问题？</div>
+  解决<b>“不知道后面哪些到了”</b>的问题。累积 ACK 只能表达连续收到的部分，SACK 允许接收方告知已收到的<b>不连续区间</b>，发送方从而<b>只重传真正丢失的段</b>，避免无谓重传。</div>
+
+  <div class="q"><div class="qt">Q6：流量控制和拥塞控制的区别？</div>
+  <b>流量控制</b>是<b>端到端</b>的，保护<b>接收方</b>不被冲垮，依据是接收方通告的 <code>rwnd</code>；<b>拥塞控制</b>是<b>全局</b>的，保护<b>网络</b>不被挤爆，依据是发送方自己探测到的 <code>cwnd</code>。最终发送窗口取二者最小值。</div>
+
+  <div class="q"><div class="qt">Q7：为什么需要滑动窗口，停等不行吗？</div>
+  停等协议每个报文都要等一个 RTT 才能发下一个，<b>信道利用率极低</b>（尤其长肥管道）。滑动窗口允许连续发送多个未确认报文，把等待时间重叠，吞吐量成倍提升。</div>
+
+  <div class="q"><div class="qt">Q8：RTO 是固定值吗？怎么算？</div>
+  不是，是<b>自适应</b>的。基于测量的 RTT 计算平滑值 SRTT 与偏差 RTTVAR，<code>RTO = SRTT + 4·RTTVAR</code>；发生重传时按 Karn 算法<b>不更新 RTT</b> 并<b>指数退避</b>。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>可靠 = 编号（seq）+ 确认（ack 是期待下一字节）+ 重传（超时 RTO / 快速 3 个重复 ACK / SACK 选择性重传）；效率 = 滑动窗口连续发；安全 = 流量控制（rwnd，护接收方）+ 拥塞控制（cwnd，护网络），发送窗口取 min。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 RFC 793、RFC 6298（RTO 计算）、RFC 2018（SACK）与 Linux TCP 实现整理。</p>
+  <p style="margin-top:8px">相关阅读：<a href="tcp_congestion_control.html">TCP 拥塞控制</a> · <a href="tcp-header-format.html">TCP 头部格式</a> · <a href="tcp-why-three-handshakes.html">为什么是三次握手</a></p>
+</footer>
+
+</div>
+</body>
+</html>

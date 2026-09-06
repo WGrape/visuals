@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 连接队列与 SYN Flood · 完全图解</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+line-height:1.8;color:#2c3e50;background:#f5f7fa;padding:20px}
+.wrap{max-width:1080px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);overflow:hidden}
+header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:44px 32px;text-align:center}
+header h1{font-size:2em;margin-bottom:8px}
+header .sub{opacity:.92;font-size:1.02em}
+.tags{margin-top:14px}
+.tag{display:inline-block;margin:4px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.18);font-size:.85em}
+nav{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid #e8ecf3;
+padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+nav a{color:#5a6c7d;text-decoration:none;font-size:.87em;padding:5px 11px;border-radius:8px;border:1px solid transparent}
+nav a:hover{color:#667eea;background:#f0f4ff;border-color:#d6e0ff}
+main{padding:32px}
+section{margin:38px 0;scroll-margin-top:60px}
+h2{font-size:1.45em;margin:0 0 14px;padding-bottom:9px;border-bottom:2px solid #eef1f6;color:#2c3e50}
+h2 .n{color:#667eea;margin-right:8px}
+h3{font-size:1.12em;margin:22px 0 8px;color:#34495e}
+p{margin:11px 0}
+ul,ol{margin:11px 0 11px 22px}
+li{margin:6px 0}
+code{background:#f4f6f9;border:1px solid #e3e8ef;border-radius:5px;padding:1px 6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.88em;color:#c7254e}
+pre{background:#2d3748;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;font-size:.86em;line-height:1.65;margin:14px 0}
+pre code{background:none;border:none;padding:0;color:inherit}
+.k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#7ee787}.c{color:#94a3b8}.t{color:#56d4dd}
+.lead{background:#f0f4ff;border-left:4px solid #667eea;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.note{background:#e8f5e9;border-left:4px solid #4caf50;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.warn{background:#fff8e1;border-left:4px solid #ffa726;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.key{background:#fce4ec;border-left:4px solid #e91e63;border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:16px 0}
+.card{background:#fafbfd;border:1px solid #e8ecf3;border-radius:12px;padding:15px 17px}
+.card h4{margin:0 0 6px;font-size:1em;color:#2c3e50}
+.card p{margin:0;color:#5a6c7d;font-size:.9em}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9em}
+th,td{border:1px solid #e3e8ef;padding:9px 12px;text-align:left;vertical-align:top}
+th{background:#f0f4ff;color:#2c3e50}
+tr:nth-child(even) td{background:#fafbfd}
+.q{background:#fff;border:1px solid #e8ecf3;border-radius:10px;padding:13px 16px;margin:12px 0}
+.q .qt{font-weight:600;color:#667eea;margin-bottom:6px}
+svg{display:block;margin:18px auto;max-width:100%}
+footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
+footer a{color:#667eea}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>TCP 连接队列与 SYN Flood</h1>
+  <p class="sub">半连接队列、全连接队列、backlog、SYN Cookie —— 服务端高并发的隐形瓶颈</p>
+  <div class="tags">
+    <span class="tag">SYN Queue</span>
+    <span class="tag">Accept Queue</span>
+    <span class="tag">listen backlog</span>
+    <span class="tag">SYN Flood / SYN Cookie</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#two">① 两个队列</a>
+  <a href="#flow">② 握手与队列流转</a>
+  <a href="#backlog">③ backlog 到底控制谁</a>
+  <a href="#flood">④ SYN Flood 攻击</a>
+  <a href="#cookie">⑤ SYN Cookie 防御</a>
+  <a href="#trouble">⑥ 溢出排查</a>
+  <a href="#qa">⑦ 面试追问</a>
+</nav>
+
+<main>
+
+<section id="two">
+  <h2><span class="n">①</span>服务端其实有两个队列</h2>
+  <div class="lead">
+    这是很多人的知识盲区：服务端在 <code>listen()</code> 后，内核会维护<b>两个</b>队列来承接还没被应用程序接走的连接——<b>半连接队列（SYN Queue）</b>和<b>全连接队列（Accept Queue）</b>。
+  </div>
+  <div class="grid">
+    <div class="card"><h4>半连接队列（SYN Queue）</h4><p>存放<b>只完成了前两次握手</b>的连接（收到客户端 SYN，已回 SYN+ACK，在等最后一个 ACK）。此时连接处于 <code>SYN_RECV</code> 状态，<b>还没完全建立</b>。</p></div>
+    <div class="card"><h4>全连接队列（Accept Queue）</h4><p>存放<b>三次握手已完成</b>、但应用程序<b>还没调用 accept() 取走</b>的连接。此时连接处于 <code>ESTABLISHED</code>，但还没交给用户态。</p></div>
+  </div>
+
+  <svg viewBox="0 0 680 260" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">服务端内核中的两个队列</text>
+
+    <rect x="40" y="45" width="110" height="44" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="95" y="62" font-size="11" fill="#2c3e50" text-anchor="middle">客户端</text>
+    <text x="95" y="79" font-size="10" fill="#667eea" text-anchor="middle">SYN_SENT</text>
+
+    <rect x="200" y="40" width="180" height="54" rx="8" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="290" y="58" font-size="11.5" fill="#e65100" text-anchor="middle">半连接队列</text>
+    <text x="290" y="75" font-size="10" fill="#ffa726" text-anchor="middle">SYN Queue · SYN_RECV</text>
+    <text x="290" y="90" font-size="9.5" fill="#7a8b9c" text-anchor="middle">收到 SYN，已回 SYN+ACK</text>
+
+    <rect x="430" y="40" width="200" height="54" rx="8" fill="#e8f5e9" stroke="#4caf50"/>
+    <text x="530" y="58" font-size="11.5" fill="#2e7d32" text-anchor="middle">全连接队列</text>
+    <text x="530" y="75" font-size="10" fill="#4caf50" text-anchor="middle">Accept Queue · ESTABLISHED</text>
+    <text x="530" y="90" font-size="9.5" fill="#7a8b9c" text-anchor="middle">三次握手完成，等 accept()</text>
+
+    <line x1="152" y1="67" x2="198" y2="67" stroke="#5a6c7d" stroke-width="1.5" marker-end="url(#ar)"/>
+    <text x="175" y="58" font-size="9" fill="#5a6c7d" text-anchor="middle">SYN</text>
+
+    <line x1="382" y1="67" x2="428" y2="67" stroke="#5a6c7d" stroke-width="1.5" marker-end="url(#ar)"/>
+    <text x="405" y="58" font-size="9" fill="#5a6c7d" text-anchor="middle">ACK</text>
+    <text x="405" y="78" font-size="8.5" fill="#5a6c7d" text-anchor="middle">第3次</text>
+
+    <rect x="430" y="130" width="200" height="44" rx="8" fill="#f3e8ff" stroke="#764ba2"/>
+    <text x="530" y="147" font-size="11" fill="#2c3e50" text-anchor="middle">应用程序</text>
+    <text x="530" y="164" font-size="10" fill="#764ba2" text-anchor="middle">accept() 取走连接</text>
+    <line x1="530" y1="96" x2="530" y2="128" stroke="#764ba2" stroke-width="1.5" marker-end="url(#ar)"/>
+
+    <rect x="40" y="195" width="600" height="46" rx="9" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="340" y="214" font-size="12" fill="#c2185b" text-anchor="middle" font-family="system-ui,sans-serif">连接只有被 accept() 取走，才算真正“交到应用手里”</text>
+    <text x="340" y="233" font-size="11" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">队列满 → 内核按策略丢弃 SYN 或回复 RST → 表现为连接超时 / 被拒</text>
+  </svg>
+</section>
+
+<section id="flow">
+  <h2><span class="n">②</span>一次握手在队列里怎么流转</h2>
+  <table>
+    <tr><th>步骤</th><th>客户端动作</th><th>服务端动作</th><th>服务端连接状态</th></tr>
+    <tr><td>1</td><td>发 <code>SYN</code></td><td>收到后创建连接请求块，放入<b>半连接队列</b>，回 <code>SYN+ACK</code></td><td>SYN_RECV</td></tr>
+    <tr><td>2</td><td>收到后发 <code>ACK</code></td><td>收到 ACK，从半连接队列<b>移出</b>，放入<b>全连接队列</b></td><td>ESTABLISHED（但未交付应用）</td></tr>
+    <tr><td>3</td><td>可以开始发数据</td><td>应用调用 <code>accept()</code> 从全连接队列取出</td><td>ESTABLISHED（已交付）</td></tr>
+  </table>
+  <div class="note"><b>关键点：</b>三次握手的<b>最后一次 ACK 到达时</b>，连接在服务端就已经是 ESTABLISHED 了，<b>不需要等应用 accept()</b>。所以即使应用暂时不 accept，客户端的 connect() 也能成功返回，数据也能被内核接收（暂存于接收缓冲区）。</div>
+</section>
+
+<section id="backlog">
+  <h2><span class="n">③</span>backlog 到底控制的是哪个队列</h2>
+  <p>这是最容易答错的细节。<code>listen(fd, backlog)</code> 中的 <code>backlog</code> 参数，在不同系统/版本里含义有变化：</p>
+  <table>
+    <tr><th>系统 / 版本</th><th>backlog 的含义</th></tr>
+    <tr><td>早期 Linux（2.2 之前）</td><td><b>半连接队列</b>大小（SYN Queue）</td></tr>
+    <tr><td><b>现代 Linux（2.2+）</b></td><td><b>全连接队列</b>大小（Accept Queue）</td></tr>
+    <tr><td>半连接队列</td><td>由 <code>net.ipv4.tcp_max_syn_backlog</code> 控制（另受 somaxconn 影响）</td></tr>
+  </table>
+  <div class="key"><b>现代 Linux 上的准确表述：</b>全连接队列长度 = <code>min(应用传入的 backlog, net.core.somaxconn)</code>。所以只调大程序里的 backlog 还不够，<b>必须同时调大 somaxconn</b>（默认通常是 128 或 4096，取决于发行版）。</div>
+
+  <pre><code><span class="c"># 查看与调整全连接队列上限</span>
+sysctl net.core.somaxconn
+sudo sysctl -w net.core.somaxconn=<span class="s">65535</span>
+
+<span class="c"># 查看与调整半连接队列上限</span>
+sysctl net.ipv4.tcp_max_syn_backlog
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=<span class="s">65535</span>
+
+<span class="c"># 是否启用 SYN Cookie（1 = 启用）</span>
+sysctl net.ipv4.tcp_syncookies</code></pre>
+</section>
+
+<section id="flood">
+  <h2><span class="n">④</span>SYN Flood：打的就是半连接队列</h2>
+  <div class="lead">
+    <b>SYN Flood 是一种典型的 DDoS 攻击</b>：攻击者<b>只发 SYN、不发最后的 ACK</b>（或者用伪造的源 IP 发 SYN，导致 SYN+ACK 永远送不到）。服务端的半连接队列被这些“半吊子连接”占满，<b>正常用户的 SYN 就进不来了</b>，服务不可用。
+  </div>
+
+  <svg viewBox="0 0 680 250" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a6c7d"/></marker></defs>
+    <text x="340" y="22" font-size="12.5" fill="#5a6c7d" text-anchor="middle" font-family="system-ui,sans-serif">SYN Flood：伪造源 IP，只发 SYN 不回 ACK</text>
+
+    <rect x="40" y="45" width="130" height="44" rx="8" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="105" y="62" font-size="11" fill="#c2185b" text-anchor="middle">攻击者</text>
+    <text x="105" y="79" font-size="9.5" fill="#e91e63" text-anchor="middle">伪造源 IP</text>
+
+    <rect x="40" y="105" width="130" height="40" rx="8" fill="#eef2ff" stroke="#667eea"/>
+    <text x="105" y="129" font-size="11" fill="#2c3e50" text-anchor="middle">正常用户</text>
+
+    <rect x="380" y="45" width="260" height="100" rx="9" fill="#fff8e1" stroke="#ffa726"/>
+    <text x="510" y="68" font-size="11.5" fill="#e65100" text-anchor="middle">服务端半连接队列</text>
+    <text x="510" y="88" font-size="10" fill="#ffa726" text-anchor="middle">被 SYN_RECV 占满</text>
+    <g fill="#ffb74d" stroke="#e65100" stroke-width="0.5">
+      <rect x="398" y="98" width="42" height="18" rx="3"/>
+      <rect x="446" y="98" width="42" height="18" rx="3"/>
+      <rect x="494" y="98" width="42" height="18" rx="3"/>
+      <rect x="542" y="98" width="42" height="18" rx="3"/>
+      <rect x="590" y="98" width="42" height="18" rx="3"/>
+    </g>
+    <text x="510" y="134" font-size="9.5" fill="#c2185b" text-anchor="middle">全是不完成的半连接 → 队满</text>
+
+    <line x1="175" y1="67" x2="376" y2="67" stroke="#e91e63" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="275" y="58" font-size="10" fill="#c2185b" text-anchor="middle">海量 SYN（伪造 IP）</text>
+    <line x1="376" y1="88" x2="175" y2="88" stroke="#c9d2dd" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+    <text x="275" y="104" font-size="9.5" fill="#7a8b9c" text-anchor="middle">SYN+ACK 发往不存在的 IP → 无人回应</text>
+
+    <line x1="175" y1="152" x2="376" y2="152" stroke="#667eea" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="275" y="144" font-size="10" fill="#2c3e50" text-anchor="middle">正常 SYN</text>
+    <line x1="376" y1="172" x2="175" y2="172" stroke="#e91e63" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="275" y="190" font-size="10" fill="#c2185b" text-anchor="middle">✗ 队列已满，SYN 被丢弃</text>
+
+    <rect x="40" y="205" width="600" height="34" rx="8" fill="#fce4ec" stroke="#e91e63"/>
+    <text x="340" y="226" font-size="11.5" fill="#c2185b" text-anchor="middle" font-family="system-ui,sans-serif">结果：正常用户连接超时或极慢，服务对外不可用</text>
+  </svg>
+</section>
+
+<section id="cookie">
+  <h2><span class="n">⑤</span>SYN Cookie：不存队列也能验证连接</h2>
+  <div class="key">
+    <b>核心思想：</b>收到 SYN 时<b>不为它分配任何资源</b>（不进半连接队列），而是把连接信息（IP、端口、时间戳等）<b>编码进 SYN+ACK 的初始序列号（ISN）里</b>当作“Cookie”发出去。等对方回 ACK 时，<b>从确认号反解出这个 Cookie 并校验</b>；合法才真正分配资源建立连接。
+  </div>
+  <p>SYN Cookie 的序列号构造大致是：</p>
+  <pre><code>ISN = <span class="f">hash</span>(源IP, 源端口, 目的IP, 目的端口, 秘密密钥, 时间计数器)
+    + <span class="f">MSS编码值</span>(取几个比特记录客户端 MSS)
+    + 时间计数器的低 5 位
+
+<span class="c"># 服务端收到 ACK 后校验：</span>
+<span class="c">#   1. 用 ack-1 反解出 hash 部分，重新计算比对</span>
+<span class="c">#   2. 检查时间计数器是否在合理窗口内（防重放）</span>
+<span class="c">#   3. 校验通过 → 才分配资源、建立连接</span></code></pre>
+
+  <div class="grid">
+    <div class="card"><h4>优点</h4><p>半连接队列<b>不再成为瓶颈</b>，即使海量伪造 SYN 也不会耗尽内存，SYN Flood 基本失效。</p></div>
+    <div class="card"><h4>代价</h4><p>Cookie 只能编码有限信息，会<b>丢失部分 TCP 选项</b>（如 SACK、Window Scale 可能失效），且计算有 CPU 开销。</p></div>
+  </div>
+  <div class="note"><b>行为特征：</b>SYN Cookie <b>只在半连接队列满时才启用</b>（作为兜底防御），正常情况下不会走这条路径。可通过 <code>net.ipv4.tcp_syncookies = 1</code> 开启，现代 Linux 发行版通常默认开启。</div>
+
+  <h3>其他常见防御手段</h3>
+  <table>
+    <tr><th>手段</th><th>做法</th></tr>
+    <tr><td>增大队列</td><td>调大 <code>tcp_max_syn_backlog</code> 与 <code>somaxconn</code>，提高“抗揍”上限</td></tr>
+    <tr><td>缩短超时</td><td>减少 SYN_RECV 的重试次数（<code>tcp_synack_retries</code>），让半吊子连接更快被清掉</td></tr>
+    <tr><td>SYN Cookie</td><td>队列满时启用，不分配资源（见上）</td></tr>
+    <tr><td>首包丢弃</td><td>故意丢弃第一个 SYN，靠<b>客户端重传</b>来验证源 IP 真实性</td></tr>
+    <tr><td>前置防护</td><td>接入云厂商 DDoS 高防、CDN、负载均衡，在流量入口清洗</td></tr>
+  </table>
+</section>
+
+<section id="trouble">
+  <h2><span class="n">⑥</span>队列溢出的现象与排查</h2>
+  <p>全连接队列溢出时，内核的行为由 <code>net.ipv4.tcp_abort_on_overflow</code> 决定：</p>
+  <table>
+    <tr><th>参数值</th><th>内核行为</th><th>客户端感受</th></tr>
+    <tr><td>0（默认）</td><td>丢弃 ACK，稍后重传 SYN+ACK</td><td>连接<b>变慢</b>、偶发超时重试</td></tr>
+    <tr><td>1</td><td>直接回 <code>RST</code></td><td>连接<b>被拒绝</b>（connection reset）</td></tr>
+  </table>
+  <pre><code><span class="c"># 查看全连接队列溢出次数（持续增长的 ListenOverflows 是危险信号）</span>
+netstat -s | grep -i <span class="s">"listen"</span>
+<span class="c">#  times the listen queue of a socket overflowed</span>
+<span class="c">#  SYNs to LISTEN sockets dropped</span>
+
+<span class="c"># 查看当前监听套接字的队列使用情况</span>
+ss -lnt
+<span class="c"># State   Recv-Q Send-Q  Local Address:Port</span>
+<span class="c"># LISTEN  0      128     *:80</span>
+<span class="c">#         ↑当前全连接队列已用  ↑最大 backlog</span>
+
+<span class="c"># 统计处于 SYN_RECV 的连接数（半连接队列压力）</span>
+ss -tan state syn-recv | wc -l</code></pre>
+  <div class="warn"><b>排查思路：</b>若 <code>ListenOverflows</code> 持续增长 → 全连接队列太小或<b>应用 accept 太慢</b>（被业务逻辑阻塞）。此时<b>不要只调大队列</b>，先确认应用是否有慢处理、线程池是否打满——队列调大只是把问题往后推。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">⑦</span>面试高频追问</h2>
+
+  <div class="q"><div class="qt">Q1：服务端有几个队列？分别存什么状态？</div>
+  两个：<b>半连接队列（SYN Queue）</b>存 <code>SYN_RECV</code>（收到 SYN 已回 SYN+ACK，等最后 ACK）；<b>全连接队列（Accept Queue）</b>存已完成三次握手、等应用 <code>accept()</code> 的 <code>ESTABLISHED</code> 连接。</div>
+
+  <div class="q"><div class="qt">Q2：listen 的 backlog 控制哪个队列？</div>
+  <b>现代 Linux 控制全连接队列</b>，实际长度取 <code>min(backlog, net.core.somaxconn)</code>。半连接队列由 <code>tcp_max_syn_backlog</code> 控制。（早期 Linux 2.2 之前 backlog 是管半连接队列的，这是常见混淆点。）</div>
+
+  <div class="q"><div class="qt">Q3：SYN Flood 的原理是什么？</div>
+  攻击者<b>只发 SYN 不回 ACK</b>（常配合伪造源 IP），让服务端半连接队列被大量 <code>SYN_RECV</code> 占满，正常用户的 SYN 无法入队，导致服务不可用。属于<b>资源耗尽型 DDoS</b>。</div>
+
+  <div class="q"><div class="qt">Q4：SYN Cookie 是怎么防御的？</div>
+  收到 SYN 时<b>不分配任何资源</b>，把连接信息哈希后<b>编码进 SYN+ACK 的初始序列号</b>；收到 ACK 时反解校验，合法才建连接。这样半连接队列不再成为瓶颈。代价是会损失部分 TCP 选项信息。</div>
+
+  <div class="q"><div class="qt">Q5：三次握手完成后，应用还没 accept，连接算建立了吗？</div>
+  <b>算。</b>最后一个 ACK 到达服务端时，连接在内核中已是 <code>ESTABLISHED</code>，客户端的 <code>connect()</code> 会成功返回，数据也能进接收缓冲区。<code>accept()</code> 只是把连接<b>从队列取到用户态</b>。</div>
+
+  <div class="q"><div class="qt">Q6：线上发现 ListenOverflows 持续增长，怎么排查？</div>
+  先看 <code>ss -lnt</code> 确认队列水位；再看<b>应用是否 accept 慢</b>（线程/协程打满、业务逻辑阻塞）。<b>优先优化应用消费速度</b>，其次才调大 <code>somaxconn</code> 与 backlog——单纯调大队列只是延迟问题爆发。</div>
+
+  <div class="q"><div class="qt">Q7：为什么 SYN Cookie 默认不一直开着？</div>
+  因为它会<b>丢失 TCP 选项协商信息</b>（SACK、Window Scale 等可能无法生效），且有哈希计算开销。所以它作为<b>队列满时的兜底防御</b>，正常路径仍走标准队列流程。</div>
+</section>
+
+<section>
+  <h2><span class="n">✓</span>一句话速记</h2>
+  <div class="lead">
+    <b>两个队列：半连接（SYN_RECV，握手没走完）+ 全连接（ESTABLISHED，等 accept）；现代 Linux 的 backlog 管全连接队列且受 somaxconn 截断；SYN Flood 打的是半连接队列，靠 SYN Cookie「不分配资源 + 序列号编码校验」来防。</b>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>本文依据 Linux 内核 TCP 实现与 SYN Cookie 机制（D. J. Bernstein 提出）整理；具体内核参数默认值因发行版与内核版本而异，请以实际系统为准。</p>
+  <p style="margin-top:8px">相关阅读：<a href="tcp-why-three-handshakes.html">为什么是三次握手</a> · <a href="tcp-four-way-handshake.html">四次挥手与 TIME_WAIT</a> · <a href="../attack/network_attacks.html">网络分层攻击</a></p>
+</footer>
+
+</div>
+</body>
+</html>

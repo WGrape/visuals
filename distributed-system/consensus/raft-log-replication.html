@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Raft 日志复制 — 复制状态机与一致性</title>
+  <style>
+    :root { --bg-primary:#0f1117;--bg-secondary:#1a1d27;--bg-card:#1e2235;--bg-highlight:#252a3d;--text-primary:#e8eaf6;--text-secondary:#9ca3c0;--text-muted:#5c6080;--accent-blue:#4f87ff;--accent-purple:#9b6fff;--accent-teal:#2dd4bf;--accent-amber:#fbbf24;--accent-red:#f87171;--accent-green:#4ade80;--border:rgba(255,255,255,0.07);--border-accent:rgba(79,135,255,0.3); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif; background: var(--bg-primary); color: var(--text-primary); font-size: 14px; line-height: 1.7; }
+    .topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: rgba(15,17,23,0.9); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar .logo { font-size: 15px; font-weight: 700; text-decoration: none; background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-purple) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .topbar a.back { color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 14px 0; }
+    header { background: linear-gradient(135deg, #0f1117 0%, #1a1530 50%, #0f1117 100%); border-bottom: 1px solid var(--border); padding: 84px 40px 50px; text-align: center; position: relative; overflow: hidden; }
+    header::before { content: ''; position: absolute; top: -60px; left: 50%; transform: translateX(-50%); width: 600px; height: 300px; background: radial-gradient(ellipse, rgba(79,135,255,0.12) 0%, transparent 70%); pointer-events: none; }
+    .header-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(79,135,255,0.1); border: 1px solid rgba(79,135,255,0.25); border-radius: 20px; padding: 4px 14px; font-size: 12px; color: var(--accent-blue); margin-bottom: 20px; }
+    header h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.5px; background: linear-gradient(135deg, #ffffff 0%, #a8b8ff 50%, #4f87ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 12px; }
+    header p { color: var(--text-secondary); font-size: 16px; max-width: 640px; margin: 0 auto; }
+    nav { position: sticky; top: 53px; z-index: 100; background: rgba(15,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; gap: 4px; overflow-x: auto; }
+    nav a { color: var(--text-secondary); text-decoration: none; padding: 14px 16px; font-size: 13px; white-space: nowrap; border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s; }
+    nav a:hover, nav a.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+    main { max-width: 1000px; margin: 0 auto; padding: 48px 40px 80px; }
+    section { margin-bottom: 72px; }
+    h2 { font-size: 26px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+    h2 .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .section-lead { color: var(--text-secondary); font-size: 15px; margin-bottom: 28px; line-height: 1.6; }
+    h3 { font-size: 17px; font-weight: 600; color: var(--text-primary); margin: 28px 0 12px; }
+    p { color: var(--text-secondary); margin-bottom: 14px; line-height: 1.8; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+    .card-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-box { border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 12px; align-items: flex-start; }
+    .info-box.blue { background: rgba(79,135,255,0.08); border: 1px solid rgba(79,135,255,0.2); }
+    .info-box.amber { background: rgba(251,191,36,0.07); border: 1px solid rgba(251,191,36,0.2); }
+    .info-box.red { background: rgba(248,113,113,0.07); border: 1px solid rgba(248,113,113,0.2); }
+    .info-box.green { background: rgba(74,222,128,0.07); border: 1px solid rgba(74,222,128,0.2); }
+    .info-box.purple { background: rgba(155,111,255,0.07); border: 1px solid rgba(155,111,255,0.2); }
+    .info-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .info-body { font-size: 13px; color: var(--text-secondary); line-height: 1.7; }
+    .info-body strong { color: var(--text-primary); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 13px; }
+    th { background: var(--bg-highlight); color: var(--text-secondary); font-weight: 500; padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    td:first-child { color: var(--text-primary); font-weight: 500; }
+    .stepper { position: relative; padding-left: 32px; }
+    .step { position: relative; margin-bottom: 24px; padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; }
+    .step::before { content: attr(data-n); position: absolute; left: -32px; top: 16px; width: 22px; height: 22px; border-radius: 50%; background: var(--bg-highlight); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--text-muted); }
+    .stepper::before { content: ''; position: absolute; left: 10px; top: 28px; bottom: 28px; width: 1px; background: var(--border); }
+    .step.ok::before { background: rgba(74,222,128,0.15); border-color: rgba(74,222,128,0.3); color: var(--accent-green); }
+    .keyline { border-left: 3px solid var(--accent-blue); padding: 4px 0 4px 16px; margin: 16px 0; color: var(--text-secondary); font-size: 14px; }
+    .keyline strong { color: var(--text-primary); }
+    footer { text-align: center; padding: 32px 40px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity 0.5s, transform 0.5s; }
+    .reveal.visible { opacity: 1; transform: none; }
+    code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
+    svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
+  </style>
+</head>
+<body>
+<div class="topbar"><a href="../index.html" class="logo">☁️ 分布式系统</a><a href="../index.html" class="back">← 返回分布式系统</a></div>
+<header>
+  <div class="header-badge">🗂️ 共识算法 · 复制状态机</div>
+  <h1>Raft 日志复制</h1>
+  <p>Raft 不止"选主"（见 basics/raft-election），更核心的是<strong>日志复制</strong>：让所有节点的"操作日志"保持一致，从而让状态机算出相同结果。这是 etcd / Consul / TiKV 的底座。</p>
+</header>
+<nav id="main-nav">
+  <a href="#rsm" class="active">复制状态机</a>
+  <a href="#logstruct">日志结构</a>
+  <a href="#flow">复制流程</a>
+  <a href="#safety">安全性规则</a>
+  <a href="#conflict">冲突处理</a>
+  <a href="#compare">vs Multi Paxos</a>
+  <a href="#interview">面试要点</a>
+</nav>
+<main>
+  <section id="rsm" class="reveal">
+    <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🔁</span>复制状态机（Replicated State Machine）</h2>
+    <p class="section-lead">核心思想：<strong>相同的初始状态 + 相同的操作序列 + 相同的处理规则 = 相同的最终状态</strong>。所以只要让所有节点"日志一致"，它们的状态机自然就一致。</p>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 640 190" xmlns="http://www.w3.org/2000/svg">
+        <!-- 三个节点 -->
+        <g font-size="11">
+          <!-- Node1 -->
+          <rect x="30" y="40" width="160" height="110" rx="10" fill="rgba(79,135,255,0.08)" stroke="var(--accent-blue)"/>
+          <text x="110" y="60" fill="#fff" text-anchor="middle" font-weight="600">节点 A（Leader）</text>
+          <text x="110" y="90" fill="var(--text-secondary)" text-anchor="middle">日志: 1,2,3,4</text>
+          <rect x="50" y="100" width="120" height="30" rx="6" fill="rgba(45,212,191,0.18)" stroke="var(--accent-teal)"/>
+          <text x="110" y="120" fill="#fff" text-anchor="middle">状态机</text>
+          <!-- Node2 -->
+          <rect x="240" y="40" width="160" height="110" rx="10" fill="rgba(155,111,255,0.08)" stroke="var(--accent-purple)"/>
+          <text x="320" y="60" fill="#fff" text-anchor="middle">节点 B（Follower）</text>
+          <text x="320" y="90" fill="var(--text-secondary)" text-anchor="middle">日志: 1,2,3,4</text>
+          <rect x="260" y="100" width="120" height="30" rx="6" fill="rgba(45,212,191,0.18)" stroke="var(--accent-teal)"/>
+          <text x="320" y="120" fill="#fff" text-anchor="middle">状态机</text>
+          <!-- Node3 -->
+          <rect x="450" y="40" width="160" height="110" rx="10" fill="rgba(155,111,255,0.08)" stroke="var(--accent-purple)"/>
+          <text x="530" y="60" fill="#fff" text-anchor="middle">节点 C（Follower）</text>
+          <text x="530" y="90" fill="var(--text-secondary)" text-anchor="middle">日志: 1,2,3,4</text>
+          <rect x="470" y="100" width="120" height="30" rx="6" fill="rgba(45,212,191,0.18)" stroke="var(--accent-teal)"/>
+          <text x="530" y="120" fill="#fff" text-anchor="middle">状态机</text>
+        </g>
+        <text x="320" y="180" fill="var(--text-muted)" font-size="11" text-anchor="middle">日志一致 → 三个状态机输出完全一致</text>
+      </svg>
+    </div>
+    <div class="info-box blue"><span class="info-icon">🧠</span><div class="info-body"><strong>一句话：</strong>Raft 不直接复制"状态"，而是复制"<strong>命令日志</strong>"。状态机只是忠实地把日志一条条执行下去。这样复制问题就被简化成"日志一致性"问题。</div></div>
+  </section>
+
+  <section id="logstruct" class="reveal">
+    <h2><span class="icon" style="background:rgba(155,111,255,0.15)">📜</span>日志结构</h2>
+    <p class="section-lead">每条日志项（Log Entry）至少包含三个字段：</p>
+    <table>
+      <tr><th>字段</th><th>含义</th><th>作用</th></tr>
+      <tr><td>Index</td><td>日志槽位编号（从 1 递增）</td><td>确定"第几条"，用于匹配与对齐</td></tr>
+      <tr><td>Term</td><td>该条由哪个任期（Leader 任期号）写入</td><td>识别过期 Leader，保证单调</td></tr>
+      <tr><td>Command</td><td>要执行的客户端命令（如 set x=3）</td><td>状态机真正执行的内容</td></tr>
+    </table>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 640 90" xmlns="http://www.w3.org/2000/svg">
+        <g font-size="11">
+          <rect x="20" y="25" width="140" height="40" rx="6" fill="rgba(79,135,255,0.2)" stroke="var(--accent-blue)"/><text x="90" y="50" fill="#fff" text-anchor="middle">[idx1, T1, cmdA]</text>
+          <rect x="175" y="25" width="140" height="40" rx="6" fill="rgba(79,135,255,0.2)" stroke="var(--accent-blue)"/><text x="245" y="50" fill="#fff" text-anchor="middle">[idx2, T1, cmdB]</text>
+          <rect x="330" y="25" width="140" height="40" rx="6" fill="rgba(45,212,191,0.2)" stroke="var(--accent-teal)"/><text x="400" y="50" fill="#fff" text-anchor="middle">[idx3, T2, cmdC]</text>
+          <rect x="485" y="25" width="140" height="40" rx="6" fill="rgba(45,212,191,0.2)" stroke="var(--accent-teal)"/><text x="555" y="50" fill="#fff" text-anchor="middle">[idx4, T2, cmdD]</text>
+        </g>
+      </svg>
+    </div>
+    <div class="keyline"><strong>关键约束（日志匹配原则 Log Matching）：</strong>如果两个节点的日志在相同 <code>index</code> 处的 entry 的 <code>term</code> 相同，那么这两个 entry 及其之后所有 entry 都完全一致。这是 Raft 安全性的基石。</div>
+  </section>
+
+  <section id="flow" class="reveal">
+    <h2><span class="icon" style="background:rgba(45,212,191,0.15)">🚀</span>正常复制流程（5 步）</h2>
+    <div class="stepper">
+      <div class="step ok" data-n="1"><strong>客户端发命令给 Leader</strong>——如 <code>set x=5</code>。Leader 先把命令追加到自己日志（未提交）。</div>
+      <div class="step ok" data-n="2"><strong>Leader 广播 AppendEntries</strong>——通过 RPC 把新 entry 发给所有 Follower。</div>
+      <div class="step ok" data-n="3"><strong>Follower 追加并应答</strong>——若日志前置匹配，Follower 写入本地并返回成功。</div>
+      <div class="step ok" data-n="4"><strong>Leader 多数派确认 → 提交</strong>——收到多数（含自己）成功后，Leader 标记该 entry 为 <strong>committed</strong>。</div>
+      <div class="step ok" data-n="5"><strong>应用到状态机并响应</strong>——Leader 执行命令、返回客户端；后续 AppendEntries 中会带 <code>commitIndex</code> 通知 Follower 也提交执行。</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 640 220" xmlns="http://www.w3.org/2000/svg">
+        <g font-size="11">
+          <rect x="250" y="10" width="140" height="40" rx="8" fill="rgba(79,135,255,0.25)" stroke="var(--accent-blue)"/><text x="320" y="35" fill="#fff" text-anchor="middle" font-weight="600">Leader</text>
+          <rect x="40" y="150" width="140" height="40" rx="8" fill="rgba(155,111,255,0.2)" stroke="var(--accent-purple)"/><text x="110" y="175" fill="#fff" text-anchor="middle">Follower B</text>
+          <rect x="250" y="150" width="140" height="40" rx="8" fill="rgba(155,111,255,0.2)" stroke="var(--accent-purple)"/><text x="320" y="175" fill="#fff" text-anchor="middle">Follower C</text>
+          <rect x="460" y="150" width="140" height="40" rx="8" fill="rgba(155,111,255,0.2)" stroke="var(--accent-purple)"/><text x="530" y="175" fill="#fff" text-anchor="middle">Follower D</text>
+          <!-- 箭头 -->
+          <path d="M320 50 L110 150" stroke="var(--accent-teal)" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+          <path d="M320 50 L320 150" stroke="var(--accent-teal)" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+          <path d="M320 50 L530 150" stroke="var(--accent-teal)" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+          <text x="320" y="115" fill="var(--accent-teal)" text-anchor="middle" font-size="11">AppendEntries（广播日志）</text>
+          <path d="M110 150 L320 95" stroke="var(--accent-green)" stroke-width="2" fill="none" stroke-dasharray="4 3" marker-end="url(#ag)"/>
+          <path d="M530 150 L320 100" stroke="var(--accent-green)" stroke-width="2" fill="none" stroke-dasharray="4 3" marker-end="url(#ag)"/>
+          <text x="360" y="135" fill="var(--accent-green)" text-anchor="middle" font-size="11">ACK</text>
+        </g>
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--accent-teal)"/></marker>
+          <marker id="ag" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--accent-green)"/></marker>
+        </defs>
+      </svg>
+    </div>
+    <div class="info-box green"><span class="info-icon">✅</span><div class="info-body"><strong>多数派（Quorum）是关键：</strong>只要 <code>⌊N/2⌋+1</code> 个节点写入成功即可提交，其余节点网络慢/挂掉也不阻塞。这样即使挂掉少数节点，系统仍可写。</div></div>
+  </section>
+
+  <section id="safety" class="reveal">
+    <h2><span class="icon" style="background:rgba(248,113,113,0.15)">🛡️</span>安全性规则（必考）</h2>
+    <div class="card">
+      <div class="card-title">① Leader 完整性（Leader Completeness）</div>
+      <div class="card-desc">一旦某 entry 在某个任期被提交，那么后续所有任期的 Leader 的日志中<strong>都必须包含这条 entry</strong>。实现靠：选举时 Leader 必须是"日志最新最全"的节点（比较最后 entry 的 term 与 index）。</div>
+    </div>
+    <div class="card">
+      <div class="card-title">② 提交规则（只提交当前任期的 entry）</div>
+      <div class="card-desc">Leader 只能<strong>顺着提交自己任期内</strong>的 entry；不能仅靠"多数派有旧任期的 entry"就提交旧 entry，必须等<strong>自己任期的 entry 也提交后，旧 entry 随之提交</strong>。这是为了避免 Figure 8 经典脑裂丢数据问题。</div>
+    </div>
+    <div class="card">
+      <div class="card-title">③ 状态机安全</div>
+      <div class="card-desc">同 index 同 term 的 entry 命令必须相同，且一旦 apply 就不可更改——保证所有节点状态机执行同一序列。</div>
+    </div>
+    <div class="info-box red"><span class="info-icon">⚠️</span><div class="info-body"><strong>面试高频坑：</strong>为什么不能"多数派有旧 entry 就提交"？因为旧 Leader 可能已下台，新 Leader 没这条却也凑够多数，会导致已提交数据被覆盖。Raft 用"先提交自己任期 entry 连带提交旧 entry"规避。</div></div>
+  </section>
+
+  <section id="conflict" class="reveal">
+    <h2><span class="icon" style="background:rgba(251,191,36,0.15)">🔧</span>日志冲突处理</h2>
+    <p class="section-lead">Follower 日志可能和 Leader 不一致（网络丢包、旧 Leader 残留）。Raft 的解决方式非常"霸道但有效"。</p>
+    <div class="keyline"><strong>规则：</strong>Follower 发现某 index 处 term 与 Leader 不符 → <strong>Leader 强制用自己的日志覆盖 Follower 该位置及之后的所有 entry</strong>（因为 Leader 的日志才是权威）。</div>
+    <div class="card">
+      <div class="card-title">Leader 如何定位冲突点</div>
+      <div class="card-desc">
+        <p>AppendEntries 带 <code>prevLogIndex / prevLogTerm</code>。Follower 比对：</p>
+        <p style="margin-bottom:0">· 不匹配 → 拒绝，并返回自己该 index 的 term；<br>· Leader 据此把 <code>nextIndex</code> 回退（一次回退一格，或跳到该 term 的起点）重试，直到匹配；<br>· 匹配点之后，Leader 把后续 entry 全部覆盖写入。</p>
+      </div>
+    </div>
+    <div class="info-box amber"><span class="info-icon">🔄</span><div class="info-body"><strong>记忆：</strong>Follower 永远被动接受 Leader 的日志。没有"两边协商合并"——这保证了日志最终必然收敛到 Leader 的样子，简单而正确。</div></div>
+  </section>
+
+  <section id="compare" class="reveal">
+    <h2><span class="icon" style="background:rgba(74,222,128,0.15)">⚖️</span>Raft 日志复制 vs Multi Paxos</h2>
+    <table>
+      <tr><th>维度</th><th>Raft</th><th>Multi Paxos</th></tr>
+      <tr><td>角色</td><td>强 Leader（任期制、明确）</td><td>稳定的 Leader（隐式、易变）</td></tr>
+      <tr><td>日志连续性</td><td>日志必须连续（无空洞）</td><td>允许不连续 instance</td></tr>
+      <tr><td>成员变更</td><td>内置 joint consensus</td><td>需额外方案</td></tr>
+      <tr><td>理解难度</td><td>低（为可理解性设计）</td><td>高（理论性强）</td></tr>
+      <tr><td>代表</td><td>etcd / Consul / TiKV</td><td>Spanner / 部分 ZooKeeper 早期</td></tr>
+    </table>
+    <div class="info-box blue"><span class="info-icon">🎓</span><div class="info-body"><strong>总结：</strong>Multi Paxos 是 Raft 的"前身/等价物"，Raft 把 Leader 角色、日志连续性、成员变更都<strong>显式化</strong>，换来了好实现、好讲、好排错。</div></div>
+  </section>
+
+  <section id="interview" class="reveal">
+    <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🎯</span>面试要点速记</h2>
+    <div class="stepper">
+      <div class="step ok" data-n="1"><strong>复制状态机：</strong>相同日志 → 相同状态机 → 相同结果，Raft 复制的是"命令日志"而非状态。</div>
+      <div class="step ok" data-n="2"><strong>日志三要素：</strong>index、term、command；靠"日志匹配原则"保证一致性。</div>
+      <div class="step ok" data-n="3"><strong>正常流程：</strong>Leader 追加 → 广播 → 多数 ACK → 提交 → apply。</div>
+      <div class="step ok" data-n="4"><strong>多数派：</strong>只需 <code>⌊N/2⌋+1</code> 成功即可提交，挂少数不阻塞。</div>
+      <div class="step ok" data-n="5"><strong>安全性：</strong>Leader 完整性 + 只提交当前任期 entry（连带提交旧 entry）。</div>
+      <div class="step ok" data-n="6"><strong>冲突：</strong>Leader 强制覆盖 Follower 不一致部分；Follower 被动接受。</div>
+    </div>
+    <div class="info-box purple"><span class="info-icon">🔥</span><div class="info-body"><strong>必考题：</strong>"Raft 怎么保证已提交的日志不会丢？"——靠 <strong>Leader 完整性 + 选举限制（新 Leader 必须含全部已提交日志）</strong>，所以新 Leader 上任后只会追加、不会覆盖已提交的 entry。</div></div>
+  </section>
+</main>
+<footer>分布式系统 · Raft 日志复制 — 复制状态机与一致性 | 面试核心图解</footer>
+<script>
+  const observer = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); }); }, { threshold: 0.08 });
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+  const nav = document.getElementById('main-nav'); const navLinks = Array.from(nav.querySelectorAll('a'));
+  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href')));
+  const spy = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) { const id = '#' + e.target.id; navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id)); } }); }, { rootMargin: '-60px 0px -70% 0px' });
+  sections.forEach(s => s && spy.observe(s));
+</script>
+</body>
+</html>
