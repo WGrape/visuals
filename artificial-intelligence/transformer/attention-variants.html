@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>注意力变体：FlashAttention / MQA / GQA 为什么出现</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:46px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .formula{background:#0b1f33;border:1px solid var(--line);border-radius:10px;
+    padding:14px 18px;font-family:"SFMono-Regular",Consolas,monospace;color:var(--cyan);
+    font-size:16px;margin:12px 0;text-align:center;overflow-x:auto}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">Transformer 架构</span>
+    <h1>注意力变体：FlashAttention / MQA / GQA 为什么出现</h1>
+    <p class="lead">标准自注意力复杂度 O(n²)，显存和速度都吃不消长序列。为降本提速，派生出 FlashAttention（IO 感知）、MQA/GQA（共享 KV）、稀疏/线性注意力。本文讲清每种解决什么、代价是什么。</p>
+  </div>
+</header>
+
+<section class="fade" id="s1"><div class="wrap">
+  <h2>一句话回答</h2>
+  <p class="lead">标准注意力的瓶颈是 <b>O(n²)</b> 的显存与算力。三条优化路线分别打不同痛点：<span class="hl">FlashAttention</span> 解决「显存带宽」、<span class="hl2">MQA/GQA</span> 解决「KV Cache 太大」、<span class="hl3">稀疏/线性注意力</span> 解决「n² 计算本身」。</p>
+</div></section>
+
+<section class="fade" id="s2"><div class="wrap">
+  <h2>标准注意力的瓶颈</h2>
+  <p>对长度 n、维度 d：每个头的注意力要算 n×n 的分数矩阵，复杂度和显存都随 <b>n²</b> 增长。</p>
+  <div class="formula">显存: O(n²·h) &nbsp;&nbsp; 算力: O(n²·d)</div>
+  <p>更致命的是<b>显存带宽</b>：标准实现要把巨大的 n×n 中间矩阵写回 HBM 再读回来算 softmax，GPU 大部分时间在「搬数据」而非「算」。长上下文（32k/128k）下这事直接炸。</p>
+  <div class="svgbox"><svg viewBox="0 0 680 200">
+    <g font-size="13" fill="#9aa7b4">
+      <text x="20" y="28">标准：先算完整 N×N 分数矩阵（巨大、写回显存）</text>
+      <rect x="40" y="50" width="240" height="120" fill="none" stroke="#2a3340"/>
+      <text x="150" y="116" fill="#ff7b72" text-anchor="middle">N×N 矩阵</text>
+      <text x="330" y="80" fill="#e6edf3">→ 写回 HBM →</text>
+      <text x="330" y="104" fill="#e6edf3">读回算 softmax</text>
+      <text x="500" y="80" fill="#58a6ff">带宽瓶颈</text>
+      <text x="500" y="104" fill="#9aa7b4">GPU 干等</text>
+    </g>
+  </svg></div>
+</div></section>
+
+<section class="fade" id="s3"><div class="wrap">
+  <h2>FlashAttention：不写出完整矩阵</h2>
+  <p>FlashAttention（Dao 2022）的核心是 <b>IO-aware</b>：把 Q/K/V 切块（tiling），在 GPU 高速缓存（SRAM）里<b>一块一块算 softmax 并累加</b>，<span class="hl2">全程不把 N×N 中间矩阵写回显存</span>。需要重算（recomputation）反向时的中间值，用「算力换带宽」。</p>
+  <div class="good">收益：显存从 O(n²) 降到 <b>O(n)</b>，速度数倍提升，且数值完全等价于标准注意力（不是近似）。是长上下文和高效训练推理的基石，v2/v3 进一步优化。</div>
+  <div class="note">FlashAttention 不改数学结果，只是更聪明的「搬运+计算」顺序。它和下面的 MQA/GQA 是正交的——可以叠加。</div>
+</div></section>
+
+<section class="fade" id="s4"><div class="wrap">
+  <h2>MQA（Multi-Query Attention）：共享 KV</h2>
+  <p>标准 MHA 里，每个注意力头有自己的一套 Q、K、V。推理时每个 token 都要缓存一份 K、V（KV Cache），头数一多，缓存巨大、且读取 KV 的显存带宽成为瓶颈。</p>
+  <p>MQA（Shazeer 2019）：<b>所有头共享同一份 K 和 V</b>，只保留多套 Q。KV Cache 直接缩小 h 倍。</p>
+  <div class="svgbox"><svg viewBox="0 0 680 200">
+    <g font-size="13" fill="#9aa7b4">
+      <text x="20" y="26">MHA：每头各一份 KV → 缓存大</text>
+      <text x="20" y="50" fill="#58a6ff">Q₁K₁V₁ Q₂K₂V₂ Q₃K₃V₃ …</text>
+      <text x="20" y="120" fill="#e3b341">MQA：所有头共用一份 KV</text>
+      <text x="20" y="144" fill="#3fb950">Q₁ Q₂ Q₃ …  │  共享 K V</text>
+      <rect x="360" y="40" width="280" height="24" fill="#1c2230" stroke="#2a3340"/>
+      <text x="500" y="57" fill="#ff7b72" text-anchor="middle">MHA 缓存 = h 份</text>
+      <rect x="360" y="130" width="280" height="24" fill="#1c2230" stroke="#2a3340"/>
+      <text x="500" y="147" fill="#3fb950" text-anchor="middle">MQA 缓存 = 1 份</text>
+    </g>
+  </svg></div>
+  <div class="warn">代价：质量略降、训练可能不稳；但推理提速明显，PaLM 等采用。</div>
+</div></section>
+
+<section class="fade" id="s5"><div class="wrap">
+  <h2>GQA（Grouped-Query Attention）：折中方案</h2>
+  <p>GQA（Ainslie 2023）是 MHA 和 MQA 的<b>折中</b>：把 h 个头分成 g 组，<b>每组共享一份 K、V</b>。g=1 就是 MQA，g=h 就是 MHA。</p>
+  <div class="good">Llama 2/3、Mistral、Qwen 等几乎都用 GQA。它几乎不掉点，却把 KV Cache 和推理延迟压下来一大截，是「质量-效率」的最优平衡点。一般取 g = 头数 / 若干（如 8 头分 4 组）。</div>
+</div></section>
+
+<section class="fade" id="s6"><div class="wrap">
+  <h2>稀疏 / 线性注意力：砍掉 n² 计算</h2>
+  <p>前面几种大多只优化常数。若要真正摆脱 O(n²)，得限制「每个 token 看多少个」：</p>
+  <div class="grid2">
+    <div class="kbox"><b>稀疏注意力</b><br>只算局部窗口 + 少量全局 token（Longformer、BigBird），复杂度降到 O(n·√n) 或 O(n·w)。</div>
+    <div class="kbox"><b>线性注意力</b><br>用核函数把 softmax 重排，先算 V·Kᵀ 再乘 Q，复杂度 O(n·d²)，与 n 线性（Linear Attention、RetNet、Mamba 类）。</div>
+  </div>
+  <div class="warn">代价：稀疏/线性会损失全局交互能力，质量或长程依赖上通常弱于稠密注意力，工业落地不如 FlashAttention+GQA 普遍。</div>
+</div></section>
+
+<section class="fade" id="s7"><div class="wrap">
+  <h2>对比一览</h2>
+  <table>
+    <tr><th>方案</th><th>打的点</th><th>KV 头数</th><th>显存/速度</th><th>质量</th><th>是否近似</th></tr>
+    <tr><td>MHA（标准）</td><td>—</td><td>h</td><td>基准</td><td>最佳</td><td>精确</td></tr>
+    <tr><td>FlashAttention</td><td>显存带宽</td><td>h</td><td>显存↓O(n) 速度↑</td><td>精确</td><td>精确</td></tr>
+    <tr><td>MQA</td><td>KV 缓存</td><td>1</td><td>缓存↓h倍 快</td><td>略降</td><td>精确</td></tr>
+    <tr><td><b>GQA</b></td><td>KV 缓存</td><td>g</td><td>缓存↓ 快</td><td>近 MHA</td><td>精确</td></tr>
+    <tr><td>稀疏/线性</td><td>n² 计算</td><td>h</td><td>复杂度↓</td><td>可能降</td><td>近似</td></tr>
+  </table>
+</div></section>
+
+<section class="fade" id="s8"><div class="wrap">
+  <h2>总结</h2>
+  <ul>
+    <li>标准注意力 O(n²) 卡在<b>显存带宽</b>和<b>KV 缓存</b>。</li>
+    <li>FlashAttention = 更聪明的计算顺序（不写大矩阵），精确且快。</li>
+    <li>MQA/GQA = 共享 KV，直接压推理缓存与延迟，GQA 是性价比之王。</li>
+    <li>稀疏/线性 = 真·降复杂度，但质量权衡大，落地面较窄。</li>
+    <li>现实中常<b>叠加</b>：GQA + FlashAttention + 分页 KV Cache（PagedAttention）。</li>
+  </ul>
+</div></section>
+
+<footer class="wrap">
+  <p>© Visuals · 用大白话讲清 AI 高频考点 · 配图与公式均为示意</p>
+</footer>
+
+<script>
+/* TOC + scroll-spy */
+const sections=[...document.querySelectorAll('section[id]')];
+const toc=document.getElementById('toc');
+const names={s1:'一句话', s2:'标准瓶颈', s3:'FlashAttn', s4:'MQA', s5:'GQA', s6:'稀疏', s7:'对比', s8:'总结'};
+sections.forEach(s=>{
+  const a=document.createElement('a');a.href='#'+s.id;a.title=names[s.id]||s.id;
+  a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:'smooth'})};toc.appendChild(a);
+});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+/* fade-in */
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{rootMargin:'0px 0px -10% 0px'});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+
+</body>
+</html>

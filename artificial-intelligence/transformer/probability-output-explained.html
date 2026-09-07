@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>大模型「按概率输出」到底是怎么回事？——从一句话到一个词的完整链路</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --panel2: #1c2430; --border: #2a3340;
+    --text: #e6edf3; --dim: #9aa7b5;
+    --c1: #ff6b6b; --c2: #4e9dff; --c3: #ffb454; --c4: #57c98a; --c5: #c792ea;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    line-height: 1.8; font-size: 15px;
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 50; background: rgba(14,17,23,.93);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    padding: 11px 22px; display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .nav a { color: var(--dim); text-decoration: none; font-size: 13px; padding: 4px 9px; border-radius: 6px; }
+  .nav a:hover { color: var(--text); background: var(--panel2); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 90px; }
+  h1 { font-size: 29px; margin: 0 0 8px; line-height: 1.35; }
+  h2 { font-size: 22px; margin: 52px 0 14px; padding-left: 12px; border-left: 4px solid var(--c1); }
+  h3 { font-size: 17px; margin: 22px 0 10px; color: var(--c2); }
+  p { margin: 10px 0; }
+  .lead { color: var(--dim); font-size: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin: 16px 0; }
+  .card.c1 { border-left: 5px solid var(--c1); }
+  .card.c2 { border-left: 5px solid var(--c2); }
+  .card.c3 { border-left: 5px solid var(--c3); }
+  .card.c4 { border-left: 5px solid var(--c4); }
+  .card.c5 { border-left: 5px solid var(--c5); }
+  code { background: var(--panel2); padding: 2px 7px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: var(--c3); }
+  .formula { background: linear-gradient(135deg,#1c2430,#202a38); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 14px 0; font-family: Consolas, monospace; overflow-x: auto; font-size: 14px; }
+  .formula .r { color: var(--c1); font-weight: 600; }
+  .formula .b { color: var(--c2); font-weight: 600; }
+  .formula .y { color: var(--c3); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: var(--panel2); color: var(--c2); }
+  .svgbox { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin: 18px 0; overflow-x: auto; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; margin: 2px 4px 2px 0; border: 1px solid var(--border); }
+  .tag.t1 { background: rgba(255,107,107,.12); color: var(--c1); border-color: var(--c1); }
+  .tag.t2 { background: rgba(78,157,255,.12); color: var(--c2); border-color: var(--c2); }
+  .tag.t3 { background: rgba(255,180,84,.12); color: var(--c3); border-color: var(--c3); }
+  .tag.t4 { background: rgba(87,201,138,.12); color: var(--c4); border-color: var(--c4); }
+  .tag.t5 { background: rgba(199,146,234,.12); color: var(--c5); border-color: var(--c5); }
+  .foot { color: var(--dim); font-size: 13px; margin-top: 60px; border-top: 1px solid var(--border); padding-top: 20px; }
+  .foot a { color: var(--c2); }
+  b.hl { color: var(--c3); }
+
+  /* probability bars */
+  .pbar { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .pbar .plabel { width: 38px; text-align: center; font-family: Consolas, monospace; background: var(--panel2); border-radius: 6px; padding: 3px 0; font-size: 13px; }
+  .ptrack { flex: 1; background: #0b0f15; border-radius: 6px; height: 22px; overflow: hidden; }
+  .pfill { height: 100%; background: linear-gradient(90deg, var(--c2), var(--c5)); border-radius: 6px; transition: width .25s ease; }
+  .pbar.on .pfill { background: linear-gradient(90deg, var(--c4), var(--c3)); box-shadow: 0 0 10px rgba(87,201,138,.6); }
+  .pbar.on .plabel { background: var(--c4); color: #0e1117; font-weight: 700; }
+  .ppct { width: 56px; text-align: right; font-family: Consolas, monospace; color: var(--dim); font-size: 13px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 14px 0 6px; }
+  .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  .btn:hover { border-color: var(--c2); }
+  .btn.primary { background: var(--c2); color: #0e1117; border-color: var(--c2); font-weight: 600; }
+  .btn.primary:hover { background: #6fb0ff; }
+  .btn.warm { background: var(--c3); color: #0e1117; border-color: var(--c3); font-weight: 600; }
+  .btn.warm:hover { background: #ffc56b; }
+  input[type=range] { accent-color: var(--c3); }
+  .readout { background: var(--panel2); border-radius: 8px; padding: 10px 14px; margin: 10px 0; font-size: 14px; }
+  .readout .big { font-size: 22px; font-weight: 700; color: var(--c4); }
+  .genbox { background: #0b0f15; border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 12px 0; font-size: 18px; line-height: 1.9; min-height: 56px; }
+  .genbox .done { color: var(--text); }
+  .genbox .cur { color: var(--c4); font-weight: 700; border-bottom: 2px solid var(--c4); }
+  .genbox .cursor { animation: blink 1s step-end infinite; color: var(--c2); }
+  @keyframes blink { 50% { opacity: 0; } }
+  .hist { font-size: 13px; color: var(--dim); font-family: Consolas, monospace; max-height: 96px; overflow-y: auto; }
+  .myth { display: flex; gap: 12px; margin: 10px 0; }
+  .myth .x { color: var(--c1); font-weight: 700; font-size: 18px; flex-shrink: 0; }
+  .myth .ok { color: var(--c4); font-weight: 700; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#one">1. 一句话结论</a>
+  <a href="#token">2. 先懂 token</a>
+  <a href="#pipeline">3. 完整流程</a>
+  <a href="#dist">4. 算概率分布</a>
+  <a href="#temp">5. 交互·温度</a>
+  <a href="#decode">6. 怎么选词</a>
+  <a href="#auto">7. 交互·自回归</a>
+  <a href="#myth">8. 常见误解</a>
+  <a href="#why">9. 为何有效</a>
+  <a href="#sum">10. 总结</a>
+</div>
+
+<div class="wrap">
+  <h1>大模型「按概率输出」到底是怎么回事？</h1>
+  <p class="lead">从"今天天气真___"到一个完整的回答——把"按概率输出"拆开讲透：模型到底在算什么、怎么算、又怎么把概率变成你看到的字。</p>
+  <div>
+    <span class="tag t1">概率输出</span>
+    <span class="tag t2">自回归生成</span>
+    <span class="tag t3">Softmax</span>
+    <span class="tag t4">解码策略</span>
+    <span class="tag t5">温度采样</span>
+  </div>
+
+  <h2 id="one">一、一句话结论：先纠正直觉</h2>
+  <div class="card c1">
+    <p style="margin-top:0"><b>「大模型按概率输出」的准确意思是：</b></p>
+    <p>模型<strong>不会"想好一句话再写出来"</strong>，而是每次只干一件事——<b class="hl">给定已经写出来的所有字，算出"下一个字应该是哪个"的概率分布</b>，然后按某种策略从分布里挑一个字，接在后面，再重复这个过程。</p>
+    <p style="margin-bottom:0">所以：</p>
+    <ul style="margin-bottom:0">
+      <li><b>"概率"</b> = 下一个词的可能性大小（不是"随机瞎说"）。</li>
+      <li><b>"输出"</b> = 一次次"算分布 → 选一个字"的循环，直到生成结束符。</li>
+      <li>整个过程本质是<b class="hl">数学上的条件概率</b>：<code>P(下一个词 | 前面所有词)</code>。</li>
+    </ul>
+  </div>
+
+  <div class="card c3">
+    <b>一个生活类比：手机输入法的"联想词"。</b><br/>
+    你打"今天天气真"，输入法会在候选栏列出"好 / 棒 / 差 / 热…"。它背后就是一个小概率模型——它并没"理解"你的心情，只是根据海量聊天记录，统计出"真"后面最常接"好"。大模型干的也是同一件事，只是规模大了十万倍、准了十万倍，并且能"续写"而不是只补一个词。
+  </div>
+
+  <h2 id="token">二、先搞懂：模型操作的是「token」，不是字</h2>
+  <p>在你看到的"文字"和模型算的"概率"之间，隔着一道"分词（Tokenization）"。模型既不读汉字也不读字母，它读的是 <b class="hl">token（词元）</b>——一串数字编号。</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="22" fill="#9aa7b5" font-size="13">第 1 步：把文本切成 token（中文常按字/词，英文常按子词）</text>
+      <!-- text -->
+      <text x="20" y="62" fill="#e6edf3" font-size="20">我喜欢吃苹果</text>
+      <line x1="20" y1="74" x2="232" y2="74" stroke="#2a3340" stroke-dasharray="3 3"/>
+      <!-- tokens -->
+      <g font-size="15">
+        <rect x="20" y="92" width="44" height="34" rx="6" fill="#161b22" stroke="#4e9dff"/><text x="42" y="114" fill="#4e9dff" text-anchor="middle">我</text>
+        <rect x="72" y="92" width="44" height="34" rx="6" fill="#161b22" stroke="#4e9dff"/><text x="94" y="114" fill="#4e9dff" text-anchor="middle">喜欢</text>
+        <rect x="124" y="92" width="44" height="34" rx="6" fill="#161b22" stroke="#4e9dff"/><text x="146" y="114" fill="#4e9dff" text-anchor="middle">吃</text>
+        <rect x="176" y="92" width="44" height="34" rx="6" fill="#161b22" stroke="#4e9dff"/><text x="198" y="114" fill="#4e9dff" text-anchor="middle">苹果</text>
+      </g>
+      <text x="240" y="116" fill="#9aa7b5" font-size="20">→</text>
+      <!-- ids -->
+      <text x="280" y="100" fill="#9aa7b5" font-size="13">每个 token 映射成一个编号（编入词表）：</text>
+      <g font-size="14" font-family="Consolas, monospace">
+        <rect x="280" y="112" width="78" height="30" rx="6" fill="#1c2430"/><text x="319" y="132" fill="#ffb454" text-anchor="middle">我 = 882</text>
+        <rect x="366" y="112" width="84" height="30" rx="6" fill="#1c2430"/><text x="408" y="132" fill="#ffb454" text-anchor="middle">喜欢 = 9043</text>
+        <rect x="458" y="112" width="66" height="30" rx="6" fill="#1c2430"/><text x="491" y="132" fill="#ffb454" text-anchor="middle">吃 = 117</text>
+        <rect x="532" y="112" width="84" height="30" rx="6" fill="#1c2430"/><text x="574" y="132" fill="#ffb454" text-anchor="middle">苹果 = 5521</text>
+      </g>
+      <text x="20" y="172" fill="#9aa7b5" font-size="12">英文例子：playing → "play" + "ing"（拆成子词），所以模型能"拼"出从没见过的词。</text>
+    </svg>
+  </div>
+  <div class="card c2">
+    <b>关键认知：</b>模型算的"下一个词的概率"，其实是<code>P(下一个 token | 前面的 token 序列)</code>。概率分布的"候选名单"，就是整个<b class="hl">词表</b>——一个可能有 <b>5 万到 20 万个</b> token 的巨大清单。每次生成，都要对这十几万个候选各算一个数。
+  </div>
+
+  <h2 id="pipeline">三、完整流程：一图看全「从一句话到一个概率分布」</h2>
+  <p>把"今天天气真"变成"好"这一个字，中间要经过下面这条流水线。注意最后一步才得到"概率"，而"选字"是另一步（下一节讲）。</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 540" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <!-- nodes -->
+      <g font-size="13">
+        <rect x="270" y="14" width="180" height="40" rx="8" fill="#161b22" stroke="#4e9dff"/><text x="360" y="38" fill="#e6edf3" text-anchor="middle">① 输入文本「今天天气真」</text>
+
+        <rect x="270" y="74" width="180" height="40" rx="8" fill="#161b22" stroke="#4e9dff"/><text x="360" y="98" fill="#e6edf3" text-anchor="middle">② 分词 → token 编号</text>
+
+        <rect x="270" y="134" width="180" height="40" rx="8" fill="#161b22" stroke="#c792ea"/><text x="360" y="158" fill="#e6edf3" text-anchor="middle">③ 嵌入 + 位置编码</text>
+        <text x="470" y="158" fill="#9aa7b5" font-size="11">变成向量</text>
+
+        <rect x="270" y="194" width="180" height="40" rx="8" fill="#161b22" stroke="#c792ea"/><text x="360" y="218" fill="#e6edf3" text-anchor="middle">④ Transformer 多层</text>
+        <text x="250" y="218" fill="#9aa7b5" font-size="11" text-anchor="end">自注意力+前馈</text>
+
+        <rect x="270" y="254" width="180" height="40" rx="8" fill="#161b22" stroke="#ffb454"/><text x="360" y="278" fill="#e6edf3" text-anchor="middle">⑤ 取最后一个位置</text>
+
+        <rect x="270" y="314" width="180" height="40" rx="8" fill="#161b22" stroke="#ffb454"/><text x="360" y="338" fill="#e6edf3" text-anchor="middle">⑥ 线性层 → 词表 Logits</text>
+
+        <rect x="270" y="374" width="180" height="40" rx="8" fill="#161b22" stroke="#57c98a"/><text x="360" y="398" fill="#e6edf3" text-anchor="middle">⑦ Softmax → 概率分布</text>
+
+        <rect x="270" y="434" width="180" height="40" rx="8" fill="#161b22" stroke="#ff6b6b"/><text x="360" y="458" fill="#e6edf3" text-anchor="middle">⑧ 解码策略：选一个 token</text>
+
+        <rect x="270" y="494" width="180" height="34" rx="8" fill="#0b0f15" stroke="#2a3340"/><text x="360" y="516" fill="#9aa7b5" text-anchor="middle">⑨ 把选中的 token 接回 ①</text>
+      </g>
+      <!-- arrows down -->
+      <g stroke="#9aa7b5" stroke-width="1.6" marker-end="url(#ar)">
+        <line x1="360" y1="54" x2="360" y2="72"/>
+        <line x1="360" y1="114" x2="360" y2="132"/>
+        <line x1="360" y1="174" x2="360" y2="192"/>
+        <line x1="360" y1="234" x2="360" y2="252"/>
+        <line x1="360" y1="294" x2="360" y2="312"/>
+        <line x1="360" y1="354" x2="360" y2="372"/>
+        <line x1="360" y1="414" x2="360" y2="432"/>
+        <line x1="360" y1="474" x2="360" y2="492"/>
+      </g>
+      <!-- loop back arrow -->
+      <path d="M270 511 C 140 511, 140 280, 268 282" fill="none" stroke="#ff6b6b" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+      <text x="120" y="400" fill="#ff6b6b" font-size="11">自回归循环：把新词拼回去，再算下一个</text>
+
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#9aa7b5"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+  <div class="card c5">
+    <b>记住这个循环：</b>第 ⑨ 步把选出来的字又塞回第 ① 步，模型对"更长的上文"再算一次分布、再选一个字……如此反复，直到吐出"结束符"。这就是"自回归（Auto-Regressive）"——<b class="hl">自己之前生成的字，是下一步生成的输入</b>。所以大模型"写文章"和"接龙"是同一回事。
+  </div>
+
+  <h2 id="dist">四、核心：每一步都在算「下一个词的概率分布」</h2>
+  <p>第 ⑥ 步的"Logits"是一个长度等于词表大小的数组（比如 15 万个数），每个数表示"对应 token 有多匹配"。第 ⑦ 步用 <b class="hl">Softmax</b> 把这个数组压成"加起来等于 100% 的概率分布"。</p>
+
+  <div class="formula">
+    <span class="y">P(tokenᵢ)</span> = exp(<span class="b">zᵢ</span>) / Σⱼ exp(<span class="b">zⱼ</span>)     <span style="color:var(--dim)">// zᵢ 是第 i 个 token 的 logit；Softmax 把任意实数变成 0~1 且总和为 1 的概率</span>
+  </div>
+
+  <p>词表极大，所以绝大多数 token 的概率都接近 0，只有少数几个"像样"。下面画的是"今天天气真"之后，词表里的真实形状——<b class="hl">一条长尾，极少数候选吃掉了几乎全部概率</b>。</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 260" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="20" fill="#9aa7b5" font-size="13">「今天天气真」之后，词表上部分候选的概率（示意，纵轴=概率，横轴=不同 token）</text>
+      <!-- baseline -->
+      <line x1="40" y1="230" x2="710" y2="230" stroke="#2a3340" stroke-width="1.5"/>
+      <!-- tall bars -->
+      <g>
+        <rect x="60" y="40" width="22" height="190" fill="#57c98a"/><text x="71" y="32" fill="#e6edf3" font-size="11" text-anchor="middle">好 0.46</text>
+        <rect x="100" y="86" width="22" height="144" fill="#4e9dff"/><text x="111" y="78" fill="#e6edf3" font-size="11" text-anchor="middle">棒 0.21</text>
+        <rect x="140" y="140" width="22" height="90" fill="#4e9dff"/><text x="151" y="132" fill="#e6edf3" font-size="11" text-anchor="middle">热 0.12</text>
+        <rect x="180" y="172" width="22" height="58" fill="#4e9dff"/><text x="191" y="164" fill="#e6edf3" font-size="11" text-anchor="middle">冷 0.07</text>
+        <rect x="220" y="200" width="22" height="30" fill="#9aa7b5"/><text x="231" y="220" fill="#9aa7b5" font-size="10" text-anchor="middle">的</text>
+      </g>
+      <!-- long tail: many tiny -->
+      <g fill="#2a3340">
+        <rect x="270" y="226" width="6" height="4"/><rect x="282" y="227" width="6" height="3"/><rect x="294" y="226" width="6" height="4"/><rect x="306" y="227" width="6" height="3"/><rect x="318" y="226" width="6" height="4"/><rect x="330" y="227" width="6" height="3"/><rect x="342" y="226" width="6" height="4"/><rect x="354" y="225" width="6" height="5"/><rect x="366" y="227" width="6" height="3"/><rect x="378" y="226" width="6" height="4"/><rect x="390" y="227" width="6" height="3"/><rect x="402" y="226" width="6" height="4"/><rect x="414" y="227" width="6" height="3"/><rect x="426" y="226" width="6" height="4"/><rect x="438" y="225" width="6" height="5"/><rect x="450" y="227" width="6" height="3"/><rect x="462" y="226" width="6" height="4"/><rect x="474" y="227" width="6" height="3"/><rect x="486" y="226" width="6" height="4"/><rect x="498" y="227" width="6" height="3"/><rect x="510" y="226" width="6" height="4"/><rect x="522" y="225" width="6" height="5"/><rect x="534" y="227" width="6" height="3"/><rect x="546" y="226" width="6" height="4"/><rect x="558" y="227" width="6" height="3"/><rect x="570" y="226" width="6" height="4"/><rect x="582" y="227" width="6" height="3"/><rect x="594" y="226" width="6" height="4"/><rect x="606" y="225" width="6" height="5"/><rect x="618" y="227" width="6" height="3"/><rect x="630" y="226" width="6" height="4"/><rect x="642" y="227" width="6" height="3"/><rect x="654" y="226" width="6" height="4"/><rect x="666" y="227" width="6" height="3"/><rect x="678" y="226" width="6" height="4"/><rect x="690" y="227" width="6" height="3"/>
+      </g>
+      <text x="710" y="246" fill="#9aa7b5" font-size="11" text-anchor="end">剩余十几万 token：概率≈0</text>
+    </svg>
+  </div>
+  <div class="card c4">
+    <b>读到这里你其实已经懂了 80%：</b>"按概率输出"= 每写一个字，都对全词表算一遍概率、挑一个。模型"说的话"完全由这条分布 + 挑选规则决定。下面两个交互，让你亲手感受分布和高低温度的区别。
+  </div>
+
+  <h2 id="temp">五、交互①：温度如何重塑概率分布</h2>
+  <p>同一个上文，模型算出的 logits 是固定的。但我们可以先用一个叫 <b class="hl">温度（Temperature）</b> 的数"加工"一下，再算 Softmax——这直接决定了生成是"死板"还是"发散"。</p>
+
+  <div class="formula">
+    <span class="y">P(tokenᵢ)</span> = exp(<span class="b">zᵢ</span> / <span class="r">T</span>) / Σⱼ exp(<span class="b">zⱼ</span> / <span class="r">T</span>)
+    <span style="color:var(--dim)">// T 越小→分布越尖(几乎只选最大的)；T 越大→分布越平(大家都有机会)</span>
+  </div>
+
+  <div class="card c2">
+    <div class="controls">
+      <span>温度 T：</span>
+      <input type="range" id="tempSlider" min="0.2" max="2" step="0.1" value="1" style="width:220px"/>
+      <span id="tempVal" class="readout" style="margin:0;padding:4px 10px">T = 1.0</span>
+    </div>
+    <div id="probBars"></div>
+    <div class="controls">
+      <button class="btn primary" id="greedyBtn">贪心：永远选概率最高的</button>
+      <button class="btn warm" id="sampleBtn">按概率采样一次</button>
+      <button class="btn" id="clearHist">清空采样记录</button>
+    </div>
+    <div class="readout">本次选中：<span id="pickOut" class="big">—</span> <span id="pickProb" style="color:var(--dim)"></span></div>
+    <div class="hist" id="sampleHist">采样历史（点"按概率采样"会看到：同样的分布，每次结果可能不同）：</div>
+  </div>
+
+  <div class="card c3">
+    <b>看懂了什么？</b>
+    <ul style="margin-bottom:0">
+      <li>把 T 拖到 <b>0.2</b>：分布被"压尖"，最高那个词几乎独占 90%+，每次都选它 → 输出稳定、重复、保守。</li>
+      <li>把 T 拖到 <b>2.0</b>：分布被"摊平"，"好/棒/热"差距缩小 → 选哪个都更随机 → 输出发散、有创意、但可能跑题。</li>
+      <li><b>"贪心"</b>永远选最高，是<b>确定性</b>的；<b>"采样"</b>按概率抽签，是<b>随机性</b>的。这就是为什么同一句话你问两遍，温度&gt;0 时答案会不一样。</li>
+    </ul>
+  </div>
+
+  <h2 id="decode">六、怎么从分布里"挑"出那个词：解码策略</h2>
+  <p>第 ⑧ 步的"选词"有多种玩法（统称解码 / Decoding）。它们<strong>都不改变分布本身</strong>，只改变"怎么从分布里取一个"：</p>
+  <table>
+    <tr><th>策略</th><th>做法</th><th>特点</th><th>适用</th></tr>
+    <tr><td><b>贪心 Greedy</b></td><td>永远选概率最高的那个</td><td>确定、单调，易重复啰嗦</td><td>需要稳定的场景</td></tr>
+    <tr><td><b>温度采样</b></td><td>用温度缩放后按概率抽</td><td>可调创意度，最常见</td><td>聊天/写作</td></tr>
+    <tr><td><b>Top-K</b></td><td>只在概率最高的 K 个里抽</td><td>砍掉离谱长尾，避免胡说</td><td>通用</td></tr>
+    <tr><td><b>Top-P（核采样）</b></td><td>只在区间内累计概率≥P 的最小候选集里抽</td><td>自适应候选数，比 Top-K 更稳</td><td>当前主流</td></tr>
+    <tr><td><b>Beam Search</b></td><td>同时保留几条候选路径，选整体概率最高</td><td>偏"标准答案"，翻译/摘要常用</td><td>翻译、摘要</td></tr>
+  </table>
+  <div class="card c5">
+    <b>一句话区分：</b>概率分布是"算"出来的（由模型参数和上文唯一决定）；选哪个词是"策略"决定的（由你设的温度/Top-K/Top-P 决定）。<b class="hl">模型永远在输出概率，只是"取数方式"不同</b>——这正是"按概率输出"这句话的精确含义。
+  </div>
+
+  <h2 id="auto">七、交互②：自回归是怎么一步步"吐字"的</h2>
+  <p>点"下一步"，看模型如何把"概率 → 选词 → 拼回输入"循环起来，一点点把句子接出来。每步下方都列出当时的候选分布（取自该步的上文）。</p>
+
+  <div class="card c4">
+    <div class="genbox" id="genText"><span class="cursor">█</span></div>
+    <div class="controls">
+      <button class="btn primary" id="genNext">下一步 ▶</button>
+      <button class="btn" id="genReset">重置</button>
+      <span class="readout" style="margin:0;padding:4px 10px" id="genStepOut">第 0 / 6 步</span>
+    </div>
+    <div id="genBars"></div>
+    <div class="readout" style="margin-top:8px">本步从分布中选中：<span id="genPick" class="big">—</span></div>
+  </div>
+  <div class="card c2">
+    <b>这就是"生成"的真相：</b>没有"先想好整句再写"，只有"每走一步，看眼前，猜下一个"。翻译、写代码、写诗，全都是这个接龙循环——区别只在模型见过的语料让它"猜"得更准。
+  </div>
+
+  <h2 id="myth">八、三个常见误解（看你是否真懂了）</h2>
+
+  <div class="myth"><span class="x">✗</span><div><b>"模型是按概率随机乱说。"</b> —— 错。分布是<b class="hl">从海量数据里学出来的规律</b>，通常高度集中在合理的词上（看图四那条长尾：绝大多数概率都给了"好/棒/热"）。"随机"只出现在采样这一步，且温度越高越随机。</div></div>
+  <div class="myth"><span class="x">✗</span><div><b>"模型像人一样'理解'了再回答。"</b> —— 目前更准确的描述是：它在做<b class="hl">极复杂的"下一个词预测"</b>。它不"懂"语义，但预测准到表现出"懂"的样子（学界对此仍有争论，但不影响"它按概率输出"这一事实）。</div></div>
+  <div class="myth"><span class="x">✗</span><div><b>"同一句话每次答案应该一样。"</b> —— 只有在<b>温度=0 且贪心</b>时才（近似）确定。只要开启采样，同样的输入也会因"按概率抽签"而给出不同结果——这恰恰是"概率输出"的直接证据。</div></div>
+  <div class="myth"><span class="ok">✓</span><div><b>正确理解：</b>大模型 = 一个被训练得极好的"下一个词概率函数" <code>f(上文) → 分布</code>，再用解码策略从分布里取字，循环接龙。</div></div>
+
+  <h2 id="why">九、为什么"概率"能 work？——它是训练目标的必然结果</h2>
+  <p>你可能会问：凭什么"下一个词的概率最高"就等于"人想看到的答案"？答案是<b class="hl">模型就是这么被训练出来的</b>：</p>
+  <div class="card c3">
+    <ul style="margin-bottom:0">
+      <li><b>训练目标：</b>给定一段文本，让模型预测"下一个 token"。用<b>交叉熵损失</b>衡量"模型给正确答案的概率"有多低，再用梯度下降调参数，使正确答案的概率越来越高。</li>
+      <li><b>结果：</b>训练充分后，<code>P(合理续写)</code> 天然就高，<code>P(胡说)</code> 天然就低。所以"采样时抽到好答案"不是巧合，是目标函数塑造的。</li>
+      <li><b>推论：</b>推理时"按概率输出"，正是训练时"学的是概率"的直接延续——训练与推理用的是同一套"概率语言"。</li>
+    </ul>
+  </div>
+
+  <h2 id="sum">十、总结：一张图串起全过程 + 口诀</h2>
+  <div class="svgbox">
+    <svg viewBox="0 0 720 150" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <g font-size="14" text-anchor="middle">
+        <rect x="10" y="55" width="120" height="44" rx="8" fill="#161b22" stroke="#4e9dff"/><text x="70" y="82" fill="#e6edf3">文本</text>
+        <text x="150" y="82" fill="#9aa7b5">→ 分词 →</text>
+        <rect x="180" y="55" width="120" height="44" rx="8" fill="#161b22" stroke="#c792ea"/><text x="240" y="82" fill="#e6edf3">向量(Transformer)</text>
+        <text x="320" y="82" fill="#9aa7b5">→</text>
+        <rect x="340" y="55" width="120" height="44" rx="8" fill="#161b22" stroke="#ffb454"/><text x="400" y="82" fill="#e6edf3">全词表 Logits</text>
+        <text x="480" y="82" fill="#9aa7b5">→</text>
+        <rect x="500" y="55" width="120" height="44" rx="8" fill="#161b22" stroke="#57c98a"/><text x="560" y="82" fill="#e6edf3">Softmax 概率</text>
+        <text x="640" y="82" fill="#9aa7b5">→</text>
+        <rect x="650" y="55" width="62" height="44" rx="8" fill="#161b22" stroke="#ff6b6b"/><text x="681" y="82" fill="#e6edf3">选词</text>
+      </g>
+      <text x="360" y="130" fill="#9aa7b5" font-size="12">把选出的词拼回开头，循环 → 一篇文章就是这么"接"出来的</text>
+    </svg>
+  </div>
+
+  <div class="card c1">
+    <p style="margin-top:0"><b>记忆口诀：</b></p>
+    <p style="margin-bottom:0"><b class="hl">分 token → 过网络 → 算分布 → 按策略取 → 拼回去 → 再来一遍。</b><br/>
+    模型从不"决定"说什么，它只"打分"：给全词表里每个候选的下一个词打分（概率），再让你选的"解码策略"从中挑一个。所谓"按概率输出"，就是这句话。</p>
+  </div>
+
+  <div class="card c5">
+    <b>继续深入（站内姊妹篇）：</b>
+    <ul style="margin-bottom:0">
+      <li><a href="transformer-explained.html" style="color:var(--c2)">Transformer 架构总览</a>——第④步的"多层"到底是什么</li>
+      <li><a href="self-attention-intuitive.html" style="color:var(--c2)">自注意力直觉</a> / <a href="attention-mechanism-explained.html" style="color:var(--c2)">注意力机制</a> / <a href="qkv-explained.html" style="color:var(--c2)">QKV 是什么</a>——模型怎么"读懂上文"</li>
+      <li><a href="positional-encoding.html" style="color:var(--c2)">位置编码</a>——模型怎么知道词的顺序</li>
+      <li><a href="llm-params-explained.html" style="color:var(--c2)">参数量级</a>——第④步那堆"算概率"的参数长在哪</li>
+      <li><a href="kv-cache-prompt-caching.html" style="color:var(--c2)">KV Cache</a>——为什么自回归循环不会每次都从头算</li>
+    </ul>
+  </div>
+
+  <div class="foot">
+    本文为教学示意：交互中的概率与候选为说明性数值，非真实模型输出；词表规模、温度为业界通用设定。
+    <br/>← <a href="../index.html">返回人工智能总目录</a>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ---------- 交互①：温度重塑分布 ----------
+  const VOCAB = [
+    {t:"好", l:3.6}, {t:"棒", l:2.8}, {t:"热", l:2.1},
+    {t:"冷", l:1.3}, {t:"的", l:1.0}, {t:"不", l:0.7},
+    {t:"差", l:0.2}, {t:"怪", l:-0.3}
+  ];
+  const probBox = document.getElementById('probBars');
+  const tempSlider = document.getElementById('tempSlider');
+  const tempVal = document.getElementById('tempVal');
+  const pickOut = document.getElementById('pickOut');
+  const pickProb = document.getElementById('pickProb');
+  const sampleHist = document.getElementById('sampleHist');
+
+  function softmax(logits, T){
+    const xs = logits.map(l => Math.exp(l / T));
+    const s = xs.reduce((a,b)=>a+b, 0);
+    return xs.map(x => x / s);
+  }
+  function renderBars(items, highlightIdx){
+    probBox.innerHTML = '';
+    items.forEach((it, i) => {
+      const row = document.createElement('div');
+      row.className = 'pbar' + (i === highlightIdx ? ' on' : '');
+      const pct = (it.p * 100);
+      row.innerHTML =
+        '<div class="plabel">'+it.t+'</div>' +
+        '<div class="ptrack"><div class="pfill" style="width:'+pct.toFixed(1)+'%"></div></div>' +
+        '<div class="ppct">'+pct.toFixed(1)+'%</div>';
+      probBox.appendChild(row);
+    });
+  }
+  function currentDist(){
+    const T = parseFloat(tempSlider.value);
+    return softmax(VOCAB.map(v=>v.l), T);
+  }
+  function update(){
+    const T = parseFloat(tempSlider.value);
+    tempVal.textContent = 'T = ' + T.toFixed(1);
+    const probs = currentDist();
+    const items = VOCAB.map((v,i)=>({t:v.t, p:probs[i]}));
+    renderBars(items, -1);
+    pickOut.textContent = '—';
+    pickProb.textContent = '';
+  }
+  function argmax(probs){
+    let mi = 0;
+    for (let i=1;i<probs.length;i++) if (probs[i] > probs[mi]) mi = i;
+    return mi;
+  }
+  function sample(probs){
+    const r = Math.random();
+    let acc = 0;
+    for (let i=0;i<probs.length;i++){
+      acc += probs[i];
+      if (r <= acc) return i;
+    }
+    return probs.length - 1;
+  }
+  tempSlider.addEventListener('input', update);
+  document.getElementById('greedyBtn').addEventListener('click', function(){
+    const probs = currentDist();
+    const mi = argmax(probs);
+    renderBars(VOCAB.map((v,i)=>({t:v.t, p:probs[i]})), mi);
+    pickOut.textContent = VOCAB[mi].t;
+    pickProb.textContent = '（概率 ' + (probs[mi]*100).toFixed(1) + '%，确定性选择）';
+  });
+  document.getElementById('sampleBtn').addEventListener('click', function(){
+    const probs = currentDist();
+    const idx = sample(probs);
+    renderBars(VOCAB.map((v,i)=>({t:v.t, p:probs[i]})), idx);
+    pickOut.textContent = VOCAB[idx].t;
+    pickProb.textContent = '（本次抽签命中，概率 ' + (probs[idx]*100).toFixed(1) + '%）';
+    const line = document.createElement('div');
+    line.textContent = '采样 → "' + VOCAB[idx].t + '"  (T=' + parseFloat(tempSlider.value).toFixed(1) + ')';
+    sampleHist.appendChild(line);
+  });
+  document.getElementById('clearHist').addEventListener('click', function(){
+    sampleHist.innerHTML = '采样历史（点"按概率采样"会看到：同样的分布，每次结果可能不同）：';
+  });
+  update();
+
+  // ---------- 交互②：自回归逐字生成 ----------
+  const GEN = [
+    { ctx:"人工智能是", cands:[["一种",.46],["一个",.21],["由",.12],["让",.09],["在",.05],["…",.07]], pick:"一种" },
+    { ctx:"人工智能是一种", cands:[["基于",.39],["以",.20],["用",.15],["由",.10],["…",.16]], pick:"基于" },
+    { ctx:"人工智能是一种基于", cands:[["数据",.44],["数学",.22],["算法",.16],["模型",.10],["…",.08]], pick:"数据" },
+    { ctx:"人工智能是一种基于数据", cands:[["的",.40],["训练",.26],["和",.16],["与",.10],["…",.08]], pick:"的" },
+    { ctx:"人工智能是一种基于数据的", cands:[["技术",.48],["系统",.24],["方法",.14],["模型",.09],["…",.05]], pick:"技术" },
+    { ctx:"人工智能是一种基于数据的技术", cands:[["，",.50],["。",.22],["它",.16],["和",.07],["…",.05]], pick:"。" }
+  ];
+  const genText = document.getElementById('genText');
+  const genBars = document.getElementById('genBars');
+  const genPick = document.getElementById('genPick');
+  const genStepOut = document.getElementById('genStepOut');
+  let gi = 0;
+  function renderGen(){
+    const done = GEN.slice(0, gi).map(s => s.ctx + s.pick).join('');
+    const cur = gi < GEN.length ? (GEN[gi].ctx + '<span class="cur">'+GEN[gi].pick+'</span>') : '';
+    const tail = gi >= GEN.length ? '<span class="done">（结束）</span>' : '<span class="cursor">█</span>';
+    genText.innerHTML = '<span class="done">'+done+'</span>' + cur + tail;
+    if (gi < GEN.length){
+      const c = GEN[gi].cands;
+      genBars.innerHTML = '';
+      c.forEach(([t,p], i) => {
+        const row = document.createElement('div');
+        row.className = 'pbar' + (t === GEN[gi].pick ? ' on' : '');
+        row.innerHTML =
+          '<div class="plabel">'+t+'</div>' +
+          '<div class="ptrack"><div class="pfill" style="width:'+(p*100).toFixed(1)+'%"></div></div>' +
+          '<div class="ppct">'+(p*100).toFixed(1)+'%</div>';
+        genBars.appendChild(row);
+      });
+      genPick.textContent = GEN[gi].pick;
+    } else {
+      genBars.innerHTML = '<div style="color:var(--dim);font-size:13px">已生成结束符，停止。</div>';
+      genPick.textContent = '结束符';
+    }
+    genStepOut.textContent = '第 ' + gi + ' / ' + GEN.length + ' 步';
+  }
+  document.getElementById('genNext').addEventListener('click', function(){
+    if (gi < GEN.length) gi++;
+    renderGen();
+  });
+  document.getElementById('genReset').addEventListener('click', function(){
+    gi = 0; renderGen();
+  });
+  renderGen();
+})();
+</script>
+</body>
+</html>

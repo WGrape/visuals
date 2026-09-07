@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Transformer 是怎么工作的？——从输入到输出的完整动态图解</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --panel2: #1c2430; --border: #2a3340;
+    --text: #e6edf3; --dim: #9aa7b5;
+    --c1: #ff6b6b; --c2: #4e9dff; --c3: #ffb454; --c4: #57c98a; --c5: #c792ea;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    line-height: 1.8; font-size: 15px;
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 50; background: rgba(14,17,23,.93);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    padding: 11px 22px; display: flex; gap: 13px; flex-wrap: wrap;
+  }
+  .nav a { color: var(--dim); text-decoration: none; font-size: 13px; padding: 4px 9px; border-radius: 6px; }
+  .nav a:hover { color: var(--text); background: var(--panel2); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 90px; }
+  h1 { font-size: 29px; margin: 0 0 8px; line-height: 1.35; }
+  h2 { font-size: 22px; margin: 52px 0 14px; padding-left: 12px; border-left: 4px solid var(--c1); }
+  h3 { font-size: 17px; margin: 22px 0 10px; color: var(--c2); }
+  p { margin: 10px 0; }
+  .lead { color: var(--dim); font-size: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin: 16px 0; }
+  .card.c1 { border-left: 5px solid var(--c1); }
+  .card.c2 { border-left: 5px solid var(--c2); }
+  .card.c3 { border-left: 5px solid var(--c3); }
+  .card.c4 { border-left: 5px solid var(--c4); }
+  .card.c5 { border-left: 5px solid var(--c5); }
+  code { background: var(--panel2); padding: 2px 7px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: var(--c3); }
+  .formula { background: linear-gradient(135deg,#1c2430,#202a38); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 14px 0; font-family: Consolas, monospace; overflow-x: auto; font-size: 14px; }
+  .formula .r { color: var(--c1); font-weight: 600; }
+  .formula .b { color: var(--c2); font-weight: 600; }
+  .formula .y { color: var(--c3); font-weight: 600; }
+  .formula .g { color: var(--c4); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: var(--panel2); color: var(--c2); }
+  .svgbox { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin: 18px 0; overflow-x: auto; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; margin: 2px 4px 2px 0; border: 1px solid var(--border); }
+  .tag.t1 { background: rgba(255,107,107,.12); color: var(--c1); border-color: var(--c1); }
+  .tag.t2 { background: rgba(78,157,255,.12); color: var(--c2); border-color: var(--c2); }
+  .tag.t3 { background: rgba(255,180,84,.12); color: var(--c3); border-color: var(--c3); }
+  .tag.t4 { background: rgba(87,201,138,.12); color: var(--c4); border-color: var(--c4); }
+  .tag.t5 { background: rgba(199,146,234,.12); color: var(--c5); border-color: var(--c5); }
+  .foot { color: var(--dim); font-size: 13px; margin-top: 60px; border-top: 1px solid var(--border); padding-top: 20px; }
+  .foot a { color: var(--c2); }
+  b.hl { color: var(--c3); }
+
+  /* --- step engine --- */
+  rect.stepbox, path.stepbox { transition: all .25s ease; }
+  rect.stepbox.active, path.stepbox.active { stroke: var(--c3); stroke-width: 2.5; filter: drop-shadow(0 0 6px var(--c3)); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+  .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  .btn:hover { border-color: var(--c2); }
+  .btn.primary { background: var(--c2); color: #0e1117; border-color: var(--c2); font-weight: 600; }
+  .btn.primary:hover { background: #6fb0ff; }
+  .btn.warm { background: var(--c3); color: #0e1117; border-color: var(--c3); font-weight: 600; }
+  .btn.warm:hover { background: #ffc56b; }
+  .stepbar { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+  .stepbar span { width: 26px; height: 5px; border-radius: 3px; background: var(--border); cursor: pointer; }
+  .stepbar span.on { background: var(--c3); }
+  .stepbar span.done { background: var(--c4); }
+  .readout { background: var(--panel2); border-radius: 8px; padding: 12px 14px; margin: 10px 0; font-size: 14px; }
+  .readout .ttl { color: var(--c3); font-weight: 700; font-size: 16px; display: block; margin-bottom: 4px; }
+
+  /* --- attention calculator --- */
+  .attn-table { border-collapse: collapse; margin: 10px 0; font-family: Consolas, monospace; font-size: 12px; }
+  .attn-table th { padding: 6px 8px; text-align: center; background: var(--panel2); color: var(--c2); }
+  .attn-table td { padding: 6px 8px; text-align: center; border: 1px solid var(--border); cursor: pointer; min-width: 54px; }
+  .attn-table td.qhead { background: var(--panel2); color: var(--text); cursor: pointer; }
+  .attn-table tr.sel td { outline: 2px solid var(--c3); outline-offset: -2px; }
+  .attn-table td:hover { outline: 1px solid var(--dim); outline-offset: -1px; }
+  .pbar { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+  .pbar .plabel { width: 52px; text-align: center; font-size: 13px; background: var(--panel2); border-radius: 6px; padding: 3px 0; }
+  .ptrack { flex: 1; background: #0b0f15; border-radius: 6px; height: 20px; overflow: hidden; }
+  .pfill { height: 100%; background: linear-gradient(90deg, var(--c2), var(--c5)); border-radius: 6px; transition: width .25s ease; }
+  .pbar.on .pfill { background: linear-gradient(90deg, var(--c4), var(--c3)); }
+  .pbar.on .plabel { background: var(--c4); color: #0e1117; font-weight: 700; }
+  .ppct { width: 56px; text-align: right; font-family: Consolas, monospace; color: var(--dim); font-size: 13px; }
+  .vec { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .vec div { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; font-family: Consolas, monospace; font-size: 13px; color: var(--c4); }
+
+  /* --- mask grid --- */
+  .maskgrid { border-collapse: collapse; font-family: Consolas, monospace; font-size: 13px; }
+  .maskgrid td { border: 1px solid var(--border); width: 44px; height: 34px; text-align: center; }
+  .maskgrid th { padding: 5px; text-align: center; background: var(--panel2); color: var(--c2); font-size: 12px; }
+  .maskgrid td.allowed { background: rgba(87,201,138,.18); color: var(--c4); }
+  .maskgrid td.blocked { background: rgba(255,107,107,.10); color: var(--c1); }
+  .maskgrid td.selrow { outline: 2px solid var(--c3); outline-offset: -2px; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#one">1. 一句话定位</a>
+  <a href="#arch">2. 全景·动态流程</a>
+  <a href="#emb">3. 词嵌入</a>
+  <a href="#pos">4. 位置编码</a>
+  <a href="#attn">5. 自注意力（核心）</a>
+  <a href="#head">6. 多头注意力</a>
+  <a href="#ffn">7. FFN·残差·归一</a>
+  <a href="#dec">8. 解码器</a>
+  <a href="#out">9. 输出与自回归</a>
+  <a href="#sum">10. 总结</a>
+</div>
+
+<div class="wrap">
+  <h1>Transformer 是怎么工作的？——从输入到输出的完整动态图解</h1>
+  <p class="lead">不用大段术语，只用一句话开场：<b>Transformer 是一台"让序列里每个词都能找到其他词、并按重要性聚合信息"的机器。</b>下面把它从输入到输出拆开，每一步都配图、配公式、配可交互演示。</p>
+  <div>
+    <span class="tag t1">端到端流程</span>
+    <span class="tag t2">自注意力</span>
+    <span class="tag t3">多头·掩码</span>
+    <span class="tag t4">残差与归一</span>
+    <span class="tag t5">自回归输出</span>
+  </div>
+
+  <h2 id="one">一、一句话定位：它在干什么</h2>
+  <div class="card c1">
+    <p style="margin-top:0">把 Transformer 想象成一个<b class="hl">超级版的"读全文再答题"</b>：</p>
+    <ul style="margin-bottom:0">
+      <li><b>输入</b>：一串词（比如一句中文句子）</li>
+      <li><b>中间</b>：每个词都去"看"整句话的所有词，问"谁对我最重要？"，然后把重要词的信息按比例<b class="hl">加权混进来</b>，更新自己 —— 这一步叫<b>自注意力（Self-Attention）</b>，是 Transformer 的灵魂</li>
+      <li><b>输出</b>：每个位置得到一个"理解后的新向量"，再拿来预测下一个词（或翻译出下一个词）</li>
+    </ul>
+  </div>
+  <div class="card c3">
+    <b>为什么它比 RNN/CNN 强？</b>老模型要么只能从左往右逐个看（RNN 串行慢、远距离会忘），要么只看局部窗口（CNN 感受野有限）。Transformer 让<b class="hl">任意两个词之间只需一步就能直接对话</b>，所以能并行、能抓长距离依赖。这就是它成为大模型底座的原因。
+  </div>
+
+  <h2 id="arch">二、全景：从输入到输出，全流程摁↑次理清</h2>
+  <p>下面这张是完整结构（编码器 + 解码器）。<span class="tag t3">点「下一步」或「自动播放」</span>，跟着高亮走一遍整条链路：</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 545" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <defs>
+        <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#9aa7b5"/>
+        </marker>
+      </defs>
+
+      <!-- inputs -->
+      <rect class="stepbox" id="inpEnc" x="90" y="12" width="200" height="34" rx="7" fill="#161b22" stroke="#4e9dff"/>
+      <text x="190" y="34" fill="#e6edf3" font-size="13" text-anchor="middle">输入：源句子</text>
+      <rect class="stepbox" id="inpDec" x="430" y="12" width="200" height="34" rx="7" fill="#161b22" stroke="#4e9dff"/>
+      <text x="530" y="34" fill="#e6edf3" font-size="13" text-anchor="middle">输入：已生成的词(右移)</text>
+
+      <!-- embeddings -->
+      <rect class="stepbox" id="emb" x="90" y="62" width="200" height="38" rx="7" fill="#161b22" stroke="#4e9dff"/>
+      <text x="190" y="78" fill="#e6edf3" font-size="13" text-anchor="middle">词嵌入 + 位置编码</text>
+      <text x="190" y="93" fill="#9aa7b5" font-size="10" text-anchor="middle">Embedding + Positional</text>
+      <rect class="stepbox" id="embDec" x="430" y="62" width="200" height="38" rx="7" fill="#161b22" stroke="#4e9dff"/>
+      <text x="530" y="78" fill="#e6edf3" font-size="13" text-anchor="middle">词嵌入 + 位置编码</text>
+      <text x="530" y="93" fill="#9aa7b5" font-size="10" text-anchor="middle">Embedding + Positional</text>
+
+      <!-- encoder stack -->
+      <rect class="stepbox" id="encStack" x="70" y="116" width="240" height="176" rx="10" fill="none" stroke="#2a3340" stroke-dasharray="5 5"/>
+      <text x="80" y="110" fill="#c792ea" font-size="12">编码器 Encoder × N</text>
+      <rect class="stepbox" id="encMHA" x="90" y="138" width="200" height="34" rx="7" fill="#161b22" stroke="#c792ea"/>
+      <text x="190" y="159" fill="#e6edf3" font-size="13" text-anchor="middle">多头自注意力</text>
+      <rect class="stepbox" id="encAN1" x="90" y="180" width="200" height="26" rx="6" fill="#161b22" stroke="#2a3340"/>
+      <text x="190" y="197" fill="#9aa7b5" font-size="11" text-anchor="middle">残差 + 层归一</text>
+      <rect class="stepbox" id="encFFN" x="90" y="214" width="200" height="34" rx="7" fill="#161b22" stroke="#ffb454"/>
+      <text x="190" y="235" fill="#e6edf3" font-size="13" text-anchor="middle">前馈网络 FFN</text>
+      <rect class="stepbox" id="encAN2" x="90" y="256" width="200" height="26" rx="6" fill="#161b22" stroke="#2a3340"/>
+      <text x="190" y="273" fill="#9aa7b5" font-size="11" text-anchor="middle">残差 + 层归一</text>
+
+      <!-- decoder stack -->
+      <rect class="stepbox" id="decStack" x="410" y="116" width="240" height="252" rx="10" fill="none" stroke="#2a3340" stroke-dasharray="5 5"/>
+      <text x="420" y="110" fill="#c792ea" font-size="12">解码器 Decoder × N</text>
+      <rect class="stepbox" id="decMHA" x="430" y="138" width="200" height="34" rx="7" fill="#161b22" stroke="#c792ea"/>
+      <text x="530" y="159" fill="#e6edf3" font-size="13" text-anchor="middle">掩码多头自注意力</text>
+      <rect class="stepbox" id="decAN1" x="430" y="180" width="200" height="26" rx="6" fill="#161b22" stroke="#2a3340"/>
+      <text x="530" y="197" fill="#9aa7b5" font-size="11" text-anchor="middle">残差 + 层归一</text>
+      <rect class="stepbox" id="decCross" x="430" y="214" width="200" height="34" rx="7" fill="#161b22" stroke="#ff6b6b"/>
+      <text x="530" y="229" fill="#e6edf3" font-size="12" text-anchor="middle">交叉注意力</text>
+      <text x="530" y="243" fill="#ff6b6b" font-size="10" text-anchor="middle">K,V 来自编码器</text>
+      <rect class="stepbox" id="decAN2" x="430" y="256" width="200" height="26" rx="6" fill="#161b22" stroke="#2a3340"/>
+      <text x="530" y="273" fill="#9aa7b5" font-size="11" text-anchor="middle">残差 + 层归一</text>
+      <rect class="stepbox" id="decFFN" x="430" y="290" width="200" height="34" rx="7" fill="#161b22" stroke="#ffb454"/>
+      <text x="530" y="311" fill="#e6edf3" font-size="13" text-anchor="middle">前馈网络 FFN</text>
+      <rect class="stepbox" id="decAN3" x="430" y="332" width="200" height="26" rx="6" fill="#161b22" stroke="#2a3340"/>
+      <text x="530" y="349" fill="#9aa7b5" font-size="11" text-anchor="middle">残差 + 层归一</text>
+
+      <!-- cross attention arrow -->
+      <path class="stepbox" id="crossArrow" d="M310,231 L426,231" fill="none" stroke="#ff6b6b" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#arw)"/>
+      <text x="368" y="224" fill="#ff6b6b" font-size="10" text-anchor="middle">K, V</text>
+
+      <!-- output -->
+      <rect class="stepbox" id="linear" x="430" y="392" width="200" height="32" rx="7" fill="#161b22" stroke="#57c98a"/>
+      <text x="530" y="413" fill="#e6edf3" font-size="13" text-anchor="middle">Linear 线性层 → 词表分数</text>
+      <rect class="stepbox" id="soft" x="430" y="434" width="200" height="32" rx="7" fill="#161b22" stroke="#57c98a"/>
+      <text x="530" y="455" fill="#e6edf3" font-size="13" text-anchor="middle">Softmax → 概率分布</text>
+      <rect class="stepbox" id="out" x="430" y="476" width="200" height="32" rx="7" fill="#161b22" stroke="#ff6b6b"/>
+      <text x="530" y="497" fill="#e6edf3" font-size="13" text-anchor="middle">下一个词 → 接回去继续</text>
+
+      <!-- internal arrows -->
+      <g stroke="#9aa7b5" stroke-width="1.4" marker-end="url(#arw)">
+        <line x1="190" y1="46" x2="190" y2="60"/>
+        <line x1="530" y1="46" x2="530" y2="60"/>
+        <line x1="190" y1="100" x2="190" y2="114"/>
+        <line x1="530" y1="100" x2="530" y2="114"/>
+        <line x1="190" y1="172" x2="190" y2="178"/>
+        <line x1="190" y1="206" x2="190" y2="212"/>
+        <line x1="190" y1="248" x2="190" y2="254"/>
+        <line x1="530" y1="172" x2="530" y2="178"/>
+        <line x1="530" y1="206" x2="530" y2="212"/>
+        <line x1="530" y1="248" x2="530" y2="254"/>
+        <line x1="530" y1="282" x2="530" y2="288"/>
+        <line x1="530" y1="324" x2="530" y2="330"/>
+        <line x1="530" y1="358" x2="530" y2="390"/>
+        <line x1="530" y1="424" x2="530" y2="432"/>
+        <line x1="530" y1="466" x2="530" y2="474"/>
+      </g>
+      <path d="M440,508 C 250,508 40,470 88,300" fill="none" stroke="#ff6b6b" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arw)"/>
+      <text x="230" y="524" fill="#ff6b6b" font-size="11">自回归：新生成的词再喂回解码器顶端</text>
+    </svg>
+  </div>
+
+  <div class="card c3">
+    <div class="controls">
+      <button class="btn primary" id="stepPrev">◀ 上一步</button>
+      <button class="btn warm" id="stepNext">下一步 ▶</button>
+      <button class="btn" id="stepPlay">▶ 自动播放</button>
+      <button class="btn" id="stepReset">重置</button>
+      <span id="stepCount" style="color:var(--dim)">步骤 0 / 8</span>
+    </div>
+    <div class="stepbar" id="stepBar"></div>
+    <div class="readout">
+      <span class="ttl" id="stepTitle">点「下一步」开始——从输入走到输出</span>
+      <span id="stepDesc">每一步都会在上方架构图中高亮当前正在处理的模块。</span>
+    </div>
+  </div>
+
+  <h2 id="emb">三、第①步：把词变成数字（分词 + 词嵌入）</h2>
+  <p>模型不认识汉字，只认识数字。所以要先把每个 token 变成一个<b class="hl">向量</b>（一串数字）——这串数字就是它的"含义坐标"。</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 190" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="20" fill="#9aa7b5" font-size="13">每个 token → 查嵌入表 → 一个 d_model 维的向量（这里用 4 维示意，真实是 768/4096 维）</text>
+      <g font-family="Consolas, monospace" font-size="12">
+        <rect x="20" y="40" width="66" height="30" rx="6" fill="#1c2430"/><text x="53" y="60" fill="#4e9dff" text-anchor="middle">小猫</text>
+        <rect x="20" y="76" width="66" height="30" rx="6" fill="#1c2430"/><text x="53" y="96" fill="#4e9dff" text-anchor="middle">追</text>
+        <rect x="20" y="112" width="66" height="30" rx="6" fill="#1c2430"/><text x="53" y="132" fill="#4e9dff" text-anchor="middle">毛线球</text>
+      </g>
+      <text x="100" y="60" fill="#9aa7b5" font-size="18">→</text>
+      <text x="100" y="96" fill="#9aa7b5" font-size="18">→</text>
+      <text x="100" y="132" fill="#9aa7b5" font-size="18">→</text>
+      <g font-family="Consolas, monospace" font-size="12" text-anchor="middle">
+        <rect x="130" y="40" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="160" y="60" fill="#ffb454">0.91</text>
+        <rect x="196" y="40" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="226" y="60" fill="#ffb454">0.12</text>
+        <rect x="262" y="40" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="292" y="60" fill="#ffb454">0.03</text>
+        <rect x="328" y="40" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="358" y="60" fill="#ffb454">0.44</text>
+
+        <rect x="130" y="76" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="160" y="96" fill="#ffb454">0.08</text>
+        <rect x="196" y="76" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="226" y="96" fill="#ffb454">0.87</text>
+        <rect x="262" y="76" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="292" y="96" fill="#ffb454">0.21</text>
+        <rect x="328" y="76" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="358" y="96" fill="#ffb454">0.10</text>
+
+        <rect x="130" y="112" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="160" y="132" fill="#ffb454">0.05</text>
+        <rect x="196" y="112" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="226" y="132" fill="#ffb454">0.19</text>
+        <rect x="262" y="112" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="292" y="132" fill="#ffb454">0.94</text>
+        <rect x="328" y="112" width="60" height="30" rx="5" fill="#161b22" stroke="#2a3340"/><text x="358" y="132" fill="#ffb454">0.31</text>
+      </g>
+      <text x="410" y="60" fill="#9aa7b5" font-size="12">…一直排到 d_model 维</text>
+      <text x="20" y="168" fill="#9aa7b5" font-size="12">这些数字不是人写的，是训练中学出来的参数；语义相近的词，向量也更接近。</text>
+    </svg>
+  </div>
+
+  <h2 id="pos">四、第②步：位置编码——告诉模型"谁在前谁在后"</h2>
+  <div class="card c1">
+    <b>为什么必须加？</b>自注意力是"一锅端"地看全部词，<b class="hl">它本身完全不知道顺序</b>。"猫追球"和"球追猫"在它眼里词是一样的。所以要在向量上叠加一个"位置信号"。
+  </div>
+  <div class="svgbox">
+    <svg viewBox="0 0 720 170" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="18" fill="#9aa7b5" font-size="13">不同维度的位置编码 = 不同频率的 sin / cos 波；位置不同 → 波形取值不同 → 模型能还原出顺序</text>
+      <line x1="40" y1="100" x2="700" y2="100" stroke="#2a3340"/>
+      <path d="M40,100 C 70,40 100,40 130,100 S 190,160 220,100" fill="none" stroke="#4e9dff" stroke-width="1.8"/>
+      <path d="M40,100 C 55,20 85,20 100,100 S 145,180 160,100 S 205,20 220,100 S 265,180 280,100 S 325,20 340,100 S 385,180 400,100 S 445,20 460,100 S 505,180 520,100 S 565,20 580,100 S 625,180 640,100 S 685,20 700,100" fill="none" stroke="#c792ea" stroke-width="1.8"/>
+      <path d="M40,100 C 48,10 72,10 80,100 S 104,190 112,100 S 136,10 144,100 S 168,190 176,100 S 200,10 208,100 S 232,190 240,100 S 264,10 272,100 S 296,190 304,100 S 328,10 336,100 S 360,190 368,100 S 392,10 400,100 S 424,190 432,100 S 456,10 464,100 S 488,190 496,100 S 520,10 528,100 S 552,190 560,100 S 576,10 584,100 S 608,190 616,100 S 632,10 640,100 S 664,190 672,100" fill="none" stroke="#ffb454" stroke-width="1.8"/>
+      <g fill="#9aa7b5" font-size="11" text-anchor="middle">
+        <text x="130" y="152">位置1</text><text x="280" y="152">位置2</text><text x="400" y="152">位置3</text><text x="520" y="152">位置4</text><text x="640" y="152">位置5</text>
+      </g>
+      <text x="40" y="40" fill="#4e9dff" font-size="11">低频 dim</text>
+      <text x="40" y="58" fill="#c792ea" font-size="11">中频 dim</text>
+      <text x="40" y="76" fill="#ffb454" font-size="11">高频 dim</text>
+    </svg>
+  </div>
+  <div class="formula">
+    <span class="b">PE</span>(pos, 2i)   = sin(pos / 10000^(2i/d_model))
+    <span class="b">PE</span>(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+    <span style="color:var(--dim)">// 然后：<span class="y">最终输入 = 词嵌入 + 位置编码</span>（直接相加，维度相同）</span>
+  </div>
+
+  <h2 id="attn">五、第③步：自注意力 —— 整个 Transformer 的灵魂（重点）</h2>
+  <p>这一步要解决的问题只有一个：<b class="hl">"当我（当前词）要理解自己时，应该重点关注句子里的哪些词？"</b></p>
+
+  <h3>5.1 三个角色：Query / Key / Value</h3>
+  <div class="card c2">
+    <p style="margin-top:0">每个词的向量会生成三个新向量，用图书馆查资料来类比最好懂：</p>
+    <ul style="margin-bottom:0">
+      <li><b class="hl">Query（查询）</b>：我手里的"检索需求" —— <b>我在找什么样的信息？</b></li>
+      <li><b class="hl">Key（键）</b>：每本书脊上的"标签" —— <b>我能提供什么信息？</b></li>
+      <li><b class="hl">Value（值）</b>：书里的实际内容 —— <b>如果你选中我，就把这个交给你</b></li>
+    </ul>
+  </div>
+  <p>流程就是三步走：<b>用 Q 去和所有 K 匹配打分 → 归一化成注意力权重 → 按权重把 V 加权求和</b>。</p>
+
+  <div class="formula">
+    <span class="g">Attention(Q, K, V)</span> = <span class="y">softmax</span>( Q · Kᵀ / √<span class="r">d_k</span> ) · V
+    <span style="color:var(--dim)">// ÷√d_k 是"缩放"，防止点积太大把 softmax 压成非0即1，梯度消失</span>
+  </div>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 720 180" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="18" fill="#9aa7b5" font-size="13">以「它」为例（数值与下方计算器一致）：它用自己的 Q 去匹配所有词的 K，算出权重，再把所有 V 按权重加总</text>
+      <rect x="20" y="78" width="70" height="30" rx="6" fill="#1c2430"/><text x="55" y="98" fill="#4e9dff" font-size="13" text-anchor="middle">Q(它)</text>
+      <text x="104" y="98" fill="#9aa7b5" font-size="14">×</text>
+      <g font-size="11">
+        <rect x="122" y="29" width="62" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="153" y="44" fill="#c792ea" text-anchor="middle">K(小猫)</text>
+        <rect x="122" y="55" width="62" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="153" y="70" fill="#c792ea" text-anchor="middle">K(追)</text>
+        <rect x="122" y="81" width="62" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="153" y="96" fill="#c792ea" text-anchor="middle">K(毛线球)</text>
+        <rect x="122" y="107" width="62" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="153" y="122" fill="#c792ea" text-anchor="middle">K(它)</text>
+        <rect x="122" y="133" width="62" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="153" y="148" fill="#c792ea" text-anchor="middle">K(累)</text>
+      </g>
+      <text x="196" y="96" fill="#9aa7b5" font-size="13">→</text>
+      <text x="206" y="99" fill="#9aa7b5" font-size="12">打分</text>
+      <g font-family="Consolas, monospace" font-size="12">
+        <rect x="245" y="29" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="271" y="44" fill="#ffb454" text-anchor="middle">2.6</text>
+        <rect x="245" y="55" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="271" y="70" fill="#ffb454" text-anchor="middle">0.1</text>
+        <rect x="245" y="81" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="271" y="96" fill="#ffb454" text-anchor="middle">0.0</text>
+        <rect x="245" y="107" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="271" y="122" fill="#ffb454" text-anchor="middle">0.9</text>
+        <rect x="245" y="133" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="271" y="148" fill="#ffb454" text-anchor="middle">0.3</text>
+      </g>
+      <text x="308" y="99" fill="#9aa7b5" font-size="12">→ softmax</text>
+      <g font-family="Consolas, monospace" font-size="12">
+        <rect x="395" y="29" width="52" height="22" rx="5" fill="#161b22" stroke="#57c98a"/><text x="421" y="44" fill="#57c98a" text-anchor="middle">0.69</text>
+        <rect x="395" y="55" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="421" y="70" fill="#9aa7b5" text-anchor="middle">0.06</text>
+        <rect x="395" y="81" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="421" y="96" fill="#9aa7b5" text-anchor="middle">0.05</text>
+        <rect x="395" y="107" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="421" y="122" fill="#9aa7b5" text-anchor="middle">0.13</text>
+        <rect x="395" y="133" width="52" height="22" rx="5" fill="#161b22" stroke="#2a3340"/><text x="421" y="148" fill="#9aa7b5" text-anchor="middle">0.07</text>
+      </g>
+      <text x="456" y="96" fill="#9aa7b5" font-size="13">→</text>
+      <text x="466" y="99" fill="#9aa7b5" font-size="12">加权求和 V</text>
+      <rect x="575" y="72" width="120" height="46" rx="7" fill="#161b22" stroke="#57c98a"/>
+      <text x="635" y="91" fill="#57c98a" text-anchor="middle" font-size="12">「它」的新表示</text>
+      <text x="635" y="107" fill="#9aa7b5" text-anchor="middle" font-size="10">[0.74, 0.15, 0.06, 0.06]</text>
+      <text x="10" y="170" fill="#9aa7b5" font-size="11">关键在 0.69：「它」把近 7 成权重给了「小猫」，所以聚合出的新向量 ≈ 小猫的信息 —— 模型借此学会了"它"指的是谁</text>
+    </svg>
+  </div>
+
+  <h3>5.2 动手算一遍：注意力计算器（真实数值，可点）</h3>
+  <p>下面用句子 <code>小猫 / 追 / 毛线球 / 它 / 累</code>，把每个词对全部词的注意力<b class="hl">真算一遍</b>。<span class="tag t3">点表格里任意一行</span>，看它的分数、权重和最终聚合出的向量：</p>
+
+  <div class="card c2">
+    <div style="overflow-x:auto">
+      <table class="attn-table" id="attnTable"></table>
+    </div>
+    <div class="readout" style="margin-top:14px">
+      <span class="ttl" id="attnTitle">← 点上面任意一行</span>
+      <div id="attnDetail" style="color:var(--dim);font-size:13px">选一个查询词，这里会显示它的打分、softmax 权重，以及加权求和后的输出向量。</div>
+    </div>
+  </div>
+
+  <div class="card c4">
+    <b>看重点（这张表在讲什么故事）：</b>
+    <ul style="margin-bottom:0">
+      <li><b>「它」最关注「小猫」</b>（权重最高）—— 这就是<b class="hl">指代消解</b>：模型通过注意力，知道"它"指的是谁。这是自注意力最经典的成效。</li>
+      <li><b>「追」同时关注「小猫」和「毛线球」</b> —— 动词把主语和宾语关联起来（谁追谁）。</li>
+      <li><b>「累」关注「它」</b> —— 谁累，就指向谁。</li>
+      <li>注意输出向量：<b>「它」聚合后的新向量已经很像「小猫」的向量</b>了——"它"这个词把自己的表示更新成了包含指代对象信息的表示。</li>
+    </ul>
+  </div>
+
+  <h2 id="head">六、第④步：多头注意力 —— 一组人同时看不同的关系</h2>
+  <p>只做一次注意力，等于只能用一种"视角"看句子。多头（Multi-Head）就是把向量切成 h 份，<b class="hl">并行做 h 次注意力</b>，每个头自动负责一种关系（语法 / 语义 / 指代 / 距离…），最后拼起来。</p>
+  <div class="formula">
+    <span class="b">headᵢ</span> = Attention( X·W<span class="b">Qᵢ</span>, X·W<span class="b">Kᵢ</span>, X·W<span class="b">Vᵢ</span> )
+    <span class="y">MultiHead(X)</span> = Concat(head₁, …, head_h) · W<span class="y">O</span>
+    <span style="color:var(--dim)">// 真实模型常用 8~96 个头，每头维度 = d_model / h</span>
+  </div>
+  <div class="svgbox">
+    <svg viewBox="0 0 720 120" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <rect x="20" y="45" width="130" height="34" rx="7" fill="#161b22" stroke="#4e9dff"/><text x="85" y="67" fill="#e6edf3" font-size="13" text-anchor="middle">输入 X</text>
+      <text x="165" y="67" fill="#9aa7b5" font-size="15">→</text>
+      <g font-size="11">
+        <rect x="180" y="24" width="105" height="26" rx="5" fill="#161b22" stroke="#c792ea"/><text x="232" y="41" fill="#c792ea" text-anchor="middle">头1：语法关系</text>
+        <rect x="180" y="54" width="105" height="26" rx="5" fill="#161b22" stroke="#c792ea"/><text x="232" y="71" fill="#c792ea" text-anchor="middle">头2：指代关系</text>
+        <rect x="180" y="84" width="105" height="26" rx="5" fill="#161b22" stroke="#c792ea"/><text x="232" y="101" fill="#c792ea" text-anchor="middle">头3：语义相似</text>
+      </g>
+      <text x="300" y="67" fill="#9aa7b5" font-size="15">→</text>
+      <rect x="315" y="45" width="120" height="34" rx="7" fill="#161b22" stroke="#ffb454"/><text x="375" y="67" fill="#e6edf3" font-size="12" text-anchor="middle">Concat 拼接</text>
+      <text x="448" y="67" fill="#9aa7b5" font-size="15">→</text>
+      <rect x="465" y="45" width="120" height="34" rx="7" fill="#161b22" stroke="#ffb454"/><text x="525" y="67" fill="#e6edf3" font-size="12" text-anchor="middle">× Wᴼ 线性融合</text>
+      <text x="598" y="67" fill="#9aa7b5" font-size="15">→</text>
+      <rect x="615" y="45" width="90" height="34" rx="7" fill="#161b22" stroke="#57c98a"/><text x="660" y="67" fill="#57c98a" font-size="12" text-anchor="middle">多头输出</text>
+    </svg>
+  </div>
+
+  <h2 id="ffn">七、第⑤步：FFN + 残差 + 层归一（简述）</h2>
+  <p>注意力负责"词与词之间交换信息"，之后每个位置还要<b class="hl">独立思考加工</b>一下，这是 FFN 的活。</p>
+  <div class="formula">
+    <span class="y">FFN</span>(x) = max(0, x·W₁ + b₁)·W₂ + b₂
+    <span style="color:var(--dim)">// 先升维(通常 4 倍) → ReLU/GELU 非线性 → 再降回原维度。给模型提供"非线性计算能力"</span>
+  </div>
+  <table>
+    <tr><th>组件</th><th>作用</th><th>一句话理解</th></tr>
+    <tr><td><b>前馈网络 FFN</b></td><td>对每个位置独立做非线性变换</td><td>每个词"消化"刚吸收来的信息</td></tr>
+    <tr><td><b>残差连接</b></td><td>输出 = 输入 + 子层输出（x + f(x)）</td><td>保留"原的我"，防止深度网络退化、梯度断流</td></tr>
+    <tr><td><b>层归一 LayerNorm</b></td><td>把向量标准化（均值0方差1）再缩放</td><td>稳定数值、加速训练，让每层输入分布不乱漂</td></tr>
+  </table>
+  <p><b>一个编码器层 = 多头自注意力 → 残差+归一 → FFN → 残差+归一</b>，然后这个层<b class="hl">重复堆叠 N 次</b>（如 12 / 32 / 96 层），每一层都在上一层理解的基础上再"深化"一层。</p>
+
+  <h2 id="dec">八、第⑥步：解码器 —— 两个关键差异</h2>
+  <p>解码器比编码器多两样东西：<b class="hl">掩码自注意力</b>和<b class="hl">交叉注意力</b>。</p>
+
+  <h3>8.1 掩码自注意力：不许偷看未来</h3>
+  <p>生成是从左往右一个词一个词来的。当模型正在生成第 3 个词时，它<b class="hl">绝对不能看到第 4、5 个词</b>（否则训练时就作弊了）。做法是把未来的位置<b>屏蔽掉</b>（分数设为 −∞，softmax 后权重为 0）。</p>
+  <div class="card c4">
+    <div class="controls">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="maskToggle" checked/> 显示因果掩码（遮住未来）
+      </label>
+      <span style="color:var(--dim);font-size:13px">点任意一行查看它能看到的范围</span>
+    </div>
+    <div style="overflow-x:auto"><table class="maskgrid" id="maskGrid"></table></div>
+    <div class="readout" id="maskInfo" style="margin-top:12px">绿色 = 允许关注；红色 ✕ = 被屏蔽的未来词。</div>
+  </div>
+
+  <h3>8.2 交叉注意力：去原文里找答案</h3>
+  <p>这是<b class="hl">编码器与解码器之间唯一的桥梁</b>。区别只在于 Q、K、V 的来源：</p>
+  <table>
+    <tr><th>注意力类型</th><th>Q 来自</th><th>K、V 来自</th><th>作用</th></tr>
+    <tr><td><b>自注意力</b></td><td>自己</td><td>自己（同一序列）</td><td>句内词互相理解</td></tr>
+    <tr><td><b>掩码自注意力</b></td><td>解码器自己</td><td>解码器自己（且只能看已生成部分）</td><td>理解已生成的内容</td></tr>
+    <tr><td><b>交叉注意力</b></td><td><b class="hl">解码器</b></td><td><b class="hl">编码器输出</b></td><td>把"原文信息"对应过来（翻译时对齐）</td></tr>
+  </table>
+  <div class="card c5">
+    <b>提示：</b>现在最流行的大语言模型（GPT 系）只保留<b class="hl">解码器</b>堆叠，去掉了编码器和交叉注意力（因为没有"第二种输入"，源=目标），所以是自回归的"续写机器"。编码器-解码器架构则多用于翻译、摘要这类"输入→另一种输出"的任务。
+  </div>
+
+  <h2 id="out">九、第⑦步：输出层 —— 从向量到"下一个词"</h2>
+  <p>解码器最后一层输出的向量，经过 <b>Linear（映射到词表大小的分数）+ Softmax（变成概率）</b> → 得到下一个词的概率分布 → 选一个词 → 接回输入开头 → 继续。</p>
+  <div class="card c1">
+    <b>这和上一篇完全接上了：</b>所谓"大模型按概率输出"，概率就是这一步算出来的。Transformer 的全部工作，都是为了<b class="hl">算出一个尽量准确的下一个词概率分布</b>。
+  </div>
+  <p style="margin-top:16px">→ 想把这个环节彻底看懂，推荐看姊妹篇：<a href="probability-output-explained.html" style="color:var(--c2)">《大模型「按概率输出」到底是怎么回事》</a>（含温度交互与逐字生成演示）。</p>
+
+  <h2 id="sum">十、总结：整条链路回顾</h2>
+  <div class="svgbox">
+    <svg viewBox="0 0 720 120" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <g font-size="12" text-anchor="middle">
+        <rect x="10" y="40" width="94" height="40" rx="7" fill="#161b22" stroke="#4e9dff"/><text x="57" y="65" fill="#e6edf3">句子</text>
+        <rect x="120" y="40" width="94" height="40" rx="7" fill="#161b22" stroke="#4e9dff"/><text x="167" y="65" fill="#e6edf3">+嵌入+位置</text>
+        <rect x="230" y="40" width="110" height="40" rx="7" fill="#161b22" stroke="#c792ea"/><text x="285" y="65" fill="#e6edf3">多头自注意力</text>
+        <rect x="356" y="40" width="94" height="40" rx="7" fill="#161b22" stroke="#ffb454"/><text x="403" y="65" fill="#e6edf3">FFN×N层</text>
+        <rect x="466" y="40" width="110" height="40" rx="7" fill="#161b22" stroke="#ff6b6b"/><text x="521" y="65" fill="#e6edf3">解码（掩码+交叉）</text>
+        <rect x="592" y="40" width="115" height="40" rx="7" fill="#161b22" stroke="#57c98a"/><text x="649" y="65" fill="#e6edf3">概率→下一个词</text>
+      </g>
+      <g stroke="#9aa7b5" stroke-width="1.4" marker-end="url(#arw2)">
+        <line x1="104" y1="60" x2="118" y2="60"/><line x1="214" y1="60" x2="228" y2="60"/><line x1="340" y1="60" x2="354" y2="60"/><line x1="450" y1="60" x2="464" y2="60"/><line x1="576" y1="60" x2="590" y2="60"/>
+      </g>
+      <text x="360" y="105" fill="#9aa7b5" font-size="12" text-anchor="middle">核心永远是那句：每个词用 Q 去匹配所有 K，按 softmax 权重把 V 加权聚合</text>
+      <defs><marker id="arw2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#9aa7b5"/></marker></defs>
+    </svg>
+  </div>
+
+  <div class="card c1">
+    <p style="margin-top:0"><b>记忆口诀（8 个字串全程）：</b></p>
+    <p style="margin-bottom:0"><b class="hl">嵌入 → 加位置 → 注意聚集 → 前馈加工 → 堆叠加深 → 掩码防偷看 → 交叉取原文 →  softmax 出概率。</b><br/>
+    如果只能记住一句：请记住 <b class="hl">「Query 找 Key，加权取 Value」</b> —— 这就是 Transformer 的全部灵魂。</p>
+  </div>
+
+  <div class="card c5">
+    <b>继续深入（站内姊妹篇）：</b>
+    <ul style="margin-bottom:0">
+      <li><a href="probability-output-explained.html" style="color:var(--c2)">大模型「按概率输出」到底咋回事</a>——第 7 步输出层的完整展开</li>
+      <li><a href="transformer-explained.html" style="color:var(--c2)">Transformer 原理总览</a>——架构的整体设计动机</li>
+      <li><a href="qkv-explained.html" style="color:var(--c2)">Q / K / V 核心讲透</a> / <a href="self-attention-intuitive.html" style="color:var(--c2)">自注意力直觉</a> / <a href="attention-mechanism-explained.html" style="color:var(--c2)">注意力机制</a></li>
+      <li><a href="attention-variants.html" style="color:var(--c2)">注意力变体（MQA / GQA / FlashAttention）</a>——工程上如何给注意力加速</li>
+      <li><a href="positional-encoding.html" style="color:var(--c2)">位置编码</a>——RoPE、ALiBi 等现代方案</li>
+      <li><a href="normalization-explained.html" style="color:var(--c2)">归一化（LayerNorm / RMSNorm / Pre-LN）</a>——第 5 步的细节</li>
+      <li><a href="moe-explained.html" style="color:var(--c2)">MoE 混合专家</a>——FFN 的规模化形态</li>
+      <li><a href="kv-cache-prompt-caching.html" style="color:var(--c2)">KV Cache</a>——自回归生成时如何避免重复计算</li>
+    </ul>
+  </div>
+
+  <div class="foot">
+    本文为教学示意：注意力计算器中的打分为说明性数值（非真实模型输出），但 softmax、加权求和均按公式实时真实计算；位置编码与公式遵循原始 Transformer 论文定义。
+    <br/>← <a href="../index.html">返回人工智能总目录</a>
+  </div>
+</div>
+
+<script>
+(function(){
+  /* ============ 交互 A：架构图步进播放 ============ */
+  var STEPS = [
+    { ids:["inpEnc","inpDec"],
+      title:"① 输入：把句子切成 token",
+      desc:"源句子进编码器；对生成类任务，已生成的词（右移一位）进解码器。此刻还只是编号，没有任何语义。" },
+    { ids:["emb","embDec"],
+      title:"② 词嵌入 + 位置编码",
+      desc:"每个 token 查表变成 d_model 维向量，再叠加位置编码，让模型知道词的顺序。到此得到 X，正式进入网络。" },
+    { ids:["encStack","encMHA"],
+      title:"③ 编码器 · 多头自注意力",
+      desc:"核心！每个词用自己的 Query 去匹配所有词的 Key，softmax 成权重后把所有 Value 加权求和 —— 词与词之间完成第一次信息交换。" },
+    { ids:["encFFN","encAN1","encAN2"],
+      title:"④ 编码器 · FFN 与残差归一",
+      desc:"注意力之后，每个位置独立做一次非线性变换（FFN）；前后都有「残差连接 + 层归一」保底。这样一个完整层会堆叠 N 次。" },
+    { ids:["decMHA"],
+      title:"⑤ 解码器 · 掩码自注意力",
+      desc:"和编码器自注意力同理，但加了因果掩码：第 i 个词只能看到第 1~i 个词，未来的词被屏蔽 —— 否则生成时就等于偷看了答案。" },
+    { ids:["decCross","crossArrow"],
+      title:"⑥ 解码器 · 交叉注意力",
+      desc:"唯一的编-解码桥梁：Q 来自解码器，K 和 V 来自编码器最终输出。作用是把原文信息对齐到当前要生成的位置（翻译时尤其关键）。" },
+    { ids:["decFFN","decAN2","decAN3"],
+      title:"⑦ 解码器 · FFN 与残差归一",
+      desc:"和编码器一样的前馈加工与归一，同样堆叠 N 次。每层结束，每个位置都得到一个融合了全局上下文的表示。" },
+    { ids:["linear","soft","out"],
+      title:"⑧ 输出：Linear → Softmax → 取词",
+      desc:"把解码器最后一层输出映射到整个词表的分数，Softmax 变成概率分布，按策略选一个词输出，再把它拼回输入端循环 —— 这就是自回归生成。" }
+  ];
+  var cur = -1, timer = null;
+  var allBoxes = document.querySelectorAll('.stepbox');
+  var stepBar = document.getElementById('stepBar');
+  STEPS.forEach(function(s, i){
+    var d = document.createElement('span');
+    d.title = s.title;
+    d.addEventListener('click', function(){ stop(); render(i); });
+    stepBar.appendChild(d);
+  });
+  function clearAll(){
+    for (var i=0;i<allBoxes.length;i++) allBoxes[i].classList.remove('active');
+  }
+  function render(i){
+    cur = i;
+    clearAll();
+    if (i >= 0){
+      STEPS[i].ids.forEach(function(id){
+        var el = document.getElementById(id);
+        if (el) el.classList.add('active');
+      });
+      document.getElementById('stepTitle').textContent = STEPS[i].title;
+      document.getElementById('stepDesc').textContent = STEPS[i].desc;
+    } else {
+      document.getElementById('stepTitle').textContent = '点「下一步」开始——从输入走到输出';
+      document.getElementById('stepDesc').textContent = '每一步都会在上方架构图中高亮当前正在处理的模块。';
+    }
+    var dots = stepBar.children;
+    for (var k=0;k<dots.length;k++){
+      dots[k].className = (k === i) ? 'on' : (k < i ? 'done' : '');
+    }
+    document.getElementById('stepCount').textContent = '步骤 ' + (i+1) + ' / ' + STEPS.length;
+  }
+  function stop(){
+    if (timer){ clearInterval(timer); timer = null; document.getElementById('stepPlay').textContent = '▶ 自动播放'; }
+  }
+  document.getElementById('stepNext').addEventListener('click', function(){ stop(); if (cur < STEPS.length-1) render(cur+1); });
+  document.getElementById('stepPrev').addEventListener('click', function(){ stop(); if (cur > 0) render(cur-1); });
+  document.getElementById('stepReset').addEventListener('click', function(){ stop(); render(-1); });
+  document.getElementById('stepPlay').addEventListener('click', function(){
+    if (timer){ stop(); return; }
+    this.textContent = '⏸ 暂停';
+    if (cur >= STEPS.length-1) render(0); else render(cur+1);
+    timer = setInterval(function(){
+      if (cur >= STEPS.length-1){ stop(); return; }
+      render(cur+1);
+    }, 2200);
+  });
+  render(-1);
+
+  /* ============ 交互 B：注意力计算器 ============ */
+  var TOK = ["小猫","追","毛线球","它","累"];
+  // 打分（示意）：每行 = 该查询词对所有词的原始匹配分
+  var SCORES = [
+    [1.6, 1.9, 0.2, 0.4, 0.1],   // 小猫
+    [2.1, 0.6, 2.0, 0.1, 0.2],   // 追
+    [0.2, 2.2, 0.7, 0.1, 0.1],   // 毛线球
+    [2.6, 0.1, 0.0, 0.9, 0.3],   // 它 —— 重点看向「小猫」
+    [1.1, 0.1, 0.0, 2.4, 0.5]    // 累
+  ];
+  // Value 向量（示意 4 维）
+  var VALS = [
+    [0.90, 0.10, 0.00, 0.00],
+    [0.05, 0.88, 0.15, 0.00],
+    [0.02, 0.18, 0.92, 0.00],
+    [0.82, 0.20, 0.05, 0.00],
+    [0.10, 0.00, 0.00, 0.90]
+  ];
+  function softmax(a){
+    var m = Math.max.apply(null, a);
+    var xs = a.map(function(x){ return Math.exp(x - m); });
+    var s = xs.reduce(function(p,q){ return p+q; }, 0);
+    return xs.map(function(x){ return x/s; });
+  }
+  // 预计算全部权重
+  var W = SCORES.map(function(row){ return softmax(row); });
+  var table = document.getElementById('attnTable');
+  function buildTable(){
+    var html = '<tr><th style="border:none"></th>';
+    TOK.forEach(function(t){ html += '<th>' + t + '</th>'; });
+    html += '</tr>';
+    TOK.forEach(function(q, i){
+      html += '<tr data-i="' + i + '"><td class="qhead">' + q + '</td>';
+      TOK.forEach(function(k, j){
+        var w = W[i][j];
+        var alpha = 0.06 + Math.min(1, w * 1.7) * 0.55;
+        html += '<td style="background:rgba(78,157,255,' + alpha.toFixed(3) + ')">' + w.toFixed(2) + '</td>';
+      });
+      html += '</tr>';
+    });
+    table.innerHTML = html;
+    var rows = table.querySelectorAll('tr[data-i]');
+    for (var n=0;n<rows.length;n++){
+      rows[n].addEventListener('click', function(){ selectAttn(parseInt(this.getAttribute('data-i'),10)); });
+    }
+  }
+  function selectAttn(i){
+    var rows = table.querySelectorAll('tr[data-i]');
+    for (var n=0;n<rows.length;n++) rows[n].classList.remove('sel');
+    rows[i].classList.add('sel');
+    var ws = W[i], maxW = 0, maxIdx = 0;
+    ws.forEach(function(w,k){ if (w > maxW){ maxW = w; maxIdx = k; } });
+    document.getElementById('attnTitle').textContent = '查询词：「' + TOK[i] + '」 —— 它最关注「' + TOK[maxIdx] + '」（权重 ' + (maxW*100).toFixed(1) + '%）';
+    var bars = '';
+    TOK.forEach(function(t, j){
+      var on = (j === maxIdx);
+      bars += '<div class="pbar' + (on?' on':'') + '"><div class="plabel">' + t + '</div>' +
+              '<div class="ptrack"><div class="pfill" style="width:' + (ws[j]*100).toFixed(1) + '%"></div></div>' +
+              '<div class="ppct">' + (ws[j]*100).toFixed(1) + '%</div></div>';
+    });
+    // 加权求和 V
+    var out = [0,0,0,0];
+    ws.forEach(function(w, j){
+      for (var d=0; d<4; d++) out[d] += w * VALS[j][d];
+    });
+    var vecHtml = out.map(function(x){
+      return '<div>' + (x>=0?' ':'') + x.toFixed(2) + '</div>';
+    }).join('');
+    document.getElementById('attnDetail').innerHTML =
+      '<div style="margin:8px 0 4px;color:var(--c3);font-size:13px">softmax 后的注意力权重 →</div>' + bars +
+      '<div style="margin:12px 0 4px;color:var(--c4);font-size:13px">输出 = Σ 权重 × V，得到「' + TOK[i] + '」的新表示：</div>' +
+      '<div class="vec">' + vecHtml + '</div>' +
+      '<div style="color:var(--dim);font-size:12px;margin-top:6px">对比一下：原 V(小猫) = [' + VALS[0].map(function(x){return x.toFixed(2);}).join(', ') + '] —— 看它俩有多像，就明白「信息被聚合过来」是什么意思。</div>';
+  }
+  buildTable();
+  selectAttn(3);   // 默认展示「它」这一行
+
+  /* ============ 交互 C：因果掩码 ============ */
+  var grid = document.getElementById('maskGrid');
+  var maskToggle = document.getElementById('maskToggle');
+  var maskRow = 2;
+  function buildMask(){
+    var html = '<tr><th></th>';
+    TOK.forEach(function(t){ html += '<th>' + t + '</th>'; });
+    html += '</tr>';
+    TOK.forEach(function(q, i){
+      html += '<tr data-r="' + i + '"><th>' + q + '</th>';
+      TOK.forEach(function(k, j){
+        if (maskToggle.checked && j > i){
+          html += '<td class="blocked">✕</td>';
+        } else {
+          html += '<td class="allowed">✓</td>';
+        }
+      });
+      html += '</tr>';
+    });
+    grid.innerHTML = html;
+    var rows = grid.querySelectorAll('tr[data-r]');
+    for (var n=0;n<rows.length;n++){
+      rows[n].addEventListener('click', function(){
+        maskRow = parseInt(this.getAttribute('data-r'), 10);
+        buildMask(); highlightMask();
+      });
+    }
+    highlightMask();
+  }
+  function highlightMask(){
+    var rows = grid.querySelectorAll('tr[data-r]');
+    for (var n=0;n<rows.length;n++) rows[n].classList.remove('selrow');
+    if (rows[maskRow]) rows[maskRow].classList.add('selrow');
+    document.getElementById('maskInfo').innerHTML =
+      '当前选中第 ' + (maskRow+1) + ' 行「<b>' + TOK[maskRow] + '</b>」：它能看到的位置是 <b class="hl">第 1 ~ ' + (maskRow+1) + ' 个词</b>，' +
+      '（' + (maskRow+2 <= TOK.length ? '第 ' + (maskRow+2) + ' 个及以后' : '后面没有') + ' 的词属于未来，已被屏蔽）。' +
+      ' 这正是保证模型「只能根据已经写出来的内容，预测下一个」的机制。';
+  }
+  maskToggle.addEventListener('change', buildMask);
+  buildMask();
+})();
+</script>
+</body>
+</html>
