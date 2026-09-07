@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>向量检索耗时：不同数量级下差多少</title>
+<style>
+:root{
+  --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#2a3140;
+  --text:#e6e8ec; --muted:#9aa3b2; --accent:#6ea8fe; --purple:#b692ff;
+  --green:#4ec9b0; --orange:#ff9e64; --red:#ff6b6b; --yellow:#ffd66b;
+  --grad:linear-gradient(90deg,#6ea8fe,#b692ff);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;font-size:16px;}
+.wrap{max-width:1000px;margin:0 auto;padding:30px 24px 100px;position:relative;}
+header.hero{padding:42px 30px;border-radius:18px;margin-bottom:30px;background:radial-gradient(1200px 300px at 10% 0%,rgba(110,168,254,.18),transparent),radial-gradient(900px 280px at 90% 10%,rgba(182,146,255,.16),transparent),var(--surface);border:1px solid var(--border);}
+header.hero h1{font-size:30px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:10px;}
+header.hero p{color:var(--muted);font-size:15.5px;max-width:780px;}
+section.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:26px 28px;margin:22px 0;scroll-margin-top:20px;}
+section.card h2{font-size:21px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border);color:#fff;}
+section.card h3{font-size:17px;margin:18px 0 8px;color:var(--accent);}
+p{margin:10px 0;color:var(--text);}
+ul,ol{margin:10px 0 10px 22px;}
+li{margin:6px 0;}
+code{background:var(--surface2);padding:2px 7px;border-radius:6px;font-family:"SF Mono",Consolas,monospace;font-size:13.5px;color:var(--orange);}
+pre{background:#0b0f16;border:1px solid var(--border);border-radius:10px;padding:16px 18px;overflow-x:auto;margin:14px 0;font-family:"SF Mono",Consolas,monospace;font-size:13px;line-height:1.6;color:#c9d1d9;}
+pre code{background:none;padding:0;color:inherit;}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;}
+th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;}
+th{background:var(--surface2);color:#fff;font-weight:600;}
+tr:nth-child(even) td{background:rgba(255,255,255,.02);}
+.diagram{margin:18px 0;text-align:center;}
+.diagram svg{max-width:100%;height:auto;}
+.caption{color:var(--muted);font-size:13px;text-align:center;margin-top:6px;}
+.callout{border-left:4px solid var(--accent);background:rgba(110,168,254,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0;}
+.callout.tip{border-color:var(--green);background:rgba(78,201,176,.08);}
+.callout.warn{border-color:var(--red);background:rgba(255,107,107,.08);}
+.formula{font-family:"SF Mono",Consolas,monospace;background:var(--surface2);padding:12px 16px;border-radius:10px;margin:12px 0;color:var(--yellow);font-size:14px;overflow-x:auto;}
+.toc{position:fixed;right:22px;top:50%;transform:translateY(-50%);z-index:40;display:flex;flex-direction:column;gap:9px;max-width:200px;}
+.toc a{color:var(--muted);text-decoration:none;font-size:12.5px;padding-left:14px;position:relative;transition:.15s;border-left:2px solid transparent;}
+.toc a::before{content:"";position:absolute;left:-4px;top:50%;transform:translateY(-50%);width:7px;height:7px;border-radius:50%;background:var(--border);transition:.15s;}
+.toc a:hover{color:var(--text);}
+.toc a.active{color:var(--text);border-left-color:var(--accent);}
+.toc a.active::before{background:var(--accent);box-shadow:0 0 8px var(--accent);}
+@media(max-width:1100px){.toc{display:none;}}
+footer{text-align:center;color:var(--muted);font-size:13px;padding:30px;border-top:1px solid var(--border);margin-top:30px;}
+footer a{color:var(--accent);text-decoration:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero"><h1>向量检索耗时：不同数量级下差多少</h1><p>用计算模型 + 对照表讲清 1万→1亿 行下暴力与 ANN 的耗时、QPS、召回率差异，以及维度与内存两个隐藏瓶颈。</p></header>
+<aside class="toc">
+<a href="#model">耗时从哪来</a>
+<a href="#table">不同数量级耗时对照</a>
+<a href="#dim">维度的影响</a>
+<a href="#mem">内存瓶颈</a>
+<a href="#empirical">工程经验数据</a>
+<a href="#concl">结论</a>
+</aside>
+
+<section class="card" id="model">
+  <h2>耗时从哪来：一次查询算几次</h2>
+  <p>向量检索的单次查询耗时，核心来自"要和多少个候选向量做距离计算"：</p>
+  <div class="formula">单查耗时 ≈ 候选数 × 向量维度 × 每次距离的计算量</div>
+  <ul>
+    <li><b>暴力（FLAT）</b>：候选数 = 全量 N，必须和每一行都算一次距离。N 越大越慢，线性增长。</li>
+    <li><b>ANN（如 HNSW）</b>：靠索引跳过绝大多数向量，候选数 ≈ O(log N)，只访问图上少数节点。</li>
+  </ul>
+  <p>假设维度 d=768，单次内积约 768 次乘加。下面给出不同数量级下的实测量级估计（CPU 单线程粗略、用于建立直觉，非精确 benchmark）。</p>
+</section>
+
+<section class="card" id="table">
+  <h2>不同数量级耗时对照（d=768，单查）</h2>
+  <table>
+    <tr><th>数据量 N</th><th>FLAT 暴力扫描</th><th>FLAT QPS(估)</th><th>HNSW(ANN)</th><th>HNSW QPS(估)</th><th>HNSW 召回@10</th></tr>
+    <tr><td>1 万</td><td>~1–3 ms</td><td>~400</td><td>~0.3 ms</td><td>~3000</td><td>99%+</td></tr>
+    <tr><td>10 万</td><td>~10–25 ms</td><td>~60</td><td>~0.4 ms</td><td>~2500</td><td>99%+</td></tr>
+    <tr><td>100 万</td><td>~80–200 ms</td><td>~8</td><td>~0.6–1.5 ms</td><td>~800–1500</td><td>95–99%</td></tr>
+    <tr><td>1000 万</td><td>~0.8–2 s</td><td>~1</td><td>~1–3 ms</td><td>~400–800</td><td>95–98%</td></tr>
+    <tr><td>1 亿</td><td>~8–20 s ❌</td><td>&lt;1</td><td>~3–8 ms*</td><td>~150–400*</td><td>90–97%*</td></tr>
+  </table>
+  <p class="caption">* 1 亿级单机能扛的 HNSW 往往内存放不下，需 IVF-PQ / DiskANN / 分布式分片；标 * 为分片或压缩后的典型值。</p>
+  <div class="diagram">
+  <svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+    <line x1="80" y1="200" x2="640" y2="200" stroke="#2a3140"/>
+    <line x1="80" y1="20" x2="80" y2="200" stroke="#2a3140"/>
+    <text x="40" y="115" fill="#9aa3b2" font-size="12" transform="rotate(-90 40 115)">单查耗时(ms, log)</text>
+    <!-- FLAT 柱 (指数增长) -->
+    <rect x="110" y="190" width="60" height="10" fill="#ff6b6b"/><text x="140" y="183" fill="#ff6b6b" font-size="10" text-anchor="middle">2</text>
+    <rect x="200" y="178" width="60" height="22" fill="#ff6b6b"/><text x="230" y="171" fill="#ff6b6b" font-size="10" text-anchor="middle">15</text>
+    <rect x="290" y="150" width="60" height="50" fill="#ff6b6b"/><text x="320" y="143" fill="#ff6b6b" font-size="10" text-anchor="middle">140</text>
+    <rect x="380" y="95" width="60" height="105" fill="#ff6b6b"/><text x="410" y="88" fill="#ff6b6b" font-size="10" text-anchor="middle">1500</text>
+    <rect x="470" y="30" width="60" height="170" fill="#ff6b6b"/><text x="500" y="23" fill="#ff6b6b" font-size="10" text-anchor="middle">15000</text>
+    <!-- HNSW 柱 (几乎不变) -->
+    <rect x="175" y="186" width="45" height="14" fill="#4ec9b0"/><text x="197" y="179" fill="#4ec9b0" font-size="10" text-anchor="middle">0.4</text>
+    <rect x="355" y="183" width="45" height="17" fill="#4ec9b0"/><text x="377" y="176" fill="#4ec9b0" font-size="10" text-anchor="middle">1</text>
+    <rect x="445" y="179" width="45" height="21" fill="#4ec9b0"/><text x="467" y="172" fill="#4ec9b0" font-size="10" text-anchor="middle">3</text>
+    <text x="360" y="220" fill="#9aa3b2" font-size="11" text-anchor="middle">1万 · 10万 · 100万 · 1000万 · 1亿</text>
+    <rect x="560" y="40" width="14" height="14" fill="#ff6b6b"/><text x="580" y="51" fill="#9aa3b2" font-size="11">FLAT(暴力)</text>
+    <rect x="560" y="60" width="14" height="14" fill="#4ec9b0"/><text x="580" y="71" fill="#9aa3b2" font-size="11">HNSW(ANN)</text>
+  </svg>
+  <div class="caption">图 1：暴力扫描耗时随数据量线性(指数感)飙升；ANN 几乎不随 N 增长。纵轴为对数示意。</div>
+  </div>
+</section>
+
+<section class="card" id="dim">
+  <h2>维度的影响</h2>
+  <p>耗时与<b>维度 d 成正比</b>。从 384 → 768 → 1536，单次距离计算量翻倍再翻倍：</p>
+  <table>
+    <tr><th>维度 d</th><th>相对计算量</th><th>对 FLAT</th><th>对 ANN</th></tr>
+    <tr><td>384</td><td>1×</td><td>快一半</td><td>略快</td></tr>
+    <tr><td>768</td><td>2×</td><td>基准</td><td>基准</td></tr>
+    <tr><td>1536</td><td>4×</td><td>慢约 4 倍</td><td>访问节点数略增，整体约 2–3×</td></tr>
+  </table>
+  <div class="callout">高维还会带来"维度灾难"：距离分布趋同，暴力意义下降，ANN 索引也更难建。能用 768 就别盲目上 1536，除非精度确实不够。</div>
+</section>
+
+<section class="card" id="mem">
+  <h2>内存才是真正的瓶颈</h2>
+  <p>耗时之外，<b>内存往往先爆</b>。float32 每维 4 字节：</p>
+  <div class="formula">内存 = N × d × 4 字节（未压缩，HNSW 还要额外存图边）</div>
+  <table>
+    <tr><th>数据量</th><th>768d float32</th><th>PQ 压缩后(~1/32)</th></tr>
+    <tr><td>100 万</td><td>~3 GB</td><td>~0.1 GB</td></tr>
+    <tr><td>1000 万</td><td>~30 GB</td><td>~1 GB</td></tr>
+    <tr><td>1 亿</td><td>~300 GB ❌</td><td>~10 GB</td></tr>
+  </table>
+  <p>HNSW 因为是图结构，还要额外存邻居边（约 N×M×4 字节，M 通常 16~64），实际内存比裸向量还大。所以亿级数据几乎必须用 IVF-PQ / 磁盘索引（DiskANN）/ 分布式。</p>
+</section>
+
+<section class="card" id="empirical">
+  <h2>工程经验数据（量级参考）</h2>
+  <ul>
+    <li><b>Faiss HNSW，100 万 × 768d</b>：单查 ~1–2 ms，单线程可达数千 QPS；efSearch=64~128 时召回@10 约 95–99%。</li>
+    <li><b>内存够时</b>：HNSW 是"又快又准"的默认选择，直到内存放不下。</li>
+    <li><b>千万~亿级</b>：IVF-PQ（nprobe 调召回）或 Milvus/Weaviate 的分布式分片；单分片控制在千万级以内。</li>
+    <li><b>批量检索（batch）</b>：一次查 100 个 query 比单个查 100 次快数倍（向量化 + 更好利用缓存）。</li>
+  </ul>
+</section>
+
+<section class="card" id="concl">
+  <h2>结论速记</h2>
+  <ul>
+    <li>暴力扫描耗时 ∝ N × d；ANN 耗时 ∝ log(N) × d。<b>数据量越大，ANN 优势越夸张</b>。</li>
+    <li>维度翻倍 → 耗时翻倍；别无脑上高维。</li>
+    <li>真正卡住你的是<b>内存</b>：亿级必须量化 / 磁盘 / 分片。</li>
+    <li>选型顺序：小数据用 FLAT 保准确；中大数据 HNSW；超大数据 IVF-PQ/DiskANN。详见《向量索引选型指南》。</li>
+  </ul>
+</section>
+
+<footer>向量检索系列 · <a href="../index.html">返回 AI 学科首页</a></footer>
+</div>
+
+<script>
+const tocLinks=[...document.querySelectorAll('.toc a')];
+const map=tocLinks.map(a=>document.getElementById(a.getAttribute('href').slice(1)));
+const obs=new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      const id=e.target.id;
+      tocLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')===('#'+id)));
+    }
+  });
+},{rootMargin:'-30% 0px -60% 0px'});
+map.forEach(s=>s&&obs.observe(s));
+</script>
+
+</body>
+</html>

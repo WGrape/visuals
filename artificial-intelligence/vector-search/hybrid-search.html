@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>混合检索：稠密 + 稀疏</title>
+<style>
+:root{
+  --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#2a3140;
+  --text:#e6e8ec; --muted:#9aa3b2; --accent:#6ea8fe; --purple:#b692ff;
+  --green:#4ec9b0; --orange:#ff9e64; --red:#ff6b6b; --yellow:#ffd66b;
+  --grad:linear-gradient(90deg,#6ea8fe,#b692ff);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;font-size:16px;}
+.wrap{max-width:1000px;margin:0 auto;padding:30px 24px 100px;position:relative;}
+header.hero{padding:42px 30px;border-radius:18px;margin-bottom:30px;background:radial-gradient(1200px 300px at 10% 0%,rgba(110,168,254,.18),transparent),radial-gradient(900px 280px at 90% 10%,rgba(182,146,255,.16),transparent),var(--surface);border:1px solid var(--border);}
+header.hero h1{font-size:30px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:10px;}
+header.hero p{color:var(--muted);font-size:15.5px;max-width:780px;}
+section.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:26px 28px;margin:22px 0;scroll-margin-top:20px;}
+section.card h2{font-size:21px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border);color:#fff;}
+section.card h3{font-size:17px;margin:18px 0 8px;color:var(--accent);}
+p{margin:10px 0;color:var(--text);}
+ul,ol{margin:10px 0 10px 22px;}
+li{margin:6px 0;}
+code{background:var(--surface2);padding:2px 7px;border-radius:6px;font-family:"SF Mono",Consolas,monospace;font-size:13.5px;color:var(--orange);}
+pre{background:#0b0f16;border:1px solid var(--border);border-radius:10px;padding:16px 18px;overflow-x:auto;margin:14px 0;font-family:"SF Mono",Consolas,monospace;font-size:13px;line-height:1.6;color:#c9d1d9;}
+pre code{background:none;padding:0;color:inherit;}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;}
+th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;}
+th{background:var(--surface2);color:#fff;font-weight:600;}
+tr:nth-child(even) td{background:rgba(255,255,255,.02);}
+.diagram{margin:18px 0;text-align:center;}
+.diagram svg{max-width:100%;height:auto;}
+.caption{color:var(--muted);font-size:13px;text-align:center;margin-top:6px;}
+.callout{border-left:4px solid var(--accent);background:rgba(110,168,254,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0;}
+.callout.tip{border-color:var(--green);background:rgba(78,201,176,.08);}
+.callout.warn{border-color:var(--red);background:rgba(255,107,107,.08);}
+.formula{font-family:"SF Mono",Consolas,monospace;background:var(--surface2);padding:12px 16px;border-radius:10px;margin:12px 0;color:var(--yellow);font-size:14px;overflow-x:auto;}
+.toc{position:fixed;right:22px;top:50%;transform:translateY(-50%);z-index:40;display:flex;flex-direction:column;gap:9px;max-width:200px;}
+.toc a{color:var(--muted);text-decoration:none;font-size:12.5px;padding-left:14px;position:relative;transition:.15s;border-left:2px solid transparent;}
+.toc a::before{content:"";position:absolute;left:-4px;top:50%;transform:translateY(-50%);width:7px;height:7px;border-radius:50%;background:var(--border);transition:.15s;}
+.toc a:hover{color:var(--text);}
+.toc a.active{color:var(--text);border-left-color:var(--accent);}
+.toc a.active::before{background:var(--accent);box-shadow:0 0 8px var(--accent);}
+@media(max-width:1100px){.toc{display:none;}}
+footer{text-align:center;color:var(--muted);font-size:13px;padding:30px;border-top:1px solid var(--border);margin-top:30px;}
+footer a{color:var(--accent);text-decoration:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero"><h1>混合检索：稠密 + 稀疏</h1><p>稠密检索的短板与 BM25 的互补；两路召回后如何用 RRF / 加权 / 学习排序融合，以及何时该上混合检索。</p></header>
+<aside class="toc">
+<a href="#gap">稠密检索的短板</a>
+<a href="#sparse">稀疏检索的优势</a>
+<a href="#fuse">两路融合</a>
+<a href="#rrf">RRF 详解</a>
+<a href="#sparse-rep">稀疏表示</a>
+<a href="#when">何时用</a>
+</aside>
+
+<section class="card" id="gap">
+  <h2>稠密检索的短板</h2>
+  <p>纯向量（稠密）检索靠语义，但有几个天然弱项：</p>
+  <ul>
+    <li><b>稀有词 / 专有名词</b>：如产品型号、错误码、人名，训练时少见，语义空间里表达弱。</li>
+    <li><b>精确匹配</b>：用户要"包含 exactly 这个字符串"，稠密检索给的是"意思近"，答非所问。</li>
+    <li><b>词面对齐</b>：query 与文档字面高度重叠但语义不同（或反之）时容易误判。</li>
+  </ul>
+</section>
+
+<section class="card" id="sparse">
+  <h2>稀疏检索（BM25）的优势</h2>
+  <p>传统 BM25 基于词频/逆文档频率，<b>对关键词、专名、精确串极其敏感且确定</b>。它正好补上稠密的短板：</p>
+  <ul>
+    <li>字面命中即高分，不会"语义对但词不对"。</li>
+    <li>对 ID、代号、术语零误判。</li>
+    <li>可解释、无需训练、开销低。</li>
+  </ul>
+  <div class="callout">互补关系：<b>稠密管"意思像"，稀疏管"词面对"</b>。两者合起来才稳。</div>
+</section>
+
+<section class="card" id="fuse">
+  <h2>两路召回 + 融合</h2>
+  <p>混合检索（Hybrid Search）标准做法：</p>
+  <ol>
+    <li>同一 query 同时跑<b>稠密路</b>（向量召回 top-k_a）和<b>稀疏路</b>（BM25 召回 top-k_b）。</li>
+    <li>把两路结果<b>归并、去重</b>，用融合算法重新排序，得最终 top-k。</li>
+  </ol>
+  <div class="diagram">
+  <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="h1" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6ea8fe"/></marker></defs>
+    <rect x="40" y="80" width="110" height="40" rx="8" fill="#1c2230" stroke="#6ea8fe"/><text x="95" y="104" fill="#e6e8ec" font-size="12" text-anchor="middle">Query</text>
+    <rect x="200" y="30" width="150" height="40" rx="8" fill="#1c2230" stroke="#b692ff"/><text x="275" y="54" fill="#e6e8ec" font-size="12" text-anchor="middle">稠密路(向量)</text>
+    <rect x="200" y="120" width="150" height="40" rx="8" fill="#1c2230" stroke="#4ec9b0"/><text x="275" y="144" fill="#e6e8ec" font-size="12" text-anchor="middle">稀疏路(BM25)</text>
+    <rect x="430" y="75" width="150" height="50" rx="8" fill="#1c2230" stroke="#ff9e64"/><text x="505" y="98" fill="#e6e8ec" font-size="12" text-anchor="middle">融合排序</text>
+    <text x="505" y="118" fill="#9aa3b2" font-size="11" text-anchor="middle">RRF / 加权</text>
+    <rect x="610" y="80" width="50" height="40" rx="8" fill="#1c2230" stroke="#ffd66b"/><text x="635" y="104" fill="#e6e8ec" font-size="12" text-anchor="middle">TopK</text>
+    <line x1="150" y1="95" x2="198" y2="60" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
+    <line x1="150" y1="100" x2="198" y2="140" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
+    <line x1="350" y1="55" x2="428" y2="95" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
+    <line x1="350" y1="140" x2="428" y2="110" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
+    <line x1="580" y1="100" x2="608" y2="100" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
+  </svg>
+  <div class="caption">图 1：两路并行召回，融合后输出最终 TopK。</div>
+  </div>
+</section>
+
+<section class="card" id="rrf">
+  <h2>RRF：最省心的融合算法</h2>
+  <p><b>RRF（Reciprocal Rank Fusion，倒数排名融合）</b>不需要把两路分数归一化到同一量纲，只看"排名"：</p>
+  <div class="formula">score(x) = Σ_{r in 各路}  1 / (k + rank_r(x))   ，k 常取 60</div>
+  <p>某个文档在两路里排名越靠前（rank 越小），融合分越高。优点：</p>
+  <ul>
+    <li><b>免归一化</b>：稠密分(0~1)和 BM25 分(0~20)量纲不同也能直接融。</li>
+    <li><b>鲁棒</b>：个别路分数异常不影响整体。</li>
+    <li>简单、无超参（除 k）。</li>
+  </ul>
+  <p>另有<b>加权求和</b>：先把各路分数 min-max / z-score 归一化，再 w_d·s_d + w_s·s_s。需调权重，但对"某路更重要"的场景更可控。还有<b>学习排序</b>（Cross-Encoder / LambdaMART）做最终精排，精度最高但成本高。</p>
+</section>
+
+<section class="card" id="sparse-rep">
+  <h2>稀疏表示不止 BM25</h2>
+  <ul>
+    <li><b>BM25</b>：统计式，确定、快、对关键词强。</li>
+    <li><b>SPLADE</b>：用模型把文档/查询变成"带权重的词表向量"（仍是稀疏），兼顾语义与可解释。</li>
+    <li><b>BM25+（上下文稀疏）</b>：模型生成的稀疏向量，比纯 BM25 更懂语义。</li>
+  </ul>
+  <p>混合检索的"稀疏路"可以是 BM25，也可以是这些模型稀疏向量，后两者效果更好。</p>
+</section>
+
+<section class="card" id="when">
+  <h2>何时该上混合检索</h2>
+  <ul>
+    <li>知识库含<b>专名、型号、错误码、法律条款编号</b>等——必用。</li>
+    <li>用户常做<b>精确短语</b>搜索——必用。</li>
+    <li>纯开放域闲聊/通用问答——稠密单路通常够。</li>
+  </ul>
+  <div class="callout tip">经验法则：企业知识库 / RAG 生产环境，默认上"稠密 + BM25(RRF 融合)"。它几乎总是比纯向量稳一截，成本却只多一路关键词检索。</div>
+</section>
+
+<footer>向量检索系列 · <a href="../index.html">返回 AI 学科首页</a></footer>
+</div>
+
+<script>
+const tocLinks=[...document.querySelectorAll('.toc a')];
+const map=tocLinks.map(a=>document.getElementById(a.getAttribute('href').slice(1)));
+const obs=new IntersectionObserver((entries)=>{
+  entries.forEach(e=>{
+    if(e.isIntersecting){
+      const id=e.target.id;
+      tocLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')===('#'+id)));
+    }
+  });
+},{rootMargin:'-30% 0px -60% 0px'});
+map.forEach(s=>s&&obs.observe(s));
+</script>
+
+</body>
+</html>
