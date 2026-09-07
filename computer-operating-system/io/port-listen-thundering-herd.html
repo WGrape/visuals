@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>一个端口能被两个程序同时监听吗？——顺便彻底讲清「惊群问题」</title>
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+    background: #0d1117; color: #e6edf3;
+    margin: 0; line-height: 1.8; font-size: 15px;
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 50; background: rgba(13,17,23,.94);
+    backdrop-filter: blur(8px); border-bottom: 1px solid #30363d;
+    padding: 10px 22px; display: flex; gap: 13px; flex-wrap: wrap;
+  }
+  .nav a { color: #8b949e; text-decoration: none; font-size: 13px; padding: 4px 9px; border-radius: 6px; }
+  .nav a:hover { color: #e6edf3; background: #161b22; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 30px 24px 90px; }
+  h1 { font-size: 27px; margin: 0 0 8px; line-height: 1.4; color: #58a6ff; }
+  h2 { font-size: 21px; margin: 50px 0 14px; padding-left: 12px; border-left: 4px solid #1f6feb; }
+  h3 { font-size: 17px; margin: 22px 0 10px; color: #58a6ff; }
+  p { margin: 10px 0; }
+  .subtitle { color: #8b949e; font-size: 15px; margin-bottom: 18px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px 22px; margin: 16px 0; }
+  .card.red { border-left: 4px solid #f85149; }
+  .card.green { border-left: 4px solid #3fb950; }
+  .card.blue { border-left: 4px solid #58a6ff; }
+  .card.yellow { border-left: 4px solid #e3b341; }
+  .card.purple { border-left: 4px solid #bc8cff; }
+  code { background: #0d1117; border: 1px solid #30363d; padding: 1px 6px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: #e3b341; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px; overflow-x: auto; font-family: Consolas, monospace; font-size: 13px; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th, td { border: 1px solid #30363d; padding: 9px 12px; text-align: left; }
+  th { background: #161b22; color: #58a6ff; }
+  .svgbox { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px; margin: 18px 0; overflow-x: auto; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; margin: 2px 4px 2px 0; }
+  .tag.b { background: rgba(88,166,255,.12); color: #58a6ff; border: 1px solid #58a6ff; }
+  .tag.g { background: rgba(63,185,80,.12); color: #3fb950; border: 1px solid #3fb950; }
+  .tag.r { background: rgba(248,81,73,.12); color: #f85149; border: 1px solid #f85149; }
+  .tag.y { background: rgba(227,179,65,.12); color: #e3b341; border: 1px solid #e3b341; }
+  .tag.p { background: rgba(188,140,255,.12); color: #bc8cff; border: 1px solid #bc8cff; }
+  .hl { color: #e3b341; font-weight: 700; }
+  .foot { color: #8b949e; font-size: 13px; margin-top: 60px; border-top: 1px solid #30363d; padding-top: 20px; }
+  .foot a { color: #58a6ff; }
+
+  /* 交互控件 */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+  .btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  .btn:hover { border-color: #58a6ff; }
+  .btn.primary { background: #1f6feb; color: #fff; border-color: #1f6feb; font-weight: 600; }
+  .btn.primary:hover { background: #388bfd; }
+  .btn.warn { background: #e3b341; color: #0d1117; border-color: #e3b341; font-weight: 600; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  select, input[type=range] { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 5px 8px; }
+  label.chk { display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 14px; }
+  .readout { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 14px; margin: 10px 0; font-size: 14px; }
+
+  /* 惊群模拟器 */
+  .herd-stage { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+  .worker {
+    width: 92px; padding: 10px 6px; border-radius: 9px; text-align: center;
+    border: 1.5px solid #30363d; background: #0d1117; transition: all .22s ease;
+    font-size: 12px; line-height: 1.5;
+  }
+  .worker .wname { font-weight: 700; color: #8b949e; }
+  .worker .wst { font-size: 11px; margin-top: 3px; color: #6e7681; }
+  .worker.sleep { border-color: #30363d; }
+  .worker.sleep .wst { color: #6e7681; }
+  .worker.wake { border-color: #e3b341; background: rgba(227,179,65,.14); box-shadow: 0 0 10px rgba(227,179,65,.5); }
+  .worker.wake .wst { color: #e3b341; font-weight: 700; }
+  .worker.ok { border-color: #3fb950; background: rgba(63,185,80,.16); box-shadow: 0 0 10px rgba(63,185,80,.5); }
+  .worker.ok .wst { color: #3fb950; font-weight: 700; }
+  .worker.fail { border-color: #f85149; background: rgba(248,81,73,.12); }
+  .worker.fail .wst { color: #f85149; font-weight: 700; }
+  .stats { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
+  .stat { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  .stat b { font-size: 18px; }
+  .stat.g b { color: #3fb950; }
+  .stat.r b { color: #f85149; }
+  .stat.y b { color: #e3b341; }
+
+  /* bind 演示 */
+  .portbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+  .socket {
+    min-width: 170px; padding: 10px 14px; border-radius: 9px; border: 1.5px solid #30363d;
+    background: #0d1117; font-size: 13px;
+  }
+  .socket.taken { border-color: #58a6ff; }
+  .socket.err { border-color: #f85149; background: rgba(248,81,73,.12); }
+  .socket.reuse { border-color: #3fb950; background: rgba(63,185,80,.12); }
+  .socket .st { font-size: 11px; color: #8b949e; margin-top: 3px; }
+  .logline { font-family: Consolas, monospace; font-size: 12px; color: #8b949e; margin: 3px 0; }
+  .logline.ok { color: #3fb950; }
+  .logline.err { color: #f85149; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#answer">1. 直接回答</a>
+  <a href="#bind">2. 端口归属规则</a>
+  <a href="#demo1">3. 交互·bind 冲突</a>
+  <a href="#share">4. 「群」从哪来</a>
+  <a href="#what">5. 什么是惊群</a>
+  <a href="#demo2">6. 交互·惊群模拟</a>
+  <a href="#kernel">7. 内核演进真相</a>
+  <a href="#fix">8. 解决方案</a>
+  <a href="#broad">9. 广义惊群</a>
+  <a href="#sum">10. 总结</a>
+</div>
+
+<div class="wrap">
+  <h1>一个端口能被两个程序同时监听吗？——顺便彻底讲清「惊群问题」</h1>
+  <p class="subtitle">这两个问题看起来矛盾："端口既然只能一个程序监听，那哪来的'一群'进程被惊醒？" 本文把这条逻辑链完整打通。</p>
+  <div>
+    <span class="tag b">端口与 bind</span>
+    <span class="tag g">SO_REUSEPORT</span>
+    <span class="tag r">惊群 Thundering Herd</span>
+    <span class="tag y">epoll / EPOLLEXCLUSIVE</span>
+    <span class="tag p">accept 队列</span>
+  </div>
+
+  <h2 id="answer">一、直接回答（结论先行）</h2>
+  <div class="card red">
+    <p style="margin-top:0"><b>Q：一个端口能被两个程序同时监听吗？</b></p>
+    <p><span class="hl">默认不能。</span>同一个 <code>(协议, IP, 端口)</code> 三元组，在同一网络命名空间里只能被<b>一个 socket</b> 绑定并监听。第二个程序调用 <code>bind()</code> 会直接失败，返回 <code>EADDRINUSE (Address already in use)</code>。</p>
+    <p><b>唯一的例外</b>：所有 socket 都显式设置了 <code>SO_REUSEPORT</code>（Linux 3.9+），才允许多个 socket 绑定完全相同的地址与端口 —— 这是内核专门开的口子，且每个 socket 有自己独立的 accept 队列。</p>
+  </div>
+  <div class="card green">
+    <p style="margin-top:0"><b>Q：那惊群问题是怎么来的？</b></p>
+    <p><span class="hl">惊群跟"两个程序监听同一端口"毫无关系。</span>它的真实场景是：<b>一个监听 socket，被多个进程/线程共享</b>（典型是 <code>fork()</code> 继承 fd），这些进程<b>全都阻塞在同一个 <code>accept()</code> 上</b>。一个连接到达时，内核把<b>所有</b>等待者都唤醒，可连接只有一个 —— 醒了却抢不到的人白忙一场，再回去睡。</p>
+    <p style="margin-bottom:0"><b>一句话化解矛盾：</b>端口确实只有一个"监听者"，但监听者身后<b>排着一队等着接客的服务员</b>。"群"指的是这队服务员，不是多个监听者。</p>
+  </div>
+
+  <h2 id="bind">二、端口到底归谁：bind 的三元组规则</h2>
+  <p>内核判断"这个端口有没有被占"，看的是<b class="hl">四元组</b>（监听场景是三元组）：<code>协议 + IP + 端口</code>。</p>
+  <table>
+    <tr><th>场景</th><th>能否共存</th><th>说明</th></tr>
+    <tr><td>TCP 8080 与 TCP 8080（同 IP）</td><td><b style="color:#f85149">不能</b></td><td>完全相同的三元组 → <code>EADDRINUSE</code></td></tr>
+    <tr><td>TCP 8080 与 UDP 8080</td><td><b style="color:#3fb950">能</b></td><td>协议不同，是两个独立的端口空间</td></tr>
+    <tr><td>127.0.0.1:8080 与 10.0.0.5:8080</td><td><b style="color:#3fb950">能</b></td><td>绑定 IP 不同（多网卡机器常见）</td></tr>
+    <tr><td>0.0.0.0:8080 与 10.0.0.5:8080</td><td>视情况</td><td>需 <code>SO_REUSEADDR</code>，且行为依赖系统</td></tr>
+    <tr><td>两个进程都设 <code>SO_REUSEPORT</code> 绑同一 IP:端口</td><td><b style="color:#3fb950">能</b></td><td>内核允许，各有独立 accept 队列，由内核分发</td></tr>
+  </table>
+
+  <h3>两个容易混淆的选项</h3>
+  <div class="card yellow">
+    <p style="margin-top:0"><b><code>SO_REUSEADDR</code></b>：主要解决"端口处于 <code>TIME_WAIT</code> 时重启服务绑不上"的问题，让地址可以复用。<span class="hl">它并不能让两个进程同时监听同一个端口</span>（这是最常见的误解）。</p>
+    <p style="margin-bottom:0"><b><code>SO_REUSEPORT</code></b>：才是"允许多个 socket 绑定完全相同 addr:port"的那个开关。它本来的设计目的之一，<b>恰恰就是为了解决惊群</b>。</p>
+  </div>
+
+  <h2 id="demo1">三、交互①：亲手试一次 bind 冲突</h2>
+  <div class="card blue">
+    <div class="controls">
+      <label class="chk"><input type="checkbox" id="reuseChk"/> 开启 <code>SO_REUSEPORT</code>（双方都设置）</label>
+      <button class="btn primary" id="bindB">进程 B 尝试 bind 8080</button>
+      <button class="btn" id="bindReset">重置</button>
+    </div>
+    <div class="portbar">
+      <div class="socket taken" id="sockA">
+        <b>进程 A</b><br/>bind(0.0.0.0:8080) → listen()
+        <div class="st">状态：LISTEN（先来先占）</div>
+      </div>
+      <div class="socket" id="sockB" style="display:none"></div>
+    </div>
+    <div id="bindLog"></div>
+  </div>
+
+  <h2 id="share">四、那「群」到底从哪来？—— fork 让多个进程共享同一个 socket</h2>
+  <p>关键在 <code>fork()</code>：<b>子进程会继承父进程的文件描述符</b>。如果父进程先创建好 listening socket 再 fork 出 N 个 worker，那么这 N 个 worker 手里拿的是<b class="hl">同一个 socket 的引用</b>（内核里是同一个 <code>struct sock</code>，只是引用计数 +N）。</p>
+
+  <div class="svgbox">
+    <svg viewBox="0 0 900 300" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="20" fill="#8b949e" font-size="13">父进程 socket() → bind() → listen() → fork() × N ：N 个进程共享同一个 listening fd</text>
+
+      <!-- 进程们 -->
+      <g font-size="12">
+        <rect x="30" y="50" width="120" height="34" rx="7" fill="#0d1117" stroke="#58a6ff"/><text x="90" y="72" fill="#e6edf3" text-anchor="middle">父进程 master</text>
+        <rect x="30" y="98" width="120" height="30" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="90" y="117" fill="#8b949e" text-anchor="middle">worker 1</text>
+        <rect x="30" y="134" width="120" height="30" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="90" y="153" fill="#8b949e" text-anchor="middle">worker 2</text>
+        <rect x="30" y="170" width="120" height="30" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="90" y="189" fill="#8b949e" text-anchor="middle">worker 3</text>
+        <rect x="30" y="206" width="120" height="30" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="90" y="225" fill="#8b949e" text-anchor="middle">worker 4</text>
+      </g>
+      <text x="160" y="118" fill="#8b949e" font-size="11">fd 3</text>
+      <text x="160" y="154" fill="#8b949e" font-size="11">fd 3</text>
+      <text x="160" y="190" fill="#8b949e" font-size="11">fd 3</text>
+      <text x="160" y="226" fill="#8b949e" font-size="11">fd 3</text>
+
+      <!-- fork arrows -->
+      <g stroke="#8b949e" stroke-width="1.3" fill="none" marker-end="url(#a1)">
+        <path d="M150,67 C 118,67 118,113 152,113"/>
+        <path d="M150,67 C 108,67 108,149 152,149"/>
+        <path d="M150,67 C 100,67 100,185 152,185"/>
+        <path d="M150,67 C 94,67 94,221 152,221"/>
+      </g>
+
+      <!-- 汇聚到同一个 socket -->
+      <g stroke="#3fb950" stroke-width="1.6" fill="none" marker-end="url(#a2)">
+        <line x1="192" y1="113" x2="470" y2="150"/>
+        <line x1="192" y1="149" x2="470" y2="152"/>
+        <line x1="192" y1="185" x2="470" y2="154"/>
+        <line x1="192" y1="221" x2="470" y2="156"/>
+      </g>
+
+      <!-- 内核 socket -->
+      <rect x="480" y="118" width="180" height="70" rx="9" fill="#0d1117" stroke="#3fb950" stroke-width="2"/>
+      <text x="570" y="142" fill="#3fb950" font-size="13" text-anchor="middle">同一个 listening socket</text>
+      <text x="570" y="160" fill="#8b949e" font-size="11" text-anchor="middle">0.0.0.0:8080 · refcount=4</text>
+      <text x="570" y="176" fill="#8b949e" font-size="11" text-anchor="middle">accept 队列（全连接）</text>
+
+      <!-- accept 队列 -->
+      <rect x="700" y="118" width="170" height="70" rx="9" fill="#0d1117" stroke="#e3b341"/>
+      <text x="785" y="138" fill="#e3b341" font-size="12" text-anchor="middle">等待队列（等待者）</text>
+      <text x="785" y="158" fill="#e6edf3" font-size="11" text-anchor="middle">w1, w2, w3, w4</text>
+      <text x="785" y="176" fill="#8b949e" font-size="10" text-anchor="middle">全部阻塞在 accept()</text>
+      <line x1="660" y1="153" x2="698" y2="153" stroke="#8b949e" stroke-width="1.4" marker-end="url(#a1)"/>
+
+      <text x="30" y="266" fill="#8b949e" font-size="12">结果：端口只有 <tspan fill="#3fb950">1 个</tspan> 监听者，但同一个 accept 队列后面排了 <tspan fill="#e3b341">4 个</tspan> 等待者 —— 这就是"群"的来源。</text>
+      <text x="30" y="288" fill="#8b949e" font-size="12">注意：worker 之间共享的是「文件描述符」，不是各自 bind 了一个端口。这点务必分清。</text>
+
+      <defs>
+        <marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b949e"/></marker>
+        <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#3fb950"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3>连接是怎么进到 accept 队列的</h3>
+  <div class="svgbox">
+    <svg viewBox="0 0 900 170" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="18" fill="#8b949e" font-size="13">TCP 三次握手在内核里会经过两条队列；accept() 只是从第二条队列里"取"一个</text>
+      <rect x="30" y="60" width="130" height="34" rx="7" fill="#0d1117" stroke="#58a6ff"/><text x="95" y="82" fill="#e6edf3" font-size="13" text-anchor="middle">客户端 SYN</text>
+      <line x1="160" y1="77" x2="205" y2="77" stroke="#8b949e" stroke-width="1.4" marker-end="url(#b1)"/>
+      <rect x="210" y="52" width="150" height="50" rx="7" fill="#0d1117" stroke="#e3b341"/>
+      <text x="285" y="72" fill="#e3b341" font-size="12" text-anchor="middle">SYN 队列（半连接）</text>
+      <text x="285" y="90" fill="#8b949e" font-size="10" text-anchor="middle">收到 SYN，回 SYN+ACK</text>
+      <line x1="360" y1="77" x2="405" y2="77" stroke="#8b949e" stroke-width="1.4" marker-end="url(#b1)"/>
+      <rect x="410" y="52" width="150" height="50" rx="7" fill="#0d1117" stroke="#3fb950"/>
+      <text x="485" y="72" fill="#3fb950" font-size="12" text-anchor="middle">accept 队列（全连接）</text>
+      <text x="485" y="90" fill="#8b949e" font-size="10" text-anchor="middle">三次握手完成</text>
+      <line x1="560" y1="77" x2="605" y2="77" stroke="#8b949e" stroke-width="1.4" marker-end="url(#b1)"/>
+      <rect x="610" y="52" width="160" height="50" rx="7" fill="#0d1117" stroke="#bc8cff"/>
+      <text x="690" y="72" fill="#bc8cff" font-size="12" text-anchor="middle">accept() 取走一个连接</text>
+      <text x="690" y="90" fill="#8b949e" font-size="10" text-anchor="middle">返回新的 connfd</text>
+      <text x="30" y="140" fill="#8b949e" font-size="12">关键点：连接入队后，内核要决定「唤醒谁来取」—— 唤醒 1 个人，还是把所有人都叫醒？这个决定直接决定有没有惊群。</text>
+      <defs><marker id="b1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b949e"/></marker></defs>
+    </svg>
+  </div>
+
+  <h2 id="what">五、什么是惊群问题（Thundering Herd）</h2>
+  <div class="card red">
+    <p style="margin-top:0"><b>定义：</b>当一个资源变为可用（有新事件）时，内核/框架把<b class="hl">所有</b>等待这个资源的进程/线程全部唤醒，但最终<b>只有一个（或少数几个）</b>能真正拿到并处理它 —— 其余的都在"白醒"，做了一次无效的调度与上下文切换。</p>
+    <p style="margin-bottom:0"><b>名字由来：</b>英文 <i>thundering herd</i>，形容一群牲畜/鸟受惊后同时狂奔。一个小小的事件，惊动了一整群。</p>
+  </div>
+
+  <h3>惊群发生时的四个瞬间</h3>
+  <div class="svgbox">
+    <svg viewBox="0 0 900 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <g font-size="12" text-anchor="middle">
+        <rect x="20" y="55" width="180" height="46" rx="8" fill="#0d1117" stroke="#58a6ff"/><text x="110" y="76" fill="#e6edf3">① 4 个 worker 全在睡</text><text x="110" y="92" fill="#8b949e" font-size="10">都阻塞在 accept()</text>
+        <rect x="235" y="55" width="180" height="46" rx="8" fill="#0d1117" stroke="#e3b341"/><text x="325" y="76" fill="#e3b341">② 1 个连接到达</text><text x="325" y="92" fill="#8b949e" font-size="10">内核唤醒<b>全部</b> 4 个</text>
+        <rect x="450" y="55" width="180" height="46" rx="8" fill="#0d1117" stroke="#3fb950"/><text x="540" y="76" fill="#3fb950">③ 只有 1 个抢到</text><text x="540" y="92" fill="#8b949e" font-size="10">成功 accept 拿走连接</text>
+        <rect x="665" y="55" width="200" height="46" rx="8" fill="#0d1117" stroke="#f85149"/><text x="765" y="76" fill="#f85149">④ 其余 3 个白醒</text><text x="765" y="92" fill="#8b949e" font-size="10">EAGAIN → 再睡回去</text>
+      </g>
+      <g stroke="#8b949e" stroke-width="1.4" fill="none" marker-end="url(#c1)">
+        <line x1="200" y1="78" x2="233" y2="78"/><line x1="415" y1="78" x2="448" y2="78"/><line x1="630" y1="78" x2="663" y2="78"/>
+      </g>
+      <text x="20" y="140" fill="#e3b341" font-size="13">代价（每次连接）：</text>
+      <text x="20" y="162" fill="#8b949e" font-size="12">• 3 次无用的「阻塞 → 就绪 → 被调度 → 执行 → 失败 → 再阻塞」全流程</text>
+      <text x="20" y="182" fill="#8b949e" font-size="12">• CPU 缓存/TLB 被冲掉、调度器负载上升；短连接高并发下会被急剧放大（QPS 越高浪费越恐怖）</text>
+      <text x="20" y="202" fill="#8b949e" font-size="12">• 还可能造成负载倾斜：不保证谁抢到，可能出现"忙的更忙"</text>
+      <defs><marker id="c1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b949e"/></marker></defs>
+    </svg>
+  </div>
+
+  <h2 id="demo2">六、交互②：惊群模拟器（亲手看浪费了多少次唤醒）</h2>
+  <p>下面模拟一组 worker 共享同一个 listening socket。<span class="tag y">点「来一个连接」</span>观察：普通模式下<b>全部</b> worker 被唤醒，只有 1 个成功；切到「独占唤醒」模式后，内核只叫醒 1 个。</p>
+
+  <div class="card purple">
+    <div class="controls">
+      <span>worker 数量：</span>
+      <select id="wkCount">
+        <option value="4">4 个</option>
+        <option value="8" selected>8 个</option>
+        <option value="16">16 个</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="exclusiveChk"/> 启用独占唤醒（EPOLLEXCLUSIVE / 现代 accept）</label>
+    </div>
+    <div class="controls">
+      <button class="btn primary" id="connBtn">来一个连接 ▶</button>
+      <button class="btn warn" id="burstBtn">快速压 20 个连接</button>
+      <button class="btn" id="herdReset">重置统计</button>
+    </div>
+    <div class="herd-stage" id="herdStage"></div>
+    <div class="readout" id="herdMsg">等待连接…</div>
+    <div class="stats">
+      <div class="stat y">累计唤醒 <b id="stWake">0</b> 次</div>
+      <div class="stat g">有效唤醒 <b id="stOk">0</b> 次</div>
+      <div class="stat r">无效唤醒 <b id="stFail">0</b> 次</div>
+      <div class="stat">浪费率 <b id="stRate">0%</b></div>
+    </div>
+  </div>
+
+  <div class="card yellow">
+    <b>怎么读这个模拟器：</b>
+    <ul style="margin-bottom:0">
+      <li>关掉「独占唤醒」→ 每来 1 个连接，N 个 worker 全被唤醒（黄），1 个成功（绿），N−1 个失败（红）。worker 越多，浪费率越高（8 个 worker 时浪费 <b>87.5%</b>）。</li>
+      <li>打开「独占唤醒」→ 每次只叫醒 1 个，浪费率 <b>0%</b>。这就是现代内核与 <code>EPOLLEXCLUSIVE</code> / <code>SO_REUSEPORT</code> 做的事。</li>
+    </ul>
+  </div>
+
+  <h2 id="kernel">七、关键澄清：惊群在现代 Linux 上还在吗？</h2>
+  <p>这是最容易讲错的一节，必须分层看：</p>
+  <table>
+    <tr><th>场景</th><th>是否惊群</th><th>说明</th></tr>
+    <tr>
+      <td><b>多进程直接阻塞在 <code>accept()</code></b><br/>（fork 共享 listening fd）</td>
+      <td><b style="color:#3fb950">基本已修复</b></td>
+      <td>Linux 2.6 起，内核在 accept 等待队列上用了<b>独占唤醒</b>（<code>WQ_FLAG_EXCLUSIVE</code>）：新连接入队时只唤醒<b>一个</b>进程。经典 accept 惊群在现代内核上基本不存在了。</td>
+    </tr>
+    <tr>
+      <td><b>多进程用各自 <code>epoll</code> 监听同一个 listening fd</b></td>
+      <td><b style="color:#f85149">仍然惊群</b></td>
+      <td>每个 epoll 实例都会收到可读事件并唤醒自己的进程 → 多个进程同时被叫醒去 accept，只有一个成功。这是今天最常遇到的惊群。</td>
+    </tr>
+    <tr>
+      <td><code>select</code> / <code>poll</code> 共享 fd</td>
+      <td><b style="color:#f85149">惊群</b></td>
+      <td>同 epoll，无独占唤醒机制。</td>
+    </tr>
+    <tr>
+      <td>多个 socket 各自 <code>SO_REUSEPORT</code></td>
+      <td><b style="color:#3fb950">不惊群</b></td>
+      <td>每个 socket 有独立的 accept 队列，内核按四元组 hash 选一个 socket，只唤醒它的等待者。</td>
+    </tr>
+  </table>
+  <div class="card blue">
+    <p style="margin-top:0"><b>所以"既然端口只能一个程序监听，为什么会有惊群"的完整答案是：</b></p>
+    <p style="margin-bottom:0">惊群发生在<b class="hl">"一个监听 socket + 多个等待者"</b>这个结构上（fork 共享 fd / 多 epoll 实例监听同一 fd），跟"几个程序监听端口"无关。即使全世界只有一个程序能 bind 这个端口，只要它 fork 出 8 个 worker 共享这个 fd，惊群的条件就成立了。</p>
+  </div>
+
+  <h2 id="fix">八、怎么解决：四种主流方案</h2>
+
+  <h3>方案 1：单 acceptor + 分发（最朴素）</h3>
+  <p>只让一个线程/进程负责 <code>accept()</code>，拿到 connfd 后通过管道/队列分发给 worker 处理。<b>没有竞争就没有惊群。</b>缺点是单点可能成为瓶颈（但 accept 本身很快，多数场景够用）。</p>
+
+  <h3>方案 2：accept 锁（accept_mutex）—— Nginx 早期做法</h3>
+  <p>worker 之间抢一把锁，只有拿到锁的进程才把 listening fd 加入自己的 epoll。锁的粒度是"要不要去监听"，不是"每次 accept 都抢锁"，所以开销可控。缺点：仍有一次锁竞争，且负载可能不均。</p>
+
+  <h3>方案 3：EPOLLEXCLUSIVE（Linux 4.5+）</h3>
+  <p>把 fd <b>以独占方式</b>加入 epoll：<code>EPOLL_CTL_ADD</code> 时带上 <code>EPOLLEXCLUSIVE</code>。事件就绪时，内核只唤醒<b>其中一个</b> epoll 实例，而不是全部。改一个 flag 就能解决，代价最小。</p>
+  <pre>struct epoll_event ev;
+ev.events = EPOLLIN | EPOLLEXCLUSIVE;   // ← 关键：独占唤醒
+ev.data.fd = listenfd;
+epoll_ctl(epfd, EPOLL_CTL_ADD, listenfd, &ev);</pre>
+
+  <h3>方案 4：SO_REUSEPORT（现代首选）</h3>
+  <p>每个进程<b>各自</b> socket + bind + listen 同一端口，内核做负载均衡。<b>注意：这正好是本文开头说的"端口能被多个程序监听"的唯一例外情况。</b></p>
+  <div class="svgbox">
+    <svg viewBox="0 0 900 240" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+      <text x="10" y="18" fill="#8b949e" font-size="13">SO_REUSEPORT：N 个独立 socket 绑同一端口，内核按四元组 hash 分发，每次只惊动一个队列</text>
+      <rect x="30" y="48" width="140" height="34" rx="7" fill="#0d1117" stroke="#58a6ff"/><text x="100" y="70" fill="#e6edf3" font-size="12" text-anchor="middle">新连接到达</text>
+      <line x1="170" y1="65" x2="215" y2="65" stroke="#8b949e" stroke-width="1.4" marker-end="url(#d1)"/>
+      <rect x="220" y="42" width="150" height="46" rx="8" fill="#0d1117" stroke="#bc8cff"/>
+      <text x="295" y="62" fill="#bc8cff" font-size="12" text-anchor="middle">内核 hash 分发</text>
+      <text x="295" y="80" fill="#8b949e" font-size="10" text-anchor="middle">(src_ip, src_port, ...)</text>
+
+      <g font-size="11">
+        <rect x="430" y="38" width="180" height="34" rx="6" fill="#0d1117" stroke="#3fb950"/><text x="520" y="59" fill="#e6edf3" text-anchor="middle">socket A · accept 队列</text>
+        <rect x="430" y="84" width="180" height="34" rx="6" fill="#0d1117" stroke="#3fb950"/><text x="520" y="105" fill="#e6edf3" text-anchor="middle">socket B · accept 队列</text>
+        <rect x="430" y="130" width="180" height="34" rx="6" fill="#0d1117" stroke="#3fb950"/><text x="520" y="151" fill="#e6edf3" text-anchor="middle">socket C · accept 队列</text>
+        <rect x="430" y="176" width="180" height="34" rx="6" fill="#0d1117" stroke="#3fb950"/><text x="520" y="197" fill="#e6edf3" text-anchor="middle">socket D · accept 队列</text>
+      </g>
+      <g stroke="#bc8cff" stroke-width="1.4" fill="none" stroke-dasharray="3 3">
+        <line x1="370" y1="55" x2="428" y2="55"/><line x1="370" y1="101" x2="428" y2="101"/><line x1="370" y1="147" x2="428" y2="147"/><line x1="370" y1="193" x2="428" y2="193"/>
+      </g>
+      <g font-size="11">
+        <rect x="650" y="38" width="120" height="34" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="710" y="59" fill="#8b949e" text-anchor="middle">worker A</text>
+        <rect x="650" y="84" width="120" height="34" rx="6" fill="#0d1117" stroke="#e3b341"/><text x="710" y="105" fill="#e3b341" text-anchor="middle">worker B ← 只有它醒</text>
+        <rect x="650" y="130" width="120" height="34" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="710" y="151" fill="#8b949e" text-anchor="middle">worker C</text>
+        <rect x="650" y="176" width="120" height="34" rx="6" fill="#0d1117" stroke="#8b949e"/><text x="710" y="197" fill="#8b949e" text-anchor="middle">worker D</text>
+      </g>
+      <text x="30" y="228" fill="#8b949e" font-size="12">优点：无锁、无惊群、多核扩展性好。注意：hash 分发是按连接四元组，不是按"谁更闲"，长连接场景可能不均。</text>
+      <defs><marker id="d1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b949e"/></marker></defs>
+    </svg>
+  </div>
+
+  <table>
+    <tr><th>方案</th><th>是否有惊群</th><th>是否需加锁</th><th>负载均衡</th><th>备注</th></tr>
+    <tr><td>单 acceptor + 分发</td><td>无</td><td>不需要</td><td>取决于分发策略</td><td>简单可靠，accept 通常不是瓶颈</td></tr>
+    <tr><td>accept_mutex</td><td>无</td><td>需要</td><td>一般</td><td>Nginx 早期方案，<code>accept_mutex on</code></td></tr>
+    <tr><td>EPOLLEXCLUSIVE</td><td>无</td><td>不需要</td><td>较好（内核挑一个）</td><td>Linux 4.5+，改动最小</td></tr>
+    <tr><td>SO_REUSEPORT</td><td>无</td><td>不需要</td><td>好（hash 分发）</td><td>Linux 3.9+，Nginx 1.9.1+ 支持，现代首选</td></tr>
+  </table>
+
+  <h2 id="broad">九、广义的惊群：不止 accept</h2>
+  <p>"一次事件唤醒一群，只有一个有用"这个模式到处都是，理解了这个模式就能举一反三：</p>
+  <table>
+    <tr><th>场景</th><th>表现</th><th>常见解法</th></tr>
+    <tr><td><b>条件变量</b></td><td><code>notify_all()</code> 唤醒全部等待线程，只有一个能拿到任务</td><td>用 <code>notify_one()</code></td></tr>
+    <tr><td><b>线程池</b></td><td>一个任务入队，所有空闲线程被唤醒争抢</td><td>任务队列 + 单唤醒</td></tr>
+    <tr><td><b>select/poll/epoll 共享 fd</b></td><td>同上文 accept 场景</td><td>EPOLLEXCLUSIVE / SO_REUSEPORT</td></tr>
+    <tr><td><b>缓存击穿</b></td><td>热点 key 过期瞬间，海量请求同时打到数据库</td><td>互斥重建 / 逻辑过期 / 提前预热</td></tr>
+    <tr><td><b>锁竞争</b></td><td>锁释放时唤醒所有等待者，只有一个抢到</td><td>队列化排队唤醒</td></tr>
+  </table>
+
+  <h2 id="sum">十、总结：如果面试官问你，这样答</h2>
+  <div class="card green">
+    <p style="margin-top:0"><b>Q：一个端口能被两个程序同时监听吗？</b></p>
+    <p><b>A：</b>默认不能。<code>(协议, IP, 端口)</code> 三元组唯一，第二个 <code>bind()</code> 会返回 <code>EADDRINUSE</code>。<code>SO_REUSEADDR</code> 只解决 TIME_WAIT 复用，<span class="hl">不能</span>让两个进程同时监听；只有所有 socket 都设了 <code>SO_REUSEPORT</code> 才可以，此时每个 socket 有独立 accept 队列，由内核 hash 分发。</p>
+    <p style="margin-bottom:0"><b>Q：那惊群是怎么回事？</b></p>
+  </div>
+  <div class="card blue">
+    <p style="margin-top:0"><b>A：</b>惊群<b>不是</b>多个程序监听同一端口导致的，而是<b class="hl">一个监听 socket 被多个进程/线程共享、全部阻塞在同一个 <code>accept()</code>（或同一个 fd 的 epoll）上</b>。事件到达时内核如果唤醒所有等待者，就只有 1 个能成功，其余 N−1 个白醒，白白付出调度与上下文切换代价。</p>
+    <p>现代 Linux 上：<b>裸 accept 的惊群已被内核的独占唤醒基本修复</b>；但<b>多个 epoll 实例监听同一 listening fd 仍会惊群</b>，需要 <code>EPOLLEXCLUSIVE</code>（Linux 4.5+）或 <code>SO_REUSEPORT</code>（Linux 3.9+）。Nginx 早期用 <code>accept_mutex</code>，现在推荐 <code>SO_REUSEPORT</code>。</p>
+    <p style="margin-bottom:0"><b>一句话口诀：</b><span class="hl">端口只能一个主，fork 之后一群人；事件来时别全叫，独占唤醒才高效。</span></p>
+  </div>
+
+  <div class="card purple">
+    <b>站内相关：</b>
+    <ul style="margin-bottom:0">
+      <li><a href="io_multiplexing.html" style="color:#58a6ff">IO 多路复用原理图</a>——select / poll / epoll 的机制对比</li>
+      <li><a href="reactor.html" style="color:#58a6ff">Reactor 模式</a>——为什么网络程序要这么组织</li>
+      <li><a href="io-latency.html" style="color:#58a6ff">IO 延迟全景</a>——上下文切换与调度开销的量化</li>
+      <li><a href="../threads/context-switch-overhead.html" style="color:#58a6ff">上下文切换开销</a>——"白醒一次"到底浪费了多少</li>
+    </ul>
+  </div>
+
+  <div class="foot">
+    说明：本文中的惊群模拟为教学示意（worker 数、唤醒行为按机制抽象呈现）；内核行为描述基于 Linux 主线演进：accept 独占唤醒（2.6 起）、SO_REUSEPORT（3.9+）、EPOLLEXCLUSIVE（4.5+）。不同内核版本与 Unix 变体（BSD/macOS）行为可能存在差异。
+    <br/>← <a href="../index.html">返回操作系统总目录</a>
+  </div>
+</div>
+
+<script>
+(function(){
+  /* ========== 交互①：bind 冲突演示 ========== */
+  var reuseChk = document.getElementById('reuseChk');
+  var sockB = document.getElementById('sockB');
+  var bindLog = document.getElementById('bindLog');
+  var bBound = false;
+  function log(msg, cls){
+    var d = document.createElement('div');
+    d.className = 'logline' + (cls ? ' ' + cls : '');
+    d.textContent = msg;
+    bindLog.appendChild(d);
+  }
+  document.getElementById('bindB').addEventListener('click', function(){
+    sockB.style.display = 'block';
+    if (bBound) { log('进程 B 已经绑定过了。', ''); return; }
+    if (reuseChk.checked){
+      bBound = true;
+      sockB.className = 'socket reuse';
+      sockB.innerHTML = '<b>进程 B</b><br/>bind(0.0.0.0:8080) → listen()<div class="st">状态：LISTEN（SO_REUSEPORT 允许）</div>';
+      log('[OK] 双方都设置 SO_REUSEPORT → 绑定成功。两个 socket 各有独立 accept 队列，内核 hash 分发。', 'ok');
+    } else {
+      sockB.className = 'socket err';
+      sockB.innerHTML = '<b>进程 B</b><br/>bind(0.0.0.0:8080)<div class="st">失败：EADDRINUSE</div>';
+      log('[FAIL] bind: Address already in use (EADDRINUSE) —— 端口已被进程 A 占用。', 'err');
+      log('提示：勾选 SO_REUSEPORT 再试。注意 SO_REUSEADDR 解决不了这个问题。', '');
+    }
+  });
+  document.getElementById('bindReset').addEventListener('click', function(){
+    bBound = false;
+    sockB.style.display = 'none';
+    sockB.className = 'socket';
+    bindLog.innerHTML = '';
+  });
+
+  /* ========== 交互②：惊群模拟器 ========== */
+  var stage = document.getElementById('herdStage');
+  var wkSel = document.getElementById('wkCount');
+  var exChk = document.getElementById('exclusiveChk');
+  var msg = document.getElementById('herdMsg');
+  var stWake = document.getElementById('stWake');
+  var stOk = document.getElementById('stOk');
+  var stFail = document.getElementById('stFail');
+  var stRate = document.getElementById('stRate');
+  var connBtn = document.getElementById('connBtn');
+  var burstBtn = document.getElementById('burstBtn');
+
+  var workers = [];
+  var stats = { wake:0, ok:0, fail:0 };
+  var busy = false;
+  var rrIndex = 0;
+
+  function buildWorkers(){
+    var n = parseInt(wkSel.value, 10);
+    stage.innerHTML = '';
+    workers = [];
+    for (var i=0;i<n;i++){
+      var d = document.createElement('div');
+      d.className = 'worker sleep';
+      d.innerHTML = '<div class="wname">worker ' + (i+1) + '</div><div class="wst">阻塞中</div>';
+      stage.appendChild(d);
+      workers.push(d);
+    }
+    rrIndex = 0;
+  }
+  function setW(i, state, text){
+    var w = workers[i];
+    w.className = 'worker ' + state;
+    w.innerHTML = '<div class="wname">worker ' + (i+1) + '</div><div class="wst">' + text + '</div>';
+  }
+  function resetAll(){
+    for (var i=0;i<workers.length;i++) setW(i, 'sleep', '阻塞中');
+  }
+  function updateStats(){
+    stWake.textContent = stats.wake;
+    stOk.textContent = stats.ok;
+    stFail.textContent = stats.fail;
+    var rate = stats.wake === 0 ? 0 : (stats.fail / stats.wake * 100);
+    stRate.textContent = rate.toFixed(1) + '%';
+  }
+  function lock(v){
+    busy = v;
+    connBtn.disabled = v;
+    burstBtn.disabled = v;
+  }
+
+  // 一次连接的完整动画
+  function oneConnection(animate){
+    var n = workers.length;
+    var ex = exChk.checked;
+    var winner = rrIndex % n;
+    rrIndex++;
+
+    if (ex){
+      // 独占唤醒：只叫醒一个
+      stats.wake += 1; stats.ok += 1;
+      if (!animate){ updateStats(); return; }
+      setW(winner, 'wake', '被唤醒…');
+      setTimeout(function(){
+        setW(winner, 'ok', 'accept 成功 ✓');
+        msg.innerHTML = '独占唤醒模式：内核只唤醒 <b>1</b> 个 worker（#' + (winner+1) + '），无无效唤醒。';
+        setTimeout(function(){
+          setW(winner, 'sleep', '阻塞中');
+        }, 700);
+      }, 420);
+    } else {
+      // 惊群：全部唤醒
+      stats.wake += n; stats.ok += 1; stats.fail += (n - 1);
+      if (!animate){ updateStats(); return; }
+      for (var i=0;i<n;i++) setW(i, 'wake', '被唤醒…');
+      msg.innerHTML = '惊群！一个连接到达 → 内核把 <b>' + n + '</b> 个 worker 全部唤醒。';
+      setTimeout(function(){
+        setW(winner, 'ok', 'accept 成功 ✓');
+        for (var j=0;j<n;j++) if (j !== winner) setW(j, 'fail', '空手 EAGAIN ✗');
+        msg.innerHTML = '只有 worker #' + (winner+1) + ' 抢到连接，其余 <b>' + (n-1) + '</b> 个白醒一场，再睡回去。';
+        updateStats();
+        setTimeout(function(){ resetAll(); }, 800);
+      }, 480);
+    }
+    updateStats();
+  }
+
+  connBtn.addEventListener('click', function(){
+    if (busy) return;
+    lock(true);
+    oneConnection(true);
+    setTimeout(function(){ lock(false); }, 1400);
+  });
+
+  burstBtn.addEventListener('click', function(){
+    if (busy) return;
+    lock(true);
+    var n = workers.length;
+    var ex = exChk.checked;
+    for (var k=0;k<20;k++) oneConnection(false);
+    resetAll();
+    if (ex){
+      msg.innerHTML = '压测 20 个连接（独占唤醒）：共唤醒 <b>' + 20 + '</b> 次，全部有效，浪费率 <b>0%</b>。';
+    } else {
+      msg.innerHTML = '压测 20 个连接（惊群）：共唤醒 <b>' + (20*n) + '</b> 次，其中有效 <b>20</b> 次，无效 <b>' + (20*(n-1)) + '</b> 次（浪费 ' + ((n-1)/n*100).toFixed(1) + '%）。';
+    }
+    lock(false);
+  });
+
+  wkSel.addEventListener('change', function(){ buildWorkers(); resetAll(); });
+  document.getElementById('herdReset').addEventListener('click', function(){
+    stats = { wake:0, ok:0, fail:0 };
+    updateStats(); resetAll();
+    msg.textContent = '等待连接…';
+  });
+
+  buildWorkers();
+  updateStats();
+})();
+</script>
+</body>
+</html>
