@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Redis 内存满了会怎样？崩溃还是自动清理？</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f0f4f8;
+    --card: #ffffff;
+    --ink: #1a202c;
+    --gray: #4a5568;
+    --line: #e2e8f0;
+    --navy: #0f3460;
+    --red: #dc2626;
+    --red-soft: #fee2e2;
+    --red-mid: #f87171;
+    --green: #16a34a;
+    --green-soft: #f0fdf4;
+    --green-mid: #86efac;
+    --amber: #d97706;
+    --amber-soft: #fef9c3;
+    --blue: #2563eb;
+    --blue-soft: #dbeafe;
+  }
+
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.75;
+    font-size: 15px;
+  }
+
+  /* ===== HERO ===== */
+  .hero {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 100%);
+    color: #fff;
+    padding: 64px 40px 54px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ""; position: absolute; width: 420px; height: 420px; border-radius: 50%;
+    background: rgba(229,57,53,0.12); top: -120px; right: -90px;
+  }
+  .hero::after {
+    content: ""; position: absolute; width: 320px; height: 320px; border-radius: 50%;
+    background: rgba(255,193,7,0.08); bottom: -90px; left: -70px;
+  }
+  .hero-badge {
+    display: inline-block; background: rgba(229,57,53,0.85); color: #fff;
+    font-size: 12px; font-weight: 700; letter-spacing: 2px; padding: 5px 16px;
+    border-radius: 20px; margin-bottom: 18px; text-transform: uppercase;
+  }
+  .hero h1 { font-size: 2.3rem; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 14px; position: relative; }
+  .hero h1 span { color: var(--red-mid); }
+  .hero p { color: #cbd5e1; max-width: 760px; margin: 0 auto; font-size: 1.02rem; position: relative; }
+
+  /* ===== TOP NAV ===== */
+  .topnav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,0.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+    display: flex; gap: 4px; padding: 10px 18px; flex-wrap: wrap; justify-content: center;
+  }
+  .topnav a {
+    text-decoration: none; color: var(--gray); font-size: 13px; font-weight: 600;
+    padding: 6px 13px; border-radius: 20px; transition: all .2s; white-space: nowrap;
+  }
+  .topnav a:hover { background: var(--blue-soft); color: var(--blue); }
+  .topnav a.active { background: var(--navy); color: #fff; }
+
+  /* ===== LAYOUT ===== */
+  .wrap { max-width: 980px; margin: 0 auto; padding: 38px 24px 80px; }
+  section { margin-bottom: 52px; scroll-margin-top: 70px; }
+  h2 {
+    font-size: 1.6rem; font-weight: 800; color: var(--navy);
+    margin-bottom: 18px; padding-left: 14px; border-left: 5px solid var(--red);
+  }
+  h3 { font-size: 1.18rem; font-weight: 700; color: var(--ink); margin: 26px 0 12px; }
+  p { margin-bottom: 12px; color: #2d3748; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 7px; color: #2d3748; }
+  strong { color: var(--ink); }
+  code {
+    background: #edf2f7; padding: 2px 7px; border-radius: 5px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.86em; color: #9b2c2c;
+  }
+  .mono { font-family: "SF Mono", Consolas, monospace; }
+
+  /* ===== CARDS ===== */
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 24px; margin: 16px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+  @media (max-width: 720px){ .grid2,.grid3{ grid-template-columns: 1fr; } }
+
+  /* ===== TL;DR / CALLOUTS ===== */
+  .tldr {
+    background: linear-gradient(135deg,#0f3460,#16213e); color:#e2e8f0;
+    border-radius: 16px; padding: 26px 28px; margin: 26px 0;
+    border-left: 6px solid var(--red-mid);
+  }
+  .tldr h3 { color:#fff; margin-top:0; }
+  .tldr p { color:#cbd5e1; }
+  .tldr .ans { font-size: 1.12rem; color:#fff; font-weight:700; }
+
+  .callout { border-radius: 12px; padding: 16px 20px; margin: 16px 0; border-left: 5px solid; }
+  .callout.warn { background: var(--red-soft); border-color: var(--red); }
+  .callout.tip { background: var(--green-soft); border-color: var(--green); }
+  .callout.note { background: var(--blue-soft); border-color: var(--blue); }
+  .callout.amber { background: var(--amber-soft); border-color: var(--amber); }
+  .callout .tt { font-weight: 800; display:block; margin-bottom: 4px; }
+  .callout.warn .tt { color: var(--red); }
+  .callout.tip .tt { color: var(--green); }
+  .callout.note .tt { color: var(--blue); }
+  .callout.amber .tt { color: var(--amber); }
+
+  /* ===== TABLE ===== */
+  .tbl-wrap { overflow-x: auto; margin: 16px 0; border-radius: 12px; border: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 14px; }
+  th, td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: var(--navy); color: #fff; font-weight: 700; }
+  tbody tr:nth-child(even){ background: #f8fafc; }
+  td code { font-size: 0.82em; }
+  .tag { display:inline-block; padding: 2px 9px; border-radius: 20px; font-size:12px; font-weight:700; }
+  .tag.red { background: var(--red-soft); color: var(--red); }
+  .tag.green { background: var(--green-soft); color: var(--green); }
+  .tag.blue { background: var(--blue-soft); color: var(--blue); }
+  .tag.amber { background: var(--amber-soft); color: var(--amber); }
+
+  /* ===== SVG WRAP ===== */
+  .fig { background:#fff; border:1px solid var(--line); border-radius:14px; padding:18px; margin:18px 0; text-align:center; }
+  .fig svg { max-width:100%; height:auto; }
+  .fig .cap { font-size:13px; color:var(--gray); margin-top:10px; }
+
+  /* ===== STEP LIST ===== */
+  .steps { counter-reset: s; list-style:none; margin-left:0; }
+  .steps li { position:relative; padding:14px 16px 14px 54px; background:#fff; border:1px solid var(--line); border-radius:12px; margin-bottom:12px; }
+  .steps li::before {
+    counter-increment: s; content: counter(s); position:absolute; left:14px; top:14px;
+    width:26px; height:26px; background:var(--navy); color:#fff; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px;
+  }
+
+  /* ===== COMMAND BLOCK ===== */
+  .cmd {
+    background:#0f172a; color:#e2e8f0; border-radius:12px; padding:16px 18px;
+    font-family:"SF Mono",Consolas,monospace; font-size:13.5px; line-height:1.7; overflow-x:auto; margin:14px 0;
+  }
+  .cmd .c { color:#64748b; }
+  .cmd .k { color:#7dd3fc; }
+  .cmd .v { color:#86efac; }
+  .cmd .e { color:#fca5a5; }
+
+  /* ===== FOOTER ===== */
+  footer { background:#16213e; color:#94a3b8; padding:34px 24px; text-align:center; font-size:13px; }
+  footer a { color:#7dd3fc; text-decoration:none; }
+  footer a:hover { text-decoration:underline; }
+  .related { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin-top:14px; }
+  .related a { background:rgba(255,255,255,0.08); padding:6px 14px; border-radius:20px; }
+
+  .fade { opacity:0; transform: translateY(18px); transition: opacity .6s ease, transform .6s ease; }
+  .fade.show { opacity:1; transform:none; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <span class="hero-badge">Redis Memory</span>
+  <h1>Redis 内存满了，会<span>崩溃</span>还是<span>自动清理</span>？</h1>
+  <p>答案不是二选一，而是取决于一个关键配置：<strong style="color:#fca5a5">maxmemory</strong> 有没有设置、设成什么策略。这篇文章把它讲透。</p>
+</div>
+
+<nav class="topnav" id="topnav">
+  <a href="#answer" class="nav-link">一句话结论</a>
+  <a href="#two" class="nav-link">两种根本局面</a>
+  <a href="#policy" class="nav-link">8 种淘汰策略</a>
+  <a href="#noeviction" class="nav-link">noeviction 真相</a>
+  <a href="#algo" class="nav-link">LRU / LFU / TTL</a>
+  <a href="#oom" class="nav-link">没配的崩溃真相</a>
+  <a href="#flow" class="nav-link">完整处理流程</a>
+  <a href="#ops" class="nav-link">配置与监控</a>
+  <a href="#myth" class="nav-link">常见误区</a>
+  <a href="#check" class="nav-link">实战清单</a>
+</nav>
+
+<div class="wrap">
+
+  <!-- ============ 结论 ============ -->
+  <section id="answer">
+    <h2>一句话结论</h2>
+    <div class="tldr">
+      <h3>Redis 不会"凭空崩溃"，但也不会"永远自己清理"</h3>
+      <p class="ans">取决于 <code class="mono" style="background:rgba(255,255,255,.12);color:#fca5a5">maxmemory</code> 配置：</p>
+      <ol>
+        <li style="color:#e2e8f0"><strong style="color:#fff">设了 maxmemory + 非 noeviction 策略</strong> → Redis <strong style="color:#86efac">自动清理</strong>（按策略淘汰旧键），服务继续跑，不崩溃。</li>
+        <li style="color:#e2e8f0"><strong style="color:#fff">设了 maxmemory + 默认 noeviction</strong> → Redis <strong style="color:#fca5a5">不清理</strong>，但只是<strong style="color:#fff">写命令返回 OOM 错误</strong>，进程不崩溃，读命令照常。</li>
+        <li style="color:#e2e8f0"><strong style="color:#fff">没设 maxmemory（=0，默认不限制）</strong> → Redis 一直吃内存，直到宿主机内存耗尽，被 Linux <strong style="color:#fca5a5">OOM Killer 杀掉</strong>或系统卡死——这才是"崩溃"的真实来源。</li>
+      </ol>
+    </div>
+    <p>所以记住一句话：<strong>Redis 内存满 ≠ 崩溃</strong>。"崩溃"几乎都来自「没给 Redis 设上限」或「设了上限但缓存/副本缓冲把内存撑爆」。下面逐层拆开。</p>
+  </section>
+
+  <!-- ============ 两种局面 ============ -->
+  <section id="two">
+    <h2>两种根本局面：看 maxmemory 这道分水岭</h2>
+    <p>Redis 判定"内存满"的唯一标准是：<strong>当前数据占用的内存 ≥ maxmemory</strong>。而 maxmemory 默认是 <code>0</code>，意思是"不限制"。这就分出两条完全不同的命运。</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 720 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+        <defs>
+          <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+          </marker>
+        </defs>
+        <!-- root -->
+        <rect x="270" y="20" width="180" height="52" rx="10" fill="#0f3460"/>
+        <text x="360" y="44" fill="#fff" font-size="15" font-weight="700" text-anchor="middle">写入触顶 maxmemory</text>
+        <text x="360" y="62" fill="#cbd5e1" font-size="11" text-anchor="middle">数据内存 ≥ 阈值</text>
+        <line x1="360" y1="72" x2="360" y2="108" stroke="#475569" stroke-width="2" marker-end="url(#ar)"/>
+
+        <!-- fork label -->
+        <text x="360" y="102" fill="#1a202c" font-size="12" text-anchor="middle" font-weight="700">分水岭：maxmemory 是否设置？</text>
+
+        <!-- left: set -->
+        <rect x="40" y="118" width="280" height="46" rx="10" fill="#16a34a"/>
+        <text x="180" y="146" fill="#fff" font-size="14" font-weight="700" text-anchor="middle">情形 A：设了 maxmemory（≠0）</text>
+        <line x1="180" y1="164" x2="180" y2="196" stroke="#475569" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="40" y="200" width="280" height="120" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+        <text x="180" y="226" fill="#166534" font-size="13" font-weight="700" text-anchor="middle">Redis 自己处理，不崩溃</text>
+        <text x="180" y="252" fill="#14532d" font-size="12" text-anchor="middle">→ 按 maxmemory-policy 行动</text>
+        <text x="180" y="276" fill="#14532d" font-size="12" text-anchor="middle">   非 noeviction：自动淘汰键</text>
+        <text x="180" y="300" fill="#14532d" font-size="12" text-anchor="middle">   默认 noeviction：写命令报错</text>
+
+        <!-- right: not set -->
+        <rect x="400" y="118" width="280" height="46" rx="10" fill="#dc2626"/>
+        <text x="540" y="146" fill="#fff" font-size="14" font-weight="700" text-anchor="middle">情形 B：未设置（=0 默认）</text>
+        <line x1="540" y1="164" x2="540" y2="196" stroke="#475569" stroke-width="2" marker-end="url(#ar)"/>
+        <rect x="400" y="200" width="280" height="120" rx="10" fill="#fee2e2" stroke="#fca5a5"/>
+        <text x="540" y="226" fill="#991b1b" font-size="13" font-weight="700" text-anchor="middle">Redis 不限制，宿主机兜底</text>
+        <text x="540" y="252" fill="#7f1d1d" font-size="12" text-anchor="middle">→ 内存持续增长不停止</text>
+        <text x="540" y="276" fill="#7f1d1d" font-size="12" text-anchor="middle">→ 系统内存耗尽</text>
+        <text x="540" y="300" fill="#7f1d1d" font-size="12" text-anchor="middle">→ OOM Killer 杀进程 / 卡死</text>
+      </svg>
+      <div class="cap">图 1：内存满后的两条命运，由 maxmemory 这道分水岭决定</div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 情形 A：设了 maxmemory</h3>
+        <p>Redis 知道自己的"红线"在哪，数据内存触顶时会<strong>主动介入</strong>：要么按淘汰策略删旧键腾空间，要么（默认策略下）拒绝再写入但保住进程。无论哪种，<strong>进程不会崩</strong>。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">💥 情形 B：没设 maxmemory</h3>
+        <p>Redis 认为"内存无限大"，来者不拒。直到把整台机器的物理内存吃光，由操作系统来决定谁去死——通常是 Redis 这个大内存户被 OOM Killer 优先干掉。这个崩溃<strong>锅不在 Redis 逻辑，在配置缺失</strong>。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 8 种策略 ============ -->
+  <section id="policy">
+    <h2>设了 maxmemory 后：8 种淘汰策略怎么选</h2>
+    <p><code>maxmemory-policy</code> 决定 Redis 触顶时"淘汰谁"。8 种策略可分成 4 个家族，关键看两点：<strong>候选范围</strong>（所有键 vs 仅带 TTL 的键）和<strong>选择算法</strong>（LRU / LFU / TTL / Random）。</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+        <defs>
+          <marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+          </marker>
+        </defs>
+        <!-- root -->
+        <rect x="290" y="14" width="140" height="44" rx="9" fill="#0f3460"/>
+        <text x="360" y="42" fill="#fff" font-size="14" font-weight="700" text-anchor="middle">maxmemory-policy</text>
+
+        <!-- left branch: allkeys -->
+        <line x1="320" y1="58" x2="150" y2="92" stroke="#475569" stroke-width="2" marker-end="url(#ar2)"/>
+        <text x="232" y="78" fill="#1a202c" font-size="12" font-weight="700" text-anchor="middle">候选=全部键</text>
+        <rect x="30" y="96" width="240" height="36" rx="8" fill="#dbeafe"/>
+        <text x="150" y="119" fill="#1e40af" font-size="13" font-weight="700" text-anchor="middle">allkeys-* 家族</text>
+        <line x1="150" y1="132" x2="150" y2="156" stroke="#475569" stroke-width="2" marker-end="url(#ar2)"/>
+        <g font-size="12.5">
+          <rect x="34" y="160" width="232" height="34" rx="7" fill="#fff" stroke="#bfdbfe"/>
+          <text x="150" y="182" fill="#1e3a8a" text-anchor="middle">allkeys-lru  · 最近最少用</text>
+          <rect x="34" y="200" width="232" height="34" rx="7" fill="#fff" stroke="#bfdbfe"/>
+          <text x="150" y="222" fill="#1e3a8a" text-anchor="middle">allkeys-lfu  · 最不常用</text>
+          <rect x="34" y="240" width="232" height="34" rx="7" fill="#fff" stroke="#bfdbfe"/>
+          <text x="150" y="262" fill="#1e3a8a" text-anchor="middle">allkeys-random · 随机</text>
+        </g>
+
+        <!-- right branch: volatile -->
+        <line x1="400" y1="58" x2="570" y2="92" stroke="#475569" stroke-width="2" marker-end="url(#ar2)"/>
+        <text x="488" y="78" fill="#1a202c" font-size="12" font-weight="700" text-anchor="middle">候选=仅带 TTL 键</text>
+        <rect x="450" y="96" width="240" height="36" rx="8" fill="#e1f5ee"/>
+        <text x="570" y="119" fill="#0f6e56" font-size="13" font-weight="700" text-anchor="middle">volatile-* 家族</text>
+        <line x1="570" y1="132" x2="570" y2="156" stroke="#475569" stroke-width="2" marker-end="url(#ar2)"/>
+        <g font-size="12.5">
+          <rect x="454" y="160" width="232" height="34" rx="7" fill="#fff" stroke="#a7f3d0"/>
+          <text x="570" y="182" fill="#065f46" text-anchor="middle">volatile-lru  · 最近最少用</text>
+          <rect x="454" y="200" width="232" height="34" rx="7" fill="#fff" stroke="#a7f3d0"/>
+          <text x="570" y="222" fill="#065f46" text-anchor="middle">volatile-lfu  · 最不常用</text>
+          <rect x="454" y="240" width="232" height="34" rx="7" fill="#fff" stroke="#a7f3d0"/>
+          <text x="570" y="262" fill="#065f46" text-anchor="middle">volatile-random · 随机</text>
+          <rect x="454" y="280" width="232" height="34" rx="7" fill="#fff" stroke="#a7f3d0"/>
+          <text x="570" y="302" fill="#065f46" text-anchor="middle">volatile-ttl · 剩时最短</text>
+        </g>
+
+        <!-- noeviction center bottom -->
+        <line x1="360" y1="58" x2="360" y2="150" stroke="#475569" stroke-width="2" marker-end="url(#ar2)"/>
+        <text x="420" y="110" fill="#991b1b" font-size="12" font-weight="700" text-anchor="middle">都不淘汰</text>
+        <rect x="270" y="252" width="180" height="44" rx="9" fill="#fee2e2" stroke="#fca5a5"/>
+        <text x="360" y="279" fill="#991b1b" font-size="13" font-weight="700" text-anchor="middle">noeviction（默认）</text>
+      </svg>
+      <div class="cap">图 2：8 种策略的两大分类维度——候选范围（allkeys / volatile）与算法（LRU/LFU/TTL/Random），外加"谁都不淘汰"的 noeviction</div>
+    </div>
+
+    <h3>8 种策略一览表</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>策略</th><th>候选范围</th><th>选择算法</th><th>行为</th><th>典型用途</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>noeviction</code></td><td>—</td><td>不淘汰</td><td><span class="tag red">默认</span> 写命令报错，不删数据</td><td>当缓存用时不选它；用于"数据神圣不可丢"</td></tr>
+          <tr><td><code>allkeys-lru</code></td><td>全部键</td><td>近似 LRU</td><td><span class="tag green">最常用</span> 删最久未用</td><td>纯缓存，所有键都可再生</td></tr>
+          <tr><td><code>allkeys-lfu</code></td><td>全部键</td><td>LFU 频率</td><td>删访问频次最低</td><td>热点明显、需长期保留热键</td></tr>
+          <tr><td><code>allkeys-random</code></td><td>全部键</td><td>随机</td><td>随机删</td><td>几乎不用，仅特殊测试</td></tr>
+          <tr><td><code>volatile-lru</code></td><td>仅带 TTL 键</td><td>近似 LRU</td><td>在有过期键里删最久未用</td><td>缓存+持久数据混存，只淘汰临时键</td></tr>
+          <tr><td><code>volatile-lfu</code></td><td>仅带 TTL 键</td><td>LFU 频率</td><td>在过期键里删最不常用</td><td>同上，但更重频率</td></tr>
+          <tr><td><code>volatile-random</code></td><td>仅带 TTL 键</td><td>随机</td><td>在过期键里随机删</td><td>极少用</td></tr>
+          <tr><td><code>volatile-ttl</code></td><td>仅带 TTL 键</td><td>剩余寿命</td><td>删"最快过期"的键</td><td>希望尽量留长生数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout note">
+      <span class="tt">关键区分：allkeys-* vs volatile-*</span>
+      <ul style="margin-bottom:0">
+        <li><strong>allkeys-*</strong>：候选是<strong>所有键</strong>。哪怕你设置了 TTL 的持久数据，也可能被淘汰。适合"Redis 就是缓存"的场景。</li>
+        <li><strong>volatile-*</strong>：候选<strong>只限带 TTL 的键</strong>。没设过期时间的键（持久数据）永远安全。适合"缓存和持久数据放同一个 Redis"的场景。</li>
+        <li>⚠️ <strong>坑</strong>：用 <code>volatile-*</code> 时，如果所有键都没设 TTL，候选集为空 → Redis 退化为 <strong>noeviction</strong>，写命令直接报错！</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============ noeviction 真相 ============ -->
+  <section id="noeviction">
+    <h2>noeviction（默认策略）的真相：报错，不是崩溃</h2>
+    <p>很多人以为"内存满了 Redis 就崩"，其实默认配置下它<strong>最温和</strong>：宁可报错也不删你的数据。</p>
+
+    <div class="grid2">
+      <div class="card">
+        <h3 style="color:var(--red)">内存满 + noeviction 时</h3>
+        <ul>
+          <li>所有<strong>写类命令</strong>（SET、LPUSH、HSET、EXPIRE…）返回错误 <code>OOM command not allowed when used memory &gt; 'maxmemory'</code></li>
+          <li><strong>读类命令</strong>（GET、HGET、LRANGE…）完全正常，能继续服务</li>
+          <li><strong>删除类命令</strong>（DEL、EXPIRE 后自然过期）正常，可手动腾空间</li>
+          <li>Redis 进程<strong>不崩溃、不重启</strong></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">这意味着什么</h3>
+        <ul>
+          <li>你的<strong>已存数据完好无损</strong>——这是 noeviction 的设计初衷：宁可写不进，也不乱删</li>
+          <li>适合把 Redis 当<strong>数据库/消息队列</strong>而非纯缓存的场景</li>
+          <li>代价是：应用层的写会批量失败，需要业务侧做好降级/重试/告警</li>
+          <li>这<strong>不是崩溃</strong>，但体验上像"服务不可写"，必须被监控到</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <span class="tt">⚠ 所以"会崩溃吗"的准确答案是</span>
+      配置了 maxmemory（无论什么策略），Redis 进程<strong>都不会自己崩溃</strong>。崩溃只发生在「完全没配 maxmemory」导致被系统 OOM Killer 干掉，或「配了 maxmemory 但缓冲/副本把内存撑爆」的边界情况（见下文）。
+    </div>
+  </section>
+
+  <!-- ============ 算法原理 ============ -->
+  <section id="algo">
+    <h2>自动清理靠什么算法：LRU / LFU / TTL / Random</h2>
+    <p>当策略决定"要淘汰"时，具体挑哪个键？四类算法各有取舍。</p>
+
+    <h3>LRU（最近最少使用）——最经典</h3>
+    <p>淘汰"最久没被访问"的键。Redis 实现的是<strong>近似 LRU</strong>：不维护精确链表，而是<strong>随机采样</strong> <code>maxmemory-samples</code>（默认 5）个键，从中挑最久未用的淘汰。牺牲一点精度换 CPU。</p>
+
+    <h3>LFU（最不频繁使用）——Redis 4.0+ 更聪明</h3>
+    <p>淘汰"访问频次最低"的键。每个键维护一个 8 位<strong>对数计数器</strong>（morris counter），访问时概率自增、随时间<strong>衰减</strong>。比 LRU 更能识别"曾经热但已冷"的键，适合长期热点场景。两个旋钮：<code>lfu-log-factor</code>（增长快慢，默认 10）、<code>lfu-decay-time</code>（衰减分钟数，默认 1）。</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 720 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+        <!-- LRU -->
+        <text x="170" y="28" fill="#0f3460" font-size="14" font-weight="700" text-anchor="middle">近似 LRU（采样淘汰）</text>
+        <rect x="40" y="44" width="260" height="150" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+        <text x="170" y="68" fill="#475569" font-size="11" text-anchor="middle">随机采样 5 个键</text>
+        <circle cx="90" cy="105" r="16" fill="#dbeafe"/><text x="90" y="109" fill="#1e40af" font-size="11" text-anchor="middle">A</text>
+        <circle cx="150" cy="105" r="16" fill="#dbeafe"/><text x="150" y="109" fill="#1e40af" font-size="11" text-anchor="middle">B</text>
+        <circle cx="210" cy="105" r="16" fill="#dbeafe"/><text x="210" y="109" fill="#1e40af" font-size="11" text-anchor="middle">C</text>
+        <circle cx="120" cy="155" r="16" fill="#dbeafe"/><text x="120" y="159" fill="#1e40af" font-size="11" text-anchor="middle">D</text>
+        <circle cx="185" cy="155" r="16" fill="#fca5a5"/><text x="185" y="159" fill="#991b1b" font-size="11" text-anchor="middle">E</text>
+        <text x="170" y="184" fill="#dc2626" font-size="11" font-weight="700" text-anchor="middle">↑ 其中最久未用者被淘汰</text>
+
+        <!-- LFU -->
+        <text x="550" y="28" fill="#0f3460" font-size="14" font-weight="700" text-anchor="middle">LFU（频率计数 + 衰减）</text>
+        <rect x="420" y="44" width="260" height="150" rx="10" fill="#f0fdf4" stroke="#a7f3d0"/>
+        <text x="550" y="68" fill="#475569" font-size="11" text-anchor="middle">每个键一个访问计数器</text>
+        <g font-size="11" text-anchor="middle">
+          <rect x="440" y="84" width="64" height="30" rx="6" fill="#fff" stroke="#86efac"/><text x="472" y="104" fill="#065f46">K1 cnt=3</text>
+          <rect x="516" y="84" width="64" height="30" rx="6" fill="#fff" stroke="#86efac"/><text x="548" y="104" fill="#065f46">K2 cnt=9</text>
+          <rect x="592" y="84" width="64" height="30" rx="6" fill="#fff" stroke="#86efac"/><text x="624" y="104" fill="#065f46">K3 cnt=1</text>
+          <rect x="492" y="132" width="116" height="30" rx="6" fill="#fee2e2" stroke="#fca5a5"/><text x="550" y="152" fill="#991b1b">K3 最低 → 淘汰</text>
+        </g>
+        <text x="550" y="184" fill="#16a34a" font-size="11" font-weight="700" text-anchor="middle">↑ 频次最低者被淘汰（随时间衰减）</text>
+      </svg>
+      <div class="cap">图 3：近似 LRU（采样挑最久未用）与 LFU（按访问计数器挑最低）两种核心算法的对比</div>
+    </div>
+
+    <h3>TTL 与 Random</h3>
+    <ul>
+      <li><strong>volatile-ttl</strong>：在带 TTL 的键里，淘汰<strong>剩余寿命最短</strong>的（越快过期越先走）。简单但不管访问热度。</li>
+      <li><strong>random</strong>（allkeys / volatile）：<strong>随机</strong>挑一个淘汰。几乎只用于测试，生产不推荐——会误删热键。</li>
+    </ul>
+
+    <div class="callout tip">
+      <span class="tt">✅ 工程选型直觉</span>
+      纯缓存首选 <code>allkeys-lru</code>；有明显长期热点的选 <code>allkeys-lfu</code>；缓存与持久数据混存的选 <code>volatile-lru/lfu</code>；<strong>永远别用 random 当生产策略</strong>。
+    </div>
+  </section>
+
+  <!-- ============ 没配的崩溃 ============ -->
+  <section id="oom">
+    <h2>情形 B 的崩溃真相：不是 Redis 崩，是系统杀了它</h2>
+    <p>当 <code>maxmemory = 0</code>（默认），Redis 不限制自己。内存使用会一路上涨，直到宿主机 RAM 耗尽。</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+        <!-- axes -->
+        <line x1="60" y1="210" x2="680" y2="210" stroke="#475569" stroke-width="2"/>
+        <line x1="60" y1="20" x2="60" y2="210" stroke="#475569" stroke-width="2"/>
+        <text x="370" y="240" fill="#475569" font-size="12" text-anchor="middle">时间 →</text>
+        <text x="30" y="120" fill="#475569" font-size="12" text-anchor="middle" transform="rotate(-90 30 120)">内存占用</text>
+
+        <!-- physical limit line -->
+        <line x1="60" y1="70" x2="680" y2="70" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 5"/>
+        <text x="640" y="62" fill="#dc2626" font-size="11" font-weight="700" text-anchor="end">宿主机物理内存上限</text>
+
+        <!-- curve -->
+        <path d="M60,205 C200,200 320,180 420,150 C500,125 560,95 620,72" fill="none" stroke="#2563eb" stroke-width="3"/>
+        <circle cx="620" cy="72" r="6" fill="#dc2626"/>
+        <text x="620" y="48" fill="#dc2626" font-size="12" font-weight="700" text-anchor="middle">OOM Killer 触发</text>
+        <text x="360" y="120" fill="#2563eb" font-size="12" font-weight="700" text-anchor="middle">Redis 内存持续增长（maxmemory=0 不拦截）</text>
+      </svg>
+      <div class="cap">图 4：未设 maxmemory 时，Redis 内存曲线一路逼近物理上限，越线后被操作系统 OOM Killer 终结</div>
+    </div>
+
+    <div class="steps">
+      <li><strong>Redis 不设上限</strong>：客户端持续写入，<code>used_memory</code> 单调上升，Redis 自身不报警、不拦截。</li>
+      <li><strong>逼近物理内存</strong>：系统可用内存见底，开始用 swap，Redis 响应变慢（磁盘 IO）。</li>
+      <li><strong>内存耗尽</strong>：内核 OOM（Out-Of-Memory）子系统启动，按 oom_score 挑"最该死"的进程。</li>
+      <li><strong>Redis 被 Kill</strong>：占用大内存的 Redis 通常是首选目标，进程直接被杀，<strong>表现为"突然崩溃/失联"</strong>，日志里常见 <code>Out Of Memory</code> 或进程直接消失。</li>
+      <li><strong>恢复</strong>：若开了持久化（RDB/AOF）可重启加载；若是纯缓存则丢失全部热数据，瞬间击穿到后端 DB。</li>
+    </div>
+
+    <div class="callout warn">
+      <span class="tt">⚠ 第二大坑：配了 maxmemory 也可能 OOM</span>
+      <code>maxmemory</code> 只计算<strong>数据内存</strong>，不包括：<strong>客户端输出缓冲</strong>、<strong>副本同步缓冲</strong>、<strong>AOF 重写缓冲</strong>、内存<strong>碎片</strong>。这些都会让 <code>used_memory_rss</code>（实际物理占用）超过 maxmemory。所以「设了 maxmemory 仍被 OOM」很常见——根因是缓冲/碎片，不是数据本身。
+    </div>
+  </section>
+
+  <!-- ============ 完整流程 ============ -->
+  <section id="flow">
+    <h2>内存满时，Redis 到底走哪条路（完整决策流）</h2>
+    <div class="fig">
+      <svg viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+        <defs>
+          <marker id="ar3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#475569"/></marker>
+        </defs>
+        <rect x="250" y="16" width="220" height="46" rx="9" fill="#0f3460"/>
+        <text x="360" y="44" fill="#fff" font-size="13.5" font-weight="700" text-anchor="middle">写入请求，内存达 maxmemory</text>
+
+        <line x1="360" y1="62" x2="360" y2="90" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="250" y="92" width="220" height="42" rx="9" fill="#e2e8f0"/>
+        <text x="360" y="118" fill="#1a202c" font-size="13" font-weight="700" text-anchor="middle">maxmemory=0 ？ 未设置</text>
+
+        <line x1="360" y1="134" x2="360" y2="162" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="250" y="164" width="220" height="42" rx="9" fill="#fee2e2" stroke="#fca5a5"/>
+        <text x="360" y="190" fill="#991b1b" font-size="12.5" font-weight="700" text-anchor="middle">否（=0）→ 不拦截</text>
+        <line x1="360" y1="206" x2="360" y2="234" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="225" y="236" width="270" height="40" rx="9" fill="#fee2e2" stroke="#fca5a5"/>
+        <text x="360" y="261" fill="#991b1b" font-size="12.5" font-weight="700" text-anchor="middle">内存持续涨 → 系统 OOM → 进程被杀</text>
+
+        <!-- yes branch: policy -->
+        <line x1="470" y1="113" x2="600" y2="113" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="600" y="92" width="100" height="42" rx="9" fill="#e2e8f0"/>
+        <text x="650" y="118" fill="#1a202c" font-size="12.5" font-weight="700" text-anchor="middle">是(≠0)</text>
+        <line x1="650" y1="134" x2="650" y2="162" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="560" y="164" width="180" height="42" rx="9" fill="#dbeafe"/>
+        <text x="650" y="190" fill="#1e40af" font-size="12.5" font-weight="700" text-anchor="middle">读命令？→ 正常返回</text>
+        <line x1="650" y1="206" x2="650" y2="234" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="540" y="236" width="220" height="42" rx="9" fill="#dbeafe"/>
+        <text x="650" y="262" fill="#1e40af" font-size="12.5" font-weight="700" text-anchor="middle">写命令 → 按 policy 判定</text>
+
+        <line x1="650" y1="278" x2="650" y2="306" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="540" y="308" width="220" height="44" rx="9" fill="#f0fdf4" stroke="#86efac"/>
+        <text x="650" y="326" fill="#166534" font-size="12" font-weight="700" text-anchor="middle">noeviction → 写返回 OOM 错误</text>
+        <text x="650" y="344" fill="#14532d" font-size="11" text-anchor="middle">（进程不崩，数据不丢）</text>
+
+        <line x1="650" y1="352" x2="650" y2="372" stroke="#475569" stroke-width="2" marker-end="url(#ar3)"/>
+        <rect x="520" y="374" width="260" height="40" rx="9" fill="#f0fdf4" stroke="#86efac"/>
+        <text x="650" y="399" fill="#166534" font-size="12" font-weight="700" text-anchor="middle">其他策略 → 自动淘汰键，写入成功</text>
+      </svg>
+      <div class="cap">图 5：从"内存触顶"到"最终走向"的完整决策链路——核心分叉是 maxmemory 配没配、以及 policy 是不是 noeviction</div>
+    </div>
+    <p>一句话串起来：<strong>配了 maxmemory，Redis 永远不崩</strong>（要么自清、要么报错）；<strong>没配 maxmemory，崩溃风险来自操作系统</strong>，不在 Redis 自身逻辑。</p>
+  </section>
+
+  <!-- ============ 配置与监控 ============ -->
+  <section id="ops">
+    <h2>怎么配置、怎么监控：把崩溃挡在门外</h2>
+
+    <h3>1. 设置上限与策略（推荐生产）</h3>
+    <div class="cmd">
+<span class="c"># 临时生效（重启后失效）</span>
+<span class="k">CONFIG SET</span> maxmemory 2gb
+<span class="k">CONFIG SET</span> maxmemory-policy allkeys-lru
+<span class="k">CONFIG SET</span> maxmemory-samples 5        <span class="c"># LRU/LFU 采样精度</span>
+
+<span class="c"># 永久生效：写进 redis.conf</span>
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+    </div>
+
+    <h3>2. 监控这几个指标（核心）</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>指标 / 命令</th><th>看什么</th><th>异常信号</th></tr></thead>
+        <tbody>
+          <tr><td><code>INFO memory</code> → used_memory / maxmemory</td><td>数据内存 vs 上限</td><td>两者接近 → 即将触顶</td></tr>
+          <tr><td><code>INFO memory</code> → mem_fragmentation_ratio</td><td>碎片率 (rss/used)</td><td>&gt;1.5 碎片严重，rss 远超上限</td></tr>
+          <tr><td><code>INFO stats</code> → evicted_keys</td><td>累计淘汰数</td><td>持续增长 → 在频繁淘汰</td></tr>
+          <tr><td><code>INFO stats</code> → expired_keys</td><td>自然过期数</td><td>过低却频繁淘汰 → 策略不当</td></tr>
+          <tr><td><code>CONFIG GET</code> maxmemory-policy</td><td>当前策略</td><td>是 noeviction 且写报错 → 需调</td></tr>
+          <tr><td><code>INFO clients</code> → client_recent_max_output_buffer</td><td>客户端缓冲</td><td>大缓冲 → rss 超上限隐患</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>3. 排查"明明配了 maxmemory 还崩"的思路</h3>
+    <ol>
+      <li>先看 <code>used_memory</code> 是否真超 <code>maxmemory</code>：若没超，说明崩在<strong>缓冲/碎片</strong>（rss 超了）。</li>
+      <li>看 <code>mem_fragmentation_ratio</code>：高碎片 → 考虑 <code>activedefrag</code> 主动碎片整理。</li>
+      <li>看 <code>client_recent_max_output_buffer</code> 和副本偏移：大查询/慢副本会撑爆 rss。</li>
+      <li>设 <code>maxmemory</code> 时<strong>留出缓冲</strong>（如机器 8G，maxmemory 设 4~5G），给缓冲与碎片留空间。</li>
+      <li>若是纯缓存，崩溃后重建可接受；若是数据源，必须开持久化 + 副本，并避免用会丢数据的策略。</li>
+    </ol>
+  </section>
+
+  <!-- ============ 误区 ============ -->
+  <section id="myth">
+    <h2>6 个常见误区，一次说清</h2>
+    <div class="grid2">
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 1：内存满了 Redis 就会崩</h3>
+        <p><strong>错。</strong>只要设了 maxmemory，Redis 要么自动淘汰（其他策略），要么拒绝写入（noeviction），<strong>进程都不会崩</strong>。崩几乎都因没设上限。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 1</h3>
+        <p>崩溃的源头是<strong>操作系统 OOM</strong>，不是 Redis 逻辑。配置到位，Redis 极稳。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 2：noeviction 会崩溃</h3>
+        <p><strong>错。</strong>noeviction 只是让写命令返回 OOM 错误，读照常，进程不死，数据不丢。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 2</h3>
+        <p>它是"最安全但不自动清理"的策略，适合数据不可丢场景，代价是写失败要业务兜底。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 3：设了 maxmemory 就绝不会 OOM</h3>
+        <p><strong>错。</strong>缓冲、副本同步、AOF 重写、碎片都不计入 maxmemory，rss 仍可能撑爆内存。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 3</h3>
+        <p>maxmemory 限的是<strong>数据</strong>，不是<strong>进程总占用</strong>。要留缓冲 + 监控 rss。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 4：LRU 是精确 LRU</h3>
+        <p><strong>错。</strong>Redis 用<strong>近似 LRU（采样）</strong>换性能，精度靠 <code>maxmemory-samples</code> 调。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 4</h3>
+        <p>想要更准用 LFU；想要更精确可调高 samples，但会更耗 CPU。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 5：volatile-* 一定安全</h3>
+        <p><strong>不一定。</strong>若所有键都没设 TTL，候选集为空 → 退化为 noeviction，写直接报错。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 5</h3>
+        <p>用 volatile-* 前，确保要淘汰的键<strong>确实设了过期时间</strong>。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--red)">❌ 误区 6：淘汰影响读性能</h3>
+        <p><strong>基本不影响读。</strong>淘汰是后台/写时触发，读命令正常；除非内存压力导致整体 swap 变慢。</p>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--green)">✅ 真相 6</h3>
+        <p>真正拖慢的是"内存满→swap→磁盘 IO"，不是淘汰本身。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 实战清单 ============ -->
+  <section id="check">
+    <h2>实战配置清单：照着做</h2>
+    <div class="card">
+      <ol class="steps">
+        <li><strong>必设 maxmemory</strong>：生产环境永远不要留 0。按机器内存的 50%~70% 设，给缓冲和碎片留余地。</li>
+        <li><strong>选对策略</strong>：纯缓存 → <code>allkeys-lru</code>；长期热点 → <code>allkeys-lfu</code>；缓存+持久混存 → <code>volatile-lru/lfu</code>（且务必给缓存键设 TTL）。</li>
+        <li><strong>别用 noeviction 当缓存</strong>：除非你明确要"写满即失败、数据不丢"，并做好了业务降级。</li>
+        <li><strong>监控 evicted_keys / used_memory / mem_fragmentation_ratio</strong>：设告警，触顶前介入。</li>
+        <li><strong>给 rss 留缓冲</strong>：maxmemory 别顶满物理内存，防止缓冲/碎片导致系统 OOM。</li>
+        <li><strong>大查询 & 慢副本是隐形杀手</strong>：监控 client output buffer 与副本延迟，避免它们把内存撑爆。</li>
+        <li><strong>纯缓存可丢 → 崩溃可接受</strong>；若 Redis 是数据源 → 必须开 AOF/RDB + 副本，且避免会误删持久数据的策略。</li>
+        <li><strong>压测验证</strong>：刻意灌满内存，观察是"平滑淘汰"还是"写报错"，确认符合预期再上线。</li>
+      </ol>
+    </div>
+    <div class="callout tip">
+      <span class="tt">✅ 终极一句话</span>
+      Redis 内存满了<strong>不会自己崩溃</strong>：设了 maxmemory 就自动清理或优雅报错；没设才可能被系统 OOM 杀掉。把 maxmemory 配好、策略选对、监控到位，崩溃这个话题就和你没关系了。
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <div>本页聚焦"Redis 内存满后的行为"——崩溃 vs 自动清理，主线取决于 <code style="color:#fca5a5">maxmemory</code> 配置。</div>
+  <div class="related">
+    <a href="redis-memory-overflow.html">内存溢出会发生什么</a>
+    <a href="redis-eviction.html">内存淘汰策略交互讲解</a>
+    <a href="redis-expiration-strategies.html">键过期策略</a>
+    <a href="redis-key-expiration.html">键过期机制</a>
+    <a href="redis-memory-defrag.html">内存碎片整理</a>
+    <a href="redis_memory_optimization.html">内存优化</a>
+    <a href="redis-big-key-guide.html">大 Key 治理</a>
+    <a href="redis-rehash.html">rehash 与内存</a>
+  </div>
+  <div style="margin-top:18px;color:#64748b">同目录配套阅读 · 持续补全中</div>
+</footer>
+
+<script>
+  // ===== scroll-spy =====
+  (function(){
+    const links = Array.from(document.querySelectorAll('.topnav a'));
+    const map = links.map(a => ({ a, sec: document.querySelector(a.getAttribute('href')) }));
+    const spy = () => {
+      const y = window.scrollY + 90;
+      let cur = map[0];
+      for (const m of map) { if (m.sec && m.sec.offsetTop <= y) cur = m; }
+      links.forEach(l => l.classList.remove('active'));
+      if (cur) cur.a.classList.add('active');
+    };
+    window.addEventListener('scroll', spy, { passive: true });
+    window.addEventListener('load', spy);
+    spy();
+
+    // ===== fade-in =====
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('show'); });
+    }, { threshold: 0.08 });
+    document.querySelectorAll('section, .card, .fig, .tbl-wrap, .callout, .cmd').forEach(el => {
+      el.classList.add('fade'); io.observe(el);
+    });
+  })();
+</script>
+</body>
+</html>

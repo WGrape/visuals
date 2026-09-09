@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 的 Buffer Pool 到底是啥 —— 内存版图、内部结构、LRU 与读写全流程</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --card2:#1c2128; --border:#30363d;
+    --fg:#e6edf3; --fg2:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --red:#f85149; --amber:#d29922; --purple:#bc8cff; --pink:#f778ba; --cyan:#39c5cf;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--fg);line-height:1.75;overflow-x:hidden}
+  code,pre{font-family:"SF Mono",SFMono-Regular,Consolas,Menlo,monospace}
+  code.inline{background:rgba(88,166,255,.12);color:var(--accent);padding:1px 6px;border-radius:5px;font-size:.87em}
+  pre{background:#0b0e14;border:1px solid var(--border);border-radius:11px;padding:15px 17px;
+    overflow-x:auto;font-size:12.5px;line-height:1.65;margin:12px 0;color:#c9d1d9}
+  pre .c{color:#6e7681} pre .k{color:#ff7b72} pre .s{color:#a5d6ff}
+  pre .h{color:#d29922;font-weight:700} pre .g{color:#7ee787}
+  .nav{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.92);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:5px;padding:9px 14px;justify-content:center}
+  .nav a{color:var(--fg2);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:16px;
+    border:1px solid transparent;transition:.15s}
+  .nav a:hover{color:#fff;background:rgba(255,255,255,.06)}
+  .nav a.active{background:var(--accent);color:#0d1117;font-weight:700}
+  .hero{text-align:center;padding:46px 22px 22px}
+  .hero h1{font-size:2rem;font-weight:800;letter-spacing:-.02em;margin-bottom:10px;
+    background:linear-gradient(135deg,#39c5cf,#58a6ff,#bc8cff);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero p{color:var(--fg2);max-width:940px;margin:0 auto;font-size:15px}
+  .hero .src{margin-top:12px;font-size:12.5px;color:#6e7681}
+  .pill-row{display:flex;flex-wrap:wrap;gap:9px;justify-content:center;margin-top:18px}
+  .pill{font-size:12.5px;font-weight:600;padding:5px 13px;border-radius:18px;
+    border:1px solid var(--border);background:var(--card)}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+  section{margin:52px 0;scroll-margin-top:56px}
+  .sec-head{display:flex;align-items:center;gap:13px;margin-bottom:6px}
+  .sec-badge{width:38px;height:38px;flex-shrink:0;border-radius:10px;display:flex;align-items:center;
+    justify-content:center;font-size:17px;font-weight:800;color:#0d1117}
+  .sec-title{font-size:1.4rem;font-weight:800}
+  .sec-sub{color:var(--fg2);font-size:13.5px;margin:0 0 15px 51px}
+  p.lead{color:#c9d1d9;font-size:14.5px;margin:10px 0}
+  ul,ol{color:#c9d1d9;margin:8px 0 8px 20px;font-size:14.5px}
+  li{margin:6px 0}
+  strong{color:#fff}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:20px;margin:14px 0}
+  .panel h3{font-size:1.02rem;margin-bottom:9px;color:#fff}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+  .callout{border-radius:11px;padding:13px 17px;margin:13px 0;border:1px solid var(--border);
+    background:rgba(255,255,255,.02);font-size:14px;color:#c9d1d9}
+  .callout b{color:#fff}
+  .callout ul{margin-left:17px}
+  .warn{border-left:4px solid var(--red)}
+  .tip{border-left:4px solid var(--green)}
+  .key{border-left:4px solid var(--accent)}
+  .amber{border-left:4px solid var(--amber)}
+  .purple{border-left:4px solid var(--purple)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+  th{background:rgba(0,0,0,.3);color:#fff;font-weight:600}
+  td{color:#c9d1d9}
+  tr:hover td{background:rgba(255,255,255,.025)}
+  svg{display:block;margin:0 auto;max-width:100%}
+  .diagram{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:14px;padding:17px;margin:15px 0;overflow-x:auto}
+  .diagram svg{min-width:520px}
+  .cap{text-align:center;font-size:12px;color:var(--fg2);margin-bottom:9px}
+  .tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:6px}
+  .t-y{background:rgba(63,185,80,.16);color:var(--green)}
+  .t-n{background:rgba(248,81,73,.16);color:var(--red)}
+  .t-p{background:rgba(210,153,34,.16);color:var(--amber)}
+  .badge{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:6px;margin-right:5px}
+  .b-ok{background:rgba(63,185,80,.16);color:var(--green)}
+  .b-no{background:rgba(248,81,73,.16);color:var(--red)}
+  .b-warn{background:rgba(210,153,34,.16);color:var(--amber)}
+  .summary-box{background:linear-gradient(135deg,#161b22,#0d1117);border:1px solid var(--border);border-radius:17px;padding:24px}
+  .summary-box h2{font-size:1.2rem;margin-bottom:11px}
+  .footer{text-align:center;color:#6e7681;font-size:12px;padding:38px 0}
+  .footer a{color:var(--accent);text-decoration:none}
+  .links{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:13px}
+  @media(max-width:700px){.links{grid-template-columns:1fr}}
+  .links a{display:block;padding:13px 15px;border:1px solid var(--border);border-radius:11px;
+    background:var(--card);color:var(--fg);text-decoration:none;transition:.15s}
+  .links a:hover{border-color:var(--accent);background:rgba(88,166,255,.06)}
+  .links a span{color:var(--accent);font-weight:600}
+
+  /* 命中率计算器 */
+  .sim{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:19px;margin:15px 0}
+  .row{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:9px 0}
+  .row .lb{width:170px;font-size:13px;color:var(--fg2);flex-shrink:0}
+  .row input{width:150px;background:#0b0e14;border:1px solid var(--border);color:var(--fg);
+    border-radius:8px;padding:7px 10px;font-size:13px;font-family:"SF Mono",Consolas,monospace}
+  .btn{cursor:pointer;padding:7px 16px;border-radius:8px;border:1px solid var(--accent);
+    background:var(--accent);color:#0d1117;font-size:13px;font-weight:700}
+  .btn:hover{opacity:.9}
+  .verdict{margin-top:15px;border-radius:11px;padding:15px 17px;font-size:14px;
+    border:1px solid var(--border);background:var(--card2);min-height:60px}
+  .verdict .big{font-size:1.05em;font-weight:800;margin-bottom:7px}
+  .verdict.pass{border-color:var(--green)} .verdict.pass .big{color:var(--green)}
+  .verdict.warnv{border-color:var(--amber)} .verdict.warnv .big{color:var(--amber)}
+  .verdict.bad{border-color:var(--red)} .verdict.bad .big{color:var(--red)}
+  .ring{display:flex;align-items:center;gap:18px;margin-top:12px}
+  .ring .pct{font-size:2rem;font-weight:800}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#s1">① 在哪</a>
+  <a href="#s2">② 为什么需要</a>
+  <a href="#s3">③ 装了什么</a>
+  <a href="#s4">④ 内部结构</a>
+  <a href="#s5">⑤ LRU 冷热区</a>
+  <a href="#s6">⑥ 读流程</a>
+  <a href="#s7">⑦ 写流程</a>
+  <a href="#s8">⑧ 脏页刷盘</a>
+  <a href="#s9">⑨ Change Buffer</a>
+  <a href="#s10">⑩ 配置监控</a>
+  <a href="#s11">⑪ 误区</a>
+  <a href="#s12">⑫ 命中率计算</a>
+  <a href="#s13">⑬ 总结</a>
+</div>
+
+<div class="hero">
+  <h1>MySQL 的 Buffer Pool 到底是啥</h1>
+  <p>Buffer Pool 是 InnoDB 在内存里开辟的<strong>那块最大的缓存区</strong>，用来装从磁盘读上来的数据页和索引页。它是 MySQL 性能的核心——内存装得下，磁盘几乎不用碰；装不下，再快的 CPU 也卡在磁盘 I/O 上。本文按「内存版图 → 为什么需要 → 装了什么 → 内部结构 → LRU → 读写全流程 → 刷脏 → 配置监控」逐层讲透。</p>
+  <div class="src">database-system/mysql/memory 系列之一 · 与锁、事务、索引专题互相呼应</div>
+  <div class="pill-row">
+    <span class="pill">InnoDB 内存的心脏</span>
+    <span class="pill">页级缓存（16KB/页）</span>
+    <span class="pill">读写都先过它</span>
+    <span class="pill">LRU 冷热分区防污染</span>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section id="s1">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--cyan)">1</div>
+    <div class="sec-title">它在 MySQL 内存版图里的位置</div>
+  </div>
+  <p class="sec-sub">先站远看全局：MySQL 占用内存的，远不止 Buffer Pool 一个。理解它「占多大、和谁并列」，才不会被一知半解带偏。</p>
+
+  <p class="lead">MySQL 进程占用的内存分两大层：<strong>Server 层</strong>（各种为单条连接 / 单条语句服务的缓冲）和 <strong>存储引擎层 InnoDB</strong>。Buffer Pool 是 InnoDB 层里<strong>最大、最核心</strong>的那块。</p>
+
+  <div class="diagram">
+    <div class="cap">图 1 · MySQL 内存版图：Server 层小块缓冲 vs InnoDB 层大块缓冲（Buffer Pool 体量最大）</div>
+    <svg viewBox="0 0 820 320" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/></marker>
+      </defs>
+      <!-- MySQL 进程大框 -->
+      <rect x="20" y="20" width="780" height="280" rx="14" fill="#0b0e14" stroke="#30363d" stroke-width="1.5"/>
+      <text x="40" y="44" font-size="13" font-weight="800" fill="#e6edf3">MySQL 进程占用的内存</text>
+
+      <!-- Server 层 -->
+      <rect x="40" y="62" width="340" height="222" rx="11" fill="rgba(188,140,255,.06)" stroke="#bc8cff" stroke-dasharray="5 4"/>
+      <text x="58" y="84" font-size="12.5" font-weight="800" fill="#bc8cff">① Server 层（按连接 / 按语句）</text>
+      <rect x="58" y="96" width="304" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="70" y="116" font-size="11.5" fill="#c9d1d9">线程栈 / 连接缓冲 net_buffer（每连接一份）</text>
+      <rect x="58" y="132" width="304" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="70" y="152" font-size="11.5" fill="#c9d1d9">sort_buffer / join_buffer（排序、连接）</text>
+      <rect x="58" y="168" width="304" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="70" y="188" font-size="11.5" fill="#c9d1d9">read_buffer / read_rnd_buffer（顺序/随机读）</text>
+      <rect x="58" y="204" width="304" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="70" y="224" font-size="11.5" fill="#c9d1d9">binlog_cache（事务 binlog 缓存）</text>
+      <rect x="58" y="240" width="304" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="70" y="260" font-size="11.5" fill="#c9d1d9">内部临时表（tmp_table_size）</text>
+
+      <!-- InnoDB 层 -->
+      <rect x="400" y="62" width="380" height="222" rx="11" fill="rgba(57,197,207,.07)" stroke="#39c5cf" stroke-dasharray="5 4"/>
+      <text x="418" y="84" font-size="12.5" font-weight="800" fill="#39c5cf">② InnoDB 层（共享、全局）</text>
+      <rect x="418" y="96" width="344" height="118" rx="9" fill="rgba(57,197,207,.18)" stroke="#39c5cf" stroke-width="2"/>
+      <text x="430" y="118" font-size="13" font-weight="800" fill="#fff">★ Buffer Pool（最大，本篇主角）</text>
+      <text x="430" y="140" font-size="11" fill="#c9d1d9">装数据页 / 索引页 / 锁 / 字典 / AHI</text>
+      <text x="430" y="158" font-size="11" fill="#c9d1d9">通常为物理内存 60%~80%</text>
+      <text x="430" y="176" font-size="11" fill="#8b949e">容量由 innodb_buffer_pool_size 决定</text>
+      <text x="430" y="196" font-size="11" fill="#8b949e">Change Buffer 也寄生在其中</text>
+      <rect x="418" y="222" width="162" height="50" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="430" y="244" font-size="11.5" fill="#c9d1d9">Log Buffer</text>
+      <text x="430" y="262" font-size="10.5" fill="#8b949e">redo 缓冲(16MB)</text>
+      <rect x="600" y="222" width="162" height="50" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="612" y="244" font-size="11.5" fill="#c9d1d9">Doublewrite Buffer</text>
+      <text x="612" y="262" font-size="10.5" fill="#8b949e">双写（防页断裂）</text>
+    </svg>
+  </div>
+
+  <div class="callout key">
+    <b>一眼分清三个常混的「缓冲」：</b>
+    <ul>
+      <li><b>Buffer Pool</b>：缓存<strong>数据页和索引页</strong>（页级），InnoDB 共享，最大头。</li>
+      <li><b>Log Buffer</b>：缓存<strong>redo log 的写入</strong>，很小（默认 16MB），和「落盘的数据」是两回事。</li>
+      <li><b>Query Cache</b>（8.0 已删除）：按 SQL 缓存<strong>查询结果集</strong>，和 Buffer Pool 是不同维度——别再拿它类比。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--amber)">2</div>
+    <div class="sec-title">为什么需要 Buffer Pool</div>
+  </div>
+  <p class="sec-sub">一句话：CPU 不能直接算磁盘上的数据，必须先读进内存；而磁盘比内存慢约 10 万倍。</p>
+
+  <p class="lead">一次查询的本质是：从磁盘把数据<strong>读进内存</strong> → 在内存里比较 / 计算 / 排序 → 把结果返回。如果每次都去磁盘读，性能会被 I/O 死死卡住。Buffer Pool 就是那块「<strong>内存工作台</strong>」——把最常访问的数据页留在内存，尽量让 CPU 只和内存打交道。</p>
+
+  <div class="grid3">
+    <div class="panel">
+      <h3>延迟量级对比</h3>
+      <ul style="margin-left:18px">
+        <li>内存访问：<strong>~100 ns</strong></li>
+        <li>SSD 随机读：<strong>~100 μs</strong>（慢 1000×）</li>
+        <li>机械盘随机读：<strong>~10 ms</strong>（慢 10 万×）</li>
+        <li>网络一次往返：~1 ms 级</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>没有 Buffer Pool 会怎样</h3>
+      <ul style="margin-left:18px">
+        <li>每访问一行都要一次磁盘 I/O</li>
+        <li>一次全表扫描 = N 次随机读</li>
+        <li>连接数一上来，磁盘直接被打满</li>
+        <li>CPU 大量时间<strong>空等 I/O</strong></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>有了 Buffer Pool 之后</h3>
+      <ul style="margin-left:18px">
+        <li>热点数据常驻内存，<strong>逻辑读</strong>直接命中</li>
+        <li>同页多次访问只发生一次物理读</li>
+        <li>写先改内存 + 记 redo，<strong>异步</strong>落盘</li>
+        <li>命中率 99%+ 时，磁盘近乎「隐身」</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <b>核心收益：把「随机磁盘 I/O」转成「内存访问 + 顺序写 redo + 后台异步刷盘」。</b> 这是 InnoDB 能扛高并发读写的根本原因，后面 s6/s7 会展开。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--green)">3</div>
+    <div class="sec-title">Buffer Pool 里到底装了什么</div>
+  </div>
+  <p class="sec-sub">它不是「缓存整张表」，而是缓存一个个 16KB 的「页」；里面也不止数据，还有索引、锁、字典等。</p>
+
+  <p class="lead">InnoDB 中磁盘、内存的最小管理单位都是 <strong>页（Page）</strong>，默认 <code class="inline">innodb_page_size = 16KB</code>。Buffer Pool 就是由成千上万个「页帧（buffer frame）」组成的池子，每个帧能装一页。它装的东西：</p>
+
+  <div class="diagram">
+    <div class="cap">图 2 · Buffer Pool 的内容构成：数据页 + 索引页占主体，其余是辅助结构</div>
+    <svg viewBox="0 0 820 250" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <rect x="30" y="40" width="760" height="170" rx="14" fill="rgba(57,197,207,.08)" stroke="#39c5cf" stroke-width="1.5"/>
+      <text x="50" y="64" font-size="13" font-weight="800" fill="#39c5cf">Buffer Pool</text>
+      <!-- 数据页 -->
+      <rect x="55" y="80" width="200" height="110" rx="9" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+      <text x="155" y="108" font-size="12.5" font-weight="800" fill="#fff" text-anchor="middle">数据页 Data Pages</text>
+      <text x="155" y="130" font-size="11" fill="#c9d1d9" text-anchor="middle">表的实际行记录</text>
+      <text x="155" y="150" font-size="11" fill="#c9d1d9" text-anchor="middle">占池子最大比例</text>
+      <!-- 索引页 -->
+      <rect x="270" y="80" width="200" height="110" rx="9" fill="rgba(88,166,255,.16)" stroke="#58a6ff"/>
+      <text x="370" y="108" font-size="12.5" font-weight="800" fill="#fff" text-anchor="middle">索引页 Index Pages</text>
+      <text x="370" y="130" font-size="11" fill="#c9d1d9" text-anchor="middle">B+ 树的非叶/叶子节点</text>
+      <text x="370" y="150" font-size="11" fill="#c9d1d9" text-anchor="middle">查询定位全靠它</text>
+      <!-- 其它 -->
+      <rect x="485" y="80" width="290" height="110" rx="9" fill="rgba(188,140,255,.10)" stroke="#bc8cff"/>
+      <text x="630" y="104" font-size="12" font-weight="800" fill="#fff" text-anchor="middle">其余（约占小头）</text>
+      <text x="630" y="126" font-size="11" fill="#c9d1d9" text-anchor="middle">Change Buffer（非唯一二级索引变更缓存）</text>
+      <text x="630" y="146" font-size="11" fill="#c9d1d9" text-anchor="middle">AHI 自适应哈希索引 / 行锁信息 / 数据字典</text>
+      <text x="630" y="166" font-size="11" fill="#c9d1d9" text-anchor="middle">Undo 页（部分会被缓存）</text>
+    </svg>
+  </div>
+
+  <div class="callout warn">
+    <b>两个容易踩的坑：</b>
+    <ul>
+      <li><b>redo log 不在 Buffer Pool 里</b>——它在单独的 Log Buffer（s1 图里已区分）。Buffer Pool 只管「数据 / 索引页」，redo 是「修改日志」，归属不同。</li>
+      <li><b>Buffer Pool 缓存的是「页」，不是「查询结果」</b>。同一页被查询、被更新都会进池；它不认 SQL 长什么样。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--accent)">4</div>
+    <div class="sec-title">内部结构：实例 → 区块 → 页，以及三条链表</div>
+  </div>
+  <p class="sec-sub">大池子被切成多个实例，每个实例由若干 chunk 组成；实例内部用三条链表管理页的状态。</p>
+
+  <p class="lead"><b>层次（从大到小）：</b></p>
+  <ul>
+    <li><strong>Buffer Pool 总大小</strong>：<code class="inline">innodb_buffer_pool_size</code>（默认 128MB，5.7 起上调）。</li>
+    <li><strong>实例（Instance）</strong>：总大小按 <code class="inline">innodb_buffer_pool_instances</code> 切分（默认 <strong>8</strong>，当总大小 ≥ 1GB 时；≤1GB 时默认 1）。<span class="badge b-ok">作用</span> 减少多个线程抢同一把大锁的竞争，每个实例<strong>独立</strong>管理自己的链表。</li>
+    <li><strong>区块（Chunk）</strong>：每个实例由若干 chunk 组成，<code class="inline">innodb_buffer_pool_chunk_size</code> 默认 <strong>128MB</strong>。在线扩缩容就靠「增减 chunk」实现（5.7+）。</li>
+    <li><strong>页（Page）</strong>：chunk 里是一个个 16KB 的页帧。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="cap">图 3 · 总大小 → 实例 → chunk → 页帧 的层级，以及每个实例自带的三个链表</div>
+    <svg viewBox="0 0 820 280" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs><marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/></marker></defs>
+      <rect x="30" y="20" width="760" height="48" rx="10" fill="rgba(57,197,207,.18)" stroke="#39c5cf" stroke-width="1.5"/>
+      <text x="50" y="49" font-size="12.5" font-weight="800" fill="#fff">Buffer Pool 总大小 = innodb_buffer_pool_size</text>
+
+      <!-- 实例1 -->
+      <rect x="40" y="86" width="360" height="170" rx="10" fill="rgba(88,166,255,.06)" stroke="#58a6ff" stroke-dasharray="5 4"/>
+      <text x="58" y="108" font-size="12" font-weight="800" fill="#58a6ff">实例 #1（instances 之一）</text>
+      <rect x="58" y="118" width="148" height="44" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="132" y="136" font-size="11" fill="#c9d1d9" text-anchor="middle">chunk A</text>
+      <text x="132" y="153" font-size="10" fill="#8b949e" text-anchor="middle">若干 16KB 页帧</text>
+      <rect x="214" y="118" width="148" height="44" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="288" y="136" font-size="11" fill="#c9d1d9" text-anchor="middle">chunk B</text>
+      <text x="288" y="153" font-size="10" fill="#8b949e" text-anchor="middle">若干 16KB 页帧</text>
+      <rect x="58" y="172" width="324" height="22" rx="6" fill="rgba(63,185,80,.14)" stroke="#3fb950"/>
+      <text x="66" y="187" font-size="10.5" fill="#c9d1d9">Free List（空闲页）</text>
+      <rect x="58" y="198" width="324" height="22" rx="6" fill="rgba(210,153,34,.14)" stroke="#d29922"/>
+      <text x="66" y="213" font-size="10.5" fill="#c9d1d9">LRU List（已用页，冷热分区）</text>
+      <rect x="58" y="224" width="324" height="22" rx="6" fill="rgba(248,81,73,.14)" stroke="#f85149"/>
+      <text x="66" y="239" font-size="10.5" fill="#c9d1d9">Flush List（脏页，待刷盘）</text>
+
+      <!-- 实例2 -->
+      <rect x="420" y="86" width="360" height="170" rx="10" fill="rgba(188,140,255,.06)" stroke="#bc8cff" stroke-dasharray="5 4"/>
+      <text x="438" y="108" font-size="12" font-weight="800" fill="#bc8cff">实例 #2 …（共 instances 个）</text>
+      <rect x="438" y="118" width="148" height="44" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="512" y="136" font-size="11" fill="#c9d1d9" text-anchor="middle">chunk C</text>
+      <text x="512" y="153" font-size="10" fill="#8b949e" text-anchor="middle">若干 16KB 页帧</text>
+      <rect x="594" y="118" width="148" height="44" rx="7" fill="#161b22" stroke="#30363d"/>
+      <text x="668" y="136" font-size="11" fill="#c9d1d9" text-anchor="middle">chunk D</text>
+      <text x="668" y="153" font-size="10" fill="#8b949e" text-anchor="middle">若干 16KB 页帧</text>
+      <rect x="438" y="172" width="324" height="22" rx="6" fill="rgba(63,185,80,.14)" stroke="#3fb950"/>
+      <text x="446" y="187" font-size="10.5" fill="#c9d1d9">Free List</text>
+      <rect x="438" y="198" width="324" height="22" rx="6" fill="rgba(210,153,34,.14)" stroke="#d29922"/>
+      <text x="446" y="213" font-size="10.5" fill="#c9d1d9">LRU List</text>
+      <rect x="438" y="224" width="324" height="22" rx="6" fill="rgba(248,81,73,.14)" stroke="#f85149"/>
+      <text x="446" y="239" font-size="10.5" fill="#c9d1d9">Flush List</text>
+
+      <line x1="214" y1="68" x2="214" y2="86" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar2)"/>
+      <line x1="600" y1="68" x2="600" y2="86" stroke="#bc8cff" stroke-width="2" marker-end="url(#ar2)"/>
+    </svg>
+  </div>
+
+  <div class="grid3">
+    <div class="panel">
+      <h3>Free List</h3>
+      <p>空闲页链表。刚启动、或页被淘汰后，帧回到这里等分配。读入新页时从 Free List 取一帧。</p>
+    </div>
+    <div class="panel">
+      <h3>LRU List</h3>
+      <p>正在使用的页（含干净页与脏页）。按「最近最少使用」排序，是淘汰发生的地方——见 s5。</p>
+    </div>
+    <div class="panel">
+      <h3>Flush List</h3>
+      <p>所有<strong>脏页</strong>的链表，按最早被修改的 LSN 排序。后台线程顺着它把脏页刷回磁盘。</p>
+    </div>
+  </div>
+  <p class="lead">注意：一个脏页<strong>同时在 LRU List 和 Flush List 里</strong>（两个链表指向同一帧，只是管理目的不同）。</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--purple)">5</div>
+    <div class="sec-title">LRU 的「冷热分区」——最容易被讲错的核心</div>
+  </div>
+  <p class="sec-sub">普通 LRU 会被一次全表扫描冲垮热点数据；InnoDB 用「midpoint 插入 + 老区域 + 1 秒晋升门槛」解决。</p>
+
+  <p class="lead"><b>普通 LRU 的问题：</b>新页放链表头、命中就提到头、尾部淘汰。听着没问题，但一次<strong>全表扫描</strong>会把整张表读进池，把原本的热点数据全挤到尾部<strong>淘汰掉</strong>——结果热点全失，下次访问又得回磁盘。这叫「<strong>缓冲池污染</strong>」。</p>
+
+  <p class="lead"><b>InnoDB 的改进（三段式）：</b></p>
+  <ul>
+    <li>LRU 被分成 <strong>young 区（新 / 热）</strong> 和 <strong>old 区（老 / 冷）</strong>，old 区默认占 <strong>37%</strong>（<code class="inline">innodb_old_blocks_pct</code>）。</li>
+    <li>新读入的页<strong>不放在链表头</strong>，而是插在<strong>冷热分界点（midpoint）</strong>，即 old 区的头部。</li>
+    <li>只有页在 old 区<strong>停留超过 <code class="inline">innodb_old_blocks_time</code>（默认 1000 ms）</strong>后<strong>再次被访问</strong>，才晋升到 young 区。</li>
+  </ul>
+
+  <div class="diagram">
+    <div class="cap">图 4 · 改进版 LRU：新页插在 midpoint（old 区头）；全表扫描的页在 1 秒内被顺序读完、不满足晋升条件，留在 old 区被淘汰，young 区热点得以保全</div>
+    <svg viewBox="0 0 820 250" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs><marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#d29922"/></marker></defs>
+      <text x="120" y="34" font-size="12" font-weight="800" fill="#3fb950">young 区（热，约 63%）</text>
+      <text x="600" y="34" font-size="12" font-weight="800" fill="#d29922">old 区（冷，约 37%）</text>
+      <!-- young -->
+      <rect x="40" y="50" width="370" height="60" rx="9" fill="rgba(63,185,80,.12)" stroke="#3fb950"/>
+      <circle cx="90" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="90" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">热</text>
+      <circle cx="150" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="150" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">热</text>
+      <circle cx="210" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="210" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">热</text>
+      <circle cx="270" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="270" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">热</text>
+      <circle cx="330" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="330" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">热</text>
+      <circle cx="390" cy="80" r="15" fill="#21262d" stroke="#3fb950"/><text x="390" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">头</text>
+      <!-- old -->
+      <rect x="420" y="50" width="360" height="60" rx="9" fill="rgba(210,153,34,.12)" stroke="#d29922"/>
+      <circle cx="465" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="465" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">新</text>
+      <circle cx="525" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="525" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">冷</text>
+      <circle cx="585" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="585" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">冷</text>
+      <circle cx="645" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="645" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">冷</text>
+      <circle cx="705" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="705" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">尾</text>
+      <circle cx="765" cy="80" r="15" fill="#21262d" stroke="#d29922"/><text x="765" y="84" font-size="10" fill="#e6edf3" text-anchor="middle">淘汰</text>
+      <!-- midpoint -->
+      <line x1="410" y1="50" x2="410" y2="110" stroke="#f85149" stroke-width="2" stroke-dasharray="4 3"/>
+      <text x="410" y="128" font-size="10.5" fill="#f85149" text-anchor="middle">midpoint</text>
+      <!-- 新页从磁盘插入 -->
+      <line x1="465" y1="30" x2="465" y2="50" stroke="#d29922" stroke-width="2" marker-end="url(#ar3)"/>
+      <text x="200" y="22" font-size="10" fill="#8b949e">↑ 新读入的页插在 old 区头部（不是 young 头）</text>
+      <!-- 晋升 -->
+      <path d="M465,108 C465,140 390,140 390,108" fill="none" stroke="#3fb950" stroke-width="2" marker-end="url(#ar3)"/>
+      <text x="510" y="170" font-size="10.5" fill="#3fb950">停留 &gt;1s 且再被访问 → 晋升到 young</text>
+      <!-- 扫描链不晋升 -->
+      <text x="600" y="170" font-size="10.5" fill="#d29922">全表扫描：1s 内顺序读完 → 不晋升 → 很快被淘汰</text>
+    </svg>
+  </div>
+
+  <div class="callout amber">
+    <b>为什么这么设计？</b> 全表扫描的页是「一次性」的：读进来后 1 秒之内就被下一页顶掉了，根本没有「再次访问」的机会，因此<strong>不满足晋升条件</strong>，老老实实待在 old 区被挤出——young 区的真正热点数据<strong>毫发无损</strong>。这正是 Buffer Pool 抗「临时大查询」的关键。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--cyan)">6</div>
+    <div class="sec-title">读流程：命中就爽，未命中才碰盘</div>
+  </div>
+  <p class="sec-sub">一次 SELECT 在 Buffer Pool 里走的路。</p>
+
+  <div class="diagram">
+    <div class="cap">图 5 · 读路径：先哈希查 buffer frame（O(1)）；命中=逻辑读直接返回，未命中=从磁盘读入→占 Free 帧→入 LRU</div>
+    <svg viewBox="0 0 820 230" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs><marker id="ar4" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/></marker></defs>
+      <rect x="40" y="40" width="150" height="46" rx="9" fill="#161b22" stroke="#58a6ff"/>
+      <text x="115" y="68" font-size="12" fill="#fff" text-anchor="middle">① SQL 要读某页</text>
+      <rect x="220" y="40" width="180" height="46" rx="9" fill="rgba(88,166,255,.12)" stroke="#58a6ff"/>
+      <text x="310" y="60" font-size="11.5" fill="#fff" text-anchor="middle">② 哈希查 (space,page)</text>
+      <text x="310" y="76" font-size="10" fill="#8b949e" text-anchor="middle">→ buffer frame 映射表</text>
+      <!-- 命中 -->
+      <line x1="400" y1="63" x2="430" y2="63" stroke="#3fb950" stroke-width="2" marker-end="url(#ar4)"/>
+      <rect x="440" y="20" width="170" height="46" rx="9" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+      <text x="525" y="40" font-size="12" font-weight="800" fill="#3fb950" text-anchor="middle">命中（逻辑读）</text>
+      <text x="525" y="58" font-size="10.5" fill="#c9d1d9" text-anchor="middle">直接返回，不碰盘 ✅</text>
+      <line x1="610" y1="43" x2="700" y2="43" stroke="#3fb950" stroke-width="2" marker-end="url(#ar4)"/>
+      <text x="712" y="48" font-size="11" fill="#3fb950">返回客户端</text>
+      <!-- 未命中 -->
+      <line x1="400" y1="63" x2="430" y2="120" stroke="#f85149" stroke-width="2" marker-end="url(#ar4)"/>
+      <rect x="440" y="100" width="200" height="80" rx="9" fill="rgba(248,81,73,.12)" stroke="#f85149"/>
+      <text x="540" y="122" font-size="12" font-weight="800" fill="#f85149" text-anchor="middle">未命中（物理读）</text>
+      <text x="540" y="142" font-size="10.5" fill="#c9d1d9" text-anchor="middle">③ 从 Free List 取一帧</text>
+      <text x="540" y="160" font-size="10.5" fill="#c9d1d9" text-anchor="middle">④ 磁盘读入该页</text>
+      <text x="540" y="178" font-size="10.5" fill="#c9d1d9" text-anchor="middle">⑤ 入 LRU（old 区头）</text>
+      <line x1="640" y1="140" x2="710" y2="140" stroke="#d29922" stroke-width="2" marker-end="url(#ar4)"/>
+      <text x="712" y="145" font-size="10.5" fill="#d29922">返回数据</text>
+      <text x="115" y="108" font-size="10.5" fill="#8b949e">磁盘 I/O（慢）</text>
+      <line x1="540" y1="180" x2="540" y2="205" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="3 3"/>
+    </svg>
+  </div>
+
+  <div class="callout tip">
+    <b>命中率 = 逻辑读 / (逻辑读 + 物理读)</b>。生产环境应长期 &gt; 99%；一旦掉到 95% 以下，基本意味着 Buffer Pool 装不下工作集，要加内存或调大 <code class="inline">innodb_buffer_pool_size</code>。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--green)">7</div>
+    <div class="sec-title">写流程：为什么 Buffer Pool 让写也变快</div>
+  </div>
+  <p class="sec-sub">写不立刻落盘，而是「改内存 + 记 redo + 后台异步刷」——把随机写变成顺序写。</p>
+
+  <p class="lead">一次 <code class="inline">UPDATE</code> 的真实路径：</p>
+  <ol>
+    <li>在 Buffer Pool 里找到目标页（若不在，先按 s6 读入）。</li>
+    <li><strong>直接改内存里的页</strong>，并把它标记为<strong>脏页（dirty）</strong>。</li>
+    <li>把这次修改<strong>顺序写入 redo log（经 Log Buffer）</strong>——这是顺序 I/O，极快。</li>
+    <li>事务提交时按 <code class="inline">innodb_flush_log_at_trx_commit</code> 把 redo 刷盘（保证持久性）。</li>
+    <li><span class="badge b-ok">异步</span> 脏页由后台 page cleaner 线程<strong>稍后</strong>刷回数据文件（见 s8）。</li>
+    <li>对客户端返回「成功」——<strong>此时数据文件里的旧值还在</strong>。</li>
+  </ol>
+
+  <div class="diagram">
+    <div class="cap">图 6 · 写路径：改内存（快）+ 写 redo（顺序，快）→ 立即返回；数据文件落盘是后台异步的（慢，但不阻塞查询）</div>
+    <svg viewBox="0 0 820 210" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs><marker id="ar5" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/></marker></defs>
+      <rect x="30" y="30" width="150" height="44" rx="9" fill="#161b22" stroke="#58a6ff"/>
+      <text x="105" y="57" font-size="12" fill="#fff" text-anchor="middle">UPDATE 语句</text>
+      <rect x="200" y="30" width="170" height="44" rx="9" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+      <text x="285" y="51" font-size="11.5" fill="#fff" text-anchor="middle">① 改 Buffer Pool 页</text>
+      <text x="285" y="68" font-size="10" fill="#8b949e" text-anchor="middle">标记脏页</text>
+      <line x1="370" y1="52" x2="400" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar5)"/>
+      <rect x="410" y="30" width="170" height="44" rx="9" fill="rgba(57,197,207,.16)" stroke="#39c5cf"/>
+      <text x="495" y="51" font-size="11.5" fill="#fff" text-anchor="middle">② 写 redo（顺序）</text>
+      <text x="495" y="68" font-size="10" fill="#8b949e" text-anchor="middle">经 Log Buffer</text>
+      <line x1="580" y1="52" x2="610" y2="52" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar5)"/>
+      <rect x="620" y="30" width="160" height="44" rx="9" fill="rgba(63,185,80,.18)" stroke="#3fb950"/>
+      <text x="700" y="51" font-size="12" font-weight="800" fill="#3fb950" text-anchor="middle">③ 返回客户端</text>
+      <text x="700" y="68" font-size="10" fill="#c9d1d9" text-anchor="middle">✅ 已提交</text>
+      <!-- 异步落盘 -->
+      <line x1="495" y1="74" x2="495" y2="120" stroke="#d29922" stroke-width="2" marker-end="url(#ar5)"/>
+      <rect x="410" y="122" width="360" height="56" rx="9" fill="rgba(210,153,34,.10)" stroke="#d29922"/>
+      <text x="590" y="144" font-size="11.5" fill="#fff" text-anchor="middle">④ 后台 page cleaner 异步刷脏页</text>
+      <text x="590" y="162" font-size="10.5" fill="#c9d1d9" text-anchor="middle">按 Flush List 顺序刷回磁盘数据文件</text>
+      <text x="590" y="178" font-size="10" fill="#8b949e" text-anchor="middle">不阻塞查询；崩了靠 redo 重放恢复</text>
+    </svg>
+  </div>
+
+  <div class="callout key">
+    <b>关键洞察：</b> 直接往磁盘写是<strong>随机写</strong>（慢）；但 InnoDB 把「随机写」拆成了「<strong>内存改（快）+ 顺序写 redo（快）+ 异步随机刷脏（慢但不阻塞）</strong>」。崩溃时用 redo 重放即可恢复未刷盘的修改——这叫 <strong>WAL（Write-Ahead Logging，预写日志）</strong>。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--amber)">8</div>
+    <div class="sec-title">脏页什么时候刷回磁盘</div>
+  </div>
+  <p class="sec-sub">「脏」不可怕，关键是控制刷盘时机与节奏，别让脏页堆积或集中爆发。</p>
+
+  <p class="lead"><strong>谁在刷：</strong>InnoDB 的后台 <strong>page cleaner 线程</strong>，按 <code class="inline">innodb_io_capacity</code>（默认 200，SSD 可上调）控制每秒刷盘量。</p>
+
+  <p class="lead"><strong>触发刷盘的五种情况：</strong></p>
+  <table>
+    <thead><tr><th>触发条件</th><th>说明</th><th>紧急性</th></tr></thead>
+    <tbody>
+      <tr><td>脏页比例超阈值</td><td>超过 <code class="inline">innodb_max_dirty_pages_pct</code>（默认 90%）开始积极刷</td><td><span class="tag t-p">常态</span></td></tr>
+      <tr><td>Free List 不够</td><td>没空闲帧了，被迫先刷脏页腾位（读请求会卡一下）</td><td><span class="tag t-n">紧急</span></td></tr>
+      <tr><td>redo 快写满</td><td>checkpoint 推进，必须把对应脏页刷掉才能覆盖旧 redo</td><td><span class="tag t-n">最紧急</span></td></tr>
+      <tr><td>后台定时</td><td>master 线程约每 1 秒唤醒一次，刷一点</td><td><span class="tag t-y">常态</span></td></tr>
+      <tr><td>正常关闭 / FLUSH</td><td>shutdown 或 <code class="inline">FLUSH TABLES</code> 把所有脏页落盘</td><td><span class="tag t-p">可控</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip">
+    <b>Checkpoint（检查点）是「redo 能覆盖旧日志」的前提：</b>脏页刷盘后，对应的 redo 段才能被复用。所以「脏页刷得慢」会反压 redo，最终可能拖慢写入——这也是 <code class="inline">innodb_io_capacity</code> 要按磁盘能力配好的原因。InnoDB 用的是 <strong>fuzzy checkpoint</strong>（逐步、分散地推进，而非一次性全刷），避免性能抖动。
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--purple)">9</div>
+    <div class="sec-title">Change Buffer 与 Buffer Pool 的关系</div>
+  </div>
+  <p class="sec-sub">Change Buffer 不是独立内存，而是 Buffer Pool 里划出的一块，专门缓存「非唯一二级索引的写」。</p>
+
+  <p class="lead">如果一条 UPDATE 要改一个<strong>非唯一二级索引</strong>，但<strong>对应的索引页不在 Buffer Pool 里</strong>：直接去磁盘读这个索引页很贵（随机读）。Change Buffer 的做法是——<strong>先把这个改动缓存在 Buffer Pool 里</strong>，等以后该索引页被读进池时再<strong>合并（merge）</strong>进去。</p>
+
+  <div class="diagram">
+    <div class="cap">图 7 · Change Buffer 寄生在 Buffer Pool 中：二级索引页不在内存时，写先入 Change Buffer，待该页被读入后再 merge</div>
+    <svg viewBox="0 0 820 220" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <defs><marker id="ar6" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/></marker></defs>
+      <rect x="30" y="30" width="300" height="160" rx="12" fill="rgba(57,197,207,.08)" stroke="#39c5cf" stroke-width="1.5"/>
+      <text x="50" y="54" font-size="12.5" font-weight="800" fill="#39c5cf">Buffer Pool</text>
+      <rect x="50" y="66" width="260" height="50" rx="8" fill="rgba(188,140,255,.14)" stroke="#bc8cff"/>
+      <text x="180" y="88" font-size="11.5" fill="#fff" text-anchor="middle">Change Buffer（其中一块）</text>
+      <text x="180" y="106" font-size="10" fill="#c9d1d9" text-anchor="middle">缓存二级索引的写操作</text>
+      <rect x="50" y="126" width="260" height="50" rx="8" fill="rgba(63,185,80,.12)" stroke="#3fb950"/>
+      <text x="180" y="148" font-size="11" fill="#c9d1d9" text-anchor="middle">其它数据页 / 索引页</text>
+      <text x="180" y="166" font-size="10" fill="#8b949e" text-anchor="middle">（含该二级索引页被读入后 merge）</text>
+
+      <rect x="370" y="80" width="180" height="60" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="460" y="102" font-size="11.5" fill="#fff" text-anchor="middle">二级索引页</text>
+      <text x="460" y="120" font-size="10" fill="#8b949e" text-anchor="middle">此刻在磁盘，不在池</text>
+
+      <line x1="330" y1="92" x2="370" y2="100" stroke="#bc8cff" stroke-width="2" marker-end="url(#ar6)"/>
+      <text x="350" y="80" font-size="10" fill="#bc8cff">① 写先入 Change Buffer</text>
+      <line x1="460" y1="140" x2="330" y2="160" stroke="#3fb950" stroke-width="2" marker-end="url(#ar6)"/>
+      <text x="380" y="175" font-size="10" fill="#3fb950">② 该页被读入时 merge 回索引</text>
+    </svg>
+  </div>
+
+  <div class="callout warn">
+    <b>两个要点：</b>
+    <ul>
+      <li><strong>只对「非唯一」二级索引生效</strong>——唯一索引每次写都要判重，必须立刻读到页，没法缓。</li>
+      <li>它<strong>位于 Buffer Pool 内部</strong>，所以调大 Buffer Pool 也等于给了 Change Buffer 更多空间；<code class="inline">innodb_change_buffer_max_size</code> 还能限制它最多占池子的百分比（默认 25%）。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--accent)">10</div>
+    <div class="sec-title">生产怎么配、怎么看</div>
+  </div>
+  <p class="sec-sub">给多大、几个实例、怎么看命中率——都是运维高频问题。</p>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>配置建议</h3>
+      <ul style="margin-left:18px">
+        <li><code class="inline">innodb_buffer_pool_size</code>：专用库设为<strong>物理内存 60%~80%</strong>；混布库留足给 OS 与其它进程。</li>
+        <li><code class="inline">innodb_buffer_pool_instances</code>：池 ≥ 1GB 时默认 8 即可，缓解并发争用。</li>
+        <li><strong>5.7+ 支持在线扩缩容</strong>（靠 chunk 增减），无需重启。</li>
+        <li><code class="inline">innodb_io_capacity</code>：SSD 调到 2000~4000，让刷脏跟上。</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>怎么看命中率</h3>
+      <pre><span class="c"># 看 Buffer pool hit rate（末尾）</span>
+SHOW ENGINE INNODB STATUS\G
+
+<span class="c"># 关键变量</span>
+<span class="g">Innodb_buffer_pool_read_requests</span>  <span class="c"># 逻辑读次数</span>
+<span class="g">Innodb_buffer_pool_reads</span>          <span class="c"># 物理读（从磁盘）</span>
+
+<span class="c"># 命中率 = 1 - reads / read_requests</span>
+<span class="c"># 长期 &gt; 99% 健康；&lt; 95% 多半是内存不够</span></pre>
+    </div>
+  </div>
+
+  <div class="callout key">
+    <b>调参三句话：</b> ① 命中率掉先看内存够不够；② 实例数跟并发走、一般 8 足够；③ 刷脏速度跟磁盘走、SSD 大胆调高 <code class="inline">innodb_io_capacity</code>。别一上来就猛加 Buffer Pool，先确认是不是 SQL / 索引问题导致工作集异常大。
+  </div>
+</section>
+
+<section id="s11">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--red)">11</div>
+    <div class="sec-title">五个常见误区</div>
+  </div>
+  <p class="sec-sub">把最容易讲错的点一次性讲清。</p>
+
+  <div class="grid2">
+    <div class="callout warn"><b>误区 1：Buffer Pool 是「查询缓存」</b><br>错。它缓存<strong>页（数据 + 索引）</strong>，不认 SQL；8.0 的 Query Cache 已删除，两者完全不同维度。</div>
+    <div class="callout warn"><b>误区 2：redo log 也在 Buffer Pool 里</b><br>错。redo 在独立 Log Buffer（默认 16MB），Buffer Pool 只管数据/索引页。</div>
+    <div class="callout warn"><b>误区 3：设越大越好，越大越快</b><br>错。超过物理内存会触发 OS swap，反而更慢；要给 OS 留内存（page cache、连接等）。</div>
+    <div class="callout warn"><b>误区 4：调大必须重启</b><br>错。5.7+ 支持在线 RESIZE（chunk 机制），但大变更会触发一轮页重分布，瞬时略有抖动。</div>
+    <div class="callout warn"><b>误区 5：脏页 = 危险</b><br>错。脏页是正常运行态；怕的是<strong>脏页堆积 + 集中刷盘</strong>导致抖动，靠 checkpoint 与 io_capacity 平滑即可。</div>
+    <div class="callout warn"><b>误区 6：全表扫描一定污染池</b><br>基本不会。靠 s5 的 old 区 + 1s 晋升门槛，一次性扫描的页进不了 young 区。</div>
+  </div>
+</section>
+
+<section id="s12">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--cyan)">12</div>
+    <div class="sec-title">命中率计算器（自己算一把）</div>
+  </div>
+  <p class="sec-sub">填两组监控值，看 Buffer Pool 是否健康。</p>
+
+  <div class="sim">
+    <div class="row">
+      <span class="lb">逻辑读 read_requests</span>
+      <input id="req" type="number" value="1000000" min="1">
+    </div>
+    <div class="row">
+      <span class="lb">物理读 reads（磁盘）</span>
+      <input id="phys" type="number" value="8000" min="0">
+    </div>
+    <div class="row">
+      <button class="btn" onclick="calc()">计算命中率</button>
+    </div>
+    <div class="verdict" id="vhit">
+      <div class="big">填入数值后点「计算命中率」</div>
+      命中率 = 1 − 物理读 / 逻辑读。
+    </div>
+  </div>
+</section>
+
+<section id="s13">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--purple)">13</div>
+    <div class="sec-title">总结</div>
+  </div>
+
+  <div class="summary-box">
+    <h2>一句话收尾</h2>
+    <ul>
+      <li><strong>它是什么？</strong>Buffer Pool 是 InnoDB 在内存里最大的那块缓存区，按 16KB 页缓存<strong>数据页 + 索引页</strong>（外加锁、字典、AHI、Change Buffer 等）。</li>
+      <li><strong>为什么有它？</strong>磁盘比内存慢约 10 万倍；CPU 只能算内存里的数据，Buffer Pool 是「内存工作台」，把随机磁盘 I/O 转成内存访问 + 顺序写 redo + 异步刷脏。</li>
+      <li><strong>内部长啥样？</strong>总大小 → 多个实例（默认 8）→ 每个实例多个 chunk（128MB）→ 16KB 页帧；每个实例用 <strong>Free / LRU / Flush</strong> 三条链表管理。</li>
+      <li><strong>LRU 怎么不污染？</strong>分 young/old 区，新页插 midpoint；只有 old 区停留 &gt;1s 且再被访问才晋升——全表扫描冲不垮热点。</li>
+      <li><strong>读写怎么走？</strong>读：哈希查帧、命中即返、未命中才读盘；写：改内存 + 记 redo + 异步刷脏，靠 WAL 保证崩溃可恢复。</li>
+      <li><strong>怎么配？</strong>专用库给物理内存 60%~80%；命中率长期 &gt;99% 健康，掉到 95% 以下多半是内存不够。</li>
+    </ul>
+  </div>
+
+  <div class="grid3">
+    <div class="panel">
+      <h3>速记口诀</h3>
+      <ul style="margin-left:18px">
+        <li>Buffer Pool = InnoDB 的内存工作台</li>
+        <li>缓存的是页，不认 SQL</li>
+        <li>redo 在别处，别混进池</li>
+        <li>新页进 old 区，热点留 young 区</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>三个易错点</h3>
+      <ul style="margin-left:18px">
+        <li>不是查询缓存，是页缓存</li>
+        <li>脏页正常，堆积才危险</li>
+        <li>设太大反而 swap，留内存给 OS</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>关联知识</h3>
+      <ul style="margin-left:18px">
+        <li>为什么写要记 redo：事务 / 崩溃恢复专题</li>
+        <li>页从哪来：索引（B+ 树）专题</li>
+        <li>页被加锁：locks 系列三篇</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="links">
+    <a href="../locks/update-no-index-full-table-lock.html">⚠️ <span>UPDATE 没加索引会锁全表吗</span><br>行锁加在索引上——Buffer Pool 缓存的页正是被加锁的对象（本系列姊妹篇）</a>
+    <a href="../locks/mysql-how-locking-works.html">🧭 <span>MySQL 是怎么加锁的</span><br>数据页 / 索引页在 Buffer Pool 里被加锁的完整推演</a>
+    <a href="../transaction/mysql_transaction.html">🔄 <span>MySQL 事务原理</span><br>redo / undo / WAL 与 Buffer Pool 的协作关系</a>
+    <a href="../indexes/mysql-index-explained.html">🌲 <span>MySQL 索引详解</span><br>Buffer Pool 里缓存的索引页从哪来、怎么组织</a>
+  </div>
+
+  <div class="footer" style="margin-top:22px;">
+    本文为 database-system/mysql/memory 系列之一 · <a href="../../index.html">返回数据库系统目录</a>
+  </div>
+</section>
+
+</div>
+
+<script>
+  function calc() {
+    var req = parseFloat(document.getElementById('req').value);
+    var phys = parseFloat(document.getElementById('phys').value);
+    var el = document.getElementById('vhit');
+    if (!(req > 0)) {
+      el.className = 'verdict bad';
+      el.innerHTML = '<div class="big">⛔ 逻辑读必须大于 0</div>请检查输入。';
+      return;
+    }
+    if (phys < 0) phys = 0;
+    var hit = (1 - phys / req) * 100;
+    hit = Math.max(0, Math.min(100, hit));
+    var rate = hit.toFixed(2) + '%';
+    if (hit >= 99) {
+      el.className = 'verdict pass';
+      el.innerHTML = '<div class="big">✅ 命中率 ' + rate + ' · 健康</div>' +
+        'Buffer Pool 基本兜住了工作集，磁盘 I/O 极少。继续监控即可。';
+    } else if (hit >= 95) {
+      el.className = 'verdict warnv';
+      el.innerHTML = '<div class="big">⚠️ 命中率 ' + rate + ' · 需关注</div>' +
+        '已低于理想线，热点数据开始频繁回磁盘。检查 Buffer Pool 是否偏小、或工作集是否异常大（SQL / 索引问题）。';
+    } else {
+      el.className = 'verdict bad';
+      el.innerHTML = '<div class="big">⛔ 命中率 ' + rate + ' · 危险</div>' +
+        '大量请求直接打磁盘，性能会急剧下降。优先调大 <code class="inline">innodb_buffer_pool_size</code>，并排查是否有全表扫描 / 缺少索引的烂 SQL。';
+    }
+  }
+
+  var links = document.querySelectorAll('.nav a');
+  var secs = [].map.call(links, function (a) { return document.querySelector(a.getAttribute('href')); });
+  var obs = new IntersectionObserver(function (es) {
+    es.forEach(function (e) {
+      if (e.isIntersecting) {
+        var id = '#' + e.target.id;
+        links.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === id); });
+      }
+    });
+  }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 });
+  secs.forEach(function (s) { if (s) obs.observe(s); });
+</script>
+</body>
+</html>

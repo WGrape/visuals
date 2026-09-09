@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 是怎么加锁的？—— 五个场景逐步推演加锁过程</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --card2:#1c2128; --border:#30363d;
+    --fg:#e6edf3; --fg2:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --red:#f85149; --amber:#d29922; --purple:#bc8cff; --pink:#f778ba; --cyan:#39c5cf;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--fg);line-height:1.75;overflow-x:hidden}
+  code,pre{font-family:"SF Mono",SFMono-Regular,Consolas,Menlo,monospace}
+  code.inline{background:rgba(88,166,255,.12);color:var(--accent);padding:1px 6px;border-radius:5px;font-size:.87em}
+  pre{background:#0b0e14;border:1px solid var(--border);border-radius:11px;padding:15px 17px;
+    overflow-x:auto;font-size:12.5px;line-height:1.65;margin:12px 0;color:#c9d1d9}
+  pre .c{color:#6e7681} pre .k{color:#ff7b72} pre .s{color:#a5d6ff}
+  pre .h{color:#d29922;font-weight:700} pre .g{color:#7ee787}
+  .nav{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.92);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:5px;padding:9px 14px;justify-content:center}
+  .nav a{color:var(--fg2);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:16px;
+    border:1px solid transparent;transition:.15s}
+  .nav a:hover{color:#fff;background:rgba(255,255,255,.06)}
+  .nav a.active{background:var(--accent);color:#0d1117;font-weight:700}
+  .hero{text-align:center;padding:46px 22px 22px}
+  .hero h1{font-size:2rem;font-weight:800;letter-spacing:-.02em;margin-bottom:10px;
+    background:linear-gradient(135deg,#58a6ff,#3fb950,#d29922);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero p{color:var(--fg2);max-width:920px;margin:0 auto;font-size:15px}
+  .hero .src{margin-top:12px;font-size:12.5px;color:#6e7681}
+  .pill-row{display:flex;flex-wrap:wrap;gap:9px;justify-content:center;margin-top:18px}
+  .pill{font-size:12.5px;font-weight:600;padding:5px 13px;border-radius:18px;
+    border:1px solid var(--border);background:var(--card)}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+  section{margin:52px 0;scroll-margin-top:56px}
+  .sec-head{display:flex;align-items:center;gap:13px;margin-bottom:6px}
+  .sec-badge{width:38px;height:38px;flex-shrink:0;border-radius:10px;display:flex;align-items:center;
+    justify-content:center;font-size:17px;font-weight:800;color:#0d1117}
+  .sec-title{font-size:1.4rem;font-weight:800}
+  .sec-sub{color:var(--fg2);font-size:13.5px;margin:0 0 15px 51px}
+  p.lead{color:#c9d1d9;font-size:14.5px;margin:10px 0}
+  ul,ol{color:#c9d1d9;margin:8px 0 8px 20px;font-size:14.5px}
+  li{margin:6px 0}
+  strong{color:#fff}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:20px;margin:14px 0}
+  .panel h3{font-size:1.02rem;margin-bottom:9px;color:#fff}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+  .callout{border-radius:11px;padding:13px 17px;margin:13px 0;border:1px solid var(--border);
+    background:rgba(255,255,255,.02);font-size:14px;color:#c9d1d9}
+  .callout b{color:#fff}
+  .callout ul{margin-left:17px}
+  .warn{border-left:4px solid var(--red)}
+  .tip{border-left:4px solid var(--green)}
+  .key{border-left:4px solid var(--accent)}
+  .amber{border-left:4px solid var(--amber)}
+  .purple{border-left:4px solid var(--purple)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+  th{background:rgba(0,0,0,.3);color:#fff;font-weight:600}
+  td{color:#c9d1d9}
+  tr:hover td{background:rgba(255,255,255,.025)}
+  svg{display:block;margin:0 auto;max-width:100%}
+  .diagram{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:14px;padding:17px;margin:15px 0;overflow-x:auto}
+  .diagram svg{min-width:520px}
+  .cap{text-align:center;font-size:12px;color:var(--fg2);margin-bottom:9px}
+  .tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:6px}
+  .t-y{background:rgba(63,185,80,.16);color:var(--green)}
+  .t-n{background:rgba(248,81,73,.16);color:var(--red)}
+  .t-p{background:rgba(210,153,34,.16);color:var(--amber)}
+  .badge{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:6px;margin-right:5px}
+  .b-ok{background:rgba(63,185,80,.16);color:var(--green)}
+  .b-no{background:rgba(248,81,73,.16);color:var(--red)}
+  .b-warn{background:rgba(210,153,34,.16);color:var(--amber)}
+  .sql{display:inline-block;background:#0b0e14;border:1px solid var(--border);border-radius:9px;
+    padding:9px 14px;font-size:12.5px;color:#c9d1d9;margin:8px 0;font-family:"SF Mono",Consolas,monospace}
+  .sql b{color:#ff7b72}
+  .summary-box{background:linear-gradient(135deg,#161b22,#0d1117);border:1px solid var(--border);border-radius:17px;padding:24px}
+  .summary-box h2{font-size:1.2rem;margin-bottom:11px}
+  .footer{text-align:center;color:#6e7681;font-size:12px;padding:38px 0}
+  .footer a{color:var(--accent);text-decoration:none}
+  .links{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:13px}
+  @media(max-width:700px){.links{grid-template-columns:1fr}}
+  .links a{display:block;padding:13px 15px;border:1px solid var(--border);border-radius:11px;
+    background:var(--card);color:var(--fg);text-decoration:none;transition:.15s}
+  .links a:hover{border-color:var(--accent);background:rgba(88,166,255,.06)}
+  .links a span{color:var(--accent);font-weight:600}
+
+  /* 步进推演器 */
+  .sim{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:19px;margin:15px 0}
+  .sim .sqlline{background:#0b0e14;border:1px solid var(--border);border-radius:9px;padding:10px 15px;
+    font-size:13px;color:#c9d1d9;margin-bottom:13px;font-family:"SF Mono",Consolas,monospace}
+  .sim-ctrl{display:flex;gap:9px;align-items:center;margin-bottom:13px;flex-wrap:wrap}
+  .sim-ctrl button{font:inherit;font-size:12.5px;cursor:pointer;padding:6px 14px;border-radius:8px;
+    border:1px solid var(--border);background:rgba(255,255,255,.04);color:var(--fg);transition:.15s}
+  .sim-ctrl button:hover{border-color:var(--accent);color:#fff}
+  .sim-ctrl .hint{font-size:12px;color:#6e7681}
+  .steps{display:flex;flex-direction:column;gap:7px}
+  .step{display:flex;gap:11px;align-items:flex-start;padding:9px 13px;border-radius:10px;
+    border:1px solid var(--border);background:rgba(255,255,255,.02);
+    opacity:.25;transition:opacity .25s,border-color .25s,background .25s}
+  .step.on{opacity:1;border-color:var(--accent);background:rgba(88,166,255,.08)}
+  .step .idx{flex-shrink:0;width:21px;height:21px;border-radius:50%;display:flex;align-items:center;
+    justify-content:center;font-size:11px;font-weight:800;color:#0d1117;background:var(--fg2)}
+  .step.on .idx{background:var(--accent)}
+  .step .tx{font-size:13.5px;color:#c9d1d9}
+  .step .tx b{color:#fff}
+  .step .tx em{font-style:normal;color:var(--amber);font-family:"SF Mono",Consolas,monospace;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#s1">① 问题拆解</a>
+  <a href="#s2">② 哪些 SQL 会加锁</a>
+  <a href="#s3">③ 行锁的三种</a>
+  <a href="#s4">④ 推演准备</a>
+  <a href="#s5">⑤ 唯一索引等值</a>
+  <a href="#s6">⑥ 唯一索引范围</a>
+  <a href="#s7">⑦ 非唯一索引等值</a>
+  <a href="#s8">⑧ 非唯一索引范围</a>
+  <a href="#s9">⑨ 无索引查询</a>
+  <a href="#s10">⑩ 加锁规则总结</a>
+  <a href="#s11">⑪ 亲手验证</a>
+</div>
+
+<div class="hero">
+  <h1>MySQL 是怎么加锁的？</h1>
+  <p>不背结论，逐个场景<strong>推演加锁过程</strong>：一条 SQL 进来，InnoDB 先定位到哪、扫到哪、每一步给<strong>哪个区间</strong>加什么锁。看完你会得到一条<strong>万能加锁规则</strong>，任何查询都能自己推出来。</p>
+  <div class="src">与《MySQL 锁全景速查手册》互补：那篇按「维度」分类盘点，本篇按「场景」逐步推演（提纲：哪些 SQL 加锁 → 锁的种类 → 五种索引场景逐一分析）。</div>
+  <div class="pill-row">
+    <span class="pill">加锁基本单位：Next-Key Lock</span>
+    <span class="pill">两种退化优化</span>
+    <span class="pill">五个场景逐一推演</span>
+    <span class="pill">附 data_locks 实测方法</span>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section id="s1">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--accent)">1</div>
+    <div class="sec-title">问题拆解：「怎么加锁」其实是三个问题</div>
+  </div>
+  <div class="sec-sub">就像你给的提纲那样，把大问题拆成三步，就一点都不乱了。</div>
+
+  <div class="grid3">
+    <div class="panel">
+      <h3>问题一：什么 SQL 会加锁？</h3>
+      <p>搞清<strong>「谁有资格加锁」</strong>。核心是区分<strong>快照读</strong>与<strong>当前读</strong>——大部分 SELECT 根本不加锁。</p>
+    </div>
+    <div class="panel">
+      <h3>问题二：锁有哪些种类？</h3>
+      <p>搞清<strong>「锁长什么样」</strong>。InnoDB 行锁就三种：<strong>Record Lock</strong>（锁记录）、<strong>Gap Lock</strong>（锁间隙）、<strong>Next-Key Lock</strong>（前两者合体）。</p>
+    </div>
+    <div class="panel">
+      <h3>问题三：具体怎么加？</h3>
+      <p>搞清<strong>「什么场景加哪些」</strong>。按<strong>索引类型 × 查询方式</strong>分五种场景逐一推演，这是本篇的主体。</p>
+    </div>
+  </div>
+
+  <div class="callout key">
+    <b>先给结论（后面逐一验证）——InnoDB 加锁只有一条万能规则：</b><br>
+    <strong>① 加锁的基本单位是 Next-Key Lock（左开右闭区间）；② 接着按两条规则退化：</strong>唯一索引等值命中 → 退化为 Record Lock；等值未命中 / 扫描到不满足条件的记录 → 退化为 Gap Lock。所有场景都是这条规则的展开。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--green)">2</div>
+    <div class="sec-title">问题一：什么 SQL 语句会加行级锁？</div>
+  </div>
+  <div class="sec-sub">先筛掉 90% 的误会——绝大多数 SELECT 根本不加锁。</div>
+
+  <div class="diagram">
+    <div class="cap">图 1 · 快照读 vs 当前读：只有当前读才加锁</div>
+    <svg viewBox="0 0 780 250" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <text x="390" y="20" font-size="13" fill="#8b949e" text-anchor="middle">同一个表，两种读法，两种命运</text>
+
+      <rect x="25" y="36" width="355" height="196" rx="12" fill="#3fb950" opacity="0.07" stroke="#3fb950" stroke-width="2"/>
+      <text x="202" y="60" font-size="12.5" font-weight="700" fill="#3fb950" text-anchor="middle">快照读（不加锁）</text>
+      <rect x="45" y="74" width="315" height="34" rx="7" fill="#0d1117" stroke="#30363d"/>
+      <text x="202" y="96" font-size="11.5" fill="#c9d1d9" text-anchor="middle">SELECT * FROM t WHERE ...（普通 SELECT）</text>
+      <text x="202" y="130" font-size="11" fill="#8b949e" text-anchor="middle">读的是 MVCC 版本链里的历史快照</text>
+      <text x="202" y="150" font-size="11" fill="#8b949e" text-anchor="middle">不加锁、不被写操作阻塞</text>
+      <text x="202" y="176" font-size="10.5" fill="#3fb950" text-anchor="middle">例外：SERIALIZABLE 隔离级别下会加共享锁</text>
+      <text x="202" y="204" font-size="10.5" fill="#6e7681" text-anchor="middle">这就是「读很并发」的原因</text>
+
+      <rect x="400" y="36" width="355" height="196" rx="12" fill="#f85149" opacity="0.07" stroke="#f85149" stroke-width="2"/>
+      <text x="577" y="60" font-size="12.5" font-weight="700" fill="#f85149" text-anchor="middle">当前读（加锁）</text>
+      <rect x="420" y="74" width="315" height="112" rx="7" fill="#0d1117" stroke="#30363d"/>
+      <text x="577" y="96" font-size="11" fill="#c9d1d9" text-anchor="middle">SELECT ... FOR UPDATE　→ 加 X 锁</text>
+      <text x="577" y="118" font-size="11" fill="#c9d1d9" text-anchor="middle">SELECT ... LOCK IN SHARE MODE　→ 加 S 锁</text>
+      <text x="577" y="140" font-size="11" fill="#c9d1d9" text-anchor="middle">UPDATE / DELETE　→ 自动加 X 锁</text>
+      <text x="577" y="162" font-size="11" fill="#c9d1d9" text-anchor="middle">INSERT　→ 加 X 锁 + 插入意向锁</text>
+      <text x="577" y="206" font-size="10.5" fill="#f85149" text-anchor="middle">读最新已提交版本，必须加锁保证正确性</text>
+    </svg>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:250px">语句</th><th>加锁吗</th><th>加什么</th></tr></thead>
+    <tbody>
+      <tr><td><code class="inline">SELECT * FROM t WHERE ...</code></td><td><span class="badge b-ok">不加锁</span></td><td>快照读，走 MVCC</td></tr>
+      <tr><td><code class="inline">SELECT ... FOR UPDATE</code></td><td><span class="badge b-no">加</span></td><td>排他锁 X（当前读）</td></tr>
+      <tr><td><code class="inline">SELECT ... LOCK IN SHARE MODE</code></td><td><span class="badge b-no">加</span></td><td>共享锁 S（当前读）</td></tr>
+      <tr><td><code class="inline">UPDATE ... / DELETE ...</code></td><td><span class="badge b-no">加</span></td><td>排他锁 X（隐式当前读）</td></tr>
+      <tr><td><code class="inline">INSERT ...</code></td><td><span class="badge b-no">加</span></td><td>新记录 X 锁 + 插入意向锁</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip">
+    <b>记住分水岭：</b>凡是「读最新版本并打算改」的语句（当前读）都要加锁；凡是「读个大概就行」的语句（快照读）都不加锁。后面五个场景的推演，全部基于<strong>当前读 + 默认 RR 隔离级别</strong>。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--amber)">3</div>
+    <div class="sec-title">问题二：行级锁有哪些种类？</div>
+  </div>
+  <div class="sec-sub">只有三种，且后两种只在 RR 隔离级别下出现。</div>
+
+  <div class="diagram">
+    <div class="cap">图 2 · 三种行锁的锁定范围（索引上依次有 10、15 两条记录）</div>
+    <svg viewBox="0 0 780 260" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <text x="390" y="20" font-size="13" fill="#8b949e" text-anchor="middle">左开右闭区间是看懂一切加锁图的钥匙</text>
+
+      <circle cx="230" cy="56" r="17" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="230" y="61" font-size="11.5" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="480" cy="56" r="17" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="480" y="61" font-size="11.5" fill="#e6edf3" text-anchor="middle">15</text>
+      <text x="120" y="61" font-size="11" fill="#6e7681" text-anchor="middle">……</text>
+      <text x="600" y="61" font-size="11" fill="#6e7681" text-anchor="middle">……</text>
+
+      <text x="50" y="106" font-size="12" font-weight="700" fill="#3fb950">① Record Lock 记录锁</text>
+      <rect x="462" y="92" width="36" height="20" rx="5" fill="#3fb950" opacity="0.85"/>
+      <text x="520" y="107" font-size="10.5" fill="#8b949e">只锁 15 这一条记录</text>
+
+      <text x="50" y="156" font-size="12" font-weight="700" fill="#d29922">② Gap Lock 间隙锁</text>
+      <rect x="252" y="142" width="222" height="20" rx="5" fill="#d29922" opacity="0.55"/>
+      <text x="490" y="157" font-size="10.5" fill="#8b949e">锁 (10, 15) 空隙，11~14 插不进来，但 10、15 本身不受限</text>
+
+      <text x="50" y="206" font-size="12" font-weight="700" fill="#f85149">③ Next-Key Lock 临键锁</text>
+      <rect x="252" y="192" width="246" height="20" rx="5" fill="#f85149" opacity="0.55"/>
+      <text x="520" y="207" font-size="10.5" fill="#8b949e">锁 (10, 15]：空隙 + 15 记录一起锁（左开右闭）</text>
+
+      <text x="390" y="246" font-size="10.5" fill="#6e7681" text-anchor="middle">Next-Key Lock = Gap Lock + Record Lock，是 InnoDB 在 RR 下的默认加锁单位</text>
+    </svg>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:180px">锁</th><th>锁什么</th><th>防什么</th><th>何时登场</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Record Lock</strong></td><td>单条索引记录</td><td>这行被改 / 删</td><td>唯一索引等值<strong>命中</strong>；RC 隔离级别几乎全是它</td></tr>
+      <tr><td><strong>Gap Lock</strong></td><td>记录之间的空隙（不含记录）</td><td>空隙里<strong>插入</strong>新记录 → 防幻读</td><td>等值<strong>未命中</strong>；扫描到不满足条件的记录时</td></tr>
+      <tr><td><strong>Next-Key Lock</strong></td><td>间隙 + 记录（左开右闭）</td><td>既防改又防插</td><td><strong>RR 下默认的加锁单位</strong>，之后按规则退化</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout amber">
+    <b>我的理解——为什么需要间隙锁？</b>记录锁只能锁「已经存在的行」，但幻读的本质是「<strong>多出了原本不存在的行</strong>」。要防幻读就必须把「<strong>还不存在、未来可能插入的位置</strong>」也锁住——那就是间隙。所以：<strong>记录锁防修改，间隙锁防插入，合体（Next-Key）才能同时防住两种破坏</strong>。这也是为什么 Gap Lock 只在需要防幻读的 RR 下存在——RC 根本不防幻读，自然不需要它。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--purple)">4</div>
+    <div class="sec-title">推演准备：一张样例表</div>
+  </div>
+  <div class="sec-sub">后面五个场景都用它，先看清索引上有哪些值。</div>
+
+  <pre><span class="k">CREATE TABLE</span> t_user (
+  id   <span class="t">INT</span> <span class="k">PRIMARY KEY</span>,      <span class="c">-- 主键索引（唯一）</span>
+  age  <span class="t">INT</span>,
+  <span class="k">KEY</span> index_age (age)       <span class="c">-- 普通索引（非唯一）</span>
+) <span class="k">ENGINE</span>=<span class="t">InnoDB</span>;
+
+<span class="k">INSERT INTO</span> t_user <span class="k">VALUES</span>
+  (<span class="s">1</span>,<span class="s">1</span>),(<span class="s">5</span>,<span class="s">5</span>),(<span class="s">10</span>,<span class="s">10</span>),(<span class="s">15</span>,<span class="s">15</span>),(<span class="s">20</span>,<span class="s">20</span>),(<span class="s">25</span>,<span class="s">25</span>);</pre>
+
+  <p class="lead">于是 <strong>id 主键索引</strong>和 <strong>age 普通索引</strong>上的值都是：<code class="inline">1, 5, 10, 15, 20, 25</code>，索引记录之间形成这样一条轴：</p>
+
+  <div class="diagram">
+    <div class="cap">图 3 · 索引值轴与 Next-Key 区间：每个 Next-Key 区间 =（前一个值, 本值]</div>
+    <svg viewBox="0 0 780 96" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <line x1="40" y1="52" x2="740" y2="52" stroke="#30363d" stroke-width="2"/>
+      <circle cx="70" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="70" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">1</text>
+      <circle cx="190" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="190" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">5</text>
+      <circle cx="310" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="310" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="430" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="430" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">15</text>
+      <circle cx="550" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="550" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">20</text>
+      <circle cx="670" cy="52" r="14" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+      <text x="670" y="57" font-size="11" fill="#e6edf3" text-anchor="middle">25</text>
+
+      <text x="46" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(-∞,1]</text>
+      <text x="130" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(1,5]</text>
+      <text x="250" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(5,10]</text>
+      <text x="370" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(10,15]</text>
+      <text x="490" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(15,20]</text>
+      <text x="610" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(20,25]</text>
+      <text x="715" y="30" font-size="9.5" fill="#6e7681" text-anchor="middle">(25,+∞]</text>
+
+      <text x="390" y="86" font-size="10.5" fill="#6e7681" text-anchor="middle">InnoDB 会把「最大值之后」虚拟成一条 supremum 记录，所以最后一个区间是 (25, +∞]</text>
+    </svg>
+  </div>
+
+  <div class="callout key">
+    <b>推演前把万能规则再念一遍：</b>① 默认给扫到的记录加 <strong>Next-Key Lock</strong>（即上图的区间）；② <strong>唯一索引等值命中</strong> → 退化 Record Lock；③ <strong>等值未命中</strong> 或 <strong>扫到第一条不满足条件的记录</strong> → 退化 Gap Lock。就这三句。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--green)">5</div>
+    <div class="sec-title">场景一：唯一索引（主键）等值查询</div>
+  </div>
+  <div class="sec-sub">两种结果：命中 → 只锁一行；未命中 → 只锁一个间隙。</div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>命中：锁一条记录 <span class="tag t-y">最理想</span></h3>
+      <div class="sql">select * from t_user <b>where id = 15</b> for update;</div>
+      <p>主键<strong>唯一</strong>，命中 15 后不可能再有第二个 15，<strong>不需要防插入</strong> → Next-Key 退化成 <strong>Record Lock</strong>，只锁 <code class="inline">[15,15]</code> 一行。</p>
+      <p>其它事务：<strong>改 15 不行</strong>；插 14、16 都行。</p>
+    </div>
+    <div class="panel">
+      <h3>未命中：锁一个间隙 <span class="tag t-p">防幻读</span></h3>
+      <div class="sql">select * from t_user <b>where id = 13</b> for update;</div>
+      <p>13 不存在。若不锁，别的会话此刻插入 id=13，<strong>下次再查 13 就查到了 → 幻读</strong>。所以退化成 <strong>Gap Lock</strong>，锁住 <code class="inline">(10, 15)</code>。</p>
+      <p>其它事务：<strong>插 11~14 不行</strong>；改 10、15 都行。</p>
+    </div>
+  </div>
+
+  <div class="diagram">
+    <div class="cap">图 4 · 场景一对比：命中锁「点」，未命中锁「隙」</div>
+    <svg viewBox="0 0 780 150" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <line x1="40" y1="60" x2="740" y2="60" stroke="#30363d" stroke-width="2"/>
+      <circle cx="70" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="70" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">1</text>
+      <circle cx="180" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="180" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">5</text>
+      <circle cx="290" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="290" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="400" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="400" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">15</text>
+      <circle cx="510" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="510" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">20</text>
+      <circle cx="620" cy="60" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="620" y="65" font-size="10.5" fill="#e6edf3" text-anchor="middle">25</text>
+
+      <text x="40" y="20" font-size="11.5" font-weight="700" fill="#3fb950">id=15 命中 → Record Lock</text>
+      <rect x="386" y="46" width="28" height="28" rx="6" fill="#3fb950" opacity="0.85"/>
+      <text x="440" y="26" font-size="10" fill="#8b949e">只锁 15 本身</text>
+
+      <text x="40" y="120" font-size="11.5" font-weight="700" fill="#d29922">id=13 未命中 → Gap Lock (10,15)</text>
+      <rect x="298" y="106" width="96" height="20" rx="5" fill="#d29922" opacity="0.55"/>
+      <text x="410" y="121" font-size="10" fill="#8b949e">11~14 插不进来，10 与 15 可改</text>
+    </svg>
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--cyan)">6</div>
+    <div class="sec-title">场景二：唯一索引（主键）范围查询</div>
+  </div>
+  <div class="sec-sub">逐步推演：定位 → 扫描 → 边界退化。</div>
+
+  <div class="sql">select * from t_user <b>where id &gt;= 15 and id &lt; 20</b> for update;</div>
+
+  <p class="lead"><strong>推演过程（按扫描顺序一步步来）：</strong></p>
+  <ol>
+    <li><strong>定位起点</strong>：找到 id=15。条件是 <code class="inline">&gt;= 15</code>，15 <strong>满足</strong>。它是范围起点（不是等值查询），所以<strong>不退化</strong>，加 <strong>Next-Key Lock (10, 15]</strong>。</li>
+    <li><strong>继续右扫</strong>：扫到 id=20。条件 <code class="inline">&lt; 20</code>，20 <strong>不满足</strong>。这是「第一条不满足条件的记录」→ 退化为 <strong>Gap Lock (15, 20)</strong>。</li>
+    <li><strong>停止扫描</strong>。最终锁 = <strong>(10,15] + (15,20)</strong>。</li>
+  </ol>
+
+  <div class="diagram">
+    <div class="cap">图 5 · 场景二加锁结果：一个 Next-Key + 一个 Gap</div>
+    <svg viewBox="0 0 780 130" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <line x1="40" y1="66" x2="740" y2="66" stroke="#30363d" stroke-width="2"/>
+      <circle cx="100" cy="66" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="100" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">5</text>
+      <circle cx="220" cy="66" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="220" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="340" cy="66" r="14" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="340" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">15</text>
+      <circle cx="460" cy="66" r="13" fill="rgba(210,153,34,.2)" stroke="#d29922" stroke-width="2"/>
+      <text x="460" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">20</text>
+      <circle cx="580" cy="66" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="580" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">25</text>
+
+      <rect x="234" y="52" width="106" height="28" rx="6" fill="#f85149" opacity="0.5"/>
+      <text x="287" y="98" font-size="10.5" fill="#f85149" text-anchor="middle">Next-Key Lock (10,15]：改 15 不行，插 11~14 不行</text>
+      <rect x="354" y="52" width="92" height="28" rx="6" fill="#d29922" opacity="0.45"/>
+      <text x="470" y="120" font-size="10.5" fill="#d29922" text-anchor="middle">Gap Lock (15,20)：插 16~19 不行，改 20 可以</text>
+    </svg>
+  </div>
+
+  <div class="callout warn">
+    <b>边界方向决定了锁的形状：</b>
+    <ul>
+      <li>条件是 <code class="inline">&gt;= 15</code>（<strong>含</strong>起点）→ 起点 15 满足 → 加 Next-Key (10,15]，<strong>连同记录一起锁</strong>；</li>
+      <li>条件若是 <code class="inline">&gt; 15</code>（<strong>不含</strong>）→ 15 不满足 → 对 15 退化为 Gap，锁的是 <code class="inline">(10,15)</code>；</li>
+      <li>终点方向的记录（如 <code class="inline">&lt; 20</code> 里的 20）<strong>永远退化为 Gap</strong>，因为它本身不满足条件、不该被锁记录，但要把「能插进 16~19 的空隙」封死。</li>
+    </ul>
+    具体版本行为可能有细微差异——<strong>别背结论，用第 ⑪ 节的 SQL 实测</strong>。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--pink)">7</div>
+    <div class="sec-title">场景三：非唯一索引等值查询</div>
+  </div>
+  <div class="sec-sub">最复杂也最经典的场景——三把锁，缺一不可。</div>
+
+  <div class="sql">select * from t_user <b>where age = 15</b> for update;   <span style="color:#6e7681">-- age 是普通索引</span></div>
+
+  <p class="lead">关键区别：<strong>age 是普通索引，可能有多个 age=15 的行</strong>。所以命中的 15 <strong>不能退化</strong>，还必须<strong>继续向右扫</strong>，确认后面没有别的 15 才罢休。</p>
+
+  <div class="sim">
+    <div class="sqlline">select * from t_user where <b style="color:#ff7b72">age = 15</b> for update;</div>
+    <div class="sim-ctrl">
+      <button id="btnNext">下一步 ▶</button>
+      <button id="btnAuto">自动播放</button>
+      <button id="btnReset">重置</button>
+      <span class="hint" id="simHint">共 5 步 · 点击「下一步」看加锁全过程</span>
+    </div>
+    <div class="steps" id="steps"></div>
+  </div>
+
+  <div class="callout key">
+    <b>我的理解——为什么非唯一索引要「多锁一个右间隙」？</b>因为<strong>存在第二个 age=15 的可能性</strong>。如果只锁 (10,15]，另一个事务此刻插入一条 age=15 的新行——虽然落在 (15,20) 区间里——你下次等值查询 age=15 就会多出一行，<strong>幻读照样发生</strong>。所以必须把右侧间隙 (15,20) 也封死，直到扫到第一个不相等的值（20）才能确认「15 的都找完了」。<br><br>
+    <b>这也解释了主键为什么要一起锁：</b>普通索引的记录锁只锁了 age 索引条目，但 UPDATE 要改的是<strong>行数据</strong>（在主键上），所以回表后还得给对应的主键记录加 Record Lock，否则别人可以直接改主键行绕过限制。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--purple)">8</div>
+    <div class="sec-title">场景四：非唯一索引范围查询</div>
+  </div>
+  <div class="sec-sub">把「右扫多一格」体现得最明显的场景。</div>
+
+  <div class="sql">select * from t_user <b>where age &gt;= 15 and age &lt;= 20</b> for update;</div>
+
+  <p class="lead"><strong>推演过程：</strong></p>
+  <ol>
+    <li><strong>定位 15</strong>，满足（&gt;=）→ 加 <strong>Next-Key (10,15]</strong>。</li>
+    <li><strong>扫到 20</strong>，满足（&lt;=20）→ 它是普通索引<strong>不退化</strong>，加 <strong>Next-Key (15,20]</strong>。</li>
+    <li><strong>继续右扫到 25</strong>，不满足（&gt;20）→ 退化为 <strong>Gap Lock (20,25)</strong>，防止插入 age=21 之类的新行造成幻读。</li>
+    <li>同时对命中的主键记录加 Record Lock。</li>
+  </ol>
+
+  <div class="diagram">
+    <div class="cap">图 6 · 场景四加锁结果：两个 Next-Key + 一个 Gap</div>
+    <svg viewBox="0 0 780 130" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <line x1="40" y1="66" x2="740" y2="66" stroke="#30363d" stroke-width="2"/>
+      <circle cx="100" cy="66" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="100" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">5</text>
+      <circle cx="220" cy="66" r="13" fill="#21262d" stroke="#8b949e"/>
+      <text x="220" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="340" cy="66" r="14" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="340" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">15</text>
+      <circle cx="460" cy="66" r="14" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="460" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">20</text>
+      <circle cx="580" cy="66" r="13" fill="rgba(210,153,34,.2)" stroke="#d29922" stroke-width="2"/>
+      <text x="580" y="71" font-size="10.5" fill="#e6edf3" text-anchor="middle">25</text>
+
+      <rect x="234" y="52" width="106" height="28" rx="6" fill="#f85149" opacity="0.5"/>
+      <text x="287" y="98" font-size="10.5" fill="#f85149" text-anchor="middle">Next-Key (10,15]</text>
+      <rect x="354" y="52" width="106" height="28" rx="6" fill="#f85149" opacity="0.5"/>
+      <text x="407" y="120" font-size="10.5" fill="#f85149" text-anchor="middle">Next-Key (15,20]</text>
+      <rect x="474" y="52" width="92" height="28" rx="6" fill="#d29922" opacity="0.45"/>
+      <text x="600" y="98" font-size="10.5" fill="#d29922" text-anchor="middle">Gap (20,25)：防插入 21~24</text>
+    </svg>
+  </div>
+
+  <div class="callout amber">
+    <b>对比场景二，看出规律了吗？</b>同样是「15 到 20 的范围」，唯一索引只锁了<strong>一个 Next-Key + 一个 Gap</strong>；非唯一索引锁了<strong>两个 Next-Key + 一个 Gap</strong>。差异的根源只有一句话：<strong>唯一性让「不可能再出现相同值」，于是少了一把防插入的锁</strong>。锁开销：唯一索引 &lt; 普通索引 &lt; 无索引——<strong>给 WHERE 字段建合适的索引，本质上是在给锁「减负」</strong>。
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--red)">9</div>
+    <div class="sec-title">场景五：没有索引的查询</div>
+  </div>
+  <div class="sec-sub">最危险的一种：行锁「升级」为全表锁。</div>
+
+  <div class="sql">select * from t_user <b>where name = '张三'</b> for update;   <span style="color:#6e7681">-- name 没有任何索引</span></div>
+
+  <p class="lead"><strong>推演过程：</strong>行锁加在<strong>索引记录</strong>上，而 name 没有索引 → InnoDB 只能<strong>全表扫描</strong>（走主键索引逐行扫描）→ 扫描经过的<strong>每一条记录</strong>都会被加锁，且由于不是等值命中，全部以 <strong>Next-Key Lock</strong> 形式锁住——包括 supremum（最大值之后的虚拟记录）。<strong>效果等同锁全表</strong>。</p>
+
+  <div class="diagram">
+    <div class="cap">图 7 · 无索引：整条索引轴全部被 Next-Key 锁住</div>
+    <svg viewBox="0 0 780 120" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif">
+      <line x1="40" y1="58" x2="740" y2="58" stroke="#30363d" stroke-width="2"/>
+      <circle cx="70" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="70" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">1</text>
+      <circle cx="190" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="190" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">5</text>
+      <circle cx="310" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="310" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">10</text>
+      <circle cx="430" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="430" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">15</text>
+      <circle cx="550" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="550" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">20</text>
+      <circle cx="670" cy="58" r="13" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="2"/>
+      <text x="670" y="63" font-size="10.5" fill="#e6edf3" text-anchor="middle">25</text>
+      <rect x="40" y="44" width="700" height="28" rx="6" fill="#f85149" opacity="0.18"/>
+      <text x="390" y="98" font-size="11" fill="#f85149" text-anchor="middle">(-∞,1] (1,5] (5,10] (10,15] (15,20] (20,25] (25,+∞]　全部 Next-Key Lock → 其它事务任何写都阻塞</text>
+    </svg>
+  </div>
+
+  <div class="callout warn">
+    <b>RC 隔离级别下会好一点：</b>RC <strong>没有间隙锁</strong>，无索引扫描时虽然也会先全表加锁，但<strong>事务对「不满足 WHERE 条件的行」会立即释放锁</strong>（server 层过滤后通知 InnoDB 解锁，即 semi-consistent read 的一种体现），最终只留下满足条件行的锁。这也是 RC 并发更好的又一个原因。但<strong>治本的方法永远只有一个：给 WHERE 字段建索引</strong>。
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--accent)">10</div>
+    <div class="sec-title">总结：一条万能加锁规则 + 速查表</div>
+  </div>
+
+  <div class="summary-box">
+    <h2>万能规则（三句话）</h2>
+    <ul>
+      <li><strong>① 默认形态</strong>：InnoDB 对扫描到的每条记录加 <strong>Next-Key Lock</strong>（记录 + 它前面的间隙，左开右闭）。</li>
+      <li><strong>② 退化一</strong>：索引<strong>等值查询命中</strong>，且索引<strong>唯一</strong> → 退化为 <strong>Record Lock</strong>（唯一性保证不可能再插相同的值，无需防插入）。</li>
+      <li><strong>③ 退化二</strong>：等值查询<strong>未命中</strong>，或范围扫描<strong>遇到第一条不满足条件的记录</strong> → 退化为 <strong>Gap Lock</strong>（记录本身不该锁，但空隙必须封死防插入）。</li>
+    </ul>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:190px">场景</th><th>锁</th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td>唯一索引等值 · 命中</td><td><span class="badge b-ok">Record Lock</span></td><td>只锁一行，最优</td></tr>
+      <tr><td>唯一索引等值 · 未命中</td><td><span class="badge b-warn">Gap Lock</span></td><td>锁本该落入的间隙</td></tr>
+      <tr><td>唯一索引范围（含起点）</td><td><span class="badge b-no">Next-Key</span> + <span class="badge b-warn">Gap</span></td><td>起点满足不退化；终点不满足退化</td></tr>
+      <tr><td>非唯一索引等值 · 命中</td><td><span class="badge b-no">Next-Key</span> + <span class="badge b-warn">Gap</span> + <span class="badge b-ok">主键 Record</span></td><td>右侧多锁一个间隙防重复值；回表锁主键</td></tr>
+      <tr><td>非唯一索引范围</td><td><span class="badge b-no">多个 Next-Key</span> + <span class="badge b-warn">Gap</span></td><td>多扫到第一个不满足的记录</td></tr>
+      <tr><td>无索引（任意）</td><td><span class="badge b-no">全表 Next-Key</span></td><td>RC 下会释放不满足行的锁；治本靠建索引</td></tr>
+      <tr><td>普通 SELECT（RC/RR）</td><td><span class="badge b-ok">不加锁</span></td><td>快照读走 MVCC</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid3">
+    <div class="panel">
+      <h3>理解一：锁的本质是「防幻读」</h3>
+      <p>记录锁防「改」，间隙锁防「插」。所有加锁范围的扩张，都可以回答一个问题：<strong>不这么锁，会产生什么幻读？</strong>想通这一点，五个场景不用背也能推出来。</p>
+    </div>
+    <div class="panel">
+      <h3>理解二：锁的开销与索引质量成正比</h3>
+      <p>唯一索引 &lt; 普通索引 &lt; 无索引。建索引不只是为了查询快，<strong>更是在缩小加锁范围</strong>——这是「为什么 DBA 强调 WHERE 必须走索引」的锁视角。</p>
+    </div>
+    <div class="panel">
+      <h3>理解三：RR 是锁冲突之源</h3>
+      <p>Gap / Next-Key 只在 RR 存在。高并发写入场景把隔离级别换成 <strong>RC</strong>（接受幻读），锁范围立刻缩小到「只锁命中的行」——这是一致性与并发性的直接交换。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s11">
+  <div class="sec-head">
+    <div class="sec-badge" style="background:var(--cyan)">11</div>
+    <div class="sec-title">亲手验证：别信任何文章，包括这篇</div>
+  </div>
+  <div class="sec-sub">两个会话 + 一张系统表，5 分钟亲眼看到锁。</div>
+
+  <pre><span class="c">-- 会话 A：制造一把锁</span>
+<span class="k">BEGIN</span>;
+<span class="k">SELECT</span> * <span class="k">FROM</span> t_user <span class="k">WHERE</span> age = <span class="s">15</span> <span class="k">FOR UPDATE</span>;
+
+<span class="c">-- 会话 A：看自己拿了哪些锁（MySQL 8.0）</span>
+<span class="k">SELECT</span> index_name, lock_type, lock_mode, lock_data
+<span class="k">FROM</span> performance_schema.data_locks
+<span class="k">WHERE</span> object_name = <span class="s">'t_user'</span>;
+
+<span class="c">-- 预期看到（-age 普通索引等值命中）：</span>
+<span class="c">--   index_age   RECORD  X   supremum pseudo-record / 各区间</span>
+<span class="c">--   index_age   RECORD  X   10, 15     ← next-key (10,15]</span>
+<span class="c">--   index_age   RECORD  X   15, 20     ← gap (15,20)</span>
+<span class="c">--   PRIMARY     RECORD  X   15         ← 主键记录锁</span>
+
+<span class="c">-- 会话 B：试试插入，会被阻塞</span>
+<span class="k">INSERT INTO</span> t_user <span class="k">VALUES</span>(<span class="s">16</span>, <span class="s">16</span>);   <span class="c">-- age=16 落在 (15,20) 间隙 → 等待</span>
+
+<span class="c">-- 会话 A：回滚收尾</span>
+<span class="k">ROLLBACK</span>;</pre>
+
+  <div class="callout tip">
+    <b>为什么建议实测？</b>不同 MySQL 版本对<strong>边界场景</strong>（如 <code class="inline">&gt;</code> 起点、<code class="inline">IN</code> 多值、覆盖索引下不加主键锁等）的实现有细微差异，网上文章（包括本文）都可能过时。<code class="inline">performance_schema.data_locks</code> 是<strong>唯一不会骗人的答案</strong>。把本文五个场景各跑一遍，加锁逻辑就彻底内化了。
+  </div>
+
+  <div class="links">
+    <a href="./mysql-locks-cheatsheet.html">🗂️ <span>MySQL 锁全景速查手册</span><br>按维度盘全部锁 + 按 SQL/隔离级别/索引反查 + 查锁判定器</a>
+    <a href="../transaction/mysql-locks.html">🔐 <span>MySQL 锁机制完全解析</span><br>分类详解 + 兼容矩阵 / 间隙锁 / 死锁可视化</a>
+    <a href="../transaction/mvcc-visualization.html">🔀 <span>MVCC 可视化</span><br>理解快照读为什么不加锁</a>
+    <a href="../indexes/mysql-index-explained.html">🌲 <span>MySQL 索引详解</span><br>索引结构决定加锁范围</a>
+  </div>
+
+  <div class="footer" style="margin-top:22px;">
+    本文为 database-system/mysql/locks 系列之一 · <a href="../../index.html">返回数据库系统目录</a>
+  </div>
+</section>
+
+</div>
+
+<script>
+  var STEPS = [
+    ['定位到 age=15', '通过 index_age 索引树定位到第一条 age=15 的记录。注意 age 是<b>普通索引</b>——可能还有第二个 15，所以<b>不能像唯一索引那样退化</b>。'],
+    ['加 Next-Key Lock (10,15]', '对 age=15 这条记录加默认的 Next-Key Lock：<em>(10, 15]</em>（空隙 + 记录，左开右闭）。别的会话不能改 15，也不能插入 11~14。'],
+    ['继续向右扫描', '因为是普通索引，后面<b>可能还有另一个 age=15</b>。InnoDB 继续向右扫，直到 age=20——第一条不相等的记录。'],
+    ['加 Gap Lock (15,20)', '扫描到 age=20 发现不相等，停止。对 20 退化为 Gap Lock：<em>(15, 20)</em>。这把锁封死了「再插入一个 age=15」的所有可能位置 → 防住幻读。'],
+    ['回表锁主键 id=15', '最后通过 age=15 行的主键回表，对 PRIMARY 索引上的 id=15 加 <em>Record Lock</em>——防止别人直接改主键行绕过限制。共三把锁，缺一不可。']
+  ];
+  var idx = -1, timer = null;
+  var stepsEl = document.getElementById('steps');
+  var hintEl = document.getElementById('simHint');
+
+  function render() {
+    stepsEl.innerHTML = '';
+    STEPS.forEach(function (s, i) {
+      var d = document.createElement('div');
+      d.className = 'step' + (i === idx ? ' on' : '');
+      d.innerHTML = '<div class="idx">' + (i + 1) + '</div><div class="tx"><b>' + s[0] + '</b> — ' + s[1] + '</div>';
+      stepsEl.appendChild(d);
+    });
+    hintEl.textContent = '共 ' + STEPS.length + ' 步 · 第 ' + (idx + 1) + ' 步';
+  }
+  function next() { idx = (idx + 1) % STEPS.length; render(); }
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; document.getElementById('btnAuto').textContent = '自动播放'; }
+  }
+  document.getElementById('btnNext').addEventListener('click', function () { stopAuto(); next(); });
+  document.getElementById('btnReset').addEventListener('click', function () { stopAuto(); idx = -1; render(); });
+  document.getElementById('btnAuto').addEventListener('click', function () {
+    if (timer) { stopAuto(); return; }
+    this.textContent = '暂停';
+    next();
+    timer = setInterval(next, 1600);
+  });
+  render();
+
+  var links = document.querySelectorAll('.nav a');
+  var secs = [].map.call(links, function (a) { return document.querySelector(a.getAttribute('href')); });
+  var obs = new IntersectionObserver(function (es) {
+    es.forEach(function (e) {
+      if (e.isIntersecting) {
+        var id = '#' + e.target.id;
+        links.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === id); });
+      }
+    });
+  }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 });
+  secs.forEach(function (s) { if (s) obs.observe(s); });
+</script>
+</body>
+</html>
