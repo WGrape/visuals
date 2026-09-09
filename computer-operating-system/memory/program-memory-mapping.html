@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>程序内存分布如何映射到操作系统内存 · 图解</title>
+<style>
+:root{
+  --bg:#0b1120; --bg2:#111827; --panel:rgba(255,255,255,.05);
+  --text:#e2e8f0; --muted:#94a3b8; --line:rgba(255,255,255,.1);
+  --code:#fbbf24; --good:#34d399; --bad:#f87171; --info:#38bdf8;
+  --textseg:#60a5fa; --data:#34d399; --bss:#a3e635; --heap:#c084fc;
+  --stack:#f87171; --mmap:#fbbf24; --kern:#64748b; --phys:#fb923c;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:linear-gradient(180deg,var(--bg) 0%,var(--bg2) 100%);color:var(--text);line-height:1.7;min-height:100vh;padding-top:70px}
+a{color:var(--info);text-decoration:none}
+header{position:fixed;top:0;left:0;right:0;z-index:1000;background:rgba(11,17,32,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+nav{max-width:1200px;margin:0 auto;padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{font-weight:800;font-size:1.1rem;background:linear-gradient(90deg,var(--phys),var(--info));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.nav-home{font-size:.85rem;color:var(--muted);border:1px solid var(--line);padding:.35rem .85rem;border-radius:999px;transition:.2s}
+.nav-home:hover{color:#fff;border-color:var(--info)}
+.hero{text-align:center;padding:30px 1rem 10px}
+.hero h1{font-size:2rem;background:linear-gradient(90deg,var(--textseg),var(--heap),var(--phys));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.6rem}
+.hero p{color:var(--muted);max-width:760px;margin:0 auto}
+.wrap{max-width:1100px;margin:0 auto;padding:2rem 1rem 4rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:26px;backdrop-filter:blur(6px)}
+.card h2{font-size:1.25rem;margin-bottom:14px;color:#fff}
+.card h3{font-size:1.05rem;margin:18px 0 8px;color:var(--info)}
+.card p{color:#cbd5e1;margin:10px 0}
+.card ul{margin:10px 0 10px 1.3rem;color:#cbd5e1}
+.card li{margin:6px 0}
+.mono{font-family:'SF Mono',Consolas,Menlo,monospace;background:rgba(0,0,0,.35);padding:2px 7px;border-radius:6px;color:var(--code);font-size:.86em}
+.callout{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.35);border-radius:12px;padding:14px 16px;margin:14px 0;color:#e0f2fe}
+.callout b{color:var(--info)}
+.footnote{font-size:.78rem;color:var(--muted);font-style:italic;margin-top:10px}
+.figure-title{text-align:center;font-size:.9rem;color:var(--muted);margin:8px 0 18px}
+table.cmp{width:100%;border-collapse:collapse;font-size:.86rem;margin-top:10px}
+table.cmp th,table.cmp td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}
+table.cmp th{background:rgba(255,255,255,.05);color:#fff}
+.btn{padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.07);color:#fff;cursor:pointer;font-size:.85rem;transition:.2s;margin:4px}
+.btn:hover{background:rgba(255,255,255,.14)}
+.btn.active{background:linear-gradient(90deg,var(--info),var(--good));color:#0b1120;font-weight:700;border-color:transparent}
+.step{display:flex;gap:14px;align-items:flex-start;margin:12px 0}
+.step-num{flex:0 0 auto;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;background:linear-gradient(135deg,var(--info),var(--good));color:#0b1120;font-size:.8rem}
+.step-body{flex:1;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.footer{text-align:center;color:var(--muted);padding:30px 1rem 50px;font-size:.82rem;border-top:1px solid var(--line);margin-top:10px}
+@media(max-width:720px){.hero h1{font-size:1.5rem}.wrap{padding:1rem}}
+</style>
+</head>
+<body>
+<header>
+  <nav>
+    <div class="logo">程序内存分布 → 操作系统内存映射</div>
+    <a class="nav-home" href="../index.html">← 操作系统</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>程序内存分布是怎么映射到操作系统内存的？</h1>
+  <p>程序看到的 text / data / bss / heap / stack / mmap 只是<b>虚拟地址空间里的标签</b>。真正坐在 DRAM 上的是物理页框。本页用图把“程序内存分布 → 页表 → 物理内存”这条映射链路拆开。</p>
+</div>
+
+<div class="wrap">
+
+  <!-- 1. 程序内存分布（复刻用户截图） -->
+  <div class="card">
+    <h2>① 程序看到的内存分布：一个进程的虚拟地址空间</h2>
+    <p>每个进程都以为自己独占一大片连续内存（实际是 OS 给的 illusion）。从低地址到高地址，编译器 + 运行时 + OS 把这片空间划分成若干功能区：</p>
+    <div style="display:flex;justify-content:center;margin:18px 0">
+      <svg width="360" height="620" viewBox="0 0 360 620" role="img" aria-label="进程虚拟地址空间分布图">
+        <defs>
+          <linearGradient id="gText" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#60a5fa"/></linearGradient>
+          <linearGradient id="gData" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#34d399"/></linearGradient>
+          <linearGradient id="gBss" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ca8a04"/><stop offset="100%" stop-color="#facc15"/></linearGradient>
+          <linearGradient id="gHeap" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#c084fc"/></linearGradient>
+          <linearGradient id="gMmap" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0891b2"/><stop offset="100%" stop-color="#22d3ee"/></linearGradient>
+          <linearGradient id="gStack" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#dc2626"/><stop offset="100%" stop-color="#f87171"/></linearGradient>
+          <linearGradient id="gKern" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#475569"/><stop offset="100%" stop-color="#64748b"/></linearGradient>
+          <marker id="arrowUp" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto"><path d="M2,8 L5,2 L8,8" fill="none" stroke="#c084fc" stroke-width="1.5"/></marker>
+          <marker id="arrowDown" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto"><path d="M2,2 L5,8 L8,2" fill="none" stroke="#f87171" stroke-width="1.5"/></marker>
+        </defs>
+        <!-- 外框 -->
+        <rect x="20" y="20" width="320" height="580" rx="16" fill="none" stroke="#3b82f6" stroke-width="2"/>
+        <text x="180" y="48" text-anchor="middle" font-size="15" font-weight="800" fill="#60a5fa">进程 A 虚拟地址空间</text>
+        <text x="180" y="66" text-anchor="middle" font-size="10" fill="#94a3b8" font-family="monospace">0x0000_0000_0000</text>
+
+        <!-- text -->
+        <rect x="40" y="80" width="280" height="70" rx="10" fill="url(#gText)" fill-opacity="0.18" stroke="#60a5fa" stroke-width="1.5"/>
+        <text x="180" y="112" text-anchor="middle" font-size="13" font-weight="700" fill="#60a5fa">代码段 (Text)</text>
+        <text x="180" y="130" text-anchor="middle" font-size="10" fill="#94a3b8">只读 | 可执行</text>
+        <text x="180" y="144" text-anchor="middle" font-size="9" fill="#64748b" font-family="monospace">0x400000</text>
+
+        <!-- data -->
+        <rect x="40" y="160" width="280" height="70" rx="10" fill="url(#gData)" fill-opacity="0.18" stroke="#34d399" stroke-width="1.5"/>
+        <text x="180" y="192" text-anchor="middle" font-size="13" font-weight="700" fill="#34d399">数据段 (Data)</text>
+        <text x="180" y="210" text-anchor="middle" font-size="10" fill="#94a3b8">已初始化全局变量</text>
+        <text x="180" y="224" text-anchor="middle" font-size="9" fill="#64748b" font-family="monospace">0x600000</text>
+
+        <!-- bss -->
+        <rect x="40" y="240" width="280" height="60" rx="10" fill="url(#gBss)" fill-opacity="0.18" stroke="#facc15" stroke-width="1.5"/>
+        <text x="180" y="267" text-anchor="middle" font-size="13" font-weight="700" fill="#facc15">BSS 段</text>
+        <text x="180" y="285" text-anchor="middle" font-size="10" fill="#94a3b8">未初始化变量 (zero)</text>
+
+        <!-- heap -->
+        <rect x="40" y="310" width="280" height="90" rx="10" fill="url(#gHeap)" fill-opacity="0.18" stroke="#c084fc" stroke-width="1.5"/>
+        <text x="180" y="340" text-anchor="middle" font-size="13" font-weight="700" fill="#c084fc">堆 (Heap) ↑</text>
+        <text x="180" y="360" text-anchor="middle" font-size="10" fill="#94a3b8">动态分配 (malloc/new)</text>
+        <text x="180" y="376" text-anchor="middle" font-size="10" fill="#94a3b8">brk 指针向上增长</text>
+        <text x="180" y="392" text-anchor="middle" font-size="10" fill="#c084fc" font-family="monospace">brk: 0x1000000</text>
+        <line x1="310" y1="330" x2="310" y2="380" stroke="#c084fc" stroke-width="1.5" marker-end="url(#arrowUp)"/>
+
+        <!-- mmap -->
+        <rect x="40" y="410" width="280" height="70" rx="10" fill="url(#gMmap)" fill-opacity="0.18" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="180" y="438" text-anchor="middle" font-size="13" font-weight="700" fill="#22d3ee">内存映射区 (mmap)</text>
+        <text x="180" y="456" text-anchor="middle" font-size="10" fill="#94a3b8">文件映射 / 匿名映射</text>
+        <text x="180" y="472" text-anchor="middle" font-size="9" fill="#64748b" font-family="monospace">0x7f00_0000_0000</text>
+
+        <!-- stack -->
+        <rect x="40" y="490" width="280" height="80" rx="10" fill="url(#gStack)" fill-opacity="0.18" stroke="#f87171" stroke-width="1.5"/>
+        <text x="180" y="520" text-anchor="middle" font-size="13" font-weight="700" fill="#f87171">栈 (Stack) ↓</text>
+        <text x="180" y="540" text-anchor="middle" font-size="10" fill="#94a3b8">局部变量 / 函数调用</text>
+        <text x="180" y="556" text-anchor="middle" font-size="10" fill="#94a3b8">向下增长</text>
+        <text x="180" y="572" text-anchor="middle" font-size="10" fill="#f87171" font-family="monospace">rsp: 0x7fff_ffff_ffff</text>
+        <line x1="50" y1="520" x2="50" y2="560" stroke="#f87171" stroke-width="1.5" marker-end="url(#arrowDown)"/>
+
+        <!-- kernel hint -->
+        <text x="180" y="602" text-anchor="middle" font-size="10" fill="#64748b">内核空间（高地址）</text>
+      </svg>
+    </div>
+    <p class="figure-title">典型 64 位 Linux 进程虚拟地址空间示意（地址与比例仅作参考，ASLR 会打乱具体数值）</p>
+    <ul>
+      <li><b>text</b>：机器指令，来自 ELF 的 <span class="mono">.text</span>，权限 <span class="mono">r-x</span>。</li>
+      <li><b>data</b>：已初始化全局/静态变量，来自 ELF 的 <span class="mono">.data</span>，权限 <span class="mono">rw-</span>。</li>
+      <li><b>bss</b>：未初始化全局/静态变量，ELF 里只记大小不存内容，装载时 OS 清零并映射匿名页，权限 <span class="mono">rw-</span>。</li>
+      <li><b>heap</b>：动态分配区，由 <span class="mono">malloc</span> 管理，不够时通过 <span class="mono">brk()</span> 或 <span class="mono">mmap()</span> 向 OS 申请更多虚拟地址。</li>
+      <li><b>mmap</b>：文件映射、共享库、大内存分配、线程栈等。</li>
+      <li><b>stack</b>：函数调用链、局部变量、返回地址，向下生长，大小受 <span class="mono">rlimit</span> 限制。</li>
+    </ul>
+  </div>
+
+  <!-- 2. 映射全景图 -->
+  <div class="card">
+    <h2>② 从“程序分布”到“物理内存”：核心映射链路</h2>
+    <p>程序里的地址全是<b>虚拟地址</b>。CPU 每次访存都要经过 <b>MMU（内存管理单元）</b> 查页表，把虚拟地址翻译成物理地址，才能访问 DRAM。</p>
+    <div style="display:flex;justify-content:center;margin:18px 0;overflow:auto">
+      <svg width="760" height="420" viewBox="0 0 760 420" role="img" aria-label="虚拟地址到物理内存映射全景">
+        <defs>
+          <linearGradient id="gVirt" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient>
+          <linearGradient id="gPhys" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#fb923c"/></linearGradient>
+          <linearGradient id="gTable" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient>
+          <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#94a3b8"/></marker>
+        </defs>
+
+        <!-- 左侧：进程虚拟地址空间 -->
+        <rect x="30" y="60" width="170" height="320" rx="12" fill="rgba(59,130,246,.08)" stroke="url(#gVirt)" stroke-width="2"/>
+        <text x="115" y="40" text-anchor="middle" font-size="13" font-weight="800" fill="#38bdf8">进程 A 虚拟地址空间</text>
+        <rect x="45" y="70" width="140" height="40" rx="6" fill="rgba(96,165,250,.25)" stroke="#60a5fa"/><text x="115" y="95" text-anchor="middle" font-size="11" fill="#e0f2fe">text / data / bss</text>
+        <rect x="45" y="120" width="140" height="60" rx="6" fill="rgba(192,132,252,.25)" stroke="#c084fc"/><text x="115" y="145" text-anchor="middle" font-size="11" fill="#f3e8ff">heap（向上生长）</text><text x="115" y="162" text-anchor="middle" font-size="9" fill="#c084fc" font-family="monospace">0x1000000</text>
+        <rect x="45" y="250" width="140" height="50" rx="6" fill="rgba(34,211,238,.25)" stroke="#22d3ee"/><text x="115" y="272" text-anchor="middle" font-size="11" fill="#ecfeff">mmap 区</text><text x="115" y="288" text-anchor="middle" font-size="9" fill="#22d3ee" font-family="monospace">0x7f00..</text>
+        <rect x="45" y="310" width="140" height="60" rx="6" fill="rgba(248,113,113,.25)" stroke="#f87171"/><text x="115" y="335" text-anchor="middle" font-size="11" fill="#fef2f2">stack（向下生长）</text><text x="115" y="352" text-anchor="middle" font-size="9" fill="#f87171" font-family="monospace">0x7fff..</text>
+
+        <!-- 中间：页表 -->
+        <rect x="280" y="80" width="170" height="280" rx="12" fill="rgba(139,92,246,.08)" stroke="url(#gTable)" stroke-width="2"/>
+        <text x="365" y="65" text-anchor="middle" font-size="13" font-weight="800" fill="#a78bfa">页表 (Page Table)</text>
+        <text x="365" y="105" text-anchor="middle" font-size="10" fill="#cbd5e1">VPN → PFN</text>
+        <rect x="300" y="120" width="130" height="28" rx="4" fill="rgba(167,139,250,.2)" stroke="#a78bfa"/><text x="365" y="138" text-anchor="middle" font-size="10" fill="#e0e7ff">PTE: 0x00401 → 0x3A</text>
+        <rect x="300" y="155" width="130" height="28" rx="4" fill="rgba(167,139,250,.2)" stroke="#a78bfa"/><text x="365" y="173" text-anchor="middle" font-size="10" fill="#e0e7ff">PTE: 0x01000 → 0x7F</text>
+        <rect x="300" y="190" width="130" height="28" rx="4" fill="rgba(167,139,250,.2)" stroke="#a78bfa"/><text x="365" y="208" text-anchor="middle" font-size="10" fill="#e0e7ff">PTE: 0x7FFFF → 0x12</text>
+        <rect x="300" y="225" width="130" height="28" rx="4" fill="rgba(167,139,250,.2)" stroke="#a78bfa"/><text x="365" y="243" text-anchor="middle" font-size="10" fill="#e0e7ff">PTE: 0x7FFFE → 0x55</text>
+        <rect x="300" y="275" width="130" height="60" rx="6" fill="rgba(0,0,0,.25)" stroke="#64748b" stroke-dasharray="4 2"/><text x="365" y="298" text-anchor="middle" font-size="10" fill="#94a3b8">多级页表 / PTE</text><text x="365" y="316" text-anchor="middle" font-size="9" fill="#64748b">存在位 P | 权限位 R/W/X</text>
+
+        <!-- MMU 框 -->
+        <rect x="500" y="170" width="90" height="80" rx="10" fill="rgba(100,116,139,.25)" stroke="#94a3b8" stroke-width="2"/>
+        <text x="545" y="205" text-anchor="middle" font-size="13" font-weight="800" fill="#cbd5e1">MMU</text>
+        <text x="545" y="225" text-anchor="middle" font-size="9" fill="#94a3b8">TLB 缓存</text>
+
+        <!-- 右侧：物理内存 -->
+        <rect x="640" y="60" width="100" height="320" rx="12" fill="rgba(245,158,11,.08)" stroke="url(#gPhys)" stroke-width="2"/>
+        <text x="690" y="40" text-anchor="middle" font-size="13" font-weight="800" fill="#fb923c">物理内存 (DRAM)</text>
+        <rect x="655" y="70" width="70" height="35" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c"/><text x="690" y="92" text-anchor="middle" font-size="10" fill="#fff">帧 0x3A</text>
+        <rect x="655" y="115" width="70" height="35" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c"/><text x="690" y="137" text-anchor="middle" font-size="10" fill="#fff">帧 0x7F</text>
+        <rect x="655" y="160" width="70" height="35" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c"/><text x="690" y="182" text-anchor="middle" font-size="10" fill="#fff">帧 0x12</text>
+        <rect x="655" y="205" width="70" height="35" rx="4" fill="rgba(251,146,60,.3)" stroke="#fb923c"/><text x="690" y="227" text-anchor="middle" font-size="10" fill="#fff">帧 0x55</text>
+        <rect x="655" y="260" width="70" height="35" rx="4" fill="rgba(255,255,255,.08)" stroke="#64748b" stroke-dasharray="3 2"/><text x="690" y="282" text-anchor="middle" font-size="9" fill="#64748b">空闲帧</text>
+        <rect x="655" y="315" width="70" height="35" rx="4" fill="rgba(255,255,255,.08)" stroke="#64748b" stroke-dasharray="3 2"/><text x="690" y="337" text-anchor="middle" font-size="9" fill="#64748b">空闲帧</text>
+
+        <!-- 箭头 -->
+        <path d="M200,95 L280,135" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M200,150 L280,170" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M200,340 L280,245" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M200,280 L280,215" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M450,140 L500,190" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M590,210 L640,95" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M590,210 L640,137" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M590,210 L640,180" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M590,210 L640,225" stroke="#94a3b8" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+
+        <!-- CPU 小图标 -->
+        <rect x="520" y="110" width="50" height="28" rx="4" fill="rgba(56,189,248,.2)" stroke="#38bdf8"/><text x="545" y="128" text-anchor="middle" font-size="9" fill="#e0f2fe">CPU</text>
+        <path d="M545,138 L545,170" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr)"/>
+      </svg>
+    </div>
+    <p class="figure-title">虚拟地址 → 页表 → MMU → 物理页框。页表由 OS 在进程创建/装载时建立，CPU 的 MMU 在运行时翻译。</p>
+    <div class="callout">
+      <b>关键结论：</b>程序里的 <span class="mono">0x400000</span>、<span class="mono">0x1000000</span>、<span class="mono">0x7fff...</span> 全是<b>虚拟地址</b>。它们通过页表映射到物理内存中<b>离散的页框</b>。同一个虚拟地址在不同进程里，可以映射到完全不同的物理帧；同一物理帧也可以被多个进程共享（如共享库、共享内存）。
+    </div>
+  </div>
+
+  <!-- 3. 各段映射特性 -->
+  <div class="card">
+    <h2>③ 不同段落到 OS 内存的方式并不一样</h2>
+    <p>虽然都叫“映射到物理内存”，但 text/data/bss/heap/stack/mmap 的<b>来源、权限、是否共享、是否写时复制</b>都有差别。下面这张表把细节拆开：</p>
+    <table class="cmp">
+      <tr><th>程序段</th><th>映射来源</th><th>物理页如何获得</th><th>权限</th><th>是否共享 / COW</th></tr>
+      <tr><td style="color:var(--textseg)"><b>text</b></td><td>ELF 文件 <span class="mono">.text</span></td><td>文件映射到物理页，多进程共享同一磁盘页缓存</td><td><span class="mono">r-x</span></td><td>共享只读，省内存</td></tr>
+      <tr><td style="color:var(--data)"><b>data</b></td><td>ELF 文件 <span class="mono">.data</span></td><td>文件映射，但标记为可写；第一次写时触发 COW，复制出私有页</td><td><span class="mono">rw-</span></td><td>写时复制 (COW)</td></tr>
+      <tr><td style="color:var(--bss)"><b>bss</b></td><td>ELF 只记录大小</td><td>匿名映射，OS 分配全零页（可能映射到零页，写时复制）</td><td><span class="mono">rw-</span></td><td>常与零页共享，写则 COW</td></tr>
+      <tr><td style="color:var(--heap)"><b>heap</b></td><td>运行时 <span class="mono">malloc</span></td><td>匿名映射或 <span class="mono">brk</span> 扩展；按需分配/延迟分配</td><td><span class="mono">rw-</span></td><td>进程私有</td></tr>
+      <tr><td style="color:var(--stack)"><b>stack</b></td><td>OS 建立初始栈</td><td>匿名映射，初始只提交少量页，向下缺页时按需增长</td><td><span class="mono">rw-</span></td><td>进程私有</td></tr>
+      <tr><td style="color:var(--mmap)"><b>mmap</b></td><td>文件 / 匿名</td><td>文件-backed 映射到页缓存；匿名映射到交换区/物理页</td><td>按 <span class="mono">mmap</span> 参数</td><td>文件映射可共享；匿名通常私有</td></tr>
+    </table>
+    <p class="footnote">COW = Copy-On-Write，写时复制。OS 利用它让多个进程先共享同一份只读物理页，谁写谁复制，既省内存又保证隔离。</p>
+  </div>
+
+  <!-- 4. 关键机制 -->
+  <div class="card">
+    <h2>④ 支撑映射的四个核心机制</h2>
+
+    <h3>1) 页表与多级页表</h3>
+    <p>虚拟地址被切成“页内偏移 + 若干级页索引”。x86-64 通常用 4 级或 5 级页表，每级查一个索引，最终找到 PTE（页表项），里面存着物理页框号 + 权限位。</p>
+    <div class="callout">
+      <b>为什么需要多级？</b> 如果单级页表覆盖整个 64 位地址空间，页表本身就要占用天文数字的内存。多级页表把“没有映射的区域”留空，按需展开，实际只占用少量页表页。
+    </div>
+
+    <h3>2) MMU 与 TLB</h3>
+    <p><b>MMU</b> 是 CPU 内部的硬件单元，负责每次访存时查页表做地址翻译。<b>TLB</b> 是 MMU 里的高速缓存，缓存最近用过的“虚拟页 → 物理帧”映射。TLB 命中时翻译几乎零开销；不命中才去内存里逐级查页表。</p>
+
+    <h3>3) 缺页异常 (Page Fault)</h3>
+    <p>程序访问了一个合法但尚未映射的虚拟地址（或访问了权限不足的页），CPU 会触发缺页异常，进入内核：</p>
+    <ul>
+      <li><b>按需分页：</b>如果是首次访问堆/栈的匿名页，OS 分配一个物理页、清零、填页表、恢复执行。</li>
+      <li><b>请求调页：</b>如果是文件映射区首次访问，OS 从磁盘读入对应页到页缓存，再映射。</li>
+      <li><b>非法访问：</b>如果地址根本不在页表范围内，OS 发送 <span class="mono">SIGSEGV</span>（段错误），进程被杀。</li>
+    </ul>
+
+    <h3>4) 交换 (Swap) 与按需分配</h3>
+    <p>物理内存不够时，OS 可以把不活跃的物理页换出到磁盘交换区，腾出帧给其他进程。所以虚拟地址空间可以比物理内存大——<b>不是真的同时装下所有内容，而是按需加载 + 换入换出</b>。</p>
+  </div>
+
+  <!-- 5. 一次 malloc 的完整映射旅程 -->
+  <div class="card">
+    <h2>⑤ 一次 <span class="mono">malloc(1024)</span> 的完整映射旅程</h2>
+    <p>用一个小例子把“程序分布 → OS 内存映射”串起来。假设进程执行 <span class="mono">char *p = malloc(1024); *p = 42;</span>：</p>
+
+    <div class="step"><div class="step-num">1</div><div class="step-body"><b>用户态：malloc 在堆区找空闲块</b><br>libc 的 malloc 先在自己的堆里翻一翻，看有没有合适的空闲 chunk。如果有，直接返回一个虚拟地址，<b>完全不惊动 OS</b>。</div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><b>不够了：malloc 向 OS 要虚拟地址空间</b><br>如果堆顶空间不够，malloc 调用 <span class="mono">brk()</span> 抬高堆顶，或 <span class="mono">mmap()</span> 在 mmap 区拿一块。此时 OS 只是在页表里<b>标记这片虚拟地址可用</b>，但可能还没有分配物理页。</div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><b>首次写入触发缺页异常</b><br>当执行 <span class="mono">*p = 42</span> 时，CPU 发现该虚拟页没有映射到物理帧，触发 Page Fault，陷入内核。</div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><b>OS 分配物理页并建立映射</b><br>内核从伙伴系统拿一个空闲物理页框，清零（匿名页默认），在页表里填一条 PTE，设置权限为 <span class="mono">rw-</span>，然后恢复进程执行。</div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><b>MMU 完成写入</b><br>恢复后 CPU 重新执行 <span class="mono">*p = 42</span>，这次 MMU 查到 PTE，把虚拟地址翻译成物理地址，写入 DRAM。</div></div>
+
+    <div class="callout">
+      <b>体会一下：</b>malloc 返回的地址很早就有，但<b>真正占用物理内存发生在第一次写入时</b>。这是 Linux 的“延迟分配”策略——先答应你，等你真用再给钱。
+    </div>
+  </div>
+
+  <!-- 6. 常见误区 -->
+  <div class="card">
+    <h2>⑥ 常见误区澄清</h2>
+    <ul>
+      <li><b>误区 1：“虚拟地址就是物理地址，只是换了个名字。”</b><br>错。虚拟地址通过页表映射到物理帧，多个虚拟页可映射同一帧（共享），也可映射到磁盘（换出），还可不映射（未分配）。</li>
+      <li><b>误区 2：“堆和栈是 OS 预先分配好的两块内存。”</b><br>错。OS 只给起点和扩展规则；堆内部由 malloc 切分，栈由编译器生成的指令压栈/弹栈使用。物理页都是按需分配的。</li>
+      <li><b>误区 3：“程序有多大，物理内存就占多大。”</b><br>错。text 段多进程共享；data/bss 写时才复制；堆/栈按需分页；mmap 文件区直接映射磁盘缓存。实际 RSS 往往远小于虚拟地址空间大小。</li>
+      <li><b>误区 4：“所有段都映射到物理内存。”</b><br>错。很多虚拟页只是“占坑”，并没有物理 backing，访问时才触发缺页分配。</li>
+    </ul>
+  </div>
+
+  <!-- 7. 总结 -->
+  <div class="card">
+    <h2>⑦ 一句话总结</h2>
+    <div class="callout" style="background:rgba(52,211,153,.1);border-color:rgba(52,211,153,.4);color:#d1fae5">
+      <b>程序内存分布</b>是<b>虚拟地址空间</b>里按用途贴的标签（text/data/bss/heap/stack/mmap）；<b>操作系统内存</b>是真实物理页框 + 页表 + 交换区。两者通过<b>页表 + MMU + 缺页异常</b>联系起来：OS 在装载/运行时建立映射，CPU 在每次访存时翻译地址，按需分配、写时复制、换入换出让这套映射既隔离又高效。
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">程序内存分布 → 操作系统内存映射 · 交互式图解 · 地址与布局为示意，具体因架构/OS/ASLR 而异。</div>
+
+</body>
+</html>
