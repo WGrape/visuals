@@ -3,7 +3,7 @@
     // e.g. <html data-app-root="../../">. Existing pages retain the
     // original ../container/ behavior when the attribute is absent.
     const appRoot = document.documentElement.getAttribute("data-app-root");
-    const containerBase = (appRoot === null ? "../" : appRoot) + "container/index.html?page=";
+    const containerBase = (appRoot === null ? "../" : appRoot) + "container.html?page=";
 
     function shouldSkipLink(rawHref) {
         if (!rawHref) return true;
