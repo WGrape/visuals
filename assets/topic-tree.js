@@ -3,14 +3,17 @@
 
    <div class="tree-layout" data-topic-tree>
        <section class="topic-group" data-path="relational/mysql/architecture"
-                data-title="基础架构" data-icon="🐬">
+                data-title="基础架构" data-icon="🐬" data-desc="这段目录里讲的是什么…">
            <div class="topics"> ...卡片... </div>
        </section>
        ...
    </div>
 
-   data-path 必须是该组文章的真实所在目录（相对学科根目录），目录树完全由它推导，
-   因此左侧目录树与本地目录结构严格一一对应。
+   渲染规则：
+   - 左侧渲染成一棵「纯目录树」：节点就是目录名（data-path 推导），只显示目录名 + 篇数。
+   - 最后一级目录同样是一个目录节点，但可点击（点击后右侧显示该目录的内容）。
+   - 右侧按「目录」为单位生成内容区：最上面是介绍（data-desc），下面是该目录里的文件卡片；
+     同一个目录下有多个分组时，分组会呈现为多个板块。
 */
 (function () {
     const layout = document.querySelector("[data-topic-tree]");
@@ -36,88 +39,164 @@
     if (!groups.length) return;
 
     const headerEl = document.querySelector("header");
-    const footerEl = document.querySelector("footer");
     const heroH1 = document.querySelector(".hero h1");
     const subject = heroH1 ? heroH1.textContent.replace(/^[^\w\u4e00-\u9fa5]+/, "").trim() : "";
 
-    const ROOT = "(根目录)";
-    const CROSS = "(跨学科)";
+    const ROOT_LABEL = "(根目录)";
+    const CROSS_LABEL = "(跨学科)";
 
-    function newBranch(name) {
-        return { name: name, children: [], childMap: {}, leaves: [], count: 0 };
+    function newDir(name, parent) {
+        return {
+            name: name,
+            parent: parent,
+            path: "",
+            children: [],
+            childMap: {},
+            groups: [],
+            count: 0,
+            panelId: null,
+            li: null
+        };
     }
 
-    const root = newBranch(null);
+    const root = newDir(null, null);
 
-    groups.forEach(function (group, index) {
-        const path = group.getAttribute("data-path") || ROOT;
+    /* ---------- 由 data-path 推导目录树 ---------- */
+    groups.forEach(function (group) {
+        const rawPath = group.getAttribute("data-path") || "";
         const title = group.getAttribute("data-title") || "未命名";
         const icon = group.getAttribute("data-icon") || "📄";
+        const desc = group.getAttribute("data-desc") || "";
         const topics = group.querySelector(".topics");
         const count = topics ? topics.querySelectorAll(".card").length : 0;
-        const item = {
-            id: "p" + (index + 1),
-            path: path,
-            title: title,
-            icon: icon,
-            topics: topics,
-            count: count
-        };
-        let node = root;
-        if (path !== ROOT && path !== CROSS && path !== "") {
-            const parts = path.split("/").filter(Boolean);
-            const chain = [];
+        const item = { rawPath: rawPath, title: title, icon: icon, desc: desc, topics: topics, count: count };
+
+        const isSpecial = rawPath === "" || rawPath === ROOT_LABEL || rawPath === CROSS_LABEL;
+        if (isSpecial) {
+            // 「(根目录) / (跨学科)」这类没有真实目录的分组，挂到根节点上，稍后作为顶层节点渲染
+            root.groups.push(item);
+            root.count += count;
+        } else {
+            const parts = rawPath.split("/").filter(Boolean);
+            let node = root;
             parts.forEach(function (part) {
                 if (!node.childMap[part]) {
-                    const branch = newBranch(part);
-                    node.childMap[part] = branch;
-                    node.children.push(branch);
+                    const dir = newDir(part, node);
+                    dir.path = node.path ? node.path + "/" + part : part;
+                    node.childMap[part] = dir;
+                    node.children.push(dir);
                 }
                 node = node.childMap[part];
-                chain.push(node);
             });
-            chain.forEach(function (branch) {
-                branch.count += count;
-            });
-        } else {
-            node.count += count;
+            let cur = node;
+            while (cur && cur !== root) {
+                cur.count += count;
+                cur = cur.parent;
+            }
+            node.groups.push(item);
         }
-        node.leaves.push(item);
         group.__item = item;
     });
 
-    /* ---------- 生成右侧内容面板 ---------- */
+    // 把根节点上的特殊分组（跨学科等）包成一个顶层伪目录节点，保证它们也能被渲染、被点击
+    if (root.groups.length) {
+        const label = root.groups[0].rawPath === CROSS_LABEL ? CROSS_LABEL : ROOT_LABEL;
+        const pseudo = newDir(label, root);
+        pseudo.path = label;
+        pseudo.groups = root.groups;
+        pseudo.count = root.count;
+        root.children.push(pseudo);
+    }
+
+    /* ---------- 收集「有内容的目录」节点（决定右侧内容区与树的点击目标） ---------- */
+    const ordered = [];
+    (function walk(node) {
+        if (node.groups.length) {
+            node.panelId = "g" + (ordered.length + 1);
+            ordered.push(node);
+        }
+        node.children.forEach(walk);
+    })(root);
+
+    if (!ordered.length) return;
+
+    /* ---------- 生成右侧内容面板：一个目录 = 一块内容区 ---------- */
     const content = document.createElement("section");
     content.className = "tree-content";
 
-    groups.forEach(function (group) {
-        const item = group.__item;
+    ordered.forEach(function (node) {
         const panel = document.createElement("article");
         panel.className = "group-panel";
-        panel.id = item.id;
-        panel.setAttribute("data-path", item.path);
+        panel.id = node.panelId;
+        panel.setAttribute("data-path", node.path);
 
-        const head = document.createElement("header");
+        const single = node.groups.length === 1;
+        const first = node.groups[0];
+
+        // 注意：这里不能用 <header>，common.css 里 header 是 position:fixed 的站点头栏
+        const head = document.createElement("div");
         head.className = "panel-head";
+
         const h2 = document.createElement("h2");
         h2.className = "panel-title";
         const iconSpan = document.createElement("span");
-        iconSpan.textContent = item.icon;
+        iconSpan.textContent = single ? first.icon : "📂";
         h2.appendChild(iconSpan);
-        h2.appendChild(document.createTextNode(item.title));
+        h2.appendChild(document.createTextNode(single ? first.title : node.path));
+        head.appendChild(h2);
+
         const crumb = document.createElement("p");
         crumb.className = "panel-crumb";
         crumb.appendChild(document.createTextNode(subject ? subject + " / " : ""));
         const code = document.createElement("code");
-        code.textContent = item.path;
+        code.textContent = node.path;
         crumb.appendChild(code);
-        crumb.appendChild(document.createTextNode(" \u00b7 " + item.count + " 篇"));
-        head.appendChild(h2);
+        crumb.appendChild(document.createTextNode(" \u00b7 " + node.count + " 篇"));
         head.appendChild(crumb);
+
+        // 介绍：单分组目录用分组的 data-desc，作为「这个目录是什么」的开场说明
+        const introText = single ? first.desc : "";
+        if (introText) {
+            const p = document.createElement("p");
+            p.className = "panel-desc";
+            p.textContent = introText;
+            head.appendChild(p);
+        }
+
         panel.appendChild(head);
 
-        if (item.topics) panel.appendChild(item.topics);
+        if (single) {
+            if (first.topics) panel.appendChild(first.topics);
+        } else {
+            // 同一目录下的多个分组 → 多个板块
+            node.groups.forEach(function (item) {
+                const sec = document.createElement("section");
+                sec.className = "panel-section";
+
+                const st = document.createElement("h3");
+                st.className = "panel-section-title";
+                const si = document.createElement("span");
+                si.textContent = item.icon;
+                st.appendChild(si);
+                st.appendChild(document.createTextNode(item.title));
+                sec.appendChild(st);
+
+                if (item.desc) {
+                    const pd = document.createElement("p");
+                    pd.className = "panel-desc";
+                    pd.textContent = item.desc;
+                    sec.appendChild(pd);
+                }
+                if (item.topics) sec.appendChild(item.topics);
+                panel.appendChild(sec);
+            });
+        }
+
         content.appendChild(panel);
+    });
+
+    // 原始 <section class="topic-group"> 已被搬空，移除占位
+    groups.forEach(function (group) {
         group.remove();
     });
 
@@ -130,8 +209,8 @@
     const filter = document.createElement("input");
     filter.className = "tree-filter";
     filter.type = "search";
-    filter.placeholder = "筛选分组 / 目录…";
-    filter.setAttribute("aria-label", "筛选分组");
+    filter.placeholder = "筛选目录…";
+    filter.setAttribute("aria-label", "筛选目录");
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "tree-toggle";
@@ -145,75 +224,66 @@
     const rootUl = document.createElement("ul");
     rootUl.className = "tree-root";
 
-    function leafNode(item, indent) {
-        const li = document.createElement("li");
-        li.className = "tree-leaf";
-        li.setAttribute("data-target", item.id);
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "tree-row";
-        const caret = document.createElement("span");
-        caret.className = "tree-caret";
-        caret.textContent = item.icon;
-        const name = document.createElement("span");
-        name.className = "tree-name";
-        name.textContent = item.title;
-        const badge = document.createElement("span");
-        badge.className = "tree-badge";
-        badge.textContent = item.count;
-        btn.appendChild(caret);
-        btn.appendChild(name);
-        btn.appendChild(badge);
-        li.appendChild(btn);
-        return li;
-    }
+    function buildNode(node) {
+        const hasChildren = node.children.length > 0;
+        const hasContent = node.groups.length > 0;
 
-    function branchNode(branch) {
         const li = document.createElement("li");
-        li.className = "tree-branch is-open";
+        li.className = "tree-node" + (hasChildren ? " tree-branch" : "") + (hasContent ? " is-content" : "");
+        if (hasChildren) li.classList.add("is-open");
+
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "tree-row";
-        btn.setAttribute("aria-expanded", "true");
-        const caret = document.createElement("span");
-        caret.className = "tree-caret";
-        caret.textContent = "\u25b6";
+        if (hasChildren) btn.setAttribute("aria-expanded", "true");
+
+        const mark = document.createElement("span");
+        mark.className = "tree-mark";
+        if (hasChildren) {
+            mark.classList.add("tree-caret");
+            mark.textContent = "\u25b8";
+        } else if (hasContent) {
+            // 叶子目录（有内容）：实心圆点
+            mark.classList.add("tree-dot");
+        }
+
         const name = document.createElement("span");
         name.className = "tree-name";
         const code = document.createElement("code");
-        code.textContent = branch.name;
+        code.textContent = node.name;
         name.appendChild(code);
+
         const badge = document.createElement("span");
         badge.className = "tree-badge";
-        badge.textContent = branch.count;
-        btn.appendChild(caret);
+        badge.textContent = node.count;
+
+        btn.appendChild(mark);
         btn.appendChild(name);
         btn.appendChild(badge);
         li.appendChild(btn);
 
-        const ul = document.createElement("ul");
-        ul.className = "tree-children";
-        branch.leaves.forEach(function (item) {
-            ul.appendChild(leafNode(item));
-        });
-        branch.children.forEach(function (child) {
-            ul.appendChild(branchNode(child));
-        });
-        li.appendChild(ul);
+        if (hasChildren) {
+            const ul = document.createElement("ul");
+            ul.className = "tree-children";
+            node.children.forEach(function (child) {
+                ul.appendChild(buildNode(child));
+            });
+            li.appendChild(ul);
+        }
+
+        node.li = li;
         return li;
     }
 
-    root.leaves.forEach(function (item) {
-        rootUl.appendChild(leafNode(item));
+    root.children.forEach(function (node) {
+        rootUl.appendChild(buildNode(node));
     });
-    root.children.forEach(function (branch) {
-        rootUl.appendChild(branchNode(branch));
-    });
+
     nav.appendChild(rootUl);
     const empty = document.createElement("p");
     empty.className = "tree-empty";
     empty.hidden = true;
-    empty.textContent = "没有匹配的分组";
+    empty.textContent = "没有匹配的目录";
     nav.appendChild(empty);
     aside.appendChild(nav);
 
@@ -221,9 +291,16 @@
     layout.appendChild(content);
 
     /* ---------- 交互 ---------- */
-    const leaves = Array.prototype.slice.call(layout.querySelectorAll(".tree-leaf"));
+    const allNodes = [];
+    (function collect(node) {
+        allNodes.push(node);
+        node.children.forEach(collect);
+    })(root);
+
     const panels = Array.prototype.slice.call(layout.querySelectorAll(".group-panel"));
-    const branches = Array.prototype.slice.call(layout.querySelectorAll(".tree-branch"));
+    const branches = allNodes.filter(function (n) {
+        return n.li && n.children.length > 0;
+    });
     const isNarrow = window.matchMedia("(max-width: 900px)");
 
     const storageKey = "visuals-tree:" + location.pathname;
@@ -243,13 +320,30 @@
         }
     }
 
+    function openNode(node, open) {
+        if (!node || !node.li || !node.li.classList.contains("tree-branch")) return;
+        node.li.classList.toggle("is-open", open);
+        const row = node.li.querySelector(":scope > .tree-row");
+        if (row) row.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    function ancestorsOf(node) {
+        const chain = [];
+        let current = node ? node.parent : null;
+        while (current && current !== root) {
+            chain.push(current);
+            current = current.parent;
+        }
+        return chain;
+    }
+
     function activate(target, opts) {
         opts = opts || {};
         let found = null;
-        leaves.forEach(function (leaf) {
-            const match = leaf.getAttribute("data-target") === target;
-            leaf.classList.toggle("is-active", match);
-            if (match) found = leaf;
+        ordered.forEach(function (node) {
+            const match = node.panelId === target;
+            if (node.li) node.li.classList.toggle("is-active", match);
+            if (match) found = node;
         });
         panels.forEach(function (panel) {
             panel.classList.toggle("is-active", panel.id === target);
@@ -272,15 +366,9 @@
         }
     }
 
-    function openBranch(branch, open) {
-        branch.classList.toggle("is-open", open);
-        const row = branch.querySelector(":scope > .tree-row");
-        if (row) row.setAttribute("aria-expanded", open ? "true" : "false");
-    }
-
     function allOpen() {
-        return branches.every(function (branch) {
-            return branch.classList.contains("is-open");
+        return branches.every(function (node) {
+            return node.li.classList.contains("is-open");
         });
     }
 
@@ -288,69 +376,64 @@
         toggle.textContent = allOpen() ? "收起全部" : "展开全部";
     }
 
-    function ancestorsOf(node) {
-        const chain = [];
-        let current = node.parentElement;
-        while (current && current !== layout) {
-            if (current.classList && current.classList.contains("tree-branch")) chain.push(current);
-            current = current.parentElement;
-        }
-        return chain;
-    }
+    allNodes.forEach(function (node) {
+        if (!node.li) return;
+        const hasChildren = node.children.length > 0;
+        const hasContent = node.groups.length > 0;
+        if (!hasChildren && !hasContent) return;
 
-    branches.forEach(function (branch) {
-        const row = branch.querySelector(":scope > .tree-row");
-        if (!row) return;
-        row.addEventListener("click", function () {
-            openBranch(branch, !branch.classList.contains("is-open"));
+        const row = node.li.querySelector(":scope > .tree-row");
+        row.addEventListener("click", function (ev) {
+            const onCaret = !!(ev.target.closest && ev.target.closest(".tree-caret"));
+            if (hasChildren && (onCaret || !hasContent)) {
+                openNode(node, !node.li.classList.contains("is-open"));
+            }
+            if (hasContent && !onCaret) {
+                activate(node.panelId, { scroll: true });
+            }
             syncToggleLabel();
-        });
-    });
-
-    leaves.forEach(function (leaf) {
-        const row = leaf.querySelector(":scope > .tree-row");
-        if (!row) return;
-        row.addEventListener("click", function () {
-            activate(leaf.getAttribute("data-target"), { scroll: true });
         });
     });
 
     toggle.addEventListener("click", function () {
         const open = !allOpen();
-        branches.forEach(function (branch) {
-            openBranch(branch, open);
+        branches.forEach(function (node) {
+            openNode(node, open);
         });
         syncToggleLabel();
     });
 
     filter.addEventListener("input", function () {
         const q = filter.value.trim().toLowerCase();
-        const items = Array.prototype.slice.call(nav.querySelectorAll("li"));
-        items.forEach(function (li) {
-            li.classList.remove("is-filtered-out");
+        allNodes.forEach(function (node) {
+            if (node.li) node.li.classList.remove("is-filtered-out");
         });
         if (!q) {
             empty.hidden = true;
-            branches.forEach(function (branch) {
-                openBranch(branch, true);
+            branches.forEach(function (node) {
+                openNode(node, true);
             });
             syncToggleLabel();
             return;
         }
         let anyHit = false;
-        leaves.forEach(function (leaf) {
-            const hit = (leaf.textContent || "").toLowerCase().indexOf(q) !== -1;
-            leaf.classList.toggle("is-filtered-out", !hit);
-            if (hit) {
-                anyHit = true;
-                ancestorsOf(leaf).forEach(function (branch) {
-                    openBranch(branch, true);
+        (function filterNode(node) {
+            const selfHit =
+                (node.name || "").toLowerCase().indexOf(q) !== -1 ||
+                node.groups.some(function (g) {
+                    return (g.title || "").toLowerCase().indexOf(q) !== -1;
                 });
-            }
-        });
-        branches.forEach(function (branch) {
-            const visible = branch.querySelector(".tree-leaf:not(.is-filtered-out)");
-            branch.classList.toggle("is-filtered-out", !visible);
+            let childHit = false;
+            node.children.forEach(function (child) {
+                if (filterNode(child)) childHit = true;
+            });
+            const visible = selfHit || childHit;
+            if (node.li) node.li.classList.toggle("is-filtered-out", !visible);
+            if (visible && node.children.length) openNode(node, true);
+            return visible;
+        })(root);
+        anyHit = root.children.some(function (child) {
+            return child.li && !child.li.classList.contains("is-filtered-out");
         });
         empty.hidden = anyHit;
         syncToggleLabel();
@@ -374,20 +457,22 @@
     window.addEventListener("load", fitLayout);
 
     nav.scrollTop = 0;
+    const ids = ordered.map(function (node) {
+        return node.panelId;
+    });
     const hashTarget = (location.hash || "").slice(1);
-    const exists = leaves.some(function (leaf) {
-        return leaf.getAttribute("data-target") === hashTarget;
-    });
-    const candidate = exists ? hashTarget : saved.target;
-    const valid = leaves.some(function (leaf) {
-        return leaf.getAttribute("data-target") === candidate;
-    });
-    activate(valid ? candidate : leaves[0].getAttribute("data-target"), { hash: false });
-    const active = layout.querySelector(".tree-leaf.is-active");
-    if (active) {
-        ancestorsOf(active).forEach(function (branch) {
-            openBranch(branch, true);
+    let target = ids.indexOf(hashTarget) !== -1 ? hashTarget : saved.target;
+    if (ids.indexOf(target) === -1) target = ids[0];
+
+    const activeNode = ordered.filter(function (node) {
+        return node.panelId === target;
+    })[0];
+    if (activeNode) {
+        ancestorsOf(activeNode).forEach(function (node) {
+            openNode(node, true);
         });
+        openNode(activeNode, true);
     }
+    activate(target, { hash: false });
     syncToggleLabel();
 })();

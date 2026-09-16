@@ -37,7 +37,7 @@
         }
 
         // Skip directory index cards; keep section navigation unchanged.
-        if (relativePath.endsWith("/index.html")) {
+        if (relativePath.endsWith("index.html")) {
             return null;
         }
 
