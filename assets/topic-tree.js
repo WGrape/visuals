@@ -12,8 +12,8 @@
    渲染规则：
    - 左侧渲染成一棵「纯目录树」：节点就是目录名（data-path 推导），只显示目录名 + 篇数。
    - 最后一级目录同样是一个目录节点，但可点击（点击后右侧显示该目录的内容）。
-   - 右侧按「目录」为单位生成内容区：最上面是介绍（data-desc），下面是该目录里的文件卡片；
-     同一个目录下有多个分组时，分组会呈现为多个板块。
+   - 右侧按「目录」为单位生成内容区，只展示该目录下的文件卡片；
+     分类名称、层级与篇数均由左侧目录树承担。
 */
 (function () {
     const layout = document.querySelector("[data-topic-tree]");
@@ -39,8 +39,6 @@
     if (!groups.length) return;
 
     const headerEl = document.querySelector("header");
-    const heroH1 = document.querySelector(".hero h1");
-    const subject = heroH1 ? heroH1.textContent.replace(/^[^\w\u4e00-\u9fa5]+/, "").trim() : "";
 
     const ROOT_LABEL = "(根目录)";
     const CROSS_LABEL = "(跨学科)";
@@ -133,60 +131,15 @@
         const single = node.groups.length === 1;
         const first = node.groups[0];
 
-        // 注意：这里不能用 <header>，common.css 里 header 是 position:fixed 的站点头栏
-        const head = document.createElement("div");
-        head.className = "panel-head";
-
-        const h2 = document.createElement("h2");
-        h2.className = "panel-title";
-        const iconSpan = document.createElement("span");
-        iconSpan.textContent = single ? first.icon : "📂";
-        h2.appendChild(iconSpan);
-        h2.appendChild(document.createTextNode(single ? first.title : node.path));
-        head.appendChild(h2);
-
-        const crumb = document.createElement("p");
-        crumb.className = "panel-crumb";
-        crumb.appendChild(document.createTextNode(subject ? subject + " / " : ""));
-        const code = document.createElement("code");
-        code.textContent = node.path;
-        crumb.appendChild(code);
-        crumb.appendChild(document.createTextNode(" \u00b7 " + node.count + " 篇"));
-        head.appendChild(crumb);
-
-        // 介绍：单分组目录用分组的 data-desc，作为「这个目录是什么」的开场说明
-        const introText = single ? first.desc : "";
-        if (introText) {
-            const p = document.createElement("p");
-            p.className = "panel-desc";
-            p.textContent = introText;
-            head.appendChild(p);
-        }
-
-        panel.appendChild(head);
-
+        // 分类名称和层级只由左侧目录树呈现；右侧仅展示当前目录的知识入口。
         if (single) {
             if (first.topics) panel.appendChild(first.topics);
         } else {
-            // 同一目录下的多个分组 → 多个板块
+            // 同一路径下的多个卡片集合按原顺序连续展示。
             node.groups.forEach(function (item) {
                 const sec = document.createElement("section");
                 sec.className = "panel-section";
 
-                const st = document.createElement("h3");
-                st.className = "panel-section-title";
-                const si = document.createElement("span");
-                si.textContent = item.icon;
-                st.appendChild(si);
-                st.appendChild(document.createTextNode(item.title));
-                sec.appendChild(st);
-
-                if (item.desc) {
-                    const pd = document.createElement("p");
-                    pd.className = "panel-desc";
-                    pd.textContent = item.desc;
-                    sec.appendChild(pd);
-                }
                 if (item.topics) sec.appendChild(item.topics);
                 panel.appendChild(sec);
             });
@@ -461,8 +414,9 @@
         return node.panelId;
     });
     const hashTarget = (location.hash || "").slice(1);
+    const defaultTarget = ids[0];
     let target = ids.indexOf(hashTarget) !== -1 ? hashTarget : saved.target;
-    if (ids.indexOf(target) === -1) target = ids[0];
+    if (ids.indexOf(target) === -1) target = defaultTarget;
 
     const activeNode = ordered.filter(function (node) {
         return node.panelId === target;

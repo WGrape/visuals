@@ -40,9 +40,9 @@ while IFS= read -r -d '' html_file; do
     # 获取文件的相对路径（去掉开头的./）
     relative_path="${html_file#./}"
 
-    # 查找“最近的上级 index.html”：从文件所在目录开始，逐级向上查找，
-    # 直到仓库根目录。只要任意一级祖先 index.html 中包含了指向该文件的链接，
-    # 即视为已链接。这样可以正确处理嵌套目录（如
+    # 查找祖先 index.html：从文件所在目录开始，逐级向上查找，直到仓库根目录。
+    # 只要任意一级祖先索引包含指向该文件的链接，即视为已链接；未完成物理迁移
+    # 的跨学科内容则由下方 canonical prefix 规则做额外验证。这样可以正确处理嵌套目录（如
     # kaoyan/kaoyan-math-2/Linear-Algebra/ch01.html 应检查
     # kaoyan/kaoyan-math-2/Linear-Algebra/index.html，而不是 kaoyan/index.html）。
     #
@@ -65,7 +65,7 @@ while IFS= read -r -d '' html_file; do
                 linked=1
                 break
             fi
-            # 兜底：文件名匹配（适配 href="子目录/文件名" 等写法）
+            # 兜底：文件名匹配（适配 href="子目录/文件名" 等写法）。
             filename=$(basename "$relative_path")
             if grep -q "href=\".*${filename}\"" "$candidate" 2>/dev/null; then
                 linked=1
@@ -74,6 +74,49 @@ while IFS= read -r -d '' html_file; do
         fi
         dir=$(dirname "$dir")
     done
+
+    # 过渡目录可由新学科入口显式声明 canonical prefix。校验不仅确认前缀
+    # 匹配，还必须沿该入口已登记的知识地图逐层查找精确页面链接。
+    if [[ "$linked" -eq 0 ]]; then
+        while IFS= read -r canonical_index; do
+            canonical_dir=$(dirname "${canonical_index#./}")
+            while IFS= read -r canonical_prefix; do
+                canonical_prefix=${canonical_prefix#data-canonical-prefix=\"}
+                canonical_prefix=${canonical_prefix%\"}
+                if [[ -z "$canonical_prefix" || "$relative_path" != "$canonical_prefix"/* ]]; then
+                    continue
+                fi
+
+                canonical_pages="$canonical_index"
+                previous_pages=""
+                while [[ -n "$canonical_pages" && "$canonical_pages" != "$previous_pages" && "$linked" -eq 0 ]]; do
+                    previous_pages="$canonical_pages"
+                    next_pages=""
+                    while IFS= read -r canonical_page; do
+                        canonical_page_dir=$(dirname "${canonical_page#./}")
+                        link_target=$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$relative_path" "$canonical_page_dir" 2>/dev/null || basename "$relative_path")
+                        if grep -q "href=\"${link_target}\"" "$canonical_page" 2>/dev/null; then
+                            linked=1
+                            break 3
+                        fi
+
+                        while IFS= read -r href; do
+                            href=${href#href=\"}
+                            href=${href%\"}
+                            case "$href" in
+                                *://*|"#*"|mailto:*|tel:*) continue ;;
+                            esac
+                            target_path=$(python3 -c "import os,sys;print(os.path.normpath(os.path.join(sys.argv[1], sys.argv[2])))" "$canonical_page_dir" "$href" 2>/dev/null)
+                            if [[ "$target_path" == "$canonical_dir"/* && "$target_path" == *.html && -f "$target_path" ]]; then
+                                next_pages+="$target_path"$'\n'
+                            fi
+                        done < <(grep -o 'href="[^"]*"' "$canonical_page" 2>/dev/null)
+                    done <<< "$canonical_pages"
+                    canonical_pages=$(printf '%s' "$next_pages" | sort -u)
+                done
+            done < <(grep -o 'data-canonical-prefix="[^"]*"' "$canonical_index" 2>/dev/null)
+        done < <(find . -name "index.html" -print)
+    fi
 
     if [[ "$linked" -eq 1 ]]; then
         echo -e "${GREEN}✓ $relative_path${NC}"

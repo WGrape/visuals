@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mmap 到底是什么？虚拟内存的万能胶水</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif; padding: 22px 20px; line-height: 1.75; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { color: #58a6ff; text-align: center; margin-bottom: 8px; font-size: 1.9rem; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 26px; font-size: 0.95rem; }
+
+  .tabs { text-align: center; margin-bottom: 20px; }
+  .tab { padding: 10px 16px; margin: 5px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; cursor: pointer; display: inline-block; border-radius: 6px; font-size: 13.5px; font-weight: 600; transition: all .2s; }
+  .tab:hover { border-color: #58a6ff; color: #58a6ff; }
+  .tab.active { border-color: #58a6ff; color: #58a6ff; background: rgba(88,166,255,0.1); }
+
+  .section { display: none; background: #161b22; border: 1px solid #30363d; padding: 22px; margin: 18px 0; border-radius: 8px; }
+  .section.active { display: block; animation: fade .35s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  h2 { font-size: 1.28rem; margin-bottom: 12px; color: #e6edf3; }
+  h3 { font-size: 1.05rem; margin: 20px 0 10px; color: #58a6ff; }
+  p { color: #8b949e; margin: 10px 0; }
+  b { color: #e6edf3; }
+  .kw { color: #58a6ff; font-weight: 600; }
+  .gn { color: #3fb950; font-weight: 600; }
+  .or { color: #f0883e; font-weight: 600; }
+  .rd { color: #f85149; font-weight: 600; }
+
+  code { background: #0d1117; padding: 2px 6px; color: #f0883e; border-radius: 3px; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px; color: #c9d1d9; line-height: 1.7; }
+
+  .box { padding: 15px; margin: 12px 0; border-radius: 6px; border: 2px solid; }
+  .box-blue { background: rgba(88,166,255,0.1); border-color: #58a6ff; }
+  .box-green { background: rgba(63,185,80,0.1); border-color: #3fb950; }
+  .box-orange { background: rgba(240,136,62,0.1); border-color: #f0883e; }
+  .box-red { background: rgba(248,81,73,0.1); border-color: #f85149; }
+  .box-purple { background: rgba(163,113,247,0.1); border-color: #a371f7; }
+
+  .note { border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 12px 0; background: #0d1117; color: #c9d1d9; font-size: 14.5px; }
+  .note.warn { border-left-color: #f0883e; }
+  .note.error { border-left-color: #f85149; }
+  .note.ok { border-left-color: #3fb950; }
+  .note b { color: #58a6ff; }
+  .note.ok b { color: #3fb950; }
+  .note.warn b { color: #f0883e; }
+
+  button { padding: 8px 16px; background: #1a1f2e; border: 1px solid #30363d; color: #e6edf3; cursor: pointer; margin: 5px; border-radius: 5px; font-size: 13px; font-family: inherit; font-weight: 600; transition: all .2s; }
+  button:hover { border-color: #58a6ff; color: #58a6ff; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
+  button.primary:hover { background: #388bfd; color: white; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  table { width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 13.5px; }
+  th, td { padding: 10px; text-align: left; border-bottom: 1px solid #30363d; }
+  th { color: #58a6ff; font-weight: 700; }
+  td { color: #8b949e; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  td.mono { font-family: 'SFMono-Regular', Consolas, monospace; color: #c9d1d9; font-size: 12.5px; }
+
+  ul { padding-left: 22px; margin: 10px 0; }
+  li { color: #8b949e; margin: 6px 0; }
+
+  .diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin: 14px 0; }
+  .diagram svg { display: block; margin: 0 auto; width: 100%; height: auto; }
+  .cap { text-align: center; color: #8b949e; font-size: 12.5px; margin-top: 8px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 15px 0; }
+  @media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* 交互：地址空间条 */
+  .aspace { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin: 14px 0; }
+  .aspace-title { font-size: 13px; color: #8b949e; margin-bottom: 10px; }
+  .vma-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 9px 12px; margin: 6px 0; border-radius: 6px; font-size: 12.5px;
+    border: 1px dashed #30363d; background: rgba(255,255,255,0.03); color: #8b949e;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .vma-row.resident {
+    border: 1px solid #3fb950; background: rgba(63,185,80,0.12); color: #7ee787;
+  }
+  .vma-row .tagx { font-family: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px; background: rgba(240,136,62,0.15); color: #f0883e; }
+  .vma-row.resident .tagx { background: rgba(63,185,80,0.2); color: #3fb950; }
+  .vma-row .op { cursor: pointer; color: #58a6ff; font-weight: 700; }
+
+  .stat-line { margin-top: 10px; font-size: 13px; color: #8b949e; }
+  .stat-line b { color: #58a6ff; }
+
+  /* 大小阈值演示 */
+  .slider-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 12px 0; }
+  input[type=range] { width: 240px; accent-color: #58a6ff; }
+  .size-val { font-family: 'SFMono-Regular', Consolas, monospace; color: #f0883e; font-weight: 700; font-size: 15px; }
+  .verdict { padding: 12px 16px; border-radius: 6px; margin-top: 10px; font-size: 14px; }
+
+  .step-line { padding: 10px 14px; margin: 8px 0; border-left: 3px solid #30363d; background: #0d1117; border-radius: 0 6px 6px 0; font-size: 13.5px; color: #c9d1d9; }
+  .step-line.on { border-left-color: #58a6ff; background: rgba(88,166,255,0.07); }
+  .step-line .n { color: #58a6ff; font-weight: 700; margin-right: 8px; }
+
+  footer { text-align: center; color: #8b949e; font-size: 13px; padding: 30px 0 10px; }
+  footer a { color: #58a6ff; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>mmap 到底是干什么的？</h1>
+  <p class="subtitle">虚拟内存的「万能胶水」——把文件或空地，直接贴进你的地址空间</p>
+
+  <div class="tabs">
+    <div class="tab active" data-s="s1">🎯 一句话本质</div>
+    <div class="tab" data-s="s2">🧱 它做了什么</div>
+    <div class="tab" data-s="s3">🧪 动手 mmap 一块</div>
+    <div class="tab" data-s="s4">📂 文件映射 vs 匿名映射</div>
+    <div class="tab" data-s="s5">💰 为什么 malloc 总提它</div>
+    <div class="tab" data-s="s6">⚡ mmap 读文件 vs read</div>
+    <div class="tab" data-s="s7">🛠️ 参数与坑</div>
+  </div>
+
+  <!-- ========== S1 ========== -->
+  <div class="section active" id="s1">
+    <h2>🎯 一句话本质</h2>
+    <div class="note ok">
+      <b>mmap = 在你的虚拟地址空间里「圈一块地」，并把这块地和某个东西绑定起来。</b><br>
+      绑定的可以是<b>磁盘上的文件</b>（文件映射），也可以是<b>纯内存</b>（匿名映射）。<br>
+      绑定之后，你访问这块地就<b>像访问普通数组一样</b>——用指针读写，不用 read/write。
+    </div>
+
+    <h3>🏠 生活类比：给房间贴一张「投影地图」</h3>
+    <div class="diagram">
+      <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="30" width="330" height="190" rx="12" fill="rgba(88,166,255,0.07)" stroke="#58a6ff"/>
+        <text x="195" y="56" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="700">你的进程：虚拟地址空间</text>
+        <text x="195" y="78" text-anchor="middle" fill="#8b949e" font-size="11">一整面「墙」，被划分成很多格子</text>
+
+        <rect x="60" y="95" width="270" height="40" rx="8" fill="rgba(163,113,247,0.15)" stroke="#a371f7" stroke-dasharray="5 4"/>
+        <text x="195" y="120" text-anchor="middle" fill="#d2a8ff" font-size="12">mmap 圈出来的一块（VMA）</text>
+
+        <rect x="60" y="150" width="120" height="40" rx="8" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+        <text x="120" y="175" text-anchor="middle" fill="#7ee787" font-size="11">堆</text>
+        <rect x="196" y="150" width="134" height="40" rx="8" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+        <text x="263" y="175" text-anchor="middle" fill="#f0883e" font-size="11">栈 / 其他</text>
+
+        <rect x="420" y="70" width="310" height="60" rx="10" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+        <text x="575" y="96" text-anchor="middle" fill="#f0883e" font-size="13" font-weight="700">💾 磁盘文件 data.bin</text>
+        <text x="575" y="116" text-anchor="middle" fill="#8b949e" font-size="11">100 MB，躺在硬盘上</text>
+
+        <rect x="420" y="160" width="310" height="60" rx="10" fill="rgba(63,185,80,0.10)" stroke="#3fb950"/>
+        <text x="575" y="186" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="700">🌫️ 匿名内存（全零空地）</text>
+        <text x="575" y="206" text-anchor="middle" fill="#8b949e" font-size="11">不对应任何文件</text>
+
+        <line x1="330" y1="115" x2="420" y2="100" stroke="#f0883e" stroke-width="2"/>
+        <text x="375" y="102" text-anchor="middle" fill="#8b949e" font-size="10">贴文件</text>
+        <line x1="330" y1="128" x2="420" y2="190" stroke="#3fb950" stroke-width="2"/>
+        <text x="372" y="168" text-anchor="middle" fill="#8b949e" font-size="10">贴空地</text>
+      </svg>
+      <div class="cap">mmap 就是「贴」这个动作：把外部对象贴进地址空间，之后用指针直接读写</div>
+    </div>
+
+    <h3>为什么叫「内存映射」？</h3>
+    <p><b>映射</b>的意思是：建立<span class="kw">虚拟地址区间 ↔ 某个后端对象</span>的对应关系。建立之后：</p>
+    <ul>
+      <li>读 <code>ptr[0]</code> → 内核自动把对应内容搬进物理内存 → 你拿到数据</li>
+      <li>改 <code>ptr[0]</code> → 视 <code>flags</code> 决定是<b>写回文件</b>还是<b>仅本进程可见</b></li>
+      <li>不用了 <code>munmap</code> → 拆掉这块地</li>
+    </ul>
+
+    <div class="note">
+      <b>所以 mmap 不是「分配内存」的唯一含义</b>——它本质是<b>建立映射关系</b>。只是当后端是「空地」时，看起来就像在分配内存，这就是为什么你在内存分配话题里总看到它。
+    </div>
+  </div>
+
+  <!-- ========== S2 ========== -->
+  <div class="section" id="s2">
+    <h2>🧱 mmap 到底做了什么？</h2>
+    <p>最关键的一点：<span class="or">mmap 是「预约」，不是「入住」</span>。</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="am" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#8b949e"/></marker></defs>
+
+        <rect x="20" y="30" width="200" height="80" rx="10" fill="rgba(88,166,255,0.1)" stroke="#58a6ff"/>
+        <text x="120" y="56" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">① 调用 mmap()</text>
+        <text x="120" y="78" text-anchor="middle" fill="#8b949e" font-size="11">只是登记，不搬数据</text>
+        <text x="120" y="96" text-anchor="middle" fill="#8b949e" font-size="10.5">耗时 ~微秒级</text>
+
+        <rect x="270" y="30" width="200" height="80" rx="10" fill="rgba(163,113,247,0.12)" stroke="#a371f7"/>
+        <text x="370" y="56" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">② 内核建 VMA</text>
+        <text x="370" y="78" text-anchor="middle" fill="#8b949e" font-size="11">vm_area_struct</text>
+        <text x="370" y="96" text-anchor="middle" fill="#8b949e" font-size="10.5">记录：起止/权限/后端</text>
+
+        <rect x="520" y="30" width="220" height="80" rx="10" fill="rgba(63,185,80,0.1)" stroke="#3fb950"/>
+        <text x="630" y="56" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="700">③ 首次访问 → 缺页</text>
+        <text x="630" y="78" text-anchor="middle" fill="#8b949e" font-size="11">内核才真正分配物理页</text>
+        <text x="630" y="96" text-anchor="middle" fill="#8b949e" font-size="10.5">文件映射：顺带读入磁盘</text>
+
+        <line x1="220" y1="70" x2="270" y2="70" stroke="#8b949e" stroke-width="2" marker-end="url(#am)"/>
+        <line x1="470" y1="70" x2="520" y2="70" stroke="#8b949e" stroke-width="2" marker-end="url(#am)"/>
+
+        <rect x="20" y="140" width="720" height="70" rx="10" fill="rgba(240,136,62,0.08)" stroke="#f0883e"/>
+        <text x="380" y="166" text-anchor="middle" fill="#f0883e" font-size="13" font-weight="700">关键：mmap 返回时，一块物理内存都还没分配</text>
+        <text x="380" y="190" text-anchor="middle" fill="#8b949e" font-size="11.5">「按需分页」：你碰哪一页，内核才兑现哪一页 —— 所以 mmap 一个 100GB 文件也不会瞬间吃满内存</text>
+      </svg>
+      <div class="cap">mmap 是预约，缺页中断才是入住</div>
+    </div>
+
+    <h3>内核里的三个结构</h3>
+    <table>
+      <tr><th>结构</th><th>作用</th></tr>
+      <tr><td><code>vm_area_struct</code>（VMA）</td><td>一段连续的虚拟地址区间，记录起止、权限（rwx）、是文件映射还是匿名、后端文件+偏移</td></tr>
+      <tr><td>页表项 PTE</td><td>初始为空；缺页后填入「虚拟页 → 物理页帧」的映射</td></tr>
+      <tr><td><code>address_space</code> / page cache</td><td>文件映射的后端：磁盘内容在内存里的缓存页</td></tr>
+    </table>
+
+    <div class="note warn">
+      <b>所以「mmap 分配了内存」这句话只对了一半</b>：它分配的是<b>虚拟地址区间</b>（一段门牌号），物理内存要等你真正去读写时才一页一页兑现。
+    </div>
+
+    <h3>munmap：拆掉这块地</h3>
+    <pre>munmap(addr, length);   // 解除映射，释放这段虚拟地址空间与对应物理页</pre>
+    <p>这也是为什么 <code>free()</code> 大块内存能<b>立刻把内存还给操作系统</b>——因为大块是 mmap 来的，free 直接 <code>munmap</code>；而小块在堆里，只能留在分配器手里慢慢复用。</p>
+  </div>
+
+  <!-- ========== S3 ========== -->
+  <div class="section" id="s3">
+    <h2>🧪 动手：mmap 一块，然后访问它</h2>
+    <p>点「mmap 一块」创建映射（虚线 = 只预约），再点「访问」触发缺页把它变成真实物理页（实线绿色）。</p>
+
+    <div>
+      <button class="primary" id="btnMmap">＋ mmap 一块（4 页）</button>
+      <button id="btnTouch">👆 访问第一块（触发缺页）</button>
+      <button id="btnUnmap">✂️ munmap 最后一块</button>
+      <button id="btnReset">重置</button>
+    </div>
+
+    <div class="aspace">
+      <div class="aspace-title">进程虚拟地址空间中的映射区</div>
+      <div id="vmaList"></div>
+      <div class="stat-line">
+        映射块：<b id="vmaCount">0</b> ｜ 已兑现物理页：<b id="pageCount">0</b> 页<br>
+        提示：<b>mmap 返回后物理页是 0</b> —— 这就是「预约 vs 入住」。
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="box box-blue">
+        <b>匿名映射（最像「分配内存」）</b>
+        <pre>void *p = mmap(NULL, 4096*4,
+    PROT_READ|PROT_WRITE,
+    MAP_PRIVATE|MAP_ANONYMOUS,
+    -1, 0);       // fd = -1，无文件
+p[0] = 1;         // 此时才分配物理页
+munmap(p, 4096*4);</pre>
+      </div>
+      <div class="box box-orange">
+        <b>文件映射（把文件贴进来）</b>
+        <pre>int fd = open("data.bin", O_RDONLY);
+void *p = mmap(NULL, len,
+    PROT_READ, MAP_PRIVATE,
+    fd, 0);
+printf("%c", ((char*)p)[0]);  // 直接用指针读！
+munmap(p, len);</pre>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>匿名映射的本质</b>：后端不是文件，而是「一堆零页」。内核在你写入时会分配一个<b>清零的物理页</b>，所以匿名 mmap 拿到的内存一定是全 0（这也是 <code>calloc</code> 大块时敢不 memset 的原因）。
+    </div>
+  </div>
+
+  <!-- ========== S4 ========== -->
+  <div class="section" id="s4">
+    <h2>📂 两种 mmap：文件映射 vs 匿名映射</h2>
+    <div>
+      <button class="primary" id="modeFile">📂 文件映射</button>
+      <button id="modeAnon">🌫️ 匿名映射</button>
+      <button id="modeShared">🤝 共享内存</button>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg">
+        <!-- 进程 -->
+        <rect x="30" y="40" width="240" height="170" rx="12" fill="rgba(88,166,255,0.07)" stroke="#58a6ff"/>
+        <text x="150" y="66" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">进程地址空间</text>
+        <rect x="55" y="85" width="190" height="46" rx="8" fill="rgba(163,113,247,0.15)" stroke="#a371f7"/>
+        <text x="150" y="108" text-anchor="middle" fill="#d2a8ff" font-size="12">映射区（VMA）</text>
+        <text x="150" y="124" text-anchor="middle" fill="#8b949e" font-size="10">0x7f...</text>
+
+        <!-- 右：三种后端 -->
+        <g id="mFile">
+          <rect x="360" y="60" width="180" height="50" rx="8" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+          <text x="450" y="82" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="700">page cache</text>
+          <text x="450" y="100" text-anchor="middle" fill="#8b949e" font-size="10.5">文件在内存的缓存页</text>
+          <rect x="580" y="60" width="150" height="50" rx="8" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+          <text x="655" y="82" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">💾 磁盘文件</text>
+          <text x="655" y="100" text-anchor="middle" fill="#8b949e" font-size="10.5">真正的数据源</text>
+          <line x1="245" y1="108" x2="360" y2="85" stroke="#3fb950" stroke-width="2" marker-end="url(#am)"/>
+          <line x1="540" y1="85" x2="580" y2="85" stroke="#f0883e" stroke-width="2" marker-end="url(#am)"/>
+          <text x="380" y="150" fill="#8b949e" font-size="11.5">MAP_PRIVATE：写入触发写时复制（COW），只本进程可见，不落盘</text>
+          <text x="380" y="172" fill="#8b949e" font-size="11.5">MAP_SHARED：写入直接改 page cache，最终由内核写回文件</text>
+          <text x="380" y="200" fill="#58a6ff" font-size="12" font-weight="700">典型用途：加载动态库、读大文件、进程间共享只读数据</text>
+        </g>
+
+        <g id="mAnon" style="display:none;">
+          <rect x="380" y="70" width="340" height="70" rx="10" fill="rgba(63,185,80,0.10)" stroke="#3fb950"/>
+          <text x="550" y="98" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="700">零页 / 新分配的物理页</text>
+          <text x="550" y="120" text-anchor="middle" fill="#8b949e" font-size="11">没有文件后端（MAP_ANONYMOUS，fd = -1）</text>
+          <line x1="245" y1="108" x2="380" y2="105" stroke="#3fb950" stroke-width="2" marker-end="url(#am)"/>
+          <text x="380" y="175" fill="#8b949e" font-size="11.5">内容初始全 0；进程结束后全部回收，不会写任何地方</text>
+          <text x="380" y="200" fill="#58a6ff" font-size="12" font-weight="700">典型用途：malloc 大块内存、线程栈、大数组</text>
+        </g>
+
+        <g id="mShared" style="display:none;">
+          <rect x="360" y="50" width="360" height="60" rx="10" fill="rgba(163,113,247,0.12)" stroke="#a371f7"/>
+          <text x="540" y="76" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="700">同一组物理页（两个进程共享）</text>
+          <text x="540" y="96" text-anchor="middle" fill="#8b949e" font-size="11">MAP_SHARED | MAP_ANONYMOUS，或映射同一个文件</text>
+          <line x1="245" y1="108" x2="360" y2="80" stroke="#a371f7" stroke-width="2" marker-end="url(#am)"/>
+          <rect x="360" y="130" width="170" height="46" rx="8" fill="rgba(88,166,255,0.1)" stroke="#58a6ff"/>
+          <text x="445" y="158" text-anchor="middle" fill="#79c0ff" font-size="12">进程 A 写入</text>
+          <rect x="550" y="130" width="170" height="46" rx="8" fill="rgba(88,166,255,0.1)" stroke="#58a6ff"/>
+          <text x="635" y="158" text-anchor="middle" fill="#79c0ff" font-size="12">进程 B 立刻可见</text>
+          <text x="380" y="205" fill="#58a6ff" font-size="12" font-weight="700">典型用途：进程间通信（最快的一种，无需内核拷贝）</text>
+        </g>
+      </svg>
+      <div class="cap">同一个 mmap，后端不同 → 用途完全不同</div>
+    </div>
+
+    <table>
+      <tr><th>类型</th><th>flags</th><th>后端</th><th>典型用途</th></tr>
+      <tr><td>私有文件映射</td><td class="mono">MAP_PRIVATE</td><td>文件 page cache</td><td>加载 so、读大文件、只读数据共享</td></tr>
+      <tr><td>共享文件映射</td><td class="mono">MAP_SHARED</td><td>文件 page cache</td><td>多进程共享、修改要落盘（需 msync）</td></tr>
+      <tr><td>私有匿名映射</td><td class="mono">MAP_PRIVATE|MAP_ANONYMOUS</td><td>零页</td><td><b>malloc 大块</b>、线程栈、大缓冲</td></tr>
+      <tr><td>共享匿名映射</td><td class="mono">MAP_SHARED|MAP_ANONYMOUS</td><td>共享物理页</td><td>进程间共享内存</td></tr>
+    </table>
+  </div>
+
+  <!-- ========== S5 ========== -->
+  <div class="section" id="s5">
+    <h2>💰 为什么讲内存分配总提到 mmap？</h2>
+    <p>因为 <span class="kw">malloc 有一条「大块走 mmap」的分界线</span>。拖动滑块看看不同大小的分配走哪条路。</p>
+
+    <div class="slider-row">
+      <label style="color:#8b949e;font-size:13px;">申请大小</label>
+      <input type="range" id="sizeSlider" min="0" max="6" step="1" value="1">
+      <span class="size-val" id="sizeVal">1 KB</span>
+      <span style="color:#8b949e;font-size:12.5px;">（glibc 默认阈值 M_MMAP_THRESHOLD = 128 KB）</span>
+    </div>
+
+    <div class="verdict" id="verdict"></div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="25" width="700" height="60" rx="10" fill="rgba(88,166,255,0.07)" stroke="#58a6ff"/>
+        <text x="380" y="50" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">malloc(size)</text>
+        <text x="380" y="72" text-anchor="middle" fill="#8b949e" font-size="11.5">glibc ptmalloc 的第一层判断：size &gt; 128KB ?</text>
+
+        <line x1="250" y1="85" x2="150" y2="120" stroke="#3fb950" stroke-width="2" marker-end="url(#am)"/>
+        <line x1="510" y1="85" x2="610" y2="120" stroke="#f0883e" stroke-width="2" marker-end="url(#am)"/>
+        <text x="175" y="105" fill="#7ee787" font-size="11.5">否（小块）</text>
+        <text x="585" y="105" fill="#f0883e" font-size="11.5">是（大块）</text>
+
+        <rect x="40" y="125" width="290" height="60" rx="10" fill="rgba(63,185,80,0.1)" stroke="#3fb950"/>
+        <text x="185" y="148" text-anchor="middle" fill="#7ee787" font-size="12.5" font-weight="700">走堆：brk / sbrk</text>
+        <text x="185" y="170" text-anchor="middle" fill="#8b949e" font-size="11">free 后留在分配器手里，不立即还 OS</text>
+
+        <rect x="430" y="125" width="290" height="60" rx="10" fill="rgba(240,136,62,0.1)" stroke="#f0883e"/>
+        <text x="575" y="148" text-anchor="middle" fill="#f0883e" font-size="12.5" font-weight="700">走 mmap：独立映射区</text>
+        <text x="575" y="170" text-anchor="middle" fill="#8b949e" font-size="11">free 直接 munmap，立刻还给 OS</text>
+      </svg>
+      <div class="cap">这就是「内存分配里总看到 mmap」的原因：大块内存就是它给的</div>
+    </div>
+
+    <div class="grid2">
+      <div class="box box-green">
+        <b>为什么大块要单独 mmap？</b>
+        <ul>
+          <li>避免在大堆里留下巨大空洞（外部碎片）</li>
+          <li>释放时能<b>整块归还</b>给操作系统，而不是卡在堆顶</li>
+          <li>独立 VMA，权限/生命周期清楚</li>
+        </ul>
+      </div>
+      <div class="box box-orange">
+        <b>为什么小块不 mmap？</b>
+        <ul>
+          <li>每次 mmap 都要建 VMA、至少占 1 页（4KB），<b>17 字节也要给 4096</b></li>
+          <li>munmap 有 syscall 与 TLB 刷新开销</li>
+          <li>小块高频分配，走堆内空闲链表快得多</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>除了 malloc，还有谁在用 mmap？</h3>
+    <table>
+      <tr><th>场景</th><th>怎么用 mmap</th></tr>
+      <tr><td>加载动态库（.so）</td><td>把库文件的 text/data 段映射进进程，<b>多进程共享同一份物理页</b>，省内存</td></tr>
+      <tr><td>创建线程</td><td><code>pthread_create</code> 用 mmap 给新线程分配栈空间</td></tr>
+      <tr><td>进程间共享内存</td><td><code>MAP_SHARED</code> 映射同一文件或匿名共享区</td></tr>
+      <tr><td>读写大文件</td><td>替代 read/write，减少一次数据拷贝（下一节）</td></tr>
+      <tr><td>Java / Go 的堆</td><td>运行时向 OS 要内存，底层就是 mmap（Go 的 <code>sysAlloc</code>）</td></tr>
+      <tr><td>显存 / 设备内存</td><td>把设备寄存器或显存映射进用户空间直接访问</td></tr>
+    </table>
+  </div>
+
+  <!-- ========== S6 ========== -->
+  <div class="section" id="s6">
+    <h2>⚡ mmap 读文件 vs read()：差在哪</h2>
+    <p>这是 mmap 最经典的优势场景。点按钮看两条路径的数据搬运次数。</p>
+    <div>
+      <button class="primary" id="playRead">▶ 播放 read() 路径</button>
+      <button id="playMmap">▶ 播放 mmap 路径</button>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg">
+        <rect x="20" y="20" width="150" height="50" rx="8" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+        <text x="95" y="50" text-anchor="middle" fill="#f0883e" font-size="12.5" font-weight="700">💾 磁盘</text>
+
+        <rect x="20" y="160" width="150" height="50" rx="8" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+        <text x="95" y="190" text-anchor="middle" fill="#f0883e" font-size="12.5" font-weight="700">💾 磁盘</text>
+
+        <!-- read 路径 -->
+        <text x="300" y="18" text-anchor="middle" fill="#8b949e" font-size="11.5">read() 路径</text>
+        <rect x="210" y="30" width="150" height="46" rx="8" fill="rgba(163,113,247,0.12)" stroke="#a371f7"/>
+        <text x="285" y="58" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="700">内核缓冲区</text>
+        <rect x="410" y="30" width="150" height="46" rx="8" fill="rgba(88,166,255,0.12)" stroke="#58a6ff"/>
+        <text x="485" y="58" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="700">用户 buf</text>
+        <rect x="610" y="30" width="130" height="46" rx="8" fill="rgba(63,185,80,0.1)" stroke="#3fb950"/>
+        <text x="675" y="58" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="700">你的代码</text>
+
+        <line id="r1" x1="170" y1="45" x2="210" y2="53" stroke="#f0883e" stroke-width="2.5" opacity="0.25"/>
+        <text x="190" y="34" fill="#8b949e" font-size="10">DMA</text>
+        <line id="r2" x1="360" y1="53" x2="410" y2="53" stroke="#f85149" stroke-width="2.5" opacity="0.25"/>
+        <text x="385" y="40" fill="#f85149" font-size="10">拷贝</text>
+        <line id="r3" x1="560" y1="53" x2="610" y2="53" stroke="#58a6ff" stroke-width="2.5" opacity="0.25"/>
+
+        <text id="readCost" x="300" y="100" text-anchor="middle" fill="#f85149" font-size="12">2 次数据搬运（磁盘→内核，内核→用户）</text>
+
+        <!-- mmap 路径 -->
+        <text x="300" y="135" text-anchor="middle" fill="#8b949e" font-size="11.5">mmap 路径</text>
+        <rect x="210" y="150" width="150" height="46" rx="8" fill="rgba(163,113,247,0.12)" stroke="#a371f7"/>
+        <text x="285" y="178" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="700">page cache</text>
+        <rect x="410" y="150" width="150" height="46" rx="8" fill="rgba(88,166,255,0.12)" stroke="#58a6ff"/>
+        <text x="485" y="178" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="700">映射区（直接指过去）</text>
+        <rect x="610" y="150" width="130" height="46" rx="8" fill="rgba(63,185,80,0.1)" stroke="#3fb950"/>
+        <text x="675" y="178" text-anchor="middle" fill="#7ee787" font-size="12" font-weight="700">你的代码</text>
+
+        <line id="m1" x1="170" y1="185" x2="210" y2="173" stroke="#f0883e" stroke-width="2.5" opacity="0.25"/>
+        <text x="190" y="165" fill="#8b949e" font-size="10">DMA</text>
+        <line id="m2" x1="360" y1="173" x2="410" y2="173" stroke="#3fb950" stroke-width="2.5" opacity="0.25" stroke-dasharray="4 3"/>
+        <text x="385" y="160" fill="#3fb950" font-size="10">0 拷贝</text>
+        <line id="m3" x1="560" y1="173" x2="610" y2="173" stroke="#58a6ff" stroke-width="2.5" opacity="0.25"/>
+
+        <text id="mmapCost" x="300" y="220" text-anchor="middle" fill="#3fb950" font-size="12">1 次数据搬运（磁盘→page cache），用户态直接访问该页</text>
+      </svg>
+      <div class="cap">mmap 省掉的是「内核缓冲区 → 用户缓冲区」这一次 CPU 拷贝</div>
+    </div>
+
+    <div class="grid2">
+      <div class="box box-green">
+        <b>mmap 适合的场景</b>
+        <ul>
+          <li>大文件、多次重复访问同一批页</li>
+          <li>随机访问（按需只把碰到的页读进来）</li>
+          <li>多进程共享同一份只读数据（如动态库）</li>
+        </ul>
+      </div>
+      <div class="box box-orange">
+        <b>mmap 不一定更快的情况</b>
+        <ul>
+          <li>小文件、顺序只读一次：缺页中断 + TLB 刷新可能比一次 read 更贵</li>
+          <li>每次缺页都有内核开销，可用 <code>MAP_POPULATE</code> 预读</li>
+          <li>32 位进程地址空间紧张，映射大文件容易放不下</li>
+        </ul>
+      </div>
+    </div>
+
+    <pre>// 用 mmap 读文件
+int fd = open("big.bin", O_RDONLY);
+struct stat st; fstat(fd, &st);
+char *p = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+// 之后就像操作内存一样操作文件内容
+printf("%c\n", p[1000]);
+munmap(p, st.st_size);</pre>
+  </div>
+
+  <!-- ========== S7 ========== -->
+  <div class="section" id="s7">
+    <h2>🛠️ 函数签名与参数</h2>
+    <pre>#include &lt;sys/mman.h&gt;
+
+void *mmap(void *addr,        // 建议起始地址，通常填 NULL 让内核选
+           size_t length,     // 映射长度（会向上取整到页大小 4KB 的倍数）
+           int prot,          // 权限：PROT_READ / PROT_WRITE / PROT_EXEC / PROT_NONE
+           int flags,         // 见下表
+           int fd,            // 文件描述符；匿名映射填 -1
+           off_t offset);     // 文件内偏移，必须是页大小的整数倍
+
+int munmap(void *addr, size_t length);
+int msync(void *addr, size_t len, int flags);   // 把修改刷回文件
+int mprotect(void *addr, size_t len, int prot); // 改权限</pre>
+
+    <table>
+      <tr><th>flags</th><th>含义</th></tr>
+      <tr><td class="mono">MAP_PRIVATE</td><td>私有：写入触发写时复制（COW），只本进程可见，不写回文件</td></tr>
+      <tr><td class="mono">MAP_SHARED</td><td>共享：写入对其他进程可见，文件映射会写回磁盘</td></tr>
+      <tr><td class="mono">MAP_ANONYMOUS</td><td>匿名：不关联文件（fd 填 -1），内容初始为 0</td></tr>
+      <tr><td class="mono">MAP_FIXED</td><td>必须映射到指定地址（危险，可能覆盖已有映射）</td></tr>
+      <tr><td class="mono">MAP_POPULATE</td><td>立刻预读页表，避免后续缺页抖动（用空间换时间）</td></tr>
+      <tr><td class="mono">MAP_HUGETLB</td><td>使用大页（2MB/1GB），减少 TLB miss</td></tr>
+      <tr><td class="mono">MAP_NORESERVE</td><td>不预留 swap 空间</td></tr>
+    </table>
+
+    <h3>⚠️ 常见坑</h3>
+    <table>
+      <tr><th>坑</th><th>说明</th></tr>
+      <tr><td><code>SIGBUS</code> 崩溃</td><td>映射了文件，但文件被别的进程<b>截断</b>了，再去访问超出范围的页 → 直接 SIGBUS（不是段错误）</td></tr>
+      <tr><td>offset 必须页对齐</td><td><code>offset</code> 必须是 4096 的整数倍，否则 <code>EINVAL</code></td></tr>
+      <tr><td>length 会向上取整</td><td>映射 1 字节也占一页，别用它分配大量小对象</td></tr>
+      <tr><td>MAP_SHARED 改了不落盘？</td><td>内核<b>延迟写回</b>，要确保持久化得调 <code>msync()</code>（类似 fsync）</td></tr>
+      <tr><td>忘记 munmap</td><td>地址空间泄漏；64 位下不炸，但 VMA 数量有上限（<code>max_map_count</code>）</td></tr>
+      <tr><td>映射长度超过文件</td><td>访问超出文件末尾的页（最后一页之内一般安全，跨页则 SIGBUS）</td></tr>
+    </table>
+
+    <h3>✅ 一句话带走</h3>
+    <div class="note ok">
+      <b>mmap 不是「分配内存」，而是「建立映射」</b>——在你的虚拟地址空间里圈一块地，把<b>文件或空地</b>贴上去。<br>
+      mmap 返回时只是<b>预约</b>（建 VMA），真正分配物理内存要等你<b>首次访问触发缺页</b>。<br>
+      内存分配里总看到它，是因为 <b>malloc 超过 128KB 就走 mmap</b>，这样 free 能立刻把内存还给操作系统。
+    </div>
+
+    <h3>🔗 对照速查</h3>
+    <table>
+      <tr><th>操作</th><th>mmap 世界</th><th>堆（malloc）世界</th></tr>
+      <tr><td>申请</td><td class="mono">mmap(...)</td><td class="mono">malloc(size)</td></tr>
+      <tr><td>粒度</td><td>页（4KB 起）</td><td>字节级（分配器切分）</td></tr>
+      <tr><td>释放</td><td class="mono">munmap → 立刻还给 OS</td><td class="mono">free → 留在分配器里复用</td></tr>
+      <tr><td>初始化</td><td>匿名映射保证全 0</td><td>malloc 内容未定义</td></tr>
+      <tr><td>典型用途</td><td>大块内存、文件、共享内存、栈</td><td>日常小对象</td></tr>
+    </table>
+  </div>
+
+  <footer>
+    <a href="../index.html">← 返回内存管理首页</a> ｜ <a href="../../index.html">返回操作系统首页</a> ｜ <a href="../../../index.html">返回总首页</a>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('.tab');
+  var secs = document.querySelectorAll('.section');
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      tabs.forEach(function (x) { x.classList.remove('active'); });
+      secs.forEach(function (s) { s.classList.remove('active'); });
+      t.classList.add('active');
+      document.getElementById(t.dataset.s).classList.add('active');
+    });
+  });
+
+  /* ---------- S3：动手 mmap ---------- */
+  var vmas = [], vseq = 0;
+  function renderVma() {
+    var box = document.getElementById('vmaList');
+    box.innerHTML = '';
+    if (!vmas.length) {
+      box.innerHTML = '<div style="color:#8b949e;font-size:13px;font-style:italic;">（还没有映射，点上面的「mmap 一块」）</div>';
+    }
+    vmas.forEach(function (v, i) {
+      var row = document.createElement('div');
+      row.className = 'vma-row' + (v.resident ? ' resident' : '');
+      var left = document.createElement('span');
+      left.textContent = '0x7f' + v.hex + '  ' + v.size;
+      var tag = document.createElement('span');
+      tag.className = 'tagx';
+      tag.textContent = v.resident ? '已兑现 ' + v.pages + ' 页' : '仅预约（0 物理页）';
+      var op = document.createElement('span');
+      op.className = 'op';
+      op.textContent = v.resident ? '' : '访问 »';
+      if (!v.resident) {
+        op.addEventListener('click', function () { v.resident = true; renderVma(); });
+      }
+      row.appendChild(left); row.appendChild(tag); row.appendChild(op);
+      box.appendChild(row);
+    });
+    var pages = vmas.reduce(function (a, v) { return a + (v.resident ? v.pages : 0); }, 0);
+    document.getElementById('vmaCount').textContent = vmas.length;
+    document.getElementById('pageCount').textContent = pages;
+  }
+  document.getElementById('btnMmap').addEventListener('click', function () {
+    vseq++;
+    vmas.push({ hex: (0x1000 + vseq * 0x4000).toString(16).padStart(8, '0'), size: '16 KB', pages: 4, resident: false });
+    renderVma();
+  });
+  document.getElementById('btnTouch').addEventListener('click', function () {
+    for (var i = 0; i < vmas.length; i++) { if (!vmas[i].resident) { vmas[i].resident = true; break; } }
+    renderVma();
+  });
+  document.getElementById('btnUnmap').addEventListener('click', function () { vmas.pop(); renderVma(); });
+  document.getElementById('btnReset').addEventListener('click', function () { vmas = []; vseq = 0; renderVma(); });
+  renderVma();
+
+  /* ---------- S4：模式切换 ---------- */
+  var groups = { mFile: 'modeFile', mAnon: 'modeAnon', mShared: 'modeShared' };
+  function showMode(id) {
+    Object.keys(groups).forEach(function (g) { document.getElementById(g).style.display = 'none'; });
+    document.getElementById(id).style.display = '';
+    ['modeFile', 'modeAnon', 'modeShared'].forEach(function (b) {
+      document.getElementById(b).classList.remove('primary');
+    });
+    document.getElementById(groups[id]).classList.add('primary');
+  }
+  document.getElementById('modeFile').addEventListener('click', function () { showMode('mFile'); });
+  document.getElementById('modeAnon').addEventListener('click', function () { showMode('mAnon'); });
+  document.getElementById('modeShared').addEventListener('click', function () { showMode('mShared'); });
+
+  /* ---------- S5：malloc 阈值 ---------- */
+  var sizes = [
+    { label: '1 KB', kb: 1 }, { label: '32 KB', kb: 32 }, { label: '100 KB', kb: 100 },
+    { label: '128 KB', kb: 128 }, { label: '256 KB', kb: 256 }, { label: '1 MB', kb: 1024 }, { label: '16 MB', kb: 16384 }
+  ];
+  var sl = document.getElementById('sizeSlider');
+  function renderSize() {
+    var s = sizes[+sl.value];
+    document.getElementById('sizeVal').textContent = s.label;
+    var v = document.getElementById('verdict');
+    if (s.kb >= 128) {
+      v.className = 'verdict box box-orange';
+      v.innerHTML = '<b>→ 走 mmap</b>：malloc 直接用 mmap 开一块独立映射区。' +
+        '<br>free() 时执行 munmap，<b>内存立刻归还操作系统</b>。' +
+        '<br>代价：至少占一页（4KB）起，且 mmap/munmap 是系统调用 + TLB 刷新。';
+    } else {
+      v.className = 'verdict box box-green';
+      v.innerHTML = '<b>→ 走堆（brk）</b>：从堆里切一块（fast bin / small bin / large bin / top chunk）。' +
+        '<br>free() 后<b>只是回到分配器的空闲链表</b>，进程还占着，不还给 OS。' +
+        '<br>好处：后续同尺寸分配可立刻复用，无系统调用开销。';
+    }
+  }
+  sl.addEventListener('input', renderSize);
+  renderSize();
+
+  /* ---------- S6：播放对比 ---------- */
+  function play(ids, ms) {
+    ids.forEach(function (id) { var e = document.getElementById(id); if (e) e.setAttribute('opacity', '0.25'); });
+    var i = 0;
+    var timer = setInterval(function () {
+      if (i >= ids.length) { clearInterval(timer); return; }
+      var e = document.getElementById(ids[i]);
+      if (e) e.setAttribute('opacity', '1');
+      i++;
+    }, ms);
+  }
+  document.getElementById('playRead').addEventListener('click', function () { play(['r1', 'r2', 'r3'], 500); });
+  document.getElementById('playMmap').addEventListener('click', function () { play(['m1', 'm2', 'm3'], 500); });
+})();
+</script>
+</body>
+</html>

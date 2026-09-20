@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CPU 特权模型：内核态 vs 用户态到底在保护谁</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0f172a;
+    --bg2: #1e293b;
+    --bg3: #334155;
+    --text: #e2e8f0;
+    --text2: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --green: #34d399;
+    --yellow: #fbbf24;
+    --red: #f87171;
+    --orange: #fb923c;
+    --purple: #c084fc;
+    --pink: #f472b6;
+    --teal: #2dd4bf;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+    display: flex; gap: 4px; padding: 12px 24px;
+    overflow-x: auto;
+  }
+  .nav-btn {
+    padding: 8px 18px; border-radius: 8px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--text2); font-size: 14px; cursor: pointer;
+    white-space: nowrap; transition: all 0.3s;
+  }
+  .nav-btn:hover { background: var(--bg2); color: var(--text); }
+  .nav-btn.active {
+    background: linear-gradient(135deg, rgba(56,189,248,0.15), rgba(129,140,248,0.15));
+    border-color: var(--accent); color: var(--accent);
+  }
+
+  .container { max-width: 1180px; margin: 0 auto; padding: 80px 24px 40px; }
+  .section { display: none; animation: fadeIn 0.4s ease; }
+  .section.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+  h1 { font-size: 30px; margin-bottom: 8px; }
+  h1 span { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .subtitle { color: var(--text2); font-size: 16px; margin-bottom: 28px; }
+  h2 { font-size: 22px; margin: 34px 0 14px; color: var(--accent); }
+  h3 { font-size: 17px; margin: 22px 0 10px; color: var(--accent2); }
+  p { font-size: 15px; margin-bottom: 12px; }
+  strong { color: #fff; }
+
+  .card {
+    background: var(--bg2); border: 1px solid rgba(56,189,248,0.1);
+    border-radius: 12px; padding: 20px; margin-bottom: 16px;
+  }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+
+  /* Rings */
+  .rings { display: flex; justify-content: center; padding: 28px 0; }
+  .ring {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; border-radius: 50%; border: 3px solid; gap: 14px;
+  }
+  .ring0 { width: 360px; height: 360px; background: rgba(56,189,248,0.08); border-color: var(--accent); color: var(--accent); }
+  .ring3 { width: 210px; height: 210px; background: rgba(192,132,252,0.1); border-color: var(--purple); color: var(--purple); }
+  .ring .lbl { font-size: 17px; font-weight: 700; }
+  .ring .sub { font-size: 12px; opacity: 0.85; max-width: 78%; }
+
+  /* Flow */
+  .flow-container { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; padding: 22px 0; }
+  .flow-box {
+    padding: 14px 20px; border-radius: 10px; font-size: 14px; font-weight: 600; text-align: center;
+    border: 2px solid; min-width: 130px; transition: all 0.3s;
+  }
+  .flow-box:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0,0,0,0.3); }
+  .flow-box .small { font-size: 11px; font-weight: 400; opacity: 0.75; display: block; margin-top: 3px; }
+  .flow-arrow { font-size: 22px; color: var(--text2); font-weight: 300; }
+  .st-kernel { border-color: var(--accent); background: rgba(56,189,248,0.12); color: var(--accent); }
+  .st-user { border-color: var(--purple); background: rgba(192,132,252,0.12); color: var(--purple); }
+  .st-hw { border-color: var(--yellow); background: rgba(251,191,36,0.12); color: var(--yellow); }
+  .st-bad { border-color: var(--red); background: rgba(248,113,113,0.12); color: var(--red); }
+
+  /* Comparison */
+  .cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  .cmp-col h4 { text-align: center; padding: 12px; border-radius: 8px 8px 0 0; font-size: 15px; }
+  .cmp-col .body { border: 1px solid rgba(255,255,255,0.08); border-radius: 0 0 8px 8px; padding: 16px; }
+  .cmp-col.has h4 { background: rgba(52,211,153,0.16); color: var(--green); }
+  .cmp-col.no h4 { background: rgba(248,113,113,0.16); color: var(--red); }
+  .cmp-item { padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+  .cmp-item:last-child { border-bottom: none; }
+
+  /* Table */
+  .res-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 12px 0; }
+  .res-table th { text-align: left; padding: 12px 16px; background: var(--bg3); color: var(--accent); border-bottom: 2px solid rgba(56,189,248,0.2); font-weight: 600; font-size: 13px; }
+  .res-table td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); vertical-align: top; }
+  .res-table tr:hover td { background: rgba(56,189,248,0.03); }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 4px; font-size: 12px; font-weight: 600; margin: 2px 4px 2px 0; }
+  .tag-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .tag-no { background: rgba(248,113,113,0.15); color: var(--red); }
+
+  /* Info boxes */
+  .info-box { background: rgba(56,189,248,0.08); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 12px 0; font-size: 14px; }
+  .info-box.warn { background: rgba(251,191,36,0.08); border-left-color: var(--yellow); }
+  .info-box.red { background: rgba(248,113,113,0.08); border-left-color: var(--red); }
+  .info-box.green { background: rgba(52,211,153,0.08); border-left-color: var(--green); }
+
+  /* Code */
+  pre.code-block { background: #0d1117; border: 1px solid rgba(56,189,248,0.15); border-radius: 10px; padding: 18px; overflow-x: auto; font-size: 13px; line-height: 1.7; margin: 14px 0; }
+  pre.code-block code { font-family: 'SF Mono','Fira Code','Consolas',monospace; color: var(--text); }
+  .cm { color: #6b7b8d; }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .num { color: #79c0ff; }
+  .sys { color: #7ee787; font-weight: 600; }
+
+  /* Misconception */
+  .myth { border-left: 3px solid var(--red); background: rgba(248,113,113,0.06); padding: 14px 18px; border-radius: 0 10px 10px 0; margin: 12px 0; }
+  .myth .wrong { color: var(--red); font-weight: 700; }
+  .myth .right { color: var(--green); font-weight: 700; }
+
+  .footer-note { margin-top: 30px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,0.08); color: var(--text2); font-size: 13px; }
+
+  @media (max-width: 768px) {
+    .cmp-grid { grid-template-columns: 1fr; }
+    .card-grid { grid-template-columns: 1fr; }
+    h1 { font-size: 24px; }
+    .ring0 { width: 280px; height: 280px; }
+    .ring3 { width: 160px; height: 160px; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <button class="nav-btn active" onclick="show(0)">🏠 总览</button>
+  <button class="nav-btn" onclick="show(1)">🎯 这是什么</button>
+  <button class="nav-btn" onclick="show(2)">❓ 为什么需要</button>
+  <button class="nav-btn" onclick="show(3)">⚙️ 硬件怎么实现</button>
+  <button class="nav-btn" onclick="show(4)">🔄 进程管理里干啥</button>
+  <button class="nav-btn" onclick="show(5)">⚖️ 到底为谁</button>
+  <button class="nav-btn" onclick="show(6)">🛡️ 解决什么问题</button>
+  <button class="nav-btn" onclick="show(7)">🧠 误区与速记</button>
+</nav>
+
+<div class="container">
+
+<!-- S0 总览 -->
+<div class="section active" id="s0">
+  <h1>CPU 特权模型：<span>内核态 vs 用户态</span>到底在保护谁</h1>
+  <p class="subtitle">特权分级是 CPU 硬件给"进程隔离 + 系统保护"打下的地基——它决定了一段代码能碰什么指令、能摸哪块内存。</p>
+
+  <h2>🗺️ 一句话先入脑</h2>
+  <div class="card">
+    <p style="font-size:15px;"><strong>CPU 特权模型</strong>就是 CPU 内置的一套"权限分级"：把代码分成不同特权级别，<strong>低级别不能乱动高级别的资源</strong>。它最常被简化成两级——<strong>内核态（Ring 0，最高特权）</strong>和<strong>用户态（Ring 3，默认低特权）</strong>。</p>
+    <div class="info-box" style="margin-top:12px;">
+      <strong>类比：</strong>整台电脑像一栋大楼，所有进程是租客，操作系统是大楼管理处。用户态 = 租客被关在自己房间里（能用自己的东西，不能随便进别人家、不能动电闸）；内核态 = 管理处持有的万能钥匙（能修电路、能调度公共区域）。特权模型就是"这栋楼的物理门禁"，由钢筋水泥（硬件）强制，不是靠租客自觉。
+    </div>
+  </div>
+
+  <h2>🔘 特权环（保护环）一览</h2>
+  <div class="rings">
+    <div class="ring ring0">
+      <div class="lbl">Ring 0 · 内核态</div>
+      <div class="sub">可执行特权指令 · 访问全部内存（含内核空间）· 直接操作设备</div>
+      <div class="ring ring3">
+        <div class="lbl">Ring 3 · 用户态</div>
+        <div class="sub">只能跑普通指令 · 只能访问自己的用户地址空间</div>
+      </div>
+    </div>
+  </div>
+  <p style="text-align:center;color:var(--text2);font-size:13px;">x86 实际有 4 个环（Ring 0~3），但现代 OS 几乎只用 0 和 3；Ring 1/2 大多闲置。</p>
+</div>
+
+<!-- S1 这是什么 -->
+<div class="section" id="s1">
+  <h1>🎯 特权模型 <span>到底是什么</span></h1>
+
+  <h2>1. 特权级别是 CPU 的一个硬件状态</h2>
+  <div class="card">
+    <p>在 x86 上，当前特权级叫 <strong>CPL（Current Privilege Level）</strong>，存在 <code>CS</code> 段选择子的低 2 位里，取值 0~3。ARM 叫<strong>异常级别 EL0~EL3</strong>（EL0=用户，EL1=内核），RISC-V 叫<strong>U/S/M 模式</strong>。它不是软件里的一个 bool 变量，而是 CPU 真正在每次执行指令、每次访问内存时都会检查的<strong>硬件状态位</strong>。</p>
+  </div>
+
+  <h2>2. 它在检查两件事</h2>
+  <div class="card-grid">
+    <div class="card" style="border-color:rgba(248,113,113,0.3)">
+      <h3 style="color:var(--red)">① 指令特权</h3>
+      <p>有些指令被标记为<strong>特权指令</strong>，只能在内核态执行。用户态一旦执行，CPU 立刻抛出 <code>#GP</code> 异常。典型的有：</p>
+      <p><code>hlt</code>（停机）、<code>cli/sti</code>（开关中断）、<code>in/out</code>（端口 IO）、写控制寄存器 <code>cr0/cr3</code>、<code>lgdt/lidt</code>（加载全局/中断描述符表）、<code>invlpg</code>（刷 TLB）等。</p>
+    </div>
+    <div class="card" style="border-color:rgba(56,189,248,0.3)">
+      <h3 style="color:var(--accent)">② 内存特权</h3>
+      <p>配合<strong>虚拟内存 + 页表权限位</strong>，内核态可访问<strong>全部</strong>虚拟地址（内核空间 + 用户空间）；用户态只能访问<strong>自己的用户空间</strong>。去碰内核地址 → 触发<code>#PF</code> 页错误，内核直接判它越界。</p>
+    </div>
+  </div>
+
+  <h2>3. 两级 vs 四级</h2>
+  <div class="info-box">
+    x86 给了 4 个环，但 Linux / Windows 这种通用 OS 只启用 <strong>Ring 0（内核态）</strong>和 <strong>Ring 3（用户态）</strong>。Ring 1/2 历史上想给设备驱动或虚拟机监视器用，结果大家发现"两级够用且简单"，就把中间两级空着了。所以日常讨论里"特权模型"≈"双态模型"。
+  </div>
+</div>
+
+<!-- S2 为什么需要 -->
+<div class="section" id="s2">
+  <h1>❓ 为什么 <span>非要有</span> 特权模型</h1>
+
+  <h2>根本矛盾：大家共享同一台机器</h2>
+  <div class="card">
+    <p>一台电脑上，<strong>多个进程 + 操作系统，共用同一颗 CPU、同一片物理内存、同一批硬件设备</strong>。如果这些代码"权利平等、都能直接摸硬件"，会发生什么？下面这张图就是没有围栏的世界：</p>
+    <div class="flow-container">
+      <div class="flow-box st-user">😈 进程 A<br><span class="small">用户态但能直接摸硬件</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box st-bad">📖 读进程 B 内存<br><span class="small">偷密码 / 偷数据</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box st-bad">💾 直写磁盘控制器<br><span class="small">破坏文件系统</span></div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box st-bad">⛔ hlt / cli<br><span class="small">整机卡死</span></div>
+    </div>
+  </div>
+
+  <h2>没有特权分级，至少塌掉五件事</h2>
+  <div class="card-grid">
+    <div class="card"><h3 style="color:var(--red)">① 无隔离</h3><p>进程 A 能直接读进程 B 的内存，密码、聊天记录随便偷。</p></div>
+    <div class="card"><h3 style="color:var(--red)">② 无保护</h3><p>进程能直接写磁盘/网卡控制器，一个程序就能把别人的文件删光、把网络搞瘫。</p></div>
+    <div class="card"><h3 style="color:var(--red)">③ 一崩全崩</h3><p>某个程序的野指针戳到 OS 内核数据结构 → 整个系统蓝屏/死机。</p></div>
+    <div class="card"><h3 style="color:var(--red)">④ 可被霸占</h3><p>进程能 <code>cli</code> 关中断、<code>hlt</code> 停机，轻松让整机失去响应。</p></div>
+    <div class="card"><h3 style="color:var(--red)">⑤ 无法仲裁</h3><p>没有"更高的裁判"，谁都能抢资源，调度和配额根本无从强制。</p></div>
+  </div>
+
+  <div class="info-box red">
+    <strong>历史旁证：</strong>早期的 DOS、Windows 9x 基本是"全程用户态 + 软件约定保护"，结果一个程序死、全机死，一个病毒全机没。现代 OS（NT 系、Linux）强制 Ring 0/3 分离后，稳定性是质的飞跃。特权模型就是为消灭上面这五种灾难而生的<strong>硬件强制围栏</strong>——靠程序自觉是没用的，必须由 CPU 在每条指令上兜底。
+  </div>
+</div>
+
+<!-- S3 硬件实现 -->
+<div class="section" id="s3">
+  <h1>⚙️ 硬件 <span>怎么实现</span> 模式切换</h1>
+
+  <h2>核心铁律：用户态不能自己升特权</h2>
+  <div class="card">
+    <p>如果进程能随便把自己的 CPL 从 3 改成 0，那围栏就形同虚设。所以 CPU 规定：<strong>提升特权只有一条合法路径——通过预先注册好的"受控入口"</strong>。用户代码无法伪造这次跳跃。</p>
+  </div>
+
+  <h2>三类会"陷入"内核的事件</h2>
+  <div class="flow-container">
+    <div class="flow-box st-user">👤 用户进程<br><span class="small">用户态</span></div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-hw">🚪 受控入口<br><span class="small">syscall / int / 中断</span></div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-kernel">🛡️ 内核处理<br><span class="small">硬件自动升到 Ring 0</span></div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-hw">↩️ sysret / iret</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-user">👤 回用户态</div>
+  </div>
+  <div class="card-grid">
+    <div class="card"><h3 style="color:var(--green)">系统调用（主动）</h3><p>进程主动请求服务：<code>read()</code>、<code>fork()</code>、<code>mmap()</code>。现代用 <code>syscall</code>/<code>sysenter</code> 指令，老式用 <code>int 0x80</code>。</p></div>
+    <div class="card"><h3 style="color:var(--yellow)">异常（被动·程序犯错）</h3><p>缺页 <code>#PF</code>、除零、非法指令、用户态执行特权指令触发的 <code>#GP</code>。内核捕获后或修复、或杀进程。</p></div>
+    <div class="card"><h3 style="color:var(--accent)">中断（被动·外界事件）</h3><p>时钟 tick、网卡来包、磁盘完成。硬件打断当前执行，跳到内核中断处理程序。</p></div>
+  </div>
+
+  <h2>切换的硬件动作</h2>
+  <p>以系统调用为例，CPU 硬件自动完成：</p>
+  <pre class="code-block"><code><span class="cm"># 用户态程序想读文件，自己没权限，只能"申请"</span>
+mov  rax, <span class="num">0</span>          <span class="cm"># sys_read 的编号</span>
+<span class="kw">syscall</span>              <span class="cm"># ← 硬件在此：把 CPL 升到 0、切到内核栈、跳到内核 syscall 入口</span>
+                   <span class="cm">#   内核校验"你有权读这个 fd 吗"→ 真正去读 → 把结果放回寄存器</span>
+                   <span class="cm">#   sysret：把 CPL 降回 3，回到这里继续执行</span></code></pre>
+  <div class="info-box">
+    <strong>关键点：</strong>入口地址、内核栈、允许的特权级，都是内核<strong>事先</strong>在 IDT/GDT 里注册好的。硬件只会认这些预定入口来提升 CPL，用户代码无法凭空造一个。这正是特权模型"可信"的根——<strong>上升特权这件事，CPU 替你强制走正门</strong>。
+  </div>
+</div>
+
+<!-- S4 进程管理 -->
+<div class="section" id="s4">
+  <h1>🔄 进程管理里 <span>它干啥</span></h1>
+
+  <h2>普通进程：99% 时间在用户态</h2>
+  <div class="card">
+    <p>一个进程跑你的业务逻辑——算数、循环、调普通库函数——<strong>全在用户态</strong>。这时候它碰不到硬件、进不了内核空间，被关在自己的地址空间里。</p>
+  </div>
+
+  <h2>需要"自己做不到的事"→ 系统调用陷入内核</h2>
+  <div class="flow-container">
+    <div class="flow-box st-user">进程要读文件</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-hw">syscall</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-kernel">内核代劳<br><span class="small">先校验权限，再操作</span></div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box st-user">结果返回</div>
+  </div>
+  <p>读文件、收发网络、申请内存、创建子进程、退出……凡是碰资源的，进程都得"申请"，由内核在更高特权下<strong>替它完成并先做合法性检查</strong>（比如"这个文件你有权读吗"）。</p>
+
+  <h2>进程管理本身：核心操作全在内核态</h2>
+  <div class="card-grid">
+    <div class="card"><h3 style="color:var(--accent)">创建进程</h3><p><code>fork/clone</code>：分配 PID、建 PCB、复制地址空间——动的是全局进程表，必须在内核态。</p></div>
+    <div class="card"><h3 style="color:var(--accent)">调度</h3><p><code>schedule()</code>：决定下一个跑谁，改的是全局调度状态，多个 CPU 共享，必须内核态。</p></div>
+    <div class="card"><h3 style="color:var(--accent)">上下文切换</h3><p>保存/恢复寄存器、切换页表（写 <code>cr3</code>）——直接碰 CPU 控制和 MMU，是特权指令。</p></div>
+    <div class="card"><h3 style="color:var(--accent)">销毁进程</h3><p>回收资源、从进程表摘除——同样动全局结构，内核态执行。</p></div>
+  </div>
+
+  <div class="info-box warn">
+    <strong>越界即被抓：</strong>如果某进程在用户态"手痒"去执行特权指令（比如自己想改 <code>cr3</code> 切页表），CPU 立刻抛 <code>#GP</code>，内核捕获后通常直接<strong>杀掉</strong>这个进程（发 SIGSEGV）。围栏在起作用——进程根本越不了界，更别说偷偷接管系统。
+  </div>
+  <div class="info-box">
+    <strong>易混点：</strong>"陷入内核"≠"进程变成了内核进程"。进程始终是一个<strong>用户进程</strong>，只是临时借内核态执行系统调用，干完立刻回用户态。<strong>内核态是 CPU 的执行级别，不是进程的身份。</strong>
+  </div>
+</div>
+
+<!-- S5 到底为谁 -->
+<div class="section" id="s5">
+  <h1>⚖️ 内核态 vs 用户态 <span>到底为谁服务</span></h1>
+  <p class="subtitle">这是最容易被想歪的一点。先把两个常见误解拆掉。</p>
+
+  <div class="myth">
+    <p><span class="wrong">✗ 误解一：</span>"内核态是给操作系统享福的特权，用户态是给老百姓受罪的。"</p>
+    <p style="margin-top:8px;"><span class="right">✓ 正解：</span>特权不是 OS 的"福利"，而是 OS 作为<strong>裁判</strong>必须拿到的<strong>执法权</strong>。没有这把最高权，它就无法强制任何规则。</p>
+  </div>
+  <div class="myth">
+    <p><span class="wrong">✗ 误解二：</span>"用户态是操作系统给用户程序的好处。"</p>
+    <p style="margin-top:8px;"><span class="right">✓ 正解：</span>用户态其实是<strong>套在用户程序身上的笼子</strong>——是限制，不是恩赐。</p>
+  </div>
+
+  <h2>正确的 framing：它是一套保护机制，不是"服务谁"</h2>
+  <div class="card">
+    <p>特权模型的<strong>目的不是"服务 X"，而是"隔离谁、防住谁"</strong>。最终受益的是<strong>所有用户（和系统整体）</strong>：</p>
+    <div class="card-grid" style="margin-top:12px;">
+      <div class="card" style="border-color:rgba(192,132,252,0.3)">
+        <h3 style="color:var(--purple)">用户态限制"进程"</h3>
+        <p>你的进程被关在笼子里 → <strong>你自己的 bug 不会炸了全机</strong>；你也进不了别人的笼子 → <strong>别人的密码/文件偷不到</strong>。</p>
+      </div>
+      <div class="card" style="border-color:rgba(56,189,248,0.3)">
+        <h3 style="color:var(--accent)">内核态赋予"OS 执法权"</h3>
+        <p>OS 站到最高处，才能<strong>公平地给所有用户当裁判</strong>：统一调度 CPU、统一管内存、统一把关每一次资源访问。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box green">
+    <strong>记忆口诀：</strong><br>
+    • <strong>用户态</strong>限制的是「进程」，保护的是「用户（们）」；<br>
+    • <strong>内核态</strong>赋予的是「OS 的执法权」，守护的是「整个系统的稳定与安全」。<br><br>
+    所以回答你的问题：它既不是"只服务 OS"，也不是"只服务用户"——它是<strong>通过让 OS 站在最高特权来强制规则，最终保护每一个用户和系统本身</strong>。OS 跑在内核态，是因为只有它站得够高，才能既管住进程、又不被进程架空。
+  </div>
+</div>
+
+<!-- S6 解决什么问题 -->
+<div class="section" id="s6">
+  <h1>🛡️ 它 <span>解决了什么问题</span></h1>
+
+  <h2>五大收益</h2>
+  <div class="card-grid">
+    <div class="card"><h3 style="color:var(--green)">① 隔离</h3><p>进程间地址空间互不连通，A 看不到 B 的内存。</p></div>
+    <div class="card"><h3 style="color:var(--green)">② 保护</h3><p>内核、硬件、他人数据不被任意进程乱碰。</p></div>
+    <div class="card"><h3 style="color:var(--green)">③ 多道程序</h3><p>互不信任的程序能安全共享同一颗 CPU 并发跑。</p></div>
+    <div class="card"><h3 style="color:var(--green)">④ 稳定</h3><p>一个程序崩，不影响别的进程，更不崩 OS。</p></div>
+    <div class="card"><h3 style="color:var(--green)">⑤ 可控仲裁</h3><p>谁用多少 CPU/内存，由内核统一强制调度。</p></div>
+  </div>
+
+  <h2>有 vs 没有：一张表看明白</h2>
+  <div class="cmp-grid">
+    <div class="cmp-col has">
+      <h4>✅ 有特权模型（现代 OS）</h4>
+      <div class="body">
+        <div class="cmp-item"><span class="tag tag-yes">隔离</span>进程地址空间独立</div>
+        <div class="cmp-item"><span class="tag tag-yes">保护</span>内核/硬件不被用户乱改</div>
+        <div class="cmp-item"><span class="tag tag-yes">稳定</span>单进程崩溃被内核收拾</div>
+        <div class="cmp-item"><span class="tag tag-yes">多租户</span>多用户安全共存</div>
+        <div class="cmp-item"><span class="tag tag-yes">仲裁</span>调度由内核强制</div>
+      </div>
+    </div>
+    <div class="cmp-col no">
+      <h4>❌ 没有（DOS / Win9x 风）</h4>
+      <div class="body">
+        <div class="cmp-item"><span class="tag tag-no">无隔离</span>进程互读内存</div>
+        <div class="cmp-item"><span class="tag tag-no">无保护</span>任意程序改硬件</div>
+        <div class="cmp-item"><span class="tag tag-no">易崩</span>一程序死全机死</div>
+        <div class="cmp-item"><span class="tag tag-no">裸奔</span>多用户无法隔离</div>
+        <div class="cmp-item"><span class="tag tag-no">无仲裁</span>谁抢到算谁的</div>
+      </div>
+    </div>
+  </div>
+
+  <h2>它和"虚拟内存 / 进程"的关系</h2>
+  <div class="card">
+    <p>特权模型是<strong>最底层的地基</strong>，上面两层都靠它立住：</p>
+    <table class="res-table">
+      <thead><tr><th>机制</th><th>靠特权模型做什么</th></tr></thead>
+      <tbody>
+        <tr><td><strong>虚拟内存</strong></td><td>页表的"内核只读/用户可读写"权限位，必须由内核态设置；用户态碰内核页 → <code>#PF</code>。地址隔离本质是"特权 + 页表"合力。</td></tr>
+        <tr><td><strong>进程</strong></td><td>进程是"资源 + 执行上下文"的载体，而上下文切换（写 <code>cr3</code>、改特权级）只能在内核态完成。没有特权模型，就没有安全的多进程。</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- S7 误区与速记 -->
+<div class="section" id="s7">
+  <h1>🧠 误区与 <span>速记</span></h1>
+
+  <h2>三个高频误区</h2>
+  <div class="myth">
+    <p><span class="wrong">✗ 误区：</span>内核态是"操作系统专属模式"，用户程序永远进不去。</p>
+    <p><span class="right">✓ 正解：</span>用户程序通过<strong>系统调用/异常/中断</strong>会频繁进入内核态，只是"进入"由硬件强制走正门、且干完就回。</p>
+  </div>
+  <div class="myth">
+    <p><span class="wrong">✗ 误区：</span>特权模型是为了"让 OS 运行得更快/更方便"。</p>
+    <p><span class="right">✓ 正解：</span>它牺牲了一点性能（模式切换有开销），换来的是<strong>安全与稳定</strong>。是取舍，不是加速。</p>
+  </div>
+  <div class="myth">
+    <p><span class="wrong">✗ 误区：</span>用户态比内核态"低级"，所以用户程序不如 OS 重要。</p>
+    <p><span class="right">✓ 正解：</span>特权高低是"责任大小"，不是"地位高低"。内核态是扛责任的执法权，用户态是被保护的对象；两者配合，系统才既安全又好用。</p>
+  </div>
+
+  <h2>考试速记卡</h2>
+  <div class="card">
+    <p style="font-size:15px;"><strong>1. 是什么：</strong>CPU 硬件的权限分级，x86 用 CPL（Ring 0~3），实际只启用 Ring 0（内核态）与 Ring 3（用户态）。</p>
+    <p style="font-size:15px;"><strong>2. 查什么：</strong>① 指令特权（特权指令只能 Ring 0）② 内存特权（用户态只能碰自己地址空间）。</p>
+    <p style="font-size:15px;"><strong>3. 为什么：</strong>多进程+OS 共享 CPU/内存/设备，无围栏则无隔离、无保护、一崩全崩、可被霸占、无法仲裁。</p>
+    <p style="font-size:15px;"><strong>4. 怎么升权：</strong>用户态不能自改 CPL；只能走 syscall/int/中断这些硬件预定入口，CPU 自动升到 Ring 0。</p>
+    <p style="font-size:15px;"><strong>5. 进程里：</strong>进程平时用户态；要资源就系统调用陷入内核；创建/调度/上下文切换/销毁全在内核态。</p>
+    <p style="font-size:15px;"><strong>6. 为谁：</strong>不是服务谁，是保护谁。用户态限制进程、保护用户；内核态给 OS 执法权、守护系统整体。</p>
+  </div>
+
+  <div class="footer-note">
+    相关阅读：同目录《进程生命周期》《进程结构》《fork 后父子进程共享 Socket 吗》，以及上层《线程管理》《虚拟内存》。特权模型是理解"为什么系统调用要陷入内核""为什么一个程序崩不了全机"的钥匙。
+  </div>
+</div>
+
+</div>
+
+<script>
+function show(idx) {
+  document.querySelectorAll('.section').forEach((s, i) => {
+    s.classList.toggle('active', i === idx);
+  });
+  document.querySelectorAll('.nav-btn').forEach((b, i) => {
+    b.classList.toggle('active', i === idx);
+  });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+</script>
+
+</body>
+</html>

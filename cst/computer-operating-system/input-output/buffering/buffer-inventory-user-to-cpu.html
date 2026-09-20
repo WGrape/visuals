@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>从用户态到 CPU：到底有多少个缓冲区？—— 一次把 buffer / cache 数清楚</title>
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+    background: #0d1117; color: #e6edf3;
+    margin: 0; line-height: 1.8; font-size: 15px;
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 50; background: rgba(13,17,23,.94);
+    backdrop-filter: blur(8px); border-bottom: 1px solid #30363d;
+    padding: 10px 22px; display: flex; gap: 11px; flex-wrap: wrap;
+  }
+  .nav a { color: #8b949e; text-decoration: none; font-size: 13px; padding: 4px 9px; border-radius: 6px; }
+  .nav a:hover { color: #e6edf3; background: #161b22; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 30px 24px 90px; }
+  h1 { font-size: 27px; margin: 0 0 8px; line-height: 1.4; color: #58a6ff; }
+  h2 { font-size: 21px; margin: 50px 0 14px; padding-left: 12px; border-left: 4px solid #1f6feb; }
+  h3 { font-size: 17px; margin: 24px 0 10px; color: #58a6ff; }
+  h4 { font-size: 15px; margin: 16px 0 6px; color: #e6edf3; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0 10px 22px; }
+  li { margin: 5px 0; }
+  .subtitle { color: #8b949e; font-size: 15px; margin-bottom: 18px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px 22px; margin: 16px 0; }
+  .card.red { border-left: 4px solid #f85149; }
+  .card.green { border-left: 4px solid #3fb950; }
+  .card.blue { border-left: 4px solid #58a6ff; }
+  .card.yellow { border-left: 4px solid #e3b341; }
+  .card.purple { border-left: 4px solid #bc8cff; }
+  code { background: #0d1117; border: 1px solid #30363d; padding: 1px 6px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: #e3b341; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px; overflow-x: auto; font-family: Consolas, monospace; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; border: none; padding: 0; color: #c9d1d9; }
+  .cmt { color: #8b949e; }
+  .kw { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .fn { color: #d2a8ff; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid #30363d; padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: #161b22; color: #58a6ff; }
+  tbody tr:nth-child(even) { background: #12171e; }
+  .svgbox { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px; margin: 18px 0; overflow-x: auto; }
+  .svgbox svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  figcaption { text-align: center; color: #8b949e; font-size: 13px; margin-top: 10px; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px; margin: 2px 4px 2px 0; }
+  .tag.b { background: rgba(88,166,255,.12); color: #58a6ff; border: 1px solid #58a6ff; }
+  .tag.g { background: rgba(63,185,80,.12); color: #3fb950; border: 1px solid #3fb950; }
+  .tag.r { background: rgba(248,81,73,.12); color: #f85149; border: 1px solid #f85149; }
+  .tag.y { background: rgba(227,179,65,.12); color: #e3b341; border: 1px solid #e3b341; }
+  .tag.p { background: rgba(188,140,255,.12); color: #bc8cff; border: 1px solid #bc8cff; }
+  .hl { color: #e3b341; font-weight: 700; }
+  .hl2 { color: #3fb950; font-weight: 700; }
+  .hl3 { color: #bc8cff; font-weight: 700; }
+  .foot { color: #8b949e; font-size: 13px; margin-top: 60px; border-top: 1px solid #30363d; padding-top: 20px; }
+  .foot a { color: #58a6ff; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin: 16px 0; }
+  .mini { background: #0d1117; border: 1px solid #30363d; border-radius: 9px; padding: 13px 15px; }
+  .mini h4 { margin: 0 0 6px; font-size: 14px; }
+  .mini p { margin: 0; font-size: 13px; color: #8b949e; }
+  .zone { display: inline-block; padding: 1px 8px; border-radius: 5px; font-size: 12px; font-weight: 700; }
+  .z-user { background: rgba(188,140,255,.16); color: #bc8cff; }
+  .z-kern { background: rgba(88,166,255,.16); color: #58a6ff; }
+  .z-dev  { background: rgba(227,179,65,.16); color: #e3b341; }
+  .z-cpu  { background: rgba(63,185,80,.16); color: #3fb950; }
+  /* 交互 */
+  .btnrow { display: flex; flex-wrap: wrap; gap: 9px; margin: 14px 0; }
+  .btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13.5px; }
+  .btn:hover { border-color: #58a6ff; }
+  .btn.on { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
+  .pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: #0d1117; border: 1px solid #30363d; border-radius: 9px; padding: 14px; margin: 12px 0; }
+  .pbox { border-radius: 7px; padding: 7px 10px; font-size: 12px; line-height: 1.45; border: 1.5px solid #30363d; background: #161b22; text-align: center; }
+  .pbox small { display: block; color: #8b949e; font-size: 10.5px; }
+  .pbox.user { border-color: #bc8cff; background: rgba(188,140,255,.12); }
+  .pbox.kern { border-color: #58a6ff; background: rgba(88,166,255,.12); }
+  .pbox.dev  { border-color: #e3b341; background: rgba(227,179,65,.12); }
+  .pbox.med  { border-color: #30363d; }
+  .arrow { color: #8b949e; font-size: 15px; padding: 0 2px; }
+  .copy { font-size: 11px; color: #e3b341; font-weight: 700; }
+  .copy.dma { color: #3fb950; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+  .stat { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 9px 15px; font-size: 12.5px; color: #8b949e; }
+  .stat b { display: block; font-size: 20px; color: #e6edf3; }
+  .stat.g b { color: #3fb950; } .stat.y b { color: #e3b341; } .stat.r b { color: #f85149; } .stat.b b { color: #58a6ff; }
+  .expl { background: #0d1117; border: 1px solid #30363d; border-radius: 9px; padding: 13px 15px; margin: 12px 0; font-size: 13.5px; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="#why">① 为什么这么多</a>
+  <a href="#map">② 全链路地图</a>
+  <a href="#user">③ 用户态缓冲</a>
+  <a href="#file">④ 内核·磁盘路径</a>
+  <a href="#net">⑤ 内核·网络路径</a>
+  <a href="#other">⑥ 内核·其他通道</a>
+  <a href="#dev">⑦ 设备与 DMA</a>
+  <a href="#cpu">⑧ CPU 与内存硬件</a>
+  <a href="#cls">⑨ 三种分类法</a>
+  <a href="#sim">⑩ 拷贝次数对比器</a>
+  <a href="#full">⑪ 全链路总表</a>
+  <a href="#cmd">⑫ 观测命令</a>
+</div>
+
+<div class="wrap">
+
+<h1>从用户态到 CPU：到底有多少个缓冲区？</h1>
+<p class="subtitle">把 buffer / cache 一层层数清楚 —— 为什么同样一个 <code>read()</code>，中间能藏下十几个缓冲区</p>
+
+<div class="card blue">
+  <p><b>先给你吃颗定心丸：</b>缓冲区看着多，但它不是随便堆的。<b>整个体系只有一个生成规律——「凡是两端速度不一样的地方，就插一个缓冲垫」</b>。你之所以觉得乱，是因为这些缓冲垫分布在不同层（用户态 / 内核态 / 设备 / CPU）、不同方向（读 / 写）、还分两种性质（<b>装数据的</b> vs <b>只装指针/描述符的</b>）。</p>
+  <p>把这四个维度理清，下面这 30 来个缓冲区立刻就有位置了。本文按「<span class="zone z-cpu">CPU</span> → <span class="zone z-user">用户态</span> → <span class="zone z-kern">内核态</span> → <span class="zone z-dev">设备硬件</span> → 介质」自顶向下走一遍，一个都不漏。</p>
+</div>
+
+<!-- ══════════════════ ① ══════════════════ -->
+<h2 id="why">① 为什么会有这么多缓冲区？只有三个根本原因</h2>
+
+<p>别从「名字」去记，要从「<b>它在弥合哪两端的差距</b>」去记。缓冲区存在的理由只有三类：</p>
+
+<div class="grid">
+  <div class="mini">
+    <h4>🕐 原因一：弥合<b>速度差</b></h4>
+    <p>CPU 纳秒级、内存几十纳秒、NVMe 微秒级、网卡微秒级、机械盘毫秒级。慢的一端不能一直占着快的一端等，于是中间垫一块内存，快的一方写完就走，慢的一方自己慢慢搬。<br><b>例子：</b>页缓存、socket 缓冲、网卡 ring、CPU store buffer。</p>
+  </div>
+  <div class="mini">
+    <h4>📦 原因二：弥合<b>粒度差</b></h4>
+    <p>你可能一次只写 10 字节，但磁盘最小读写单位是 512B / 4KB。零碎地搬是灾难。<br><b>例子：</b>glibc stdio 攒够 8KB 才 syscall、TCP 攒够 MSS 才发一个段、块层把相邻请求合并（merge）。</p>
+  </div>
+  <div class="mini">
+    <h4>🔓 原因三：<b>解耦</b>（异步化）</h4>
+    <p>调用方和被调方不能绑死在时间上。发消息的人不想等接收方处理完，于是把数据丢进缓冲区就返回。<br><b>例子：</b>管道缓冲、消息队列、<code>write()</code> 把数据丢进页缓存就返回（异步回写）。</p>
+  </div>
+</div>
+
+<div class="card yellow">
+  <h4>还有一个「让数量翻倍」的隐藏规律：<b>对称性</b></h4>
+  <p>同一个子系统，几乎总是<b>成对</b>出现缓冲：</p>
+  <ul>
+    <li><b>读方向 / 写方向</b>：页缓存（读缓存）↔ 脏页 + 回写队列（写缓存）</li>
+    <li><b>发送 / 接收</b>：TCP <code>sk_sndbuf</code>（发送缓冲）↔ <code>sk_rcvbuf</code>（接收缓冲）</li>
+    <li><b>网卡出 / 入</b>：TX ring ↔ RX ring</li>
+    <li><b>内存写 / 读</b>：CPU store buffer ↔ load buffer</li>
+  </ul>
+  <p>所以「感觉好多」，一半是因为<b>天然的对称导致数量 ×2</b>。你只要记住一组，另一组就是镜像。</p>
+</div>
+
+<!-- ══════════════════ ② ══════════════════ -->
+<h2 id="map">② 全链路地图：所有缓冲区一眼看全</h2>
+
+<p>先看全景。这张图从最顶上的 CPU 寄存器，一直到最底下的物理磁盘和网线，把每一层的缓冲区都标了名字。<b>纵轴就是「离 CPU 从近到远」</b>。</p>
+
+<div class="svgbox">
+<svg viewBox="0 0 680 700" xmlns="http://www.w3.org/2000/svg" font-family="PingFang SC,Microsoft YaHei,sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8b949e"/></marker>
+    <marker id="arG" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fb950"/></marker>
+  </defs>
+
+  <!-- CPU 带 -->
+  <rect x="10" y="10" width="660" height="112" rx="11" fill="rgba(63,185,80,.07)" stroke="#3fb950" stroke-width="1.2"/>
+  <text x="24" y="32" font-size="12.5" font-weight="700" fill="#3fb950">CPU 芯片内部（纳秒级）</text>
+  <rect x="26" y="42" width="120" height="38" rx="7" fill="#161b22" stroke="#3fb950"/>
+  <text x="86" y="59" font-size="10.5" fill="#e6edf3" text-anchor="middle">寄存器 register</text>
+  <text x="86" y="73" font-size="9" fill="#8b949e" text-anchor="middle">L0 · 几百字节</text>
+  <rect x="156" y="42" width="120" height="38" rx="7" fill="#161b22" stroke="#3fb950"/>
+  <text x="216" y="59" font-size="10.5" fill="#e6edf3" text-anchor="middle">Store Buffer</text>
+  <text x="216" y="73" font-size="9" fill="#8b949e" text-anchor="middle">写缓冲 · 几十条</text>
+  <rect x="286" y="42" width="120" height="38" rx="7" fill="#161b22" stroke="#3fb950"/>
+  <text x="346" y="59" font-size="10.5" fill="#e6edf3" text-anchor="middle">L1 / L2 Cache</text>
+  <text x="346" y="73" font-size="9" fill="#8b949e" text-anchor="middle">32KB / 1MB · 行64B</text>
+  <rect x="416" y="42" width="120" height="38" rx="7" fill="#161b22" stroke="#3fb950"/>
+  <text x="476" y="59" font-size="10.5" fill="#e6edf3" text-anchor="middle">L3 Cache</text>
+  <text x="476" y="73" font-size="9" fill="#8b949e" text-anchor="middle">共享 · 8~64MB</text>
+  <rect x="546" y="42" width="112" height="38" rx="7" fill="#161b22" stroke="#3fb950"/>
+  <text x="602" y="59" font-size="10.5" fill="#e6edf3" text-anchor="middle">TLB / IOTLB</text>
+  <text x="602" y="73" font-size="9" fill="#8b949e" text-anchor="middle">地址映射缓存</text>
+  <text x="340" y="103" font-size="9.5" fill="#8b949e" text-anchor="middle">★ 全是 cache：为了不每次都去访问慢一档的下一层</text>
+
+  <!-- 用户态带 -->
+  <rect x="10" y="134" width="660" height="112" rx="11" fill="rgba(188,140,255,.07)" stroke="#bc8cff" stroke-width="1.2"/>
+  <text x="24" y="156" font-size="12.5" font-weight="700" fill="#bc8cff">用户态 · 进程（微秒级）</text>
+  <rect x="26" y="166" width="150" height="42" rx="7" fill="#161b22" stroke="#bc8cff"/>
+  <text x="101" y="183" font-size="10.5" fill="#e6edf3" text-anchor="middle">① 语言运行时缓冲</text>
+  <text x="101" y="198" font-size="9" fill="#8b949e" text-anchor="middle">glibc stdio / bufio 8KB</text>
+  <rect x="186" y="166" width="150" height="42" rx="7" fill="#161b22" stroke="#bc8cff"/>
+  <text x="261" y="183" font-size="10.5" fill="#e6edf3" text-anchor="middle">② 应用自建缓冲</text>
+  <text x="261" y="198" font-size="9" fill="#8b949e" text-anchor="middle">read/write 的 buf[]</text>
+  <rect x="346" y="166" width="150" height="42" rx="7" fill="#161b22" stroke="#bc8cff"/>
+  <text x="421" y="183" font-size="10.5" fill="#e6edf3" text-anchor="middle">③ 堆/栈上的聚合缓冲</text>
+  <text x="421" y="198" font-size="9" fill="#8b949e" text-anchor="middle">Netty ByteBuf / 批处理</text>
+  <rect x="506" y="166" width="152" height="42" rx="7" fill="#161b22" stroke="#bc8cff"/>
+  <text x="582" y="183" font-size="10.5" fill="#e6edf3" text-anchor="middle">④ mmap 映射区</text>
+  <text x="582" y="198" font-size="9" fill="#8b949e" text-anchor="middle">零拷贝读（无缓冲）</text>
+  <text x="340" y="230" font-size="9.5" fill="#8b949e" text-anchor="middle">★ 这一层最容易被忽略：printf 不 flush 就不输出，就是它在攒</text>
+
+  <!-- 系统调用边界 -->
+  <line x1="10" y1="252" x2="670" y2="252" stroke="#f85149" stroke-width="1.6" stroke-dasharray="7 4"/>
+  <text x="340" y="268" font-size="11" font-weight="700" fill="#f85149" text-anchor="middle">— — —　系统调用边界（用户态 ⇄ 内核态，切换有成本）　— — —</text>
+
+  <!-- 内核态带 -->
+  <rect x="10" y="278" width="660" height="150" rx="11" fill="rgba(88,166,255,.07)" stroke="#58a6ff" stroke-width="1.2"/>
+  <text x="24" y="300" font-size="12.5" font-weight="700" fill="#58a6ff">内核态（微秒级）</text>
+  <rect x="26" y="310" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="101" y="327" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑤ 页缓存 Page Cache</text>
+  <text x="101" y="342" font-size="9" fill="#8b949e" text-anchor="middle">文件内容 · 预读 128KB</text>
+  <rect x="186" y="310" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="261" y="327" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑥ 脏页 + 回写队列</text>
+  <text x="261" y="342" font-size="9" fill="#8b949e" text-anchor="middle">写方向 · dirty_ratio</text>
+  <rect x="346" y="310" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="421" y="327" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑦ socket 收发缓冲</text>
+  <text x="421" y="342" font-size="9" fill="#8b949e" text-anchor="middle">sndbuf / rcvbuf</text>
+  <rect x="506" y="310" width="152" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="582" y="327" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑧ sk_buff 包缓冲</text>
+  <text x="582" y="342" font-size="9" fill="#8b949e" text-anchor="middle">协议栈层间传递</text>
+  <rect x="26" y="362" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="101" y="379" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑨ bio / 块层请求</text>
+  <text x="101" y="394" font-size="9" fill="#8b949e" text-anchor="middle">请求合并 merge</text>
+  <rect x="186" y="362" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="261" y="379" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑩ 管道 / TTY 缓冲</text>
+  <text x="261" y="394" font-size="9" fill="#8b949e" text-anchor="middle">64KB 环形 · PIPE_BUF 4K</text>
+  <rect x="346" y="362" width="150" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="421" y="379" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑪ slab / 目录项缓存</text>
+  <text x="421" y="394" font-size="9" fill="#8b949e" text-anchor="middle">对象缓存 · dentry</text>
+  <rect x="506" y="362" width="152" height="42" rx="7" fill="#161b22" stroke="#58a6ff"/>
+  <text x="582" y="379" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑫ 发送/接收队列</text>
+  <text x="582" y="394" font-size="9" fill="#8b949e" text-anchor="middle">qdisc · accept 队列</text>
+  <text x="340" y="420" font-size="9.5" fill="#8b949e" text-anchor="middle">★ 内核里缓冲最多：文件路径 + 网络路径 + 通道缓冲，三套并存</text>
+
+  <!-- 设备带 -->
+  <rect x="10" y="452" width="660" height="118" rx="11" fill="rgba(227,179,65,.07)" stroke="#e3b341" stroke-width="1.2"/>
+  <text x="24" y="474" font-size="12.5" font-weight="700" fill="#e3b341">设备 / 总线（微秒级）</text>
+  <rect x="26" y="484" width="150" height="42" rx="7" fill="#161b22" stroke="#e3b341"/>
+  <text x="101" y="501" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑬ DMA 一致性内存</text>
+  <text x="101" y="516" font-size="9" fill="#8b949e" text-anchor="middle">dma_alloc_coherent</text>
+  <rect x="186" y="484" width="150" height="42" rx="7" fill="#161b22" stroke="#e3b341"/>
+  <text x="261" y="501" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑭ swiotlb bounce buf</text>
+  <text x="261" y="516" font-size="9" fill="#8b949e" text-anchor="middle">设备寻址不到时的中转</text>
+  <rect x="346" y="484" width="150" height="42" rx="7" fill="#161b22" stroke="#e3b341"/>
+  <text x="421" y="501" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑮ 网卡 TX/RX ring</text>
+  <text x="421" y="516" font-size="9" fill="#8b949e" text-anchor="middle">描述符环 · 256~4096</text>
+  <rect x="506" y="484" width="152" height="42" rx="7" fill="#161b22" stroke="#e3b341"/>
+  <text x="582" y="501" font-size="10.5" fill="#e6edf3" text-anchor="middle">⑯ 磁盘控制器缓存</text>
+  <text x="582" y="516" font-size="9" fill="#8b949e" text-anchor="middle">掉电丢数据的那个</text>
+  <text x="340" y="552" font-size="9.5" fill="#8b949e" text-anchor="middle">★ 这一层是硬件，DMA 直接在这和内存之间搬数据，CPU 不参与</text>
+
+  <!-- 介质带 -->
+  <rect x="10" y="578" width="660" height="106" rx="11" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <text x="24" y="600" font-size="12.5" font-weight="700" fill="#8b949e">物理介质（毫秒~微秒级）</text>
+  <rect x="26" y="610" width="300" height="56" rx="7" fill="#0d1117" stroke="#30363d"/>
+  <text x="176" y="631" font-size="10.5" fill="#e6edf3" text-anchor="middle">磁盘 / SSD</text>
+  <text x="176" y="648" font-size="9" fill="#8b949e" text-anchor="middle">盘内缓存 · SSD 的 DRAM+FTL+SLC 缓存</text>
+  <rect x="346" y="610" width="312" height="56" rx="7" fill="#0d1117" stroke="#30363d"/>
+  <text x="502" y="631" font-size="10.5" fill="#e6edf3" text-anchor="middle">网线 / 光纤 / 对端主机</text>
+  <text x="502" y="648" font-size="9" fill="#8b949e" text-anchor="middle">对端也有它的整套缓冲（镜像）</text>
+
+  <!-- 右侧流转箭头 -->
+  <line x1="100" y1="122" x2="100" y2="134" stroke="#8b949e" stroke-width="1.2" marker-end="url(#ar)"/>
+  <line x1="100" y1="246" x2="100" y2="256" stroke="#8b949e" stroke-width="1.2"/>
+  <line x1="100" y1="274" x2="100" y2="284" stroke="#8b949e" stroke-width="1.2" marker-end="url(#ar)"/>
+  <line x1="100" y1="428" x2="100" y2="452" stroke="#8b949e" stroke-width="1.2" marker-end="url(#ar)"/>
+  <line x1="100" y1="570" x2="100" y2="584" stroke="#8b949e" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="636" y="130" font-size="9" fill="#8b949e" text-anchor="end">越往上越快</text>
+  <text x="636" y="690" font-size="9" fill="#8b949e" text-anchor="end">越往下越慢</text>
+</svg>
+<figcaption>图 1：缓冲区全链路地图 —— 16 个主要缓冲区，按「离 CPU 的距离」排布</figcaption>
+</div>
+
+<div class="card green">
+  <p><b>一眼看懂关键规律：</b>从上到下，每一层都在给「下一层比它慢」这件事做缓冲。数据往下走，需要 <b>DMA</b>（设备搬，CPU 不管）；数据在上两层之间（内核 ⇄ 用户）走，需要 <b>CPU 亲自拷</b>（因为要跨权限边界）。<b>这个区别，就是后面「拷贝次数」的根源。</b></p>
+</div>
+
+<!-- ══════════════════ ③ ══════════════════ -->
+<h2 id="user">③ 用户态：4 层缓冲，你平时只看见 1 层</h2>
+
+<p>用户态其实不止你写的那个 <code>buf[]</code>。从「你调函数」到「真正进内核」，中间还隔着一层语言运行时缓冲。</p>
+
+<h3>① 语言运行时缓冲（最隐蔽的一层）</h3>
+<p>这是<b>「感觉好多」的头号元凶</b>，因为它完全不在你的代码里，却在默默地攒数据：</p>
+
+<table>
+  <thead><tr><th>语言 / 库</th><th>缓冲对象</th><th>默认大小</th><th>刷新时机</th></tr></thead>
+  <tbody>
+    <tr><td>C（glibc）</td><td><code>FILE*</code> 自带 stdio 缓冲</td><td><code>BUFSIZ</code> = 8KB</td><td>满了 / <code>fflush()</code> / 进程退出 / 行缓冲遇 <code>\n</code></td></tr>
+    <tr><td>Go</td><td><code>bufio.Reader</code> / <code>bufio.Writer</code></td><td>4KB（可指定）</td><td><code>Flush()</code> 或缓冲满</td></tr>
+    <tr><td>Java</td><td><code>BufferedInputStream/Writer</code></td><td>8KB</td><td><code>flush()</code> 或缓冲满</td></tr>
+    <tr><td>C++</td><td><code>std::filebuf</code> / <code>iostream</code></td><td>通常 8KB</td><td><code>flush()</code> / 满 / 析构</td></tr>
+    <tr><td>Python</td><td><code>io.BufferedWriter</code></td><td>8KB（<code>open(buffering=)</code>）</td><td><code>flush()</code> 或满</td></tr>
+  </tbody>
+</table>
+
+<div class="card red">
+  <p><b>用它解释一个经典怪现象：</b>为什么 <code>printf("hello")</code> 不带 <code>\n</code> 且程序没退出时，终端看不到？因为数据还躺在 <span class="zone z-user">stdio 缓冲</span> 里，<b>根本没进内核</b>。而 <code>printf("hello\n")</code> 能立刻看到，是因为输出到<b>终端（tty）时是行缓冲</b>，遇 <code>\n</code> 就刷。<br>
+  更坑的是：<b>输出到文件时变成全缓冲</b>（攒满 8KB 才写），所以「重定向到文件后日志看不到」也是这层干的。<code>stderr</code> 默认无缓冲，所以报错总是能立刻看到。</p>
+</div>
+
+<h3>② 应用自建缓冲（你写的那个 buf）</h3>
+<pre><code><span class="kw">char</span> buf[<span class="str">4096</span>];
+<span class="kw">ssize_t</span> n = <span class="fn">read</span>(fd, buf, <span class="kw">sizeof</span> buf);   <span class="cmt">// buf 就是「应用自建缓冲」</span>
+<span class="fn">write</span>(sockfd, buf, n);                       <span class="cmt">// 数据要从这里再走进内核</span></code></pre>
+<p>这是用户态和内核态之间的<b>「摆渡船」</b>。之所以必须有它，是因为<b>内核绝对不能直接把用户传进来的指针拿去访问</b>——地址可能非法、可能被换出、可能有 TOCTOU 攻击风险。所以内核要求：<b>数据必须落在你提供的一块内存里，内核来拷贝</b>。这块内存就是它。</p>
+
+<h3>③ 堆/栈上的聚合缓冲</h3>
+<p>为了减少 syscall 次数，框架会在用户态再攒一层：Netty 的 <code>ByteBuf</code>、Kafka Producer 的 <code>batch.size</code>（默认 16KB）、MySQL 驱动的结果集缓冲、HTTP 框架的 body 拼装。<b>它们和 ① 的区别是：① 是「你想写就写」的透明层，③ 是「攒批提交」的显式策略。</b></p>
+
+<h3>④ mmap 映射区（一个「假装没有缓冲」的特例）</h3>
+<p><code>mmap()</code> 把文件<b>直接映射进你的地址空间</b>，你读那块内存就相当于读文件——<b>没有「用户缓冲」这一概念了</b>（严格说，是用户缓冲和页缓存合体了：你访问的页就是页缓存的那一页）。这是后面「少一次拷贝」的关键手段。</p>
+
+<!-- ══════════════════ ④ ══════════════════ -->
+<h2 id="file">④ 内核态 · 磁盘/文件路径：缓冲最密集的一段</h2>
+
+<p>接上你那台「从文件读到内存」的链路，从内核往下数，还有 6 层。</p>
+
+<h3>⑤ 页缓存 Page Cache（你截图里的「缓存区」）</h3>
+<p>文件内容在内核里的家。<b>所有 <code>read()</code>/<code>write()</code> 都经过它</b>，这是 Linux IO 性能的核心机制。</p>
+<ul>
+  <li><b>它不是一块固定内存</b>，而是「把所有空闲内存都拿来缓存文件」的策略。所以 <code>free -h</code> 里 <code>buff/cache</code> 那列常常很大——<b>那是好事，不是内存泄漏</b>。</li>
+  <li><b>读命中</b>：数据已在页缓存 → 直接拷给你，不碰磁盘。<b>读未命中</b>：触发<b>预读 readahead</b>，不只读你要的那 4KB，还会往前多读（默认 <code>read_ahead_kb</code> ≈ 128KB），赌你接下来还要。</li>
+  <li><b>预读本身就是一层缓冲</b>——提前把数据搬进内存等你，属于「用空间换时间」的预取缓存。</li>
+</ul>
+
+<h3>⑥ 脏页 + 回写队列（写方向的镜像）</h3>
+<p><code>write()</code> 为什么快？因为它<b>只把数据写进页缓存就把返回了</b>，根本没落盘。这些「已改但没写回磁盘」的页叫<b>脏页 dirty page</b>，由内核的 <code>writeback</code> 线程在合适的时机批量刷盘。</p>
+<pre><code><span class="cmt"># 关键参数：什么时候开始后台刷 / 再不刷就阻塞</span>
+vm.dirty_background_ratio = 10   <span class="cmt"># 脏页超总内存 10% 就后台开刷</span>
+vm.dirty_ratio            = 20   <span class="cmt"># 超 20% 则 write() 自己阻塞下来刷</span>
+vm.dirty_expire_centisecs = 3000 <span class="cmt"># 脏页最长活 30 秒必须刷</span></code></pre>
+<div class="card yellow">
+  <p><b>这就是「掉电丢数据」的原理</b>：你以为 <code>write()</code> 成功 = 数据安全，其实它<b>只到了内存里的页缓存</b>。真想让数据落盘，必须 <code>fsync()</code>/<code>fdatasync()</code>——这两个调用的作用就是「逼脏页立刻回写，并等它完成」。</p>
+</div>
+
+<h3>⑦ 块层：bio / 请求队列 / 合并（merge）</h3>
+<p>页缓存要落盘时，内核不会「一页一页」地发命令，而是：</p>
+<ol>
+  <li>包装成 <code>bio</code>（block IO，描述「把这块内存写到那个扇区」）；</li>
+  <li>送进块设备的<b>请求队列</b>（现代内核是 blk-mq 多队列）；</li>
+  <li><b>合并 merge</b>：如果相邻请求的扇区连续，就合成一个更大的请求 → <b>一次搬更多，减少 IO 次数。</b></li>
+  <li>由调度器（mq-deadline / BFQ / none）决定顺序，试图把「随机 IO 排成近似顺序 IO」。</li>
+</ol>
+<p><b>队列本身就是缓冲区</b>——它让「上层随时投递」和「下层按自己的节奏执行」解耦。</p>
+
+<h3>⑧ 目录项/inode 缓存 + slab（元数据缓存）</h3>
+<p>除了文件内容，<b>路径解析的结果也会被缓存</b>：<code>dentry cache</code> 缓存「目录项 → inode」的映射，<code>inode cache</code> 缓存文件元数据。它们由 <code>slab</code> 分配器统一管理（同一类对象复用同一批内存块，避免反复分配释放）。<br>
+所以 <code>free -h</code> 里那个 <code>buff/cache</code> <b>混了两种东西</b>：页缓存（文件内容）+ slab（元数据/内核对象）。用 <code>slabtop</code> 能看 slab 明细。</p>
+
+<h3>⑨ 磁盘控制器缓存（硬件，掉电丢的那位）</h3>
+<p>磁盘/RAID 卡自己还有一块 DRAM 缓存（机械盘常见 64–256MB），用来攒写请求、重排顺序。致命的是：<b>它也在内存里，掉电一样丢。</b>所以：</p>
+<ul>
+  <li>带电池/超级电容保护的阵列卡 → 敢开 write cache，性能大幅提升且能保数据；</li>
+  <li>不带保护的裸盘 write cache → <b>掉了就是掉了</b>。<code>fsync()</code> 发出的 flush 命令能穿透到盘（FUA / flush cache），但前提是盘/控制器老实执行。</li>
+</ul>
+<p>这就是「明明 <code>fsync</code> 了还丢数据」的经典案发现场——数据卡在<b>下一个缓冲区</b>里。</p>
+
+<!-- ══════════════════ ⑤ ══════════════════ -->
+<h2 id="net">⑤ 内核态 · 网络路径：socket 缓冲是「一对」，不是一个</h2>
+
+<p>你截图里的「socket 缓冲区」只是一个方向。真实的 TCP socket 有<b>两个独立的缓冲</b>，而且每个连接各一份。</p>
+
+<h3>⑦ socket 发送缓冲 / 接收缓冲（每连接 ×2）</h3>
+<table>
+  <thead><tr><th>缓冲</th><th>位置</th><th>干什么</th><th>满了会怎样</th><th>怎么调</th></tr></thead>
+  <tbody>
+    <tr><td><b>发送缓冲</b> <code>sk_sndbuf</code></td><td>内核 <code>struct sock</code></td><td>暂存已 <code>write()</code> 但还没被对端 ACK 的数据（重传还得靠它）</td><td><code>write()</code> <b>阻塞或返回 EAGAIN</b>（这就是「写阻塞」的真身）</td><td><code>SO_SNDBUF</code> / <code>net.ipv4.tcp_wmem</code></td></tr>
+    <tr><td><b>接收缓冲</b> <code>sk_rcvbuf</code></td><td>内核 <code>struct sock</code></td><td>暂存已收到但应用还没 <code>read()</code> 的数据</td><td><b>通告窗口变小</b> → 对端减速；再满就直接丢包</td><td><code>SO_RCVBUF</code> / <code>net.ipv4.tcp_rmem</code></td></tr>
+  </tbody>
+</table>
+<div class="card blue">
+  <p><b>为什么发送缓冲必须留数据？</b>因为 TCP 是<b>可靠</b>的。你 <code>write()</code> 完就把内存释放了，但对端可能没收到——内核得把副本留着，超时了好重传。所以 <code>write()</code> 返回成功 <b>≠</b> 对方收到了，只代表「数据已交给我保管」。<b>这一条是理解 TCP 缓冲独占性的关键。</b></p>
+  <p>顺带：接收缓冲的大小由 TCP 动态调整（<code>tcp_moderate_rcvbuf</code> 自动调优），它直接决定了<b>滑动窗口</b>能开多大——窗口的上限基本就是接收缓冲的大小。</p>
+</div>
+
+<h3>⑧ sk_buff（skb）：协议栈内的「包信封」</h3>
+<p>网络数据在内核里不是裸指针乱传的，而是统一封装成 <code>struct sk_buff</code>。收发路径上，一个 skb 会依次经过 链路层 → IP 层 → TCP 层。<b>这里要澄清一个常见误解：</b></p>
+<div class="card red">
+  <p>❌ <s>「协议栈每一层都有一个自己的缓冲区，所以包被拷了好几遍。」</s></p>
+  <p>✅ <b>不是。</b>skb 是一块内存（<code>skb->head</code> 到 <code>skb->end</code>），内部用 <code>data</code>/<code>tail</code> 两个指针标识「有效数据区间」。各层要做的事只是<b>移动这两个指针</b>：下层加头（<code>skb_push</code>）、上层剥头（<code>skb_pull</code>）。<b>这是指针操作，不是数据拷贝</b>——所以一个包穿过整个协议栈，数据只被搬了很少的次数。</p>
+</div>
+
+<h3>⑫ 传输/驱动之间的队列（也是缓冲）</h3>
+<ul>
+  <li><b>qdisc 队列</b>：网卡发送前的排队与调度（<code>tc qdisc</code>），负责限速、优先级、整形。</li>
+  <li><b>TCP 乱序队列 / 重传队列</b>：收到乱序包先攒着等缺口补齐（<code>tcp_reordering</code>），以及重传时的那份备份。</li>
+  <li><b>半连接队列 / 全连接队列</b>：三次握手的两个队列，<code>backlog</code> 控制的就是它们。</li>
+</ul>
+
+<!-- ══════════════════ ⑥ ══════════════════ -->
+<h2 id="other">⑥ 内核态 · 其他通道：管道 / TTY / Unix Socket</h2>
+
+<p>不走磁盘也不走网卡的通信，同样有缓冲，而且原理一致（都是<b>环形缓冲 + 读写指针</b>）。</p>
+
+<div class="grid">
+  <div class="mini">
+    <h4>⑩ 管道缓冲 pipe buffer</h4>
+    <p>默认容量 <b>64KB</b>（16 个页，<code>/proc/sys/fs/pipe-max-size</code> 可调到 1MB）。写满就阻塞写者。<br><b>关键常量</b> <code>PIPE_BUF = 4096</code>：小于它的单次写入是<b>原子</b>的（不会被别的进程插队截断）。</p>
+  </div>
+  <div class="mini">
+    <h4>TTY / 终端行缓冲</h4>
+    <p>终端驱动（line discipline）里有一层行缓冲，负责回显、行编辑（backspace 能用就是因为它）、以及对 <code>\n</code> 的处理。这就是「行缓冲」概念的物理来源。</p>
+  </div>
+  <div class="mini">
+    <h4>Unix Domain Socket 缓冲</h4>
+    <p>本机进程间通信，内核里同样有一对收发缓冲（<code>sk_sndbuf</code>/<code>sk_rcvbuf</code>）。区别是数据<b>不用经过协议栈和网卡</b>，直接内核内拷贝，所以比走 TCP 回环更快。</p>
+  </div>
+  <div class="mini">
+    <h4>共享内存 / tmpfs</h4>
+    <p>「零缓冲」的极端：两边直接读写同一块物理内存，<b>不存在搬运</b>。代价是要自己做同步（互斥锁 / 信号量）。</p>
+  </div>
+</div>
+
+<!-- ══════════════════ ⑦ ══════════════════ -->
+<h2 id="dev">⑦ 设备与 DMA：为什么「DMA 也有缓冲区」</h2>
+
+<p>这是你截图里 <b>① ④ 两次 DMA 拷贝</b>背后的东西。DMA 的本质是「<b>让设备自己去读写内存，把 CPU 解放出来</b>」，但设备要读写内存，就必须有：</p>
+
+<h3>⑬ DMA 一致性内存（coherent DMA memory）</h3>
+<p>设备通过 DMA 去访问的内存，不是随便一块内存都行，它必须满足：<b>地址稳定、CPU 和设备看到的内容一致</b>。所以驱动会专门用 <code>dma_alloc_coherent()</code> 申请一块这样的缓冲。</p>
+<div class="card purple">
+  <p><b>为什么「一致」要特别说？</b>因为 CPU 有 Cache。如果 CPU 把数据写进 L1 但还没刷到 DRAM，此时设备去 DRAM 读，就会读到旧数据！所以要么这块内存被标成<b>不可缓存（uncached）</b>，要么在交给设备前后手动做 <b>cache flush / invalidate</b>（这叫 streaming DMA 的 sync 操作）。<b>这就是「DMA 缓冲区」这个词的由来——它不是数据的中转站，而是「CPU 和设备交接数据的合规场地」。</b></p>
+</div>
+
+<h3>⑭ swiotlb bounce buffer（最难发现的一层）</h3>
+<p>如果设备是 32 位的，只能寻址 4GB 以内的物理内存，而你要搬的数据恰好在 4GB 以上怎么办？内核会在低地址区准备一块<b>弹跳缓冲（bounce buffer）</b>：先把数据拷进去，再让设备从那里搬。<b>这是又一层你完全看不见的数据拷贝。</b></p>
+
+<h3>⑮ 网卡 TX/RX ring（描述符环）</h3>
+<p>网卡内部有一圈固定数量的「槽位」，每个槽位要么指向一块内存（接收方向，网卡把包 DMA 进去），要么指向一块待发内存（发送方向）。驱动和网卡靠<b>移动读写指针</b>协作，不用锁。</p>
+<pre><code>ethtool -g eth0     <span class="cmt"># 看 ring 大小：RX / TX 常见 256 / 512 / 1024 / 4096</span>
+ethtool -S eth0     <span class="cmt"># 看丢包：rx_dropped / rx_fifo_errors 增长 = ring 被冲爆</span>
+ethtool -l eth0     <span class="cmt"># 看多队列（RSS）：每队列一套 ring</span></code></pre>
+<div class="card yellow">
+  <p><b>ring 满了 = 丢包，但和「TCP 重传」丢的不是一回事：</b>应用把 socket 接收缓冲读得太慢 → 数据堆到 ring → ring 满 → <b>网卡直接扔包</b>，连 TCP 都不知道，只能等对端超时重传。<b>所以「网卡 ring → socket 接收缓冲 → 应用」这条链上，任何一环慢了，都会丢。</b></p>
+</div>
+
+<h3>⑯ 磁盘控制器缓存 / SSD 内部缓存</h3>
+<p>机械盘的盘载缓存（64–256MB）、SSD 的 DRAM 缓存 + FTL 映射表缓存 + SLC 缓存（把 TLC/QLC 当 SLC 用来加速写入）。<b>它们各自都在做「攒批、重排、缓冲」，而且都在你的 <code>fsync</code> 之外。</b></p>
+
+<!-- ══════════════════ ⑧ ══════════════════ -->
+<h2 id="cpu">⑧ CPU 与内存硬件：缓存其实是「一种缓冲」</h2>
+
+<p>你问的是「从操作系统到 CPU 硬件底层」，那 CPU 这一侧当然也要数。严格说，CPU 这类叫 <b>cache（缓存）</b>而非 buffer（缓冲），但它们的本质完全一样：<b>给「快的一侧」一个不用等「慢的一侧」的地方</b>。区别只在：<b>buffer 是「数据在路上的暂存」，cache 是「数据的一个更快副本」</b>。</p>
+
+<div class="svgbox">
+<svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg" font-family="PingFang SC,Microsoft YaHei,sans-serif">
+  <defs>
+    <marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3fb950"/></marker>
+  </defs>
+  <text x="340" y="20" font-size="12" font-weight="700" fill="#e6edf3" text-anchor="middle">沿「访存路径」自下而上：每一层都是上一层的缓存</text>
+
+  <!-- 寄存器 -->
+  <rect x="40" y="36" width="600" height="46" rx="8" fill="rgba(63,185,80,.10)" stroke="#3fb950"/>
+  <text x="56" y="56" font-size="11.5" fill="#3fb950" font-weight="700">寄存器 Register</text>
+  <text x="56" y="73" font-size="9.5" fill="#8b949e">直接属于 CPU 核心 · 访问约 0.3ns（1 个时钟周期）· 容量几百字节</text>
+  <text x="624" y="62" font-size="9.5" fill="#8b949e" text-anchor="end">L0</text>
+
+  <!-- Store Buffer -->
+  <rect x="40" y="90" width="600" height="46" rx="8" fill="rgba(63,185,80,.08)" stroke="#3fb950" stroke-dasharray="4 3"/>
+  <text x="56" y="110" font-size="11.5" fill="#e6edf3" font-weight="700">Store Buffer / Load Buffer（写缓冲 / 读缓冲）</text>
+  <text x="56" y="127" font-size="9.5" fill="#8b949e">每个核心几十条 · 让「写」立刻返回、不阻塞后续指令 · 是内存序重排与内存屏障的根源</text>
+
+  <!-- L1 -->
+  <rect x="40" y="144" width="292" height="46" rx="8" fill="rgba(63,185,80,.08)" stroke="#3fb950"/>
+  <text x="56" y="164" font-size="11.5" fill="#e6edf3" font-weight="700">L1 Cache（指令 / 数据各一套）</text>
+  <text x="56" y="181" font-size="9.5" fill="#8b949e">每核 32–64KB · 约 1ns</text>
+
+  <!-- L2 -->
+  <rect x="348" y="144" width="292" height="46" rx="8" fill="rgba(63,185,80,.08)" stroke="#3fb950"/>
+  <text x="364" y="164" font-size="11.5" fill="#e6edf3" font-weight="700">L2 Cache</text>
+  <text x="364" y="181" font-size="9.5" fill="#8b949e">每核 0.5–2MB · 约 4ns</text>
+
+  <!-- L3 -->
+  <rect x="40" y="198" width="600" height="46" rx="8" fill="rgba(63,185,80,.06)" stroke="#3fb950"/>
+  <text x="56" y="218" font-size="11.5" fill="#e6edf3" font-weight="700">L3 Cache（多核共享）</text>
+  <text x="56" y="235" font-size="9.5" fill="#8b949e">8–64MB · 约 12ns · 跨越它意味着要走核间一致性协议（MESI）</text>
+
+  <!-- TLB 旁路 -->
+  <rect x="40" y="252" width="600" height="44" rx="8" fill="rgba(188,140,255,.08)" stroke="#bc8cff"/>
+  <text x="56" y="271" font-size="11.5" fill="#bc8cff" font-weight="700">TLB（页表缓存）· 与数据缓存并行的另一条支路</text>
+  <text x="56" y="288" font-size="9.5" fill="#8b949e">缓存「虚拟地址 → 物理地址」的映射 · L1 TLB 几十项，L2 TLB 约 1500+ 项 · 缺失要查页表（几十~上百 ns）</text>
+
+  <!-- 内存控制器 -->
+  <rect x="40" y="304" width="600" height="46" rx="8" fill="rgba(227,179,65,.08)" stroke="#e3b341"/>
+  <text x="56" y="324" font-size="11.5" fill="#e3b341" font-weight="700">内存控制器写缓冲 + 读写重排</text>
+  <text x="56" y="341" font-size="9.5" fill="#8b949e">把零碎写合并成 burst · 重排访问顺序以提高 row hit 率</text>
+
+  <!-- DRAM row buffer -->
+  <rect x="40" y="358" width="600" height="46" rx="8" fill="rgba(227,179,65,.06)" stroke="#e3b341"/>
+  <text x="56" y="378" font-size="11.5" fill="#e6edf3" font-weight="700">DRAM 行缓冲 Row Buffer</text>
+  <text x="56" y="395" font-size="9.5" fill="#8b949e">DRAM 芯片内部一行约 1–8KB · 命中（row hit）比未命中快 2–3 倍 · 约 60–100ns</text>
+
+  <line x1="20" y1="410" x2="660" y2="410" stroke="#30363d"/>
+  <text x="340" y="424" font-size="9.5" fill="#8b949e" text-anchor="middle">★ 一次 CPU 访存要穿过的全部「缓冲/缓存」——这就是「为什么快」和「为什么会重排」的答案</text>
+</svg>
+<figcaption>图 2：CPU 与内存硬件的缓存/缓冲层栈</figcaption>
+</div>
+
+<div class="card purple">
+  <p><b>顺带解决了另一个疑惑：</b>你如果看过内存屏障（memory barrier）的内容，会知道「CPU 会重排指令」。重排的<b>物理载体</b>就是这里的 <span class="hl3">Store Buffer</span> 和<span class="hl3">内存控制器写缓冲</span>——正因为写操作先进缓冲就返回了，后面的读才可能「跑到」前面的写之前。加 <code>mfence</code> 的本质，就是<b>强制把 store buffer 刷干净</b>。</p>
+</div>
+
+<!-- ══════════════════ ⑨ ══════════════════ -->
+<h2 id="cls">⑨ 为什么你会觉得乱？因为缺三种分类法</h2>
+
+<p>缓冲区不是按名字记的，是按维度记的。补上这三个维度，一切都归位。</p>
+
+<h3>分类法一：按「目的」分（决定它为什么存在）</h3>
+<table>
+  <thead><tr><th>类型</th><th>目的</th><th>代表</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag b">速度缓冲</span></td><td>弥合两端速度差，让快的一方不等</td><td>页缓存、socket 收发缓冲、网卡 ring、CPU store buffer、管道缓冲</td></tr>
+    <tr><td><span class="tag g">预取缓存</span></td><td>猜你接下来要用，提前搬过来</td><td>预读 readahead、CPU L1/L2/L3、TLB、dentry cache</td></tr>
+    <tr><td><span class="tag y">聚合缓冲</span></td><td>攒批，把多次小操作合成一次大操作</td><td>stdio 缓冲、块层 merge、TCP 攒够 MSS、内存控制器写合并</td></tr>
+    <tr><td><span class="tag p">交接缓冲</span></td><td>跨权限/跨设备边界的合规交接场地</td><td>用户 <code>buf[]</code>（跨内核边界）、DMA 一致性内存、bounce buffer</td></tr>
+  </tbody>
+</table>
+
+<h3>分类法二：按「装的是数据还是指针」分（最关键的一个洞察）</h3>
+<div class="grid">
+  <div class="mini">
+    <h4>🟦 数据型缓冲（真搬运）</h4>
+    <p>里面<b>装着实际的数据字节</b>，写进去/读出来都是内容的拷贝。<br>
+    <b>例子：</b>页缓存、用户 buf、socket 发送缓冲、stdio 缓冲、管道缓冲、DMA 一致性内存。<br>
+    <b>特点：</b>占空间大（=数据量）、拷贝有成本。</p>
+  </div>
+  <div class="mini">
+    <h4>🟨 描述符型缓冲（只指路）</h4>
+    <p>里面<b>装的是「数据在哪」的描述信息</b>（地址 + 长度），数据本身一动不动。<br>
+    <b>例子：</b>网卡 ring 里的描述符、块层 <code>bio</code>、<code>sk_buff</code> 的头部、页表、<code>splice</code> 用的 pipe 缓冲（装的是页的引用！）。<br>
+    <b>特点：</b>几乎不占空间、几乎没有拷贝成本——<b>零拷贝就是靠它实现的。</b></p>
+  </div>
+</div>
+<div class="card green">
+  <p><b>这个分类解决了你最大的困惑：</b>「怎么到处都是缓冲区？」——因为其中一半以上<b>根本不装数据</b>，它们只是「一张写着地址的便签」。便签当然可以到处贴，成本几乎为零。真正会拖慢性能的，只有<b>数据型缓冲之间的拷贝</b>。</p>
+</div>
+
+<h3>分类法三：按「方向」分（数量 ×2 的来源）</h3>
+<table>
+  <thead><tr><th>子系统</th><th>「进」方向</th><th>「出」方向</th></tr></thead>
+  <tbody>
+    <tr><td>文件</td><td>页缓存 + 预读</td><td>脏页 + 回写队列</td></tr>
+    <tr><td>网络</td><td>socket 接收缓冲 + RX ring</td><td>socket 发送缓冲 + TX ring</td></tr>
+    <tr><td>CPU</td><td>Load Buffer / L1</td><td>Store Buffer</td></tr>
+    <tr><td>通道</td><td>读端缓冲</td><td>写端缓冲</td></tr>
+  </tbody>
+</table>
+
+<!-- ══════════════════ ⑩ ══════════════════ -->
+<h2 id="sim">⑩ 交互：不同 IO 方式到底碰了几个缓冲、拷了几次？</h2>
+
+<p>下面这个对比器把你那张图的链路拆开看。<b>点击一种方式</b>，就能看到数据实际经过了哪些缓冲、每一次搬运是 <span class="copy">CPU 拷贝</span>（贵）还是 <span class="copy dma">DMA 拷贝</span>（便宜，不占 CPU）。</p>
+
+<div class="card">
+  <div class="btnrow" id="simBtns"></div>
+  <div class="stats" id="simStats"></div>
+  <div class="pipe" id="simPipe"></div>
+  <div class="expl" id="simExpl"></div>
+</div>
+
+<div class="card yellow">
+  <p><b>看懂一个反直觉结论：</b>所谓「零拷贝」（sendfile / splice / RDMA）<b>并不是真的零次搬运</b>——磁盘到内存、内存到网卡这两次 <span class="copy dma">DMA 拷贝</span>始终省不掉。它省掉的是 <span class="copy">CPU 拷贝</span>（以及用户态/内核态来回切换）。<br>
+  <b>所以「零拷贝」的准确含义是：CPU 零拷贝。</b>只要你看到「数据不再进入用户态」，就是它的共同特征。</p>
+</div>
+
+<!-- ══════════════════ ⑪ ══════════════════ -->
+<h2 id="full">⑪ 全链路总表：一次数完所有缓冲区</h2>
+
+<p>把前面所有内容汇总成一张表。这就是你要的那个「完整清单」——<b>共 30 项</b>，按从 CPU 到介质排列。</p>
+
+<table>
+  <thead><tr><th>#</th><th>缓冲区名字</th><th>所在层</th><th>装数据 / 指针</th><th>典型大小</th><th>怎么观测</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>寄存器 Register</td><td><span class="zone z-cpu">CPU</span></td><td>数据</td><td>几百字节</td><td>—</td></tr>
+    <tr><td>2</td><td>Store/Load Buffer</td><td><span class="zone z-cpu">CPU</span></td><td>数据</td><td>每核几十条</td><td>—</td></tr>
+    <tr><td>3</td><td>L1 Cache</td><td><span class="zone z-cpu">CPU</span></td><td>数据</td><td>32–64KB/核</td><td><code>lscpu</code> / <code>lscpu -C</code></td></tr>
+    <tr><td>4</td><td>L2 Cache</td><td><span class="zone z-cpu">CPU</span></td><td>数据</td><td>0.5–2MB/核</td><td><code>lscpu -C</code></td></tr>
+    <tr><td>5</td><td>L3 Cache</td><td><span class="zone z-cpu">CPU</span></td><td>数据</td><td>8–64MB</td><td><code>lscpu -C</code></td></tr>
+    <tr><td>6</td><td>TLB / IOTLB</td><td><span class="zone z-cpu">CPU</span></td><td>指针（映射）</td><td>L1 几十项</td><td><code>perf stat -e dTLB-load-misses</code></td></tr>
+    <tr><td>7</td><td>DRAM Row Buffer</td><td><span class="zone z-dev">硬件</span></td><td>数据</td><td>行 1–8KB</td><td>—</td></tr>
+    <tr><td>8</td><td>内存控制器写缓冲</td><td><span class="zone z-dev">硬件</span></td><td>数据</td><td>—</td><td>—</td></tr>
+    <tr><td>9</td><td>语言运行时缓冲（stdio / bufio）</td><td><span class="zone z-user">用户态</span></td><td>数据</td><td>4–8KB</td><td>代码 / 断点</td></tr>
+    <tr><td>10</td><td>应用自建缓冲 <code>buf[]</code></td><td><span class="zone z-user">用户态</span></td><td>数据</td><td>自己定</td><td>代码</td></tr>
+    <tr><td>11</td><td>框架聚合缓冲（batch / ByteBuf）</td><td><span class="zone z-user">用户态</span></td><td>数据</td><td>16KB 起</td><td>框架配置</td></tr>
+    <tr><td>12</td><td>mmap 映射区</td><td><span class="zone z-user">用户态</span></td><td>无（=页缓存）</td><td>—</td><td><code>/proc/&lt;pid&gt;/maps</code></td></tr>
+    <tr><td>13</td><td><b>页缓存 Page Cache</b></td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>占空闲内存</td><td><code>free -h</code> / <code>vmtouch</code> / <code>mincore</code></td></tr>
+    <tr><td>14</td><td>预读缓冲 readahead</td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>默认 128KB</td><td><code>/sys/block/sdX/queue/read_ahead_kb</code></td></tr>
+    <tr><td>15</td><td>脏页 / 回写队列</td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>dirty_ratio 20%</td><td><code>/proc/meminfo</code> 的 Dirty / Writeback</td></tr>
+    <tr><td>16</td><td>dentry / inode 缓存</td><td><span class="zone z-kern">内核</span></td><td>数据+指针</td><td>动态</td><td><code>slabtop</code></td></tr>
+    <tr><td>17</td><td>slab 对象缓存</td><td><span class="zone z-kern">内核</span></td><td>对象</td><td>动态</td><td><code>slabtop</code> / <code>/proc/slabinfo</code></td></tr>
+    <tr><td>18</td><td>bio / 块层请求队列</td><td><span class="zone z-kern">内核</span></td><td>指针</td><td>队列深度</td><td><code>iostat -x</code> 的 aqu-sz</td></tr>
+    <tr><td>19</td><td><b>socket 发送缓冲</b></td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>tcp_wmem 默认 16KB 起</td><td><code>ss -mti</code></td></tr>
+    <tr><td>20</td><td><b>socket 接收缓冲</b></td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>tcp_rmem 默认 128KB 起</td><td><code>ss -mti</code></td></tr>
+    <tr><td>21</td><td>发送/接收队列（TCP）</td><td><span class="zone z-kern">内核</span></td><td>数据+指针</td><td>按窗口</td><td><code>ss -mti</code></td></tr>
+    <tr><td>22</td><td>半连接 / 全连接队列</td><td><span class="zone z-kern">内核</span></td><td>指针（连接）</td><td>backlog</td><td><code>ss -lnt</code> 的 Send-Q/Recv-Q</td></tr>
+    <tr><td>23</td><td>qdisc 队列</td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>内核参数</td><td><code>tc -s qdisc show</code></td></tr>
+    <tr><td>24</td><td>sk_buff（skb）</td><td><span class="zone z-kern">内核</span></td><td>数据+指针</td><td>按包大小</td><td><code>/proc/net/sockstat</code></td></tr>
+    <tr><td>25</td><td>管道缓冲 pipe buffer</td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>64KB</td><td><code>fcntl(F_GETPIPE_SZ)</code></td></tr>
+    <tr><td>26</td><td>TTY 行缓冲</td><td><span class="zone z-kern">内核</span></td><td>数据</td><td>4KB</td><td>—</td></tr>
+    <tr><td>27</td><td>DMA 一致性内存</td><td><span class="zone z-dev">设备</span></td><td>数据</td><td>按需申请</td><td>驱动代码</td></tr>
+    <tr><td>28</td><td>swiotlb bounce buffer</td><td><span class="zone z-dev">设备</span></td><td>数据</td><td>典型几十 MB</td><td><code>cat /proc/meminfo | grep SWIOTLB</code></td></tr>
+    <tr><td>29</td><td>网卡 TX/RX ring</td><td><span class="zone z-dev">设备</span></td><td>指针（描述符）</td><td>256–4096 槽</td><td><code>ethtool -g / -S</code></td></tr>
+    <tr><td>30</td><td>磁盘控制器缓存</td><td><span class="zone z-dev">设备</span></td><td>数据</td><td>64–256MB</td><td><code>hdparm -W</code> / 阵列卡工具</td></tr>
+    <tr><td>31</td><td>SSD DRAM + FTL + SLC 缓存</td><td><span class="zone z-dev">设备</span></td><td>数据+指针</td><td>GB 级</td><td>厂商工具</td></tr>
+  </tbody>
+</table>
+
+<div class="card blue">
+  <p><b>现在回头看你那张图，它其实漏了这些：</b></p>
+  <ol>
+    <li><b>语言运行时缓冲</b>（read 之前还有一层）—— 最常见的遗漏</li>
+    <li><b>预读缓冲</b>（页缓存不是被动等的，它会主动往前读）</li>
+    <li><b>脏页/回写队列</b>（如果你的写最终要落盘，写方向还有一层异步）</li>
+    <li><b>块层 bio + merge</b>（页缓存和磁盘之间不是直连的）</li>
+    <li><b>DMA 一致性内存 / bounce buffer</b>（图里画的是「DMA 拷贝」，但它有专门的场地）</li>
+    <li><b>网卡 TX/RX ring</b>（socket 缓冲和网卡之间还隔着一圈描述符环）</li>
+    <li><b>磁盘控制器缓存</b>（数据到盘之后还可能在盘的内存里没写下去）</li>
+    <li><b>CPU Cache 与 DRAM 行缓冲</b>（每一次内存访问都要穿过它们）</li>
+  </ol>
+  <p>图本身没错，只是它画的是「<b>数据拷贝的必经之路</b>」；而完整的缓冲区地图，还要加上这些<b>「不拷贝但存在」的层</b>。</p>
+</div>
+
+<!-- ══════════════════ ⑫ ══════════════════ -->
+<h2 id="cmd">⑫ 排障常用：怎么看到这些缓冲区</h2>
+
+<pre><code><span class="cmt"># 页缓存 / slab / 脏页 / bounce buffer 全景</span>
+free -h
+cat /proc/meminfo | grep -Ei <span class="str">'Cached|Dirty|Writeback|Slab|SWIOTLB'</span>
+
+<span class="cmt"># 谁在占页缓存（哪个文件被缓存了）</span>
+vmtouch -v /path/to/file          <span class="cmt"># 需要装 vmtouch</span>
+pcstat /path/to/file              <span class="cmt"># 需要装 pcstat</span>
+
+<span class="cmt"># socket 收发缓冲的真实占用（最关键的两个指标）</span>
+ss -mti                            <span class="cmt"># skmem 那行：rb / tb / wmem / rcvbuf / sndbuf</span>
+
+<span class="cmt"># 网卡 ring 大小与丢包</span>
+ethtool -g eth0
+ethtool -S eth0 | grep -Ei <span class="str">'drop|fifo|miss'</span>
+
+<span class="cmt"># 块层队列深度与延迟</span>
+iostat -x 1                        <span class="cmt"># 关注 aqu-sz（平均队列长度）、await</span>
+
+<span class="cmt"># CPU 缓存 / TLB 缺失率</span>
+perf stat -e cache-misses,cache-references,dTLB-load-misses ./your_program
+
+<span class="cmt"># 内核对象缓存明细</span>
+slabtop -s c</code></pre>
+
+<div class="card green">
+  <h4>速记口诀</h4>
+  <p><b>「慢的地方就垫一块，一垫就是一对；</b><br>
+  <b>装数据的是垫子，只指路的不算搬。」</b></p>
+  <p style="margin-top:8px">展开成一句完整的话：<br>
+  <b>凡是两端速度不一致的地方都会插缓冲垫；同一个子系统必然成对出现（读/写、发/收、出/入）；缓冲垫分两种——装数据的（拷贝有成本，是性能瓶颈所在）和只装指针/描述符的（几乎免费，是零拷贝的基础）。</b></p>
+</div>
+
+<div class="foot">
+  <p>相关阅读：
+    <a href="../storage-io/io-latency.html">IO 延迟详解</a> ·
+    <a href="../network-io/io_multiplexing.html">IO 多路复用</a> ·
+    <a href="../network-io/reactor.html">Reactor 模式</a> ·
+    <a href="../network-io/port-listen-thundering-herd.html">端口监听与惊群</a> ·
+    <a href="../../memory-management/page-replacement/page_replacement.html">页面淘汰算法</a> ·
+    <a href="../../memory-management/address-spaces/program-memory-mapping.html">程序内存映射</a> ·
+    <a href="../../file-systems/overview/linux-filesystem.html">Linux 文件系统</a> ·
+    <a href="../../threads-and-concurrency/context-switching/context-switch-overhead.html">上下文切换开销</a>
+  </p>
+  <p>跨学科：<a href="../../../computer-composition/memory-hierarchy/cache/cpu-cache-guide.html">CPU 缓存指南</a> ·
+    <a href="../../../computer-composition/memory-hierarchy/cache/cpu-l3-cache.html">L3 缓存</a> ·
+    <a href="../../../computer-composition/memory-hierarchy/memory-ordering/memory-barrier-guide.html">内存屏障</a> ·
+    <a href="../../../computer-composition/input-output/device-communication/device-io-communication.html">设备 IO 与通信</a> ·
+    <a href="../../../computer-network/transport-layer/tcp/reliable-delivery/tcp-reliable-transmission.html">TCP 可靠传输</a> ·
+    <a href="../../../computer-network/transport-layer/tcp/connection-queues/tcp-connection-queue.html">TCP 连接队列</a> ·
+    <a href="../../../computer-network/transport-layer/socket-programming/socket-serves-how-many-clients.html">一个 Socket 服务几个客户端</a>
+  </p>
+  <p style="margin-top:14px">Visuals · 操作系统 / IO · 从用户态到 CPU 的缓冲区全景</p>
+</div>
+
+</div>
+
+<script>
+(function () {
+  var BV = '页缓存', RA = '预读缓冲', DB = '脏页/回写', BIO = '块层 bio',
+      UB = '用户缓冲', STDIO = '运行时缓冲', SBUF = 'socket 发送缓冲',
+      RBUF = 'socket 接收缓冲', TXR = '网卡 TX ring', RXR = '网卡 RX ring',
+      NIC = '网卡', DISK = '磁盘', PIPE = 'pipe 缓冲';
+
+  var modes = [
+    {
+      id: 'classic',
+      name: '传统 read + write',
+      copies: 4, cpu: 2, dma: 2, sw: 4,
+      chain: [DISK, BV, UB, SBUF, TXR, NIC],
+      tags: ['CPU 拷贝 ×2', 'DMA 拷贝 ×2', '上下文切换 ×4'],
+      exp: '就是你这张图画的流程。磁盘→页缓存（DMA），页缓存→用户缓冲（CPU 拷贝），用户缓冲→socket 发送缓冲（CPU 拷贝），socket 缓冲→网卡（DMA）。两次 CPU 拷贝是纯浪费——数据进用户态只是为了「路过」。'
+    },
+    {
+      id: 'stdio',
+      name: '加了运行时缓冲（更真实）',
+      copies: 4, cpu: 2, dma: 2, sw: 4,
+      chain: [DISK, BV, UB, STDIO, SBUF, TXR, NIC],
+      tags: ['C 里多一层 8KB 攒批', 'syscall 次数大减'],
+      exp: '如果你写的是 C 的 printf/fwrite，用户态其实还有一层 stdio 缓冲。它不增加拷贝次数（还是那 4 次），但把「很多次小 syscall」变成了「偶尔一次大 syscall」——这是「聚合缓冲」的典型价值。'
+    },
+    {
+      id: 'mmap',
+      name: 'mmap + write',
+      copies: 3, cpu: 1, dma: 2, sw: 4,
+      chain: [DISK, BV, SBUF, TXR, NIC],
+      tags: ['省掉 1 次 CPU 拷贝', '用户态无独立缓冲'],
+      exp: 'mmap 把文件页直接映射进用户地址空间，用户读写的就是页缓存那一页本身——「页缓存 → 用户缓冲」这次拷贝消失了。剩下一次 CPU 拷贝：从映射区写进 socket 发送缓冲。'
+    },
+    {
+      id: 'sendfile',
+      name: 'sendfile（真零拷贝路径）',
+      copies: 2, cpu: 0, dma: 2, sw: 2,
+      chain: [DISK, BV, RXR, NIC],
+      tags: ['CPU 零拷贝', '数据不进用户态', '需要网卡支持 SG-DMA'],
+      exp: 'sendfile 让数据全程待在内核里：DMA 从磁盘搬到页缓存，再让网卡用「分散-聚集 DMA（SG-DMA）」直接从页缓存读到网卡。数据一次都没进用户态，CPU 一次都不拷，上下文切换也从 4 次降到 2 次。这就是静态文件服务器/Nginx 快的原因。'
+    },
+    {
+      id: 'splice',
+      name: 'splice（经 pipe 传递页引用）',
+      copies: 2, cpu: 0, dma: 2, sw: 2,
+      chain: [DISK, BV, PIPE, NIC],
+      tags: ['pipe 缓冲里装的是指针', '描述符型缓冲的代表'],
+      exp: 'splice 借助一个管道在两个 fd 之间搭桥。注意：pipe 缓冲里装的不是数据，而是「页缓存页的引用」（指针）——这就是前面说的「描述符型缓冲」。数据本身只被 DMA 搬了两次，CPU 依然零拷贝。'
+    },
+    {
+      id: 'rdma',
+      name: 'RDMA / 内核旁路',
+      copies: 0, cpu: 0, dma: 0, sw: 0,
+      chain: [UB, TXR, NIC],
+      tags: ['内核完全不参与', '用户态直接投递网卡'],
+      exp: 'RDMA 让用户态直接把数据交给网卡，内核既不拷数据也不做协议处理，甚至不切上下文。严格说这就是「内存到内存」，一个字节都没被搬——极致性能，代价是网络和硬件都要专门支持。'
+    }
+  ];
+
+  var btnBox = document.getElementById('simBtns');
+  var statBox = document.getElementById('simStats');
+  var pipeBox = document.getElementById('simPipe');
+  var explBox = document.getElementById('simExpl');
+
+  function render(m) {
+    var html = '';
+    m.chain.forEach(function (n, i) {
+      var kind = 'kern';
+      if (n === UB || n === STDIO) kind = 'user';
+      if (n === NIC || n === DISK || n === TXR || n === RXR) kind = 'dev';
+      if (n === PIPE) kind = 'kern';
+      var sub = '';
+      if (n === BV || n === RA) sub = '<small>内核 · 数据</small>';
+      else if (n === UB || n === STDIO) sub = '<small>用户态 · 数据</small>';
+      else if (n === SBUF || n === RBUF) sub = '<small>内核 · 数据</small>';
+      else if (n === TXR || n === RXR) sub = '<small>设备 · 描述符</small>';
+      else if (n === PIPE) sub = '<small>内核 · 指针</small>';
+      else if (n === NIC) sub = '<small>硬件</small>';
+      else if (n === DISK) sub = '<small>介质</small>';
+      html += '<div class="pbox ' + kind + '">' + n + sub + '</div>';
+      if (i < m.chain.length - 1) {
+        var isDma = (n === DISK || n === NIC || n === TXR || n === RXR);
+        var label = isDma ? 'DMA' : 'CPU';
+        var k = isDma ? ' dma' : '';
+        html += '<span class="arrow">→</span><span class="copy' + k + '">' + label + '</span><span class="arrow">→</span>';
+      }
+    });
+    pipeBox.innerHTML = html;
+
+    var sw = m.sw;
+    statBox.innerHTML =
+      '<div class="stat r"><b>' + m.copies + '</b>总搬运次数</div>' +
+      '<div class="stat y"><b>' + m.cpu + '</b>CPU 拷贝</div>' +
+      '<div class="stat g"><b>' + m.dma + '</b>DMA 拷贝</div>' +
+      '<div class="stat b"><b>' + sw + '</b>上下文切换</div>';
+
+    explBox.innerHTML = '<b>' + m.name + '</b>　' +
+      m.tags.map(function (t) { return '<span class="tag b">' + t + '</span>'; }).join('') +
+      '<p style="margin-top:8px">' + m.exp + '</p>';
+  }
+
+  modes.forEach(function (m, i) {
+    var b = document.createElement('button');
+    b.className = 'btn' + (i === 0 ? ' on' : '');
+    b.textContent = m.name;
+    b.onclick = function () {
+      Array.prototype.forEach.call(btnBox.children, function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      render(m);
+    };
+    btnBox.appendChild(b);
+  });
+
+  render(modes[0]);
+})();
+</script>
+
+</body>
+</html>

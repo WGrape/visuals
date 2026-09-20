@@ -10,58 +10,43 @@ Visuals 致力于通过可视化的方式，让复杂的计算机科学概念变
 
 ## 知识体系
 
-### 计算机理论基础
-- 📊 **数据结构与算法** - 排序、搜索、链表、树等核心算法 ...
-- 💻 **计算机组成原理** - 运算器、存储器、总线系统、多核处理器 ...
-- 🖥️ **操作系统** - 进程管理、文件系统、内存管理、系统调用 ...
-- 🌐 **计算机网络** - 物理层到应用层协议、DNS、HTTP、TCP/IP ...
-- 🏗️ **软件工程** - 设计模式、架构设计、项目实践 ...
-- 🤖 **人工智能** - 大模型理论、Prompt Engineering、Agent 应用 ...
-- 🔐 **密码学** - 对称加密、非对称加密、数字签名 ...
-- ⚙️ **编译原理** - 词法分析、语法分析、代码生成 ...
-- 🐍 **编程语言** - 静态/动态类型、语言特性对比 ...
+目录既是网站导航，也是知识分类。首页按知识主题展示卡片；目录层级以实际知识边界为准，不为视觉分组额外增加物理目录。
 
-### 技术体系
-- 🗄️ **数据库系统** - MySQL、Redis、Elasticsearch 核心原理 ...
-- 🔌 **第三方对接** - 支付系统、认证授权、API 对接 ...
-- 💼 **业务设计** - OTA 升级、订单履约、营销活动 ...
-- 📊 **大数据系统** - Hadoop、Spark、Flink、数据湖 ...
-- 🔌 **物联网设计** - MQTT 协议、物联网通信 ...
-- 🎮 **游戏设计** - Flash 技术、游戏引擎原理 ...
+1. **计算机科学基础**：算法、组成原理、操作系统、网络、编译与密码学。
+2. **编程与程序**：编程语言、运行时、Go / Python 与工程实践。
+3. **数据库系统**：数据建模、存储、查询、缓存、检索与扩展。
+4. **大数据系统**：数仓、湖仓、批流处理、查询引擎与数据平台。
+5. **人工智能**：模型、生命周期、大语言模型、AI 工程与 AI 开发。
+6. **系统工程**：软件工程、分布式系统、云服务架构，以及高性能、高并发、高可用。
 
-### 架构设计
-- 🪢 **分布式系统** - CAP 理论、Raft 算法、分布式事务 ...
-- 🛡️ **高可用系统** - 负载均衡、故障转移、限流降级 ...
-- 🔥 **高并发系统** - 锁设计、池化技术、缓存设计、消息队列 ...
-- ☁️ **云服务架构** - Nginx、上云、带宽、SLB、WAF、CDN ...
+完整的分类原则、命名规则和新增内容流程见 [知识架构治理](docs/knowledge-architecture.md)；正在执行的目录调整及迁移清单见 [知识迁移蓝图](docs/knowledge-migration-blueprint.md)。
 
 ## 项目结构
 
 ```
 visuals/
-├── index.html                          # 首页
-├── computer-algorithm/                 # 数据结构与算法
-├── artificial-intelligence/            # 人工智能
-├── bigdata-system/                     # 大数据系统
-├── business-design/                    # 业务设计
-├── cloud-architecture/                 # 云服务架构
-├── computer-compiler-principles/          # 编译原理
-├── computer-composition/               # 计算机组成原理
-├── computer-network/                   # 计算机网络
-├── container/                          # 容器技术
-├── computer-principles/                 # 计算机原理（拓扑学、密码学）
-├── database-system/                    # 数据库系统
-├── distributed-system/                 # 分布式系统
-├── game-design/                        # 游戏设计
-├── high-availability/                  # 高可用系统
-├── high-concurrency/                   # 高并发系统
-├── iot-design/                         # 物联网设计
-├── computer-operating-system/            # 操作系统
-├── computer-programming-language/        # 编程语言
-├── computer-software-engineering/      # 软件工程
-├── third-party-integration/            # 第三方对接
-├── assets/                             # 公共资源
-└── check_html_link.sh                  # HTML 链接检查脚本
+├── index.html                    # 全站首页：一级目录标题、二级目录卡片
+├── computer-foundations/         # 计算机科学基础
+│   ├── computer-algorithm/
+│   ├── computer-network/
+│   ├── computer-operating-system/
+├── programming-and-programs/     # 编程与程序
+│   ├── golang/                   # Go 语言与运行时
+│   └── go/                       # Go 工程实践
+├── database-system/              # 数据库系统
+├── bigdata-system/               # 大数据系统
+├── artificial-intelligence/      # 人工智能
+├── system-engineering/           # 系统工程
+│   ├── software-engineering/
+│   ├── distributed-system/
+│   ├── cloud-architecture/
+│   └── high-performance-concurrency-availability/
+├── learning-and-exams/           # 学习与考试
+│   └── kaoyan/
+├── assets/                       # 公共样式、目录树和路由脚本
+├── docs/                         # 知识体系治理与迁移文档
+├── check_html_link.sh            # HTML 链接检查脚本
+└── check_safe.sh                 # 本地链接与敏感信息检查脚本
 ```
 
 ## 本地运行
@@ -95,15 +80,14 @@ chmod +x check_html_link.sh
 
 - 自动遍历项目中所有 HTML 文件
 - 检查文件是否在对应的上级 `index.html` 中有链接引用
-- 支持多级目录结构（如 `computer-algorithm/trees/binary_tree.html` 会检查 `computer-algorithm/index.html`）
+- 支持多级目录结构，并沿祖先目录查找可发现该页面的 `index.html`
 - 用颜色标记检查结果（绿色=已链接，红色=未链接，黄色=跳过）
 - 显示统计摘要：总计、已链接、未链接数量
 
 **检查规则：**
 
-- `game-design/flash-technology-explained.html` → 检查 `game-design/index.html`
-- `computer-algorithm/trees/binary_tree_traversal.html` → 检查 `computer-algorithm/index.html`
-- `high-concurrency/kafka/kafka-partition-explained.html` → 检查 `high-concurrency/index.html`
+- `computer-foundations/computer-algorithm/data-structures/trees/binary_tree_traversal.html` → 由其祖先目录中的索引发现
+- `system-engineering/high-performance-concurrency-availability/high-concurrency/kafka/kafka-partition-explained.html` → 由对应领域索引发现
 
 ## 贡献指南
 

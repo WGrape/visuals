@@ -44,18 +44,42 @@
         return relativePath + url.search + url.hash;
     }
 
+    function buildSourceIndexPath() {
+        const marker = "/visuals/";
+        const markerIndex = window.location.pathname.indexOf(marker);
+        if (markerIndex === -1) {
+            return null;
+        }
+
+        const relativePath = window.location.pathname
+            .slice(markerIndex + marker.length)
+            .replace(/^\/+/, "");
+
+        return relativePath.endsWith("index.html") ? relativePath : null;
+    }
+
+    const sourceIndexPath = buildSourceIndexPath();
+
     function rewriteCardLink(anchor) {
         const rawHref = anchor.getAttribute("href");
         if (shouldSkipLink(rawHref)) {
             return;
         }
 
+        // 知识内容始终在新标签页学习，不离开当前目录定位。
+        anchor.setAttribute("target", "_blank");
+        anchor.setAttribute("rel", "noopener");
+
         const targetPath = buildTargetPath(rawHref);
         if (!targetPath) {
             return;
         }
 
-        anchor.setAttribute("href", containerBase + encodeURIComponent(targetPath));
+        let target = containerBase + encodeURIComponent(targetPath);
+        if (sourceIndexPath) {
+            target += "&from=" + encodeURIComponent(sourceIndexPath);
+        }
+        anchor.setAttribute("href", target);
     }
 
     document.querySelectorAll("a.card[href]").forEach(rewriteCardLink);
