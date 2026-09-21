@@ -106,6 +106,25 @@
         root.children.push(pseudo);
     }
 
+    // 目录名以「01-」这类序号开头时按数字排序；未编号的目录继续遵循索引页声明顺序。
+    // 这样既能定义复习路线，也不会改变其他知识地图的现有展示顺序。
+    function directoryOrder(name) {
+        const match = /^(\d+)-/.exec(name || "");
+        return match ? Number(match[1]) : null;
+    }
+
+    function sortNumberedDirectories(node) {
+        node.children.sort(function (a, b) {
+            const aOrder = directoryOrder(a.name);
+            const bOrder = directoryOrder(b.name);
+            if (aOrder === null || bOrder === null) return 0;
+            return aOrder - bOrder;
+        });
+        node.children.forEach(sortNumberedDirectories);
+    }
+
+    sortNumberedDirectories(root);
+
     /* ---------- 收集「有内容的目录」节点（决定右侧内容区与树的点击目标） ---------- */
     const ordered = [];
     (function walk(node) {
@@ -117,6 +136,14 @@
     })(root);
 
     if (!ordered.length) return;
+
+    /* ---------- 生成目录介绍：位于学科页头与目录/卡片布局之间 ---------- */
+    const intro = document.createElement("section");
+    intro.className = "topic-directory-intro";
+    intro.setAttribute("data-topic-intro", "");
+    intro.setAttribute("aria-live", "polite");
+    intro.innerHTML = '<span class="topic-directory-intro-icon" data-topic-intro-icon aria-hidden="true"></span><div class="topic-directory-intro-copy"><h2 data-topic-intro-title></h2><p data-topic-intro-description></p></div><span class="topic-directory-intro-count" data-topic-intro-count></span>';
+    layout.parentNode.insertBefore(intro, layout);
 
     /* ---------- 生成右侧内容面板：一个目录 = 一块内容区 ---------- */
     const content = document.createElement("section");
@@ -131,7 +158,7 @@
         const single = node.groups.length === 1;
         const first = node.groups[0];
 
-        // 分类名称和层级只由左侧目录树呈现；右侧仅展示当前目录的知识入口。
+        // 分类名称和层级由左侧目录树呈现；右侧展示当前目录的知识入口。
         if (single) {
             if (first.topics) panel.appendChild(first.topics);
         } else {
@@ -256,21 +283,8 @@
     });
     const isNarrow = window.matchMedia("(max-width: 900px)");
 
-    const storageKey = "visuals-tree:" + location.pathname;
-    let saved = {};
-    try {
-        saved = JSON.parse(localStorage.getItem(storageKey) || "{}") || {};
-    } catch (err) {
-        saved = {};
-    }
-
     function remember(target) {
-        saved.target = target;
-        try {
-            localStorage.setItem(storageKey, JSON.stringify(saved));
-        } catch (err) {
-            /* ignore */
-        }
+        // 仅通过 URL hash 保持可分享的当前目录；普通访问始终从第一个目录开始。
     }
 
     function openNode(node, open) {
@@ -302,6 +316,22 @@
             panel.classList.toggle("is-active", panel.id === target);
         });
         if (!found) return;
+        if (intro) {
+            const first = found.groups[0];
+            const single = found.groups.length === 1;
+            const icon = intro.querySelector("[data-topic-intro-icon]");
+            const title = intro.querySelector("[data-topic-intro-title]");
+            const description = intro.querySelector("[data-topic-intro-description]");
+            const count = intro.querySelector("[data-topic-intro-count]");
+            if (icon) icon.textContent = single ? first.icon : "📚";
+            if (title) title.textContent = single ? first.title : found.name;
+            if (description) {
+                description.textContent = single
+                    ? first.desc
+                    : "这个目录汇集了 " + found.groups.length + " 组相关内容，可从下方卡片继续学习。";
+            }
+            if (count) count.textContent = found.count + " 篇内容";
+        }
         remember(target);
         if (opts.scroll) {
             const panel = document.getElementById(target);
@@ -415,8 +445,7 @@
     });
     const hashTarget = (location.hash || "").slice(1);
     const defaultTarget = ids[0];
-    let target = ids.indexOf(hashTarget) !== -1 ? hashTarget : saved.target;
-    if (ids.indexOf(target) === -1) target = defaultTarget;
+    let target = ids.indexOf(hashTarget) !== -1 ? hashTarget : defaultTarget;
 
     const activeNode = ordered.filter(function (node) {
         return node.panelId === target;

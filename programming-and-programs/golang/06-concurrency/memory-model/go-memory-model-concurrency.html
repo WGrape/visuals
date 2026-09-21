@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go 内存模型详解：并发可见性与 happens-before</title>
+<style>
+  :root {
+    --bg: #f8f9fa; --card: #ffffff; --text: #2C2C2A; --text-secondary: #5F5E5A; --gray-50: #F1EFE8; --gray-200: #B4B2A9;
+    --blue-50: #E6F1FB; --blue-200: #85B7EB; --blue-400: #378ADD; --blue-600: #185FA5; --blue-800: #042C53;
+    --purple-50: #EEEDFE; --purple-200: #AFA9EC; --purple-400: #7F77DD; --purple-600: #534AB7; --purple-800: #26215C;
+    --teal-50: #E1F5EE; --teal-200: #5DCAA5; --teal-400: #1D9E75; --teal-600: #0F6E56;
+    --coral-50: #FAECE7; --coral-200: #F0997B; --coral-400: #D85A30; --coral-600: #993C1D;
+    --amber-50: #FAEEDA; --amber-200: #EF9F27; --amber-400: #BA7517;
+    --green-50: #EAF3DE; --green-200: #97C459; --green-400: #639922; --green-600: #3f7a15;
+    --red-50: #FCEBEB; --red-200: #F09595; --red-400: #E24B4A;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; line-height: 1.7; }
+  .hero { background: linear-gradient(135deg, var(--blue-800) 0%, var(--purple-800) 100%); color: #fff; padding: 56px 20px 44px; text-align: center; }
+  .hero h1 { font-size: 27px; font-weight: 500; margin-bottom: 12px; }
+  .hero p { font-size: 15px; opacity: 0.9; max-width: 820px; margin: 0 auto; }
+  .topnav { position: sticky; top: 0; background: var(--card); border-bottom: 1px solid var(--gray-200); z-index: 50; padding: 10px 20px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .topnav a { font-size: 12.5px; color: var(--text-secondary); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
+  .topnav a:hover { background: var(--blue-50); color: var(--blue-600); }
+  .topnav a.active { background: var(--blue-50); color: var(--blue-600); font-weight: 600; }
+  .container { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+  .section { margin-top: 46px; scroll-margin-top: 60px; }
+  .section-tag { display: inline-block; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 20px; margin-bottom: 10px; }
+  .tag-blue { background: var(--blue-50); color: var(--blue-600); }
+  .tag-purple { background: var(--purple-50); color: var(--purple-600); }
+  .tag-teal { background: var(--teal-50); color: var(--teal-600); }
+  .tag-coral { background: var(--coral-50); color: var(--coral-600); }
+  .tag-amber { background: var(--amber-50); color: var(--amber-400); }
+  .tag-green { background: var(--green-50); color: var(--green-400); }
+  h2 { font-size: 22px; font-weight: 500; margin-bottom: 6px; }
+  .subtitle { font-size: 14px; color: var(--text-secondary); margin-bottom: 18px; }
+  .card { background: var(--card); border: 1px solid var(--gray-200); border-radius: var(--radius); padding: 22px; margin-bottom: 14px; }
+  .card h3 { font-size: 16px; font-weight: 500; margin-bottom: 8px; }
+  .card p { font-size: 14px; color: var(--text-secondary); line-height: 1.8; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 14px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 14px; }
+  .feature { background: var(--gray-50); border-radius: 10px; padding: 16px; border-left: 3px solid var(--blue-400); }
+  .feature .t { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+  .feature .d { font-size: 12.5px; color: var(--text-secondary); line-height: 1.6; }
+  pre { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 16px 20px; font-size: 13px; line-height: 1.7; overflow-x: auto; margin: 12px 0; }
+  pre .kw { color: #cba6f7; } pre .fn { color: #89b4fa; } pre .str { color: #a6e3a1; }
+  pre .cm { color: #6c7086; font-style: italic; } pre .typ { color: #f9e2af; } pre .num { color: #fab387; }
+  code.inline { background: var(--gray-50); padding: 1px 6px; border-radius: 4px; font-size: 12.5px; color: var(--blue-600); font-family: 'SF Mono', Consolas, monospace; }
+  .note { background: var(--teal-50); border: 1px solid var(--teal-200); border-radius: 10px; padding: 14px 16px; margin: 14px 0; font-size: 13.5px; color: var(--teal-600); }
+  .warn { background: var(--coral-50); border: 1px solid var(--coral-200); border-radius: 10px; padding: 14px 16px; margin: 14px 0; font-size: 13.5px; color: var(--coral-600); }
+  .diagram { background: var(--gray-50); border-radius: var(--radius); padding: 20px; margin: 16px 0; text-align: center; }
+  .cmp-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12.5px; }
+  .cmp-table th { background: var(--gray-50); padding: 9px 12px; text-align: left; font-weight: 500; font-size: 12px; border-bottom: 2px solid var(--gray-200); }
+  .cmp-table td { padding: 9px 12px; border-bottom: 1px solid #eee; vertical-align: top; }
+  .cmp-table tr:hover { background: var(--gray-50); }
+  .ok { color: var(--green-600); font-weight: 600; }
+  .bad { color: var(--red-400); font-weight: 600; }
+  .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
+  .footer a { color: var(--blue-600); text-decoration: none; }
+  .keyline { border-left: 3px solid var(--blue-400); padding-left: 16px; margin: 16px 0; }
+  .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
+  .pill { display:inline-block; font-size:11.5px; padding:2px 8px; border-radius:10px; background:var(--purple-50); color:var(--purple-600); margin-right:4px; }
+  .lead { font-size: 15px; color: var(--text); line-height: 1.85; }
+  .bigq { font-size: 16px; font-weight: 500; color: var(--blue-800); background: var(--blue-50); border-radius: 10px; padding: 14px 18px; margin: 14px 0; }
+  .links { background: var(--gray-50); border-radius: var(--radius); padding: 16px 18px; margin-top: 16px; font-size: 13px; }
+  .links h3 { font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+  .links a { color: var(--blue-600); text-decoration: none; }
+  .links a:hover { background: var(--blue-50); }
+  /* 同步原语探索器 */
+  .prim-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .prim-tab { font-size: 13px; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--gray-200); background: var(--card); color: var(--text-secondary); cursor: pointer; font-family: inherit; }
+  .prim-tab:hover { border-color: var(--blue-200); color: var(--blue-600); }
+  .prim-tab.active { background: var(--blue-600); color: #fff; border-color: var(--blue-600); }
+  .prim-panel { display: none; }
+  .prim-panel.active { display: block; }
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .ba .ba-bad { font-size: 12.5px; font-weight: 600; padding: 6px 10px; border-radius: 8px 8px 0 0; }
+  .ba .bad-x { background: var(--coral-50); color: var(--coral-600); border: 1px solid var(--coral-200); border-bottom: none; }
+  .ba .bad-o { background: var(--green-50); color: var(--green-600); border: 1px solid var(--green-200); border-bottom: none; }
+  .ba pre { margin: 0; border-radius: 0 0 10px 10px; }
+  .ba .bad-x + pre { border: 1px solid var(--coral-200); border-top: none; }
+  .ba .bad-o + pre { border: 1px solid var(--green-200); border-top: none; }
+  .ba p.ba-note { font-size: 12.5px; color: var(--text-secondary); margin-top: 8px; grid-column: 1 / -1; }
+  /* race 小测 */
+  .quiz-btn { display: block; width: 100%; text-align: left; background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; font-size: 14px; color: var(--text); cursor: pointer; font-family: inherit; }
+  .quiz-btn:hover { background: var(--blue-50); border-color: var(--blue-200); }
+  .quiz-ans { display: none; margin-top: 8px; padding: 12px 14px; border-radius: 10px; font-size: 13.5px; line-height: 1.7; }
+  .quiz-ans.show { display: block; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>Go 内存模型详解：并发可见性与 happens-before</h1>
+  <p>这是「真·内存模型」的落地页：它不讲内存怎么分配、不讲 GMP、不讲 GC，只回答一个问题——<b>在并发下，一个 goroutine 对内存的写入，在什么条件下能被另一个 goroutine 看到，以及操作之间有哪些顺序保证</b>。核心就是 happens-before 与同步原语。</p>
+</div>
+
+<div class="topnav">
+  <a href="#boundary">边界厘清</a>
+  <a href="#hb">happens-before</a>
+  <a href="#rules">规则清单</a>
+  <a href="#sync">同步原语对照</a>
+  <a href="#race">data race</a>
+  <a href="#notsync">不是同步的</a>
+  <a href="#interview">面试四块</a>
+</div>
+
+<div class="container">
+
+  <!-- 0 边界厘清 -->
+  <div class="section" id="boundary">
+    <span class="section-tag tag-coral">先划边界</span>
+    <h2>一、先说清：内存模型 ≠ 内存分配 ≠ GMP ≠ GC</h2>
+    <p class="subtitle">国内面试里「内存模型」常被用得不严谨。动手看规则前，先把四个名字里都带「内存」的话题对号入座，否则后面会越看越乱。</p>
+    <div class="bigq">「内存模型」是一份<b>并发可见性契约</b>：规定在并发 / 乱序执行下，一个协程对内存的写入，在什么条件下对另一个协程<b>可见</b>，以及操作之间有哪些<b>顺序保证</b>。它只回答「谁能看到谁的写」。</div>
+    <div class="card">
+      <h3>四个常被混为一谈的词，各管一摊</h3>
+      <div class="grid-4">
+        <div class="feature" style="border-left-color:var(--purple-400)"><div class="t">① 内存模型 Memory Model</div><div class="d">「契约/规则」层：并发下读写可见性与顺序的保证。Go 官方文档 <code class="inline">The Go Memory Model</code> 讲的就是它，核心是 <b>happens-before</b>。本页只讲这一块。</div></div>
+        <div class="feature" style="border-left-color:var(--teal-400)"><div class="t">② 内存分配 / 管理</div><div class="d">「实现」层：堆内存怎么被切成小块、怎么快速发还。关键词 <code class="inline">mcache/mcentral/mheap/span/size class</code>。</div></div>
+        <div class="feature" style="border-left-color:var(--amber-400)"><div class="t">③ GMP 调度</div><div class="d">「调度」层：百万 goroutine 怎么映射到少量 OS 线程上跑。关键词 <code class="inline">G / M / P / work-stealing</code>。</div></div>
+        <div class="feature" style="border-left-color:var(--green-400)"><div class="t">④ 垃圾回收 GC</div><div class="d">「清理」层：不再使用的内存何时被回收。关键词三色标记 / <code class="inline">STW</code> / write barrier。</div></div>
+      </div>
+      <div class="note" style="margin-top:14px">记一句口诀：<b>内存模型 = 规则（谁能看到谁的写）；内存分配 = 修路（内存怎么切）；GMP = 交警（谁在什么时候跑）；GC = 环卫（不用的内存何时扔）。</b>四件事名字里都带「内存」，但层次完全不同。</div>
+    </div>
+    <div class="diagram">
+      <svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="arwb" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#534AB7"/></marker></defs>
+        <rect x="20" y="20" width="640" height="62" rx="12" fill="#EEEDFE" stroke="#AFA9EC"/>
+        <text x="40" y="46" fill="#26215C" font-size="14" font-weight="700">规范层 · 内存模型（The Go Memory Model 文档）</text>
+        <text x="40" y="68" fill="#5F5E5A" font-size="12.5">happens-before 契约 → 规定并发下读写何时可见、顺序如何保证</text>
+        <rect x="20" y="100" width="640" height="110" rx="12" fill="#F1EFE8" stroke="#B4B2A9"/>
+        <text x="40" y="122" fill="#2C2C2A" font-size="13" font-weight="700">实现层 · 运行时子系统（名字带「内存」，但彼此独立）</text>
+        <rect x="40" y="134" width="185" height="62" rx="10" fill="#E1F5EE" stroke="#5DCAA5"/>
+        <text x="132" y="160" text-anchor="middle" fill="#0F6E56" font-size="12.5" font-weight="700">内存分配 / 管理</text>
+        <text x="132" y="180" text-anchor="middle" fill="#5F5E5A" font-size="11">管「怎么切、怎么还」</text>
+        <rect x="247" y="134" width="185" height="62" rx="10" fill="#FAEEDA" stroke="#EF9F27"/>
+        <text x="339" y="160" text-anchor="middle" fill="#993C1D" font-size="12.5" font-weight="700">GMP 调度</text>
+        <text x="339" y="180" text-anchor="middle" fill="#5F5E5A" font-size="11">管「谁在何时跑」</text>
+        <rect x="454" y="134" width="185" height="62" rx="10" fill="#EAF3DE" stroke="#97C459"/>
+        <text x="546" y="160" text-anchor="middle" fill="#0F6E56" font-size="12.5" font-weight="700">垃圾回收 GC</text>
+        <text x="546" y="180" text-anchor="middle" fill="#5F5E5A" font-size="11">管「何时扔」</text>
+        <line x1="350" y1="82" x2="350" y2="98" stroke="#534AB7" stroke-width="1.5" marker-end="url(#arwb)"/>
+        <text x="350" y="95" text-anchor="middle" fill="#534AB7" font-size="10">规范约束实现，但话题彼此独立</text>
+      </svg>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">内存模型是「规范层」（一份契约）；内存分配 / GMP / GC 是「实现层」的三个子系统。</p>
+    </div>
+    <div class="warn">本目录里那篇<a href="go-memory-model.html" style="color:var(--coral-600)">《Go内存模型》可视化页</a>恰恰把内存布局 + GMP + GC + happens-before 全塞进了一页，标题叫「内存模型」、内容却大多是另外三块——正是这种混淆的典型来源。本页只聚焦规范层。若你想厘清「面试官问的到底是哪一块」，另有一篇<a href="go-memory-model-what-is-asked.html" style="color:var(--coral-600)">《「Go 内存模型」到底在问什么》</a>专门做术语定位。</div>
+  </div>
+
+  <!-- 1 happens-before -->
+  <div class="section" id="hb">
+    <span class="section-tag tag-blue">核心</span>
+    <h2>二、happens-before 到底是什么</h2>
+    <p class="subtitle">整份内存模型，几乎全绕着 happens-before（先于发生）转。先把它吃透。</p>
+    <div class="card">
+      <h3>happens-before 是「偏序关系」，不是「墙上时钟先后」</h3>
+      <p class="lead">说 <b>A happens-before B</b>，有两层含义：</p>
+      <div class="grid-2">
+        <div class="feature"><div class="t">① 可见性保证</div><div class="d">所有对 A 的写，B 及 B 之后的操作都<b>一定能看到</b>。写结果不会「还没传过去」。</div></div>
+        <div class="feature"><div class="t">② 禁止重排</div><div class="d">编译器 / CPU 不得把 B 之前的读写重排到 A 之后（在可被观察到的范围内）。</div></div>
+      </div>
+      <div class="keyline" style="margin-top:14px"><p>它是<b>偏序</b>：有些操作之间<b>没有</b> happens-before 关系，它们就是「并发（concurrent）、不可比较」，谁先谁后<b>未定义</b>。注意 happens-before 还有<b>传递性</b>：若 A hb B 且 B hb C，则 A hb C。多数正确的并发程序，就是把一串同步事件拼成一条可见性链。</p></div>
+      <p class="lead" style="margin-top:8px">为什么需要它？你写的代码顺序，不等于 CPU / 编译器实际执行的顺序：</p>
+      <div class="grid-4">
+        <div class="feature"><div class="t">编译器重排</div><div class="d">编译期为优化，在「不改变单线程结果」前提下调换指令顺序。</div></div>
+        <div class="feature"><div class="t">CPU 乱序执行</div><div class="d">多核为吞吐会乱序 / 投机执行，写可能先停在 store buffer 里没真正落内存。</div></div>
+        <div class="feature"><div class="t">缓存不一致</div><div class="d">每核有独立缓存，A 核写的变量 B 核可能暂时从自己缓存读到旧值。</div></div>
+        <div class="feature"><div class="t">多字撕裂读</div><div class="d">大于一个机器字的变量读写，会被拆成多次机器字操作，顺序未指定（可能读到「撕裂」的值）。</div></div>
+      </div>
+    </div>
+    <div class="diagram">
+      <svg viewBox="0 0 680 180" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="arwh" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#185FA5"/></marker></defs>
+        <circle cx="120" cy="90" r="26" fill="#E6F1FB" stroke="#378ADD"/><text x="120" y="95" text-anchor="middle" fill="#042C53" font-size="14" font-weight="700">A</text>
+        <circle cx="300" cy="90" r="26" fill="#E6F1FB" stroke="#378ADD"/><text x="300" y="95" text-anchor="middle" fill="#042C53" font-size="14" font-weight="700">B</text>
+        <circle cx="480" cy="90" r="26" fill="#E6F1FB" stroke="#378ADD"/><text x="480" y="95" text-anchor="middle" fill="#042C53" font-size="14" font-weight="700">C</text>
+        <line x1="148" y1="90" x2="272" y2="90" stroke="#185FA5" stroke-width="1.6" marker-end="url(#arwh)"/>
+        <line x1="328" y1="90" x2="452" y2="90" stroke="#185FA5" stroke-width="1.6" marker-end="url(#arwh)"/>
+        <circle cx="600" cy="40" r="26" fill="#FAECE7" stroke="#D85A30"/><text x="600" y="45" text-anchor="middle" fill="#993C1D" font-size="14" font-weight="700">X</text>
+        <circle cx="600" cy="140" r="26" fill="#FAECE7" stroke="#D85A30"/><text x="600" y="145" text-anchor="middle" fill="#993C1D" font-size="14" font-weight="700">Y</text>
+        <text x="190" y="78" fill="#185FA5" font-size="11">hb</text>
+        <text x="370" y="78" fill="#185FA5" font-size="11">hb</text>
+        <text x="600" y="205" text-anchor="middle" fill="#993C1D" font-size="11">X、Y 与 A/B/C 互不 hb → 顺序未定义（concurrent）</text>
+      </svg>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">A hb B hb C 形成一条链（传递性）；X、Y 与它们互不 happens-before，顺序由实现自由决定。</p>
+    </div>
+    <div class="warn">常见误区：「happens-before 就是时间上先发生」。错。它表达的是「可见性保证 + 禁止重排」，并不等于墙上时钟的先后。两个操作之间如果「互不 happens-before」，那它们的执行顺序就是未定义的——哪怕你用 <code class="inline">time.Sleep</code> 赌它「肯定先跑完」也没用。</div>
+  </div>
+
+  <!-- 2 规则清单 -->
+  <div class="section" id="rules">
+    <span class="section-tag tag-purple">规则清单</span>
+    <h2>三、Go 内存模型给出的 happens-before 规则</h2>
+    <p class="subtitle">下面这些就是「能建立 happens-before 边界」的官方规则（节选自 The Go Memory Model）。记住它们，就握住了内存模型的骨架。</p>
+    <div class="card">
+      <h3>七条同步规则（面试常背）</h3>
+      <div class="grid-2">
+        <div class="feature"><div class="t">① 单 goroutine 顺序</div><div class="d">同一 goroutine 内，按程序顺序 hb。但注意：重排不可被本 goroutine 观察，别以为「我写的顺序就是执行顺序」。</div></div>
+        <div class="feature"><div class="t">② 包初始化 init</div><div class="d">若 p 导入 q，则 q 的 <code class="inline">init</code> 完成 hb p 的任何函数开始；<code class="inline">main.main</code> 的开始 hb 所有 init 完成之后。</div></div>
+        <div class="feature"><div class="t">③ goroutine 创建</div><div class="d"><code class="inline">go f()</code> 语句 hb 于新 goroutine 开始执行 → 创建前写的变量，新 goroutine 一定看得到。</div></div>
+        <div class="feature"><div class="t">④ channel 通信</div><div class="d">无缓冲：send hb receive；带缓冲：第 k 次 send hb 第 k 次 receive；<code class="inline">close</code> hb 收到零值的 receive。</div></div>
+        <div class="feature"><div class="t">⑤ 互斥锁 sync.Mutex</div><div class="d">第 n 次 <code class="inline">Unlock</code> hb 第 n+1 次 <code class="inline">Lock</code> 返回。解锁把你的写「发布」给下一个加锁者。</div></div>
+        <div class="feature"><div class="t">⑥ WaitGroup / Once</div><div class="d">第 n 次 <code class="inline">Done</code> hb 第 n 次 <code class="inline">Wait</code> 返回；<code class="inline">Once.Do(f)</code> 中 f 的执行 hb 任何后续 Do 返回。</div></div>
+        <div class="feature" style="grid-column:1 / -1; border-left-color:var(--amber-400)"><div class="t">⑦ sync/atomic（Go 1.19 起正式为顺序一致）</div><div class="d">一个原子的写 hb 后续观察到该值的原子读。Go 1.19 把 <code class="inline">sync/atomic</code> 的语义正式钉死为 <b>sequentially consistent</b>（对齐 C++ SC / Java volatile）。Go 1.19 还新增了类型化原子：<code class="inline">atomic.Int64 / Bool / Pointer[T]</code> 等，把「该字段必须原子访问」写进类型里，避免漏写原子访问。</div></div>
+      </div>
+      <div class="note" style="margin-top:14px">经典反例（没有同步，内存模型说「结果未定义」）：<code class="inline">done</code> 用普通 bool 轮询、<code class="inline">a</code> 用普通 string 赋值——编译器可把 <code class="inline">done=true</code> 重排到 <code class="inline">a="..."</code> 之前，CPU 也可能让主协程一直从自己缓存读到 <code class="inline">done==false</code> 而永不退出，或退出后读到未初始化的 <code class="inline">a</code>。修法正是下面第四节的同步原语。</div>
+    </div>
+    <div class="warn">Go 1.19（2022 年 8 月，文档版标记 "Version of June 6, 2022"）对内存模型做了一次重要修订：把单一的 happens-before 拆成 <b>sequenced-before</b>（程序内顺序）与 <b>synchronized-before</b>（同步事件），happens-before 是二者的传递闭包；并以 <b>DRF-SC</b>（data-race-free ⇒ sequential consistency）为目标，对齐 C/C++/Java 的保证。所以「Go 没有正经内存模型」是过时说法。这次修订<b>没有改变已有程序的可观察行为</b>，只是把长期默认遵守的契约写成了严谨可验证的文本。</div>
+  </div>
+
+  <!-- 3 同步原语对照 -->
+  <div class="section" id="sync">
+    <span class="section-tag tag-teal">对照演示</span>
+    <h2>四、四个同步原语：没同步 vs 同步</h2>
+    <p class="subtitle">这是内存模型最实用的部分。点下面的原语，看「不加同步 → 结果未定义（data race）」与「加同步 → 保证可见」的对照。左侧是错的，右侧是对的。</p>
+    <div class="prim-tabs">
+      <button class="prim-tab active" onclick="showPrim('mutex')">sync.Mutex</button>
+      <button class="prim-tab" onclick="showPrim('channel')">Channel</button>
+      <button class="prim-tab" onclick="showPrim('atomic')">sync/atomic</button>
+      <button class="prim-tab" onclick="showPrim('wg')">WaitGroup</button>
+    </div>
+
+    <div class="prim-panel active" id="prim-mutex">
+      <div class="ba">
+        <div class="ba-bad bad-x">❌ 没同步：普通读写，未定义</div>
+        <div class="ba-bad bad-o">✅ 加锁：Unlock hb 下一次 Lock</div>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">func</span> <span class="fn">writer</span>() { x = 100 }
+<span class="kw">func</span> <span class="fn">reader</span>() { <span class="fn">println</span>(x) }
+<span class="cm">// 两 goroutine 并发读写 x</span>
+<span class="cm">// 无 happens-before → data race</span>
+<span class="cm">// reader 可能读到 0 / 100 / 撕裂值</span></pre>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">var</span> mu <span class="typ">sync.Mutex</span>
+<span class="kw">func</span> <span class="fn">writer</span>() {
+    mu.<span class="fn">Lock</span>()
+    x = 100
+    mu.<span class="fn">Unlock</span>()      <span class="cm">// 发布写</span>
+}
+<span class="kw">func</span> <span class="fn">reader</span>() {
+    mu.<span class="fn">Lock</span>()        <span class="cm">// 取到写</span>
+    <span class="fn">println</span>(x)
+    mu.<span class="fn">Unlock</span>()
+}</pre>
+      </div>
+      <p class="ba-note">第 n 次 <code class="inline">Unlock</code> happens-before 第 n+1 次 <code class="inline">Lock</code> 返回。锁把临界区里的写「发布」给下一个拿到锁的 goroutine。</p>
+    </div>
+
+    <div class="prim-panel" id="prim-channel">
+      <div class="ba">
+        <div class="ba-bad bad-x">❌ 没同步：只靠普通变量</div>
+        <div class="ba-bad bad-o">✅ 通信：send hb receive</div>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">func</span> <span class="fn">main</span>() {
+    <span class="kw">go func</span>() { x = 100 }()
+    <span class="cm">// 无同步</span>
+    <span class="fn">println</span>(x)  <span class="cm">// data race</span>
+}</pre>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">func</span> <span class="fn">main</span>() {
+    ch := <span class="fn">make</span>(<span class="kw">chan</span> <span class="kw">int</span>)
+    <span class="kw">go func</span>() {
+        x = 100
+        ch &lt;- 0        <span class="cm">// send</span>
+    }()
+    &lt;-ch             <span class="cm">// receive（hb send）</span>
+    <span class="fn">println</span>(x)    <span class="cm">// 保证看到 100</span>
+}</pre>
+      </div>
+      <p class="ba-note">无缓冲 channel：send happens-before receive。Go 首选用「不要通过共享内存来通信，而要通过通信来共享内存」——channel 的通信本身就是同步语义。注意这里 x 的写 hb send（同 goroutine 顺序），send hb receive（channel 规则），receive hb println（同 goroutine 顺序），由<b>传递性</b>保证可见。</p>
+    </div>
+
+    <div class="prim-panel" id="prim-atomic">
+      <div class="ba">
+        <div class="ba-bad bad-x">❌ 没同步：普通赋值</div>
+        <div class="ba-bad bad-o">✅ 原子：写 hb 观察到该值的读</div>
+        <pre><span class="kw">var</span> x <span class="kw">int64</span>
+<span class="kw">func</span> <span class="fn">writer</span>() { x = 100 }
+<span class="kw">func</span> <span class="fn">reader</span>() { <span class="fn">println</span>(x) }
+<span class="cm">// 即便 int64 是单字</span>
+<span class="cm">// 原子性 ≠ 可见性</span>
+<span class="cm">// 无 hb → 仍可能看不到</span></pre>
+        <pre><span class="kw">var</span> x <span class="typ">atomic.Int64</span>
+<span class="kw">func</span> <span class="fn">writer</span>() {
+    x.<span class="fn">Store</span>(100)   <span class="cm">// 原子写</span>
+}
+<span class="kw">func</span> <span class="fn">reader</span>() {
+    v := x.<span class="fn">Load</span>()    <span class="cm">// 原子读</span>
+    <span class="fn">println</span>(v)      <span class="cm">// 保证一致</span>
+}</pre>
+      </div>
+      <p class="ba-note">「int 是单字，所以 x=5 天然原子、不用同步」——这是错的，原因有二：原子性 ≠ 可见性；且多字变量（如 struct、int64 在某些 32 位平台）会被拆成多次操作。<code class="inline">sync/atomic</code> 默认顺序一致，写 hb 后续观察到该值的原子读。最佳实践用类型化原子 <code class="inline">atomic.Int64 / Bool / Pointer[T]</code>，避免漏写原子访问。但记住：<b>原子操作只保单变量，不保多变量间的复合操作</b>。</p>
+    </div>
+
+    <div class="prim-panel" id="prim-wg">
+      <div class="ba">
+        <div class="ba-bad bad-x">❌ 没同步：靠 Sleep 赌顺序</div>
+        <div class="ba-bad bad-o">✅ WaitGroup：Done hb Wait 返回</div>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">func</span> <span class="fn">main</span>() {
+    <span class="kw">go func</span>() { x = 100 }()
+    <span class="fn">time</span>.<span class="fn">Sleep</span>(time.<span class="typ">Second</span>)
+    <span class="fn">println</span>(x)  <span class="cm">// 仍是 race！</span>
+}</pre>
+        <pre><span class="kw">var</span> x <span class="kw">int</span>
+<span class="kw">var</span> wg <span class="typ">sync.WaitGroup</span>
+<span class="kw">func</span> <span class="fn">main</span>() {
+    wg.<span class="fn">Add</span>(1)
+    <span class="kw">go func</span>() {
+        x = 100
+        wg.<span class="fn">Done</span>()   <span class="cm">// 发布</span>
+    }()
+    wg.<span class="fn">Wait</span>()       <span class="cm">// hb Done</span>
+    <span class="fn">println</span>(x)    <span class="cm">// 保证看到 100</span>
+}</pre>
+      </div>
+      <p class="ba-note"><code class="inline">time.Sleep</code> 不建立 happens-before——「它睡够 1 秒肯定先跑完」只是赌运气，内存模型不承认。第 n 次 <code class="inline">Done</code> happens-before 第 n 次 <code class="inline">Wait</code> 返回，所以 Wait 返回后读到的必然是 Done 之前写完的值。</p>
+    </div>
+  </div>
+
+  <!-- 4 data race -->
+  <div class="section" id="race">
+    <span class="section-tag tag-coral">危险区</span>
+    <h2>五、data race：内存模型说「未定义」的那类 bug</h2>
+    <p class="subtitle">当两段访问同一内存、至少其一是写、且它们之间没有 happens-before——这就是 data race。它不在「未定义行为」里被宽容，而是要被工具抓出来的。</p>
+    <div class="card">
+      <h3>data race 的正式判定</h3>
+      <p class="lead">两个对同一个变量 <code class="inline">v</code> 的访问，若至少一个是写，且二者之间<b>不存在任何 happens-before 关系</b>，则构成 data race。一旦有 race，程序的行为是<b>未定义的</b>——没有「可能会怎样」，而是「任何事都可能发生」（读到旧值、读到撕裂值、崩溃、或更隐蔽的逻辑错乱）。</p>
+      <div class="keyline"><p>一个正确（race-free）的并发程序的判定标准：<b>每一个共享读，都能通过一条 happens-before 边，回溯到它所观察到的那个写。</b>同步原语存在的意义，就是帮你画出这些边——它们不是普通的锁，而是「带着友好 API 的内存屏障（fence）」。</p></div>
+    </div>
+    <div class="card">
+      <h3>撕裂读：大于一个机器字的变量</h3>
+      <p class="lead">内存模型明确规定：<b>大于单个机器字的读写，会被拆成多次机器字大小的操作，顺序未指定。</b>所以即便一个 <code class="inline">struct</code> / <code class="inline">int64</code> 的「整体赋值」看起来是一步，另一个 goroutine 也可能在中途读到一半旧、一半新的值——这就是撕裂（torn）读。原子或锁能避免它。</p>
+    </div>
+    <div class="card">
+      <h3>用 race detector 抓它：<code class="inline">go run -race</code></h3>
+      <p class="lead">Go 自带基于 ThreadSanitizer 的竞态检测器，给每个内存访问记录「向量时钟」，发现「同一地址、至少一写、且互不 happens-before」的访问对就报警。开启方式统一是 <code class="inline">-race</code>：</p>
+      <pre><span class="cm"># 开发 / CI 阶段使用</span>
+<span class="fn">go</span> run  -race ./main.go
+<span class="fn">go</span> test  -race ./...
+<span class="fn">go</span> build -race ./cmd/app
+
+<span class="cm"># 报告示例（节选）</span>
+==================
+WARNING: DATA RACE
+Write at 0x00c00001a0e0 by goroutine 7:
+  main.worker()  main.go:14 +0x44
+Previous read at 0x00c00001a0e0 by goroutine 6:
+  main.main()    main.go:21 +0x88
+==================</pre>
+      <p class="lead" style="margin-top:10px">代价约为 <b>5–10× 变慢、约 2× 内存</b>，所以它是<b>开发与 CI 工具，不是生产开关</b>。两个重要前提：它只报告<b>实际执行到的代码路径</b>上的 race，所以测试覆盖率很关键；且它报的是「race」本身，race 即未定义行为，发现就必须修。</p>
+    </div>
+    <div class="quiz-box">
+      <h3 style="font-size:15px;margin-bottom:6px">小测：下面哪段是 data race？</h3>
+      <button class="quiz-btn" onclick="toggle('r1')">A. 两个 goroutine 都只 <code class="inline">atomic.LoadInt64(&amp;x)</code> 读同一个 x</button>
+      <div class="quiz-ans" id="r1" style="background:var(--green-50);color:var(--green-600)"><b>→ 不是 race。</b>两个访问都是读，没有写，不满足「至少一是写」的条件，不构成 data race（两个读之间顺序无所谓，结果都合法）。</div>
+      <button class="quiz-btn" onclick="toggle('r2')">B. goroutine A 写 <code class="inline">x</code>、goroutine B 写 <code class="inline">x</code>，二者之间无同步</button>
+      <div class="quiz-ans" id="r2" style="background:var(--coral-50);color:var(--coral-600)"><b>→ 是 race。</b>两段都是写、且互不 happens-before，典型的并发写冲突，结果未定义。</div>
+      <button class="quiz-btn" onclick="toggle('r3')">C. A 写 <code class="inline">x</code> 后 <code class="inline">ch &lt;- 0</code>，B <code class="inline">&lt;-ch</code> 后再读 <code class="inline">x</code></button>
+      <div class="quiz-ans" id="r3" style="background:var(--green-50);color:var(--green-600)"><b>→ 不是 race。</b>send hb receive，由传递性，A 对 x 的写在 B 读之前已可见，存在 happens-before 边，程序 race-free。</div>
+      <button class="quiz-btn" onclick="toggle('r4')">D. 主 goroutine 先 <code class="inline">x=100</code>，再 <code class="inline">go func(){ println(x) }()</code></button>
+      <div class="quiz-ans" id="r4" style="background:var(--green-50);color:var(--green-600)"><b>→ 不是 race。</b><code class="inline">go</code> 语句 hb 新 goroutine 开始，所以创建前对 x 的写在子 goroutine 里一定可见——这正是「goroutine 创建」规则。</div>
+    </div>
+  </div>
+
+  <!-- 5 不是同步的 -->
+  <div class="section" id="notsync">
+    <span class="section-tag tag-amber">避坑</span>
+    <h2>六、这些「看起来像同步」其实都不建立 happens-before</h2>
+    <p class="subtitle">面试和代码 review 里最高频的误判。下面每一项都<b>不</b>提供内存可见性保证。</p>
+    <table class="cmp-table">
+      <tr><th>写法</th><th>为什么没用</th><th>正确替代</th></tr>
+      <tr><td><code class="inline">time.Sleep</code></td><td class="bad">睡眠不建立任何 happens-before 边，只是赌时间。</td><td class="ok">channel / WaitGroup / Mutex</td></tr>
+      <tr><td><code class="inline">fmt.Println</code> 等打印</td><td class="bad">打印是普通函数调用，内存模型不保证它「顺带」把前面的写发布出去。</td><td class="ok">显式同步原语</td></tr>
+      <tr><td>普通变量赋值 / 读</td><td class="bad">单条读写本身没有同步语义，多 goroutine 共享就是 race。</td><td class="ok">atomic / Mutex</td></tr>
+      <tr><td>「它肯定先跑完」的直觉</td><td class="bad">没有同步事件，调度顺序不等于可见性顺序。</td><td class="ok">用同步事件建边</td></tr>
+      <tr><td>goroutine 退出</td><td class="bad">内存模型规定：<b>一个 goroutine 的退出不保证 happens-before 任何事件</b>，激进的编译器甚至可能删掉整段无同步的写。</td><td class="ok">用 channel / Mutex 收尾</td></tr>
+    </table>
+    <div class="warn">反例：<code class="inline">go func(){ a="hello" }(); print(a)</code>——对 <code class="inline">a</code> 的赋值后面没有任何同步事件，不保证被任何其它 goroutine 观察到；激进编译器甚至可能把整个 <code class="inline">go</code> 语句删掉。若必须被观察到，<b>一定要</b>用锁或 channel 建立相对顺序。</div>
+  </div>
+
+  <!-- 6 面试四块 -->
+  <div class="section" id="interview">
+    <span class="section-tag tag-green">面试</span>
+    <h2>七、把「Go 内存」拆成 4 大块，就不会再混</h2>
+    <p class="subtitle">面试官一句「Go 的内存模型」可能指四件完全不同的事。建议直接拆开，先澄清边界再展开。</p>
+    <div class="card">
+      <h3>Go 内存相关的 4 大块</h3>
+      <div class="grid-4">
+        <div class="feature" style="border-left-color:var(--purple-400)"><div class="t">① Go Memory Model</div><div class="d">并发读写可见性 · happens-before · data race · Mutex / Channel / Atomic</div></div>
+        <div class="feature" style="border-left-color:var(--teal-400)"><div class="t">② Go 内存分配</div><div class="d">栈 / 堆 · 逃逸分析 · mspan / mcache / mcentral / mheap · size class</div></div>
+        <div class="feature" style="border-left-color:var(--amber-400)"><div class="t">③ Go GC</div><div class="d">三色标记 · 写屏障 · STW · GC 调优（GOGC）</div></div>
+        <div class="feature" style="border-left-color:var(--green-400)"><div class="t">④ GMP 调度</div><div class="d">G / M / P · work-stealing · 抢占式调度</div></div>
+      </div>
+    </div>
+    <div class="keyline"><p><b>第一句话怎么答（直接背）：</b>「如果说的是 Go Memory Model，它主要解决并发场景下不同 goroutine 对共享内存的访问问题，规定什么条件下一个 goroutine 对内存的写入能被另一个 goroutine 观察到，以及操作之间的顺序关系。核心是 happens-before、data race，以及 Mutex / Channel / Atomic 等同步机制建立的可见性保证。」</p></div>
+    <div class="card">
+      <h3>如果被追问「具体讲讲」，按这条主线走</h3>
+      <div class="diagram" style="background:var(--blue-50);border:1px solid var(--blue-200)">
+        <svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg">
+          <defs><marker id="arwi" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#185FA5"/></marker></defs>
+          <rect x="20" y="55" width="130" height="44" rx="10" fill="#fff" stroke="#378ADD"/>
+          <text x="85" y="82" text-anchor="middle" fill="#042C53" font-size="12.5" font-weight="700">普通读写</text>
+          <rect x="180" y="55" width="130" height="44" rx="10" fill="#fff" stroke="#378ADD"/>
+          <text x="245" y="82" text-anchor="middle" fill="#042C53" font-size="12.5" font-weight="700">有没有同步？</text>
+          <rect x="340" y="55" width="130" height="44" rx="10" fill="#fff" stroke="#378ADD"/>
+          <text x="405" y="82" text-anchor="middle" fill="#042C53" font-size="12.5" font-weight="700">happens-before？</text>
+          <rect x="500" y="55" width="130" height="44" rx="10" fill="#fff" stroke="#378ADD"/>
+          <text x="565" y="82" text-anchor="middle" fill="#042C53" font-size="12.5" font-weight="700">data race？</text>
+          <line x1="150" y1="77" x2="178" y2="77" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arwi)"/>
+          <line x1="310" y1="77" x2="338" y2="77" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arwi)"/>
+          <line x1="470" y1="77" x2="498" y2="77" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arwi)"/>
+        </svg>
+      </div>
+      <p class="lead" style="margin-top:10px">沿着「普通读写 → 有没有同步 → 有没有 happens-before → 有没有 data race → Mutex/Channel/Atomic 如何建立同步关系」讲下去，就是「Go 内存模型」这道面试题的主线。</p>
+    </div>
+    <div class="note">如果面试官其实想问「内存怎么分配 / GMP / GC」，你就说：「若指 runtime 的内存管理，我可以再展开堆栈、逃逸分析、mspan/mcache/mcentral/mheap、三色标记与 GMP 调度。」——先把概念边界划清，这个回答非常稳。</div>
+  </div>
+
+  <div class="links">
+    <h3>相关页面（交叉阅读）</h3>
+    <p>
+      · <a href="go-memory-model-what-is-asked.html">「Go 内存模型」到底在问什么</a> — 术语定位：面试官问的到底是哪一块<br>
+      · <a href="go-memory-model.html">那篇把「内存模型 / 分配 / GMP / GC」混在一页的旧可视化页</a> — 看实现时可用，但概念上混淆，本页只取规范层<br>
+      · <a href="../../07-runtime/gmp-scheduler/goroutine-scheduler.html">Goroutine 调度器（GMP）</a> — 实现层③：谁在什么时候跑<br>
+      · <a href="../../07-runtime/garbage-collection/golang-gc-tricolor.html">三色标记法 GC</a> — 实现层④：不用的内存何时扔
+    </p>
+  </div>
+
+</div>
+
+<div class="footer">
+  Go 内存模型详解（并发可见性与 happens-before）· 本页纯静态，可离线阅读 ·
+  <a href="../../index.html">返回 Go 知识地图</a>
+</div>
+
+<script>
+  // 同步原语探索器
+  function showPrim(name) {
+    document.querySelectorAll('.prim-tab').forEach(function (b) { b.classList.remove('active'); });
+    document.querySelectorAll('.prim-panel').forEach(function (p) { p.classList.remove('active'); });
+    var btn = document.querySelector('.prim-tab[onclick*="' + name + '"]');
+    var panel = document.getElementById('prim-' + name);
+    if (btn) btn.classList.add('active');
+    if (panel) panel.classList.add('active');
+  }
+  // 小测展开
+  function toggle(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (el.classList.contains('show')) { el.classList.remove('show'); }
+    else { el.classList.add('show'); }
+  }
+  // scroll-spy
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('.topnav a'));
+    var map = {};
+    links.forEach(function (a) { map[a.getAttribute('href').slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (l) { l.classList.remove('active'); });
+          var a = map[e.target.id];
+          if (a) a.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-45% 0px -50% 0px' });
+    document.querySelectorAll('.section').forEach(function (s) { obs.observe(s); });
+  })();
+</script>
+</body>
+</html>

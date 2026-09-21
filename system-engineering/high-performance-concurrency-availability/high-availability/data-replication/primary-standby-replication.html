@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>主备同步与故障切换 — 复制、RPO、RTO</title>
+  <style>
+    :root { --bg:#0f1117; --panel:#1a1e2d; --card:#20263a; --line:rgba(255,255,255,.1); --text:#ecf0ff; --muted:#a5aec9; --blue:#5b8cff; --teal:#35d5bc; --green:#61dc91; --amber:#ffc65c; --red:#ff7582; --purple:#aa82ff; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    html { scroll-behavior:smooth; }
+    body { background:var(--bg); color:var(--text); font:14px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans SC",sans-serif; }
+    .topbar { height:54px; position:fixed; inset:0 0 auto; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:0 40px; border-bottom:1px solid var(--line); background:rgba(15,17,23,.9); backdrop-filter:blur(14px); }
+    .topbar a { text-decoration:none; color:var(--muted); font-size:13px; }
+    .topbar .logo { font-weight:700; font-size:15px; color:var(--blue); }
+    header { padding:112px 24px 62px; text-align:center; overflow:hidden; border-bottom:1px solid var(--line); background:radial-gradient(ellipse at 50% 0%,rgba(91,140,255,.2),transparent 57%),linear-gradient(135deg,#101420,#16132a 55%,#0f1117); }
+    .badge { display:inline-block; padding:5px 13px; border:1px solid rgba(91,140,255,.35); border-radius:999px; color:#9bb9ff; font-size:12px; background:rgba(91,140,255,.1); }
+    h1 { margin:15px 0 10px; font-size:clamp(30px,5vw,44px); line-height:1.2; letter-spacing:-1px; background:linear-gradient(135deg,#fff,#a4c1ff 55%,#6f99ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    header p { max-width:700px; margin:auto; color:var(--muted); font-size:16px; }
+    nav { position:sticky; top:54px; z-index:9; display:flex; gap:2px; overflow:auto; white-space:nowrap; padding:0 max(24px,calc((100% - 1000px)/2)); background:rgba(15,17,23,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
+    nav a { color:var(--muted); padding:14px 15px; text-decoration:none; font-size:13px; border-bottom:2px solid transparent; }
+    nav a:hover { color:var(--blue); border-color:var(--blue); }
+    main { max-width:1000px; margin:auto; padding:54px 24px 86px; }
+    section { margin-bottom:78px; scroll-margin-top:115px; }
+    h2 { display:flex; align-items:center; gap:10px; margin-bottom:9px; font-size:26px; }
+    h2 .icon { width:34px; height:34px; display:grid; place-items:center; border-radius:9px; font-size:17px; background:rgba(91,140,255,.14); }
+    .lead { margin-bottom:28px; color:var(--muted); font-size:15px; }
+    .diagram { padding:22px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,rgba(32,38,58,.95),rgba(19,23,35,.95)); overflow:hidden; }
+    .controls { display:flex; flex-wrap:wrap; justify-content:center; gap:9px; margin:2px 0 22px; }
+    button { padding:8px 14px; color:var(--muted); border:1px solid var(--line); border-radius:20px; background:#171c2a; cursor:pointer; font:inherit; transition:.2s; }
+    button:hover,button.active { color:#fff; border-color:var(--blue); background:rgba(91,140,255,.18); }
+    .status { margin-top:17px; padding:14px 17px; border-radius:10px; background:rgba(91,140,255,.09); border:1px solid rgba(91,140,255,.2); color:var(--muted); }
+    .status strong { color:var(--text); }
+    svg { display:block; width:100%; min-width:620px; height:auto; }
+    .flow { stroke-dasharray:8 6; animation:dash .85s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset:-28; } }
+    .packet { animation:pulse 1.1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity:.35; transform:scale(.75); transform-box:fill-box; transform-origin:center; } }
+    .mode-only { display:none; }
+    .mode-normal .normal, .mode-async .async, .mode-semisync .semisync, .mode-sync .sync, .mode-failover .failover { display:block; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+    .card { padding:21px; background:var(--card); border:1px solid var(--line); border-radius:13px; }
+    .card h3 { margin-bottom:8px; font-size:16px; }
+    .card p { color:var(--muted); font-size:13px; }
+    .accent-blue { border-top:3px solid var(--blue); } .accent-amber { border-top:3px solid var(--amber); } .accent-green { border-top:3px solid var(--green); }
+    .keyline { padding:16px 18px; border-left:3px solid var(--teal); border-radius:0 10px 10px 0; background:rgba(53,213,188,.08); color:var(--muted); }
+    .keyline strong { color:var(--text); }
+    table { width:100%; border-collapse:collapse; overflow:hidden; border:1px solid var(--line); border-radius:12px; font-size:13px; }
+    th,td { padding:13px 15px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+    th { color:#b9caff; font-weight:600; background:rgba(91,140,255,.1); } td { color:var(--muted); } td:first-child { color:var(--text); font-weight:600; } tr:last-child td { border-bottom:0; }
+    .timeline { position:relative; padding-left:35px; }
+    .timeline::before { content:""; position:absolute; left:10px; top:13px; bottom:13px; width:1px; background:var(--line); }
+    .step { position:relative; padding:16px 18px; margin-bottom:13px; background:var(--card); border:1px solid var(--line); border-radius:12px; color:var(--muted); }
+    .step::before { content:attr(data-n); position:absolute; left:-36px; top:16px; width:22px; height:22px; display:grid; place-items:center; border-radius:50%; color:var(--green); border:1px solid rgba(97,220,145,.4); background:#18251f; font-size:11px; font-weight:700; }
+    .step strong { color:var(--text); }
+    .metrics { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .metric { padding:23px; border-radius:13px; border:1px solid var(--line); background:var(--card); }
+    .metric .label { display:block; color:var(--blue); font-weight:700; font-size:18px; } .metric p { margin-top:7px; color:var(--muted); }
+    footer { padding:32px; color:#6f7894; text-align:center; border-top:1px solid var(--line); font-size:12px; }
+    @media(max-width:720px) { .topbar { padding:0 16px; } header { padding-inline:18px; } main { padding-inline:16px; } .diagram { padding:12px; overflow:auto; } .grid { grid-template-columns:1fr; } .metrics { grid-template-columns:1fr; } h2 { font-size:23px; } }
+  </style>
+</head>
+<body>
+  <div class="topbar"><a class="logo" href="../index.html">🛡️ 高可用与可靠性</a><a href="../index.html">← 返回目录</a></div>
+  <header><span class="badge">数据冗余 · 故障切换</span><h1>主备同步与故障切换</h1><p>主库承担写入，备库持续追赶。当主库失效时，让一台数据足够新的备库安全接管，并把流量切过去。</p></header>
+  <nav><a href="#overview">工作全景</a><a href="#modes">复制模式</a><a href="#failover">故障切换</a><a href="#rpo-rto">RPO / RTO</a><a href="#guardrails">关键防线</a><a href="#summary">速记</a></nav>
+  <main>
+    <section id="overview">
+      <h2><span class="icon">🔁</span>主备不是“复制一份数据”</h2>
+      <p class="lead">它是一条由写入确认、日志传输、备库回放、健康探测、主从角色切换共同组成的恢复链路。点选场景，观察确认点和流量路径的变化。</p>
+      <div class="diagram mode-normal" id="replication-demo">
+        <div class="controls"><button class="active" data-mode="normal">🟢 正常写入</button><button data-mode="async">⚡ 异步复制</button><button data-mode="semisync">🟡 半同步复制</button><button data-mode="sync">🔒 同步复制</button><button data-mode="failover">🚨 主库故障</button></div>
+        <svg viewBox="0 0 860 330" role="img" aria-label="主备复制与故障转移图">
+          <defs><marker id="arrowBlue" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#5b8cff"/></marker><marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#61dc91"/></marker><marker id="arrowAmber" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#ffc65c"/></marker></defs>
+          <text x="80" y="45" fill="#a5aec9" font-size="15" text-anchor="middle">客户端</text><circle cx="80" cy="112" r="38" fill="#182239" stroke="#5b8cff" stroke-width="2"/><text x="80" y="118" fill="#fff" font-size="25" text-anchor="middle">👤</text>
+          <line x1="122" y1="112" x2="254" y2="112" stroke="#5b8cff" stroke-width="3" marker-end="url(#arrowBlue)" class="flow"/><text x="190" y="93" fill="#9fb8ff" font-size="13" text-anchor="middle">写请求</text>
+          <g id="primary"><rect x="260" y="61" width="186" height="140" rx="14" fill="#202b45" stroke="#5b8cff" stroke-width="2"/><text x="353" y="94" fill="#fff" font-size="18" text-anchor="middle" font-weight="700">主库 Primary</text><rect x="286" y="111" width="134" height="34" rx="6" fill="#172039" stroke="#5b8cff"/><text x="353" y="133" fill="#b9caff" font-size="13" text-anchor="middle">提交 WAL / binlog</text><text x="353" y="176" fill="#61dc91" font-size="13" text-anchor="middle">● 对外写入</text></g>
+          <g id="standby"><rect x="598" y="61" width="186" height="140" rx="14" fill="#1d2930" stroke="#35d5bc" stroke-width="2"/><text x="691" y="94" fill="#fff" font-size="18" text-anchor="middle" font-weight="700">备库 Standby</text><rect x="624" y="111" width="134" height="34" rx="6" fill="#172a2e" stroke="#35d5bc"/><text x="691" y="133" fill="#a8f2e4" font-size="13" text-anchor="middle">接收并回放日志</text><text x="691" y="176" fill="#ffc65c" font-size="13" text-anchor="middle">● 持续追赶</text></g>
+          <line x1="448" y1="131" x2="592" y2="131" stroke="#35d5bc" stroke-width="3" marker-end="url(#arrowGreen)" class="flow"/><text x="520" y="112" fill="#8ee9d7" font-size="13" text-anchor="middle">复制日志</text><circle cx="513" cy="131" r="7" fill="#35d5bc" class="packet"/>
+          <line x1="598" y1="244" x2="446" y2="244" stroke="#ffc65c" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrowAmber)"/><text x="522" y="270" fill="#d5ba7b" font-size="12" text-anchor="middle">ACK（确认边界由模式决定）</text>
+          <g class="mode-only failover"><rect x="256" y="55" width="194" height="152" rx="16" fill="rgba(255,117,130,.18)" stroke="#ff7582" stroke-width="4"/><text x="353" y="225" fill="#ff7582" font-size="16" text-anchor="middle" font-weight="700">✕ 主库不可用</text><path d="M80 154 C190 278,560 280,682 207" fill="none" stroke="#61dc91" stroke-width="4" marker-end="url(#arrowGreen)" class="flow"/><text x="411" y="309" fill="#92e9ae" font-size="14" text-anchor="middle">围栏旧主后，将写流量切至已提升的备库</text><text x="691" y="225" fill="#61dc91" font-size="16" text-anchor="middle" font-weight="700">✓ 提升为新主</text></g>
+        </svg>
+        <div class="status" id="mode-status"><strong>正常写入：</strong>主库提交事务，日志流向备库；备库持续接收并回放，始终保留可提升的副本。</div>
+      </div>
+    </section>
+    <section id="modes">
+      <h2><span class="icon">⚖️</span>复制模式：确认点决定取舍</h2>
+      <p class="lead">确认越早，延迟越低、可用性越好；确认越晚，故障时丢失的数据越少。没有脱离业务目标的“最佳模式”。</p>
+      <div class="grid"><article class="card accent-blue"><h3>异步复制 Async</h3><p>主库本地提交后立即向客户端确认，备库稍后接收。吞吐和延迟表现好，但主库突然损坏时，尚未发送或回放的事务可能丢失。</p></article><article class="card accent-amber"><h3>半同步 Semi-sync</h3><p>至少一个备库收到日志后再确认（常见实现不等于已落盘或已回放）。它在延迟与数据保护间折中；备库失联时应明确是阻塞还是降级。</p></article><article class="card accent-green"><h3>同步复制 Sync</h3><p>等待副本按约定完成持久化或应用后再确认。RPO 可以趋近于 0，但跨机房网络抖动会直接进入写路径，影响写可用性和尾延迟。</p></article></div>
+    </section>
+    <section id="failover">
+      <h2><span class="icon">🚨</span>自动故障切换：先保证只有一个主</h2>
+      <p class="lead">“检测到主不可达”不等于“主已经停止写入”。网络分区、探测误判都会造成旧主仍在运行；因此切换的关键步骤是围栏。</p>
+      <div class="timeline"><div class="step" data-n="1"><strong>多维健康确认：</strong>结合进程、端口、应用、复制状态和多数派，避免一次探测超时就切换。</div><div class="step" data-n="2"><strong>围栏旧主（Fencing）：</strong>切断旧主写入资格，例如撤销租约、断开存储、隔离网络或 STONITH。未围栏，不提升。</div><div class="step" data-n="3"><strong>选择最新可用备库：</strong>比较日志位置、延迟、校验状态和故障域，提升数据最完整、健康的候选者。</div><div class="step" data-n="4"><strong>提升与切流：</strong>备库成为新主，更新服务发现、VIP、代理或 DNS；客户端应具备重试和幂等能力。</div><div class="step" data-n="5"><strong>重建旧主：</strong>旧主恢复后不能直接接流量，应以新主为准重新同步、校验并作为新备库加入。</div></div>
+    </section>
+    <section id="rpo-rto">
+      <h2><span class="icon">🎯</span>用 RPO / RTO 说清承诺</h2>
+      <p class="lead">高可用不是“永不出错”，而是明确故障后可接受的数据损失和恢复时长，并用演练检验这些数字。</p>
+      <div class="metrics"><div class="metric"><span class="label">RPO · 恢复点目标</span><p>最多能丢多久的数据。异步复制的 RPO 取决于复制延迟与未传输日志；同步复制可让 RPO 接近 0，但要付出确认等待的成本。</p></div><div class="metric"><span class="label">RTO · 恢复时间目标</span><p>从故障开始到服务恢复的最长时间。它包括故障确认、仲裁、围栏、提升、路由收敛、应用重连和验证，而不只是“切换命令”的耗时。</p></div></div>
+      <div class="keyline" style="margin-top:16px"><strong>例：</strong>“异步复制 + 30 秒最大复制延迟 + 2 分钟自动切换”应被表述为：在极端主故障时，RPO 最多约 30 秒，RTO 目标约 2 分钟；两项都需要通过故障演练测量，而非只写在设计文档里。</div>
+    </section>
+    <section id="guardrails">
+      <h2><span class="icon">🛡️</span>两类常被忽略的防线</h2>
+      <table><thead><tr><th>风险</th><th>典型现象</th><th>设计防线</th></tr></thead><tbody><tr><td>读写延迟不一致</td><td>刚写入后读备库，读到了旧值。</td><td>关键读粘主库；读己之写使用会话水位 / GTID 等待；把“可能旧读”显式暴露给业务。</td></tr><tr><td>脑裂</td><td>网络分区后旧主和新主同时接收写入，恢复时数据分叉。</td><td>多数派仲裁 + 有时效的主租约 + 强制围栏；任何没有确认旧主停止写入的提升都应被禁止。</td></tr><tr><td>复制延迟</td><td>备库落后，切换后丢失窗口扩大，读流量也更陈旧。</td><td>监控发送、接收、回放三段延迟；限流或降级写入；为备库保留回放和 IO 资源，不把监控只盯在“连接存在”。</td></tr></tbody></table>
+    </section>
+    <section id="summary">
+      <h2><span class="icon">📌</span>面试与实践速记</h2>
+      <div class="grid"><article class="card"><h3>复制不是备份</h3><p>复制会把误删、逻辑错误同步过去；仍需独立备份、保留点恢复和恢复演练。</p></article><article class="card"><h3>切换前先围栏</h3><p>可用性切换的底线是单主写入。宁可短暂不可写，也不能让两个主持续产生冲突数据。</p></article><article class="card"><h3>选择由 RPO / RTO 驱动</h3><p>先定义业务允许的数据损失和恢复时间，再选择同步级别、仲裁与切换策略，而不是反过来套技术名词。</p></article></div>
+    </section>
+  </main>
+  <footer>分布式系统 · 主备同步与故障切换 — 复制、RPO、RTO、脑裂防护</footer>
+  <script>
+    const messages = { normal:'<strong>正常写入：</strong>主库提交事务，日志流向备库；备库持续接收并回放，始终保留可提升的副本。', async:'<strong>异步复制：</strong>主库本地提交即向客户端确认。性能好，但复制链路尚未完成的事务可能在主故障时丢失。', semisync:'<strong>半同步复制：</strong>等待至少一个备库收到日志再确认。需明确 ACK 代表“收到”“落盘”还是“已回放”。', sync:'<strong>同步复制：</strong>等待副本完成约定动作后再确认，RPO 更低；副本或网络异常会放大写延迟并威胁写可用性。', failover:'<strong>主库故障：</strong>确认故障后先围栏旧主，再提升最新备库并切换写流量。旧主恢复后必须重新同步，不能直接接回流量。' };
+    const demo = document.getElementById('replication-demo'); const status = document.getElementById('mode-status');
+    document.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => { const mode = button.dataset.mode; demo.className = 'diagram mode-' + mode; document.querySelectorAll('[data-mode]').forEach(item => item.classList.toggle('active', item === button)); status.innerHTML = messages[mode]; }));
+  </script>
+</body>
+</html>
