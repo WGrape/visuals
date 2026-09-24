@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 网络 IO 的地基 — 从 Socket 系统调用到 epoll</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-card: #1c2128;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-red: #ff6b6b;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-purple: #a371f7;
+            --accent-orange: #f0883e;
+            --accent-cyan: #39c5cf;
+            --accent-yellow: #e3b341;
+            --border-color: #30363d;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+
+        .nav {
+            position: sticky; top: 0;
+            background: rgba(22,27,34,0.95);
+            border-bottom: 1px solid var(--border-color);
+            padding: 14px 0; z-index: 200;
+            backdrop-filter: blur(10px);
+        }
+        .nav-content {
+            max-width: 1100px; margin: 0 auto; padding: 0 20px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .nav-back { color: var(--accent-blue); text-decoration: none; font-size: 14px; }
+        .nav-back:hover { text-decoration: underline; }
+        .nav-title { font-size: 15px; font-weight: 600; color: var(--accent-purple); }
+
+        .container { max-width: 1100px; margin: 0 auto; padding: 40px 20px 80px; }
+
+        .hero {
+            text-align: center; padding: 50px 20px 40px;
+            background: linear-gradient(135deg, #0d1117 0%, #1a1f2e 50%, #0d1117 100%);
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 50px;
+        }
+        .hero h1 { font-size: 2.3rem; font-weight: 700; margin-bottom: 12px; }
+        .hero h1 span { color: var(--accent-purple); }
+        .hero p { color: var(--text-secondary); font-size: 1.05rem; max-width: 660px; margin: 0 auto; }
+
+        .section { margin-bottom: 60px; }
+        .section-title {
+            font-size: 1.4rem; font-weight: 700;
+            color: var(--accent-cyan); margin-bottom: 20px;
+            padding-bottom: 10px; border-bottom: 1px solid var(--border-color);
+            display: flex; align-items: center; gap: 10px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 24px;
+            margin-bottom: 20px;
+        }
+        .card h3 { font-size: 1.1rem; margin-bottom: 12px; color: var(--accent-yellow); }
+        .card p { color: var(--text-secondary); font-size: 0.95rem; line-height: 1.8; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+        @media (max-width: 700px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 20px;
+            font-size: 0.75rem; font-weight: 600; margin-right: 6px;
+        }
+        .badge-red { background: rgba(255,107,107,0.15); color: var(--accent-red); border: 1px solid rgba(255,107,107,0.3); }
+        .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+        .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+        .badge-purple { background: rgba(163,113,247,0.15); color: var(--accent-purple); border: 1px solid rgba(163,113,247,0.3); }
+        .badge-cyan { background: rgba(57,197,207,0.15); color: var(--accent-cyan); border: 1px solid rgba(57,197,207,0.3); }
+        .badge-orange { background: rgba(240,136,62,0.15); color: var(--accent-orange); border: 1px solid rgba(240,136,62,0.3); }
+        .badge-yellow { background: rgba(227,179,65,0.15); color: var(--accent-yellow); border: 1px solid rgba(227,179,65,0.3); }
+
+        .highlight-box {
+            border-left: 3px solid var(--accent-purple);
+            background: rgba(163,113,247,0.05);
+            padding: 16px 20px; border-radius: 0 8px 8px 0;
+            margin: 16px 0; font-size: 0.92rem; color: var(--text-secondary);
+        }
+        .highlight-box strong { color: var(--text-primary); }
+        .warn-box {
+            border-left: 3px solid var(--accent-orange);
+            background: rgba(240,136,62,0.06);
+            padding: 16px 20px; border-radius: 0 8px 8px 0;
+            margin: 16px 0; font-size: 0.92rem; color: var(--text-secondary);
+        }
+        .warn-box strong { color: var(--text-primary); }
+
+        .diagram {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 22px; margin-top: 16px;
+            overflow-x: auto;
+        }
+        svg { display: block; width: 100%; min-width: 660px; height: auto; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.88rem; }
+        th, td { padding: 12px 14px; text-align: left; vertical-align: top; border: 1px solid var(--border-color); }
+        th { background: var(--bg-tertiary); color: var(--accent-cyan); font-weight: 600; }
+        td { color: var(--text-secondary); }
+        td:first-child { color: var(--text-primary); font-weight: 600; }
+
+        .ctrl-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+        .btn {
+            padding: 8px 18px; border-radius: 6px; border: none;
+            cursor: pointer; font-size: 0.85rem; font-weight: 600;
+            transition: opacity 0.2s, transform 0.1s;
+            background: var(--bg-tertiary); color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn:hover { opacity: 0.85; }
+        .btn.active { background: rgba(163,113,247,0.2); color: var(--accent-purple); border-color: rgba(163,113,247,0.5); }
+
+        .flow-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 24px; margin-top: 16px;
+        }
+        .flow-steps { display: flex; flex-direction: column; gap: 0; }
+        .flow-step {
+            display: flex; align-items: flex-start; gap: 16px;
+            padding: 14px 0; border-bottom: 1px solid rgba(48,54,61,0.5);
+        }
+        .flow-step:last-child { border-bottom: none; }
+        .step-num {
+            width: 30px; height: 30px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.78rem; font-weight: 700; flex-shrink: 0;
+            background: var(--bg-tertiary); border: 2px solid var(--border-color);
+            color: var(--accent-purple);
+        }
+        .step-content h5 { font-size: 0.9rem; margin-bottom: 4px; }
+        .step-content p { font-size: 0.82rem; color: var(--text-secondary); }
+
+        .mux-box {
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 22px; margin-top: 16px;
+        }
+        .mux-flow { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 4px; }
+        .mux-step {
+            display: flex; gap: 10px; align-items: baseline;
+            padding: 9px 13px; border-radius: 8px;
+            background: var(--bg-tertiary); font-size: 0.85rem;
+            border-left: 3px solid var(--border-color);
+        }
+        .mux-step .si { color: var(--accent-purple); font-weight: 700; flex-shrink: 0; }
+        .mux-step .st { color: var(--text-secondary); }
+        .mux-step.cost { border-left-color: var(--accent-red); }
+        .mux-step.win { border-left-color: var(--accent-green); }
+
+        .calc {
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 12px; padding: 22px; margin-top: 16px;
+        }
+        .calc-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; margin-bottom: 14px; }
+        .field { display: flex; flex-direction: column; gap: 5px; }
+        .field label { font-size: 0.78rem; color: var(--text-secondary); }
+        .field input {
+            width: 130px; padding: 7px 10px; border-radius: 6px;
+            background: var(--bg-tertiary); border: 1px solid var(--border-color);
+            color: var(--text-primary); font-size: 0.88rem;
+        }
+        .calc-out {
+            margin-top: 6px; padding: 16px 18px; border-radius: 8px;
+            background: var(--bg-tertiary); border: 1px solid var(--border-color);
+            font-size: 0.9rem; color: var(--text-secondary);
+        }
+        .calc-out b { color: var(--accent-green); font-size: 1.05rem; }
+
+        .keypoint-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+        @media (max-width: 700px) { .keypoint-grid { grid-template-columns: 1fr; } }
+        .keypoint {
+            background: var(--bg-card); border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 20px; text-align: center;
+        }
+        .keypoint .kp-icon { font-size: 2rem; margin-bottom: 10px; }
+        .keypoint h4 { font-size: 0.95rem; margin-bottom: 8px; color: var(--accent-orange); }
+        .keypoint p { font-size: 0.8rem; color: var(--text-secondary); }
+
+        .timeline { position: relative; padding-left: 28px; }
+        .timeline::before {
+            content: ''; position: absolute; left: 8px; top: 0; bottom: 0;
+            width: 2px; background: var(--border-color);
+        }
+        .tl-item { position: relative; margin-bottom: 22px; }
+        .tl-dot {
+            position: absolute; left: -24px; top: 4px;
+            width: 12px; height: 12px; border-radius: 50%;
+            border: 2px solid var(--accent-purple); background: var(--bg-primary);
+        }
+        .tl-item h4 { font-size: 0.95rem; color: var(--accent-yellow); margin-bottom: 4px; }
+        .tl-item p { font-size: 0.85rem; color: var(--text-secondary); }
+
+        code {
+            background: var(--bg-tertiary); color: var(--accent-cyan);
+            padding: 1px 6px; border-radius: 4px; font-size: 0.85em;
+        }
+        pre {
+            background: var(--bg-tertiary); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 16px; overflow-x: auto;
+            font-family: 'Courier New', monospace; font-size: 0.82rem;
+            color: var(--text-secondary); margin: 14px 0;
+        }
+
+        .links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+        .links a {
+            flex: 1 1 220px; text-decoration: none; color: var(--text-primary);
+            background: var(--bg-card); border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 16px; transition: border-color .2s;
+        }
+        .links a:hover { border-color: var(--accent-purple); }
+        .links a b { display: block; font-size: 0.9rem; margin-bottom: 4px; color: var(--accent-cyan); }
+        .links a span { font-size: 0.8rem; color: var(--text-secondary); }
+
+        footer { text-align: center; padding: 30px; color: var(--text-secondary); font-size: 0.82rem; border-top: 1px solid var(--border-color); }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <div class="nav-content">
+        <a href="../../index.html" class="nav-back">← 数据库系统</a>
+        <span class="nav-title">Redis 网络 IO 的地基</span>
+        <span class="badge badge-purple">底层原理</span>
+    </div>
+</nav>
+
+<div class="hero">
+    <h1>Redis 网络 IO 的<span>地基</span></h1>
+    <p>从 socket() 到 epoll_wait()，把 Redis 脚下那一层讲透：Socket 系统调用、文件描述符、C10K、select/poll/epoll、水平与边缘触发。</p>
+</div>
+
+<div class="container">
+
+    <div class="section" id="stack">
+        <h2 class="section-title">🧱 先定位：Redis 的网络 IO 站在哪一层</h2>
+        <p>谈「Redis 网络 IO 怎么做的」之前，先确认它脚下有几层。Redis 自己只写最上面两层，下面四层都是操作系统给的。</p>
+        <div class="diagram">
+            <svg viewBox="0 0 860 400" role="img" aria-label="Redis 网络 IO 的分层栈">
+                <text x="30" y="212" transform="rotate(-90 30 212)" fill="#8b949e" font-size="13" text-anchor="middle">数据上行 / 响应下行</text>
+                <rect x="70" y="16" width="740" height="50" rx="9" fill="rgba(255,107,107,0.10)" stroke="#ff6b6b" stroke-width="1.5"/>
+                <text x="92" y="46" fill="#e6edf3" font-size="15" font-weight="700">Redis 应用层</text>
+                <text x="250" y="46" fill="#8b949e" font-size="13">RESP 协议解析 · 命令查表 · 执行命令 · 写入 reply 缓冲区</text>
+                <rect x="70" y="76" width="740" height="50" rx="9" fill="rgba(57,197,207,0.10)" stroke="#39c5cf" stroke-width="1.5"/>
+                <text x="92" y="106" fill="#e6edf3" font-size="15" font-weight="700">ae 事件循环（Reactor）</text>
+                <text x="250" y="106" fill="#8b949e" font-size="13">aeMain / aeProcessEvents · 把就绪事件分派给对应的处理函数</text>
+                <rect x="70" y="136" width="740" height="50" rx="9" fill="rgba(88,166,255,0.10)" stroke="#58a6ff" stroke-width="1.5"/>
+                <text x="92" y="166" fill="#e6edf3" font-size="15" font-weight="700">I/O 多路复用</text>
+                <text x="250" y="166" fill="#8b949e" font-size="13">epoll（Linux）/ kqueue（BSD）/ evport（Solaris）/ select（兜底）</text>
+                <rect x="70" y="196" width="740" height="50" rx="9" fill="rgba(163,113,247,0.10)" stroke="#a371f7" stroke-width="1.5"/>
+                <text x="92" y="226" fill="#e6edf3" font-size="15" font-weight="700">Socket 系统调用</text>
+                <text x="250" y="226" fill="#8b949e" font-size="13">socket / bind / listen / accept / read / write —— 每个连接一个 fd</text>
+                <rect x="70" y="256" width="740" height="50" rx="9" fill="rgba(63,185,80,0.10)" stroke="#3fb950" stroke-width="1.5"/>
+                <text x="92" y="286" fill="#e6edf3" font-size="15" font-weight="700">内核协议栈</text>
+                <text x="250" y="286" fill="#8b949e" font-size="13">TCP/IP · 收发队列里的 sk_buff · 三次握手 · 拥塞控制</text>
+                <rect x="70" y="316" width="740" height="50" rx="9" fill="rgba(240,136,62,0.10)" stroke="#f0883e" stroke-width="1.5"/>
+                <text x="92" y="346" fill="#e6edf3" font-size="15" font-weight="700">网卡与驱动</text>
+                <text x="250" y="346" fill="#8b949e" font-size="13">收包中断 / 轮询 · DMA 把帧搬进内存</text>
+                <text x="440" y="388" fill="#6e7681" font-size="12" text-anchor="middle">Redis 只实现前两层；它快的前提，是下面四层已经被操作系统优化得足够好</text>
+            </svg>
+        </div>
+        <div class="highlight-box">
+            <strong>本篇的边界：</strong>姊妹篇《Redis 网络 IO 设计原理》讲上面两层（单线程为什么快、6.0 多线程），《Redis ae 事件循环》与《ae 源码精讲》讲 ae 库本身。<strong>本篇讲下面四层</strong>——Socket 系统调用、文件描述符、C10K、select/poll/epoll、ET/LT，以及 Redis 是怎么坐在这套地基上的。
+        </div>
+    </div>
+
+    <div class="section" id="socket">
+        <h2 class="section-title">🔌 最基础的 Socket 模型：六个系统调用</h2>
+        <p>客户端和服务端要通信，双方各创建一个 Socket——相当于各开一个「口子」，读写数据都走它。可以先把它想象成一根网线，一头插客户端，一头插服务端。</p>
+        <p>创建 Socket 时要指定网络层用 IPv4 还是 IPv6、传输层用 TCP 还是 UDP。我们只看基于 TCP 的服务端流程。</p>
+        <div class="flow-container">
+            <div class="flow-steps">
+                <div class="flow-step"><div class="step-num">1</div><div class="step-content"><h5>socket()　创建 Socket</h5><p>指定 IPv4 + TCP，内核返回一个文件描述符。此时还没有地址，也没有连接。</p></div></div>
+                <div class="flow-step"><div class="step-num">2</div><div class="step-content"><h5>bind()　绑定 IP 和端口</h5><p>绑定端口：内核收到 TCP 报文后，靠 TCP 头里的端口号找到对应应用程序。绑定 IP：机器可能有多块网卡，绑定哪块就只收那块网卡上的包。</p></div></div>
+                <div class="flow-step"><div class="step-num">3</div><div class="step-content"><h5>listen()　进入监听</h5><p>对应 TCP 状态机的 listen 状态。想知道某个网络程序起没起，用 netstat 看它的端口有没有被监听即可。</p></div></div>
+                <div class="flow-step"><div class="step-num">4</div><div class="step-content"><h5>accept()　取出已建立的连接</h5><p>从内核的全连接队列里取出一个已完成三次握手的 Socket 返回给应用。没有连接时会阻塞等待。</p></div></div>
+                <div class="flow-step"><div class="step-num">5</div><div class="step-content"><h5>read() / write()　收发数据</h5><p>用 accept 返回的那个 fd 读写。读写 Socket 的感觉和读写文件几乎一样——因为在 Linux 里 Socket 本来就是以「文件」形式存在的。</p></div></div>
+                <div class="flow-step"><div class="step-num">6</div><div class="step-content"><h5>（客户端侧）connect()</h5><p>客户端创建 Socket 后调用 connect，参数指明服务端 IP 与端口，随后开始三次握手。</p></div></div>
+            </div>
+        </div>
+        <div class="diagram">
+            <svg viewBox="0 0 860 300" role="img" aria-label="监听 Socket 与已连接 Socket">
+                <defs><marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#58a6ff"/></marker><marker id="ag2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#3fb950"/></marker></defs>
+                <text x="80" y="30" fill="#8b949e" font-size="14" text-anchor="middle">客户端</text>
+                <circle cx="80" cy="120" r="34" fill="#161b22" stroke="#58a6ff" stroke-width="2"/><text x="80" y="127" fill="#e6edf3" font-size="22" text-anchor="middle">👤</text>
+                <line x1="118" y1="120" x2="196" y2="120" stroke="#58a6ff" stroke-width="3" marker-end="url(#ar2)"/><text x="156" y="104" fill="#58a6ff" font-size="12" text-anchor="middle">connect</text>
+                <rect x="204" y="70" width="200" height="70" rx="10" fill="rgba(227,179,65,0.10)" stroke="#e3b341" stroke-width="2"/>
+                <text x="304" y="98" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">半连接队列</text>
+                <text x="304" y="122" fill="#8b949e" font-size="12" text-anchor="middle">syn_rcvd · 三次握手未完成</text>
+                <rect x="204" y="160" width="200" height="70" rx="10" fill="rgba(63,185,80,0.10)" stroke="#3fb950" stroke-width="2"/>
+                <text x="304" y="188" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">全连接队列</text>
+                <text x="304" y="212" fill="#8b949e" font-size="12" text-anchor="middle">established · 握手已完成</text>
+                <line x1="304" y1="140" x2="304" y2="158" stroke="#8b949e" stroke-width="2" marker-end="url(#ag2)"/><text x="330" y="154" fill="#8b949e" font-size="11">握手完成</text>
+                <rect x="470" y="70" width="200" height="72" rx="10" fill="rgba(163,113,247,0.10)" stroke="#a371f7" stroke-width="2"/>
+                <text x="570" y="99" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">监听 Socket</text>
+                <text x="570" y="123" fill="#8b949e" font-size="12" text-anchor="middle">只用来接受连接 · 全程一个</text>
+                <rect x="700" y="70" width="140" height="72" rx="10" fill="rgba(255,107,107,0.10)" stroke="#ff6b6b" stroke-width="2"/>
+                <text x="770" y="99" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">已连接 Socket</text>
+                <text x="770" y="123" fill="#8b949e" font-size="12" text-anchor="middle">每客户端一个</text>
+                <line x1="404" y1="195" x2="466" y2="106" stroke="#a371f7" stroke-width="2" marker-end="url(#ar2)"/><text x="440" y="168" fill="#a371f7" font-size="11" text-anchor="middle">accept</text>
+                <line x1="674" y1="106" x2="696" y2="106" stroke="#ff6b6b" stroke-width="2" marker-end="url(#ar2)"/>
+                <text x="570" y="272" fill="#e6edf3" font-size="14" text-anchor="middle" font-weight="700">accept() 返回的是「已连接 Socket」，和「监听 Socket」是两个不同的 fd</text>
+                <text x="570" y="294" fill="#6e7681" font-size="12" text-anchor="middle">后续所有 read / write 都用已连接 Socket；监听 Socket 继续等着下一个客户端</text>
+            </svg>
+        </div>
+        <div class="highlight-box">
+            <strong>为什么强调「两个 Socket」：</strong>后面讲 epoll 时你会发现，Redis 把<b>监听 fd</b> 注册成「可读时去 accept」，把<b>已连接 fd</b> 注册成「可读时去读命令」。这两件事的处理函数完全不同，根源就在这里。
+        </div>
+    </div>
+
+    <div class="section" id="fd">
+        <h2 class="section-title">🧬 文件描述符背后：内核里到底有什么</h2>
+        <p>基于「Linux 一切皆文件」的理念，Socket 在内核里也是以文件形式存在的，也有对应的文件描述符（fd）。顺着 fd 往下追，能看到一条完整的链。</p>
+        <div class="diagram">
+            <svg viewBox="0 0 860 300" role="img" aria-label="从文件描述符到 sk_buff 的内核链路">
+                <defs><marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#8b949e"/></marker></defs>
+                <rect x="16" y="104" width="128" height="64" rx="9" fill="#161b22" stroke="#a371f7" stroke-width="2"/>
+                <text x="80" y="132" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">task_struct</text>
+                <text x="80" y="154" fill="#8b949e" font-size="11" text-anchor="middle">进程描述符</text>
+                <rect x="170" y="98" width="212" height="76" rx="9" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+                <text x="276" y="124" fill="#e6edf3" font-size="13" font-weight="700" text-anchor="middle">文件描述符数组</text>
+                <rect x="186" y="134" width="34" height="26" rx="5" fill="#21262d" stroke="#30363d"/><text x="203" y="152" fill="#8b949e" font-size="11" text-anchor="middle">0</text>
+                <rect x="226" y="134" width="34" height="26" rx="5" fill="#21262d" stroke="#30363d"/><text x="243" y="152" fill="#8b949e" font-size="11" text-anchor="middle">1</text>
+                <rect x="266" y="134" width="34" height="26" rx="5" fill="#21262d" stroke="#30363d"/><text x="283" y="152" fill="#8b949e" font-size="11" text-anchor="middle">2</text>
+                <rect x="306" y="134" width="34" height="26" rx="5" fill="rgba(255,107,107,0.2)" stroke="#ff6b6b" stroke-width="2"/><text x="323" y="152" fill="#ff6b6b" font-size="11" text-anchor="middle">3</text>
+                <rect x="346" y="134" width="20" height="26" rx="5" fill="#21262d" stroke="#30363d"/><text x="356" y="152" fill="#8b949e" font-size="11" text-anchor="middle">…</text>
+                <text x="276" y="190" fill="#6e7681" font-size="11" text-anchor="middle">下标就是 fd（一个整数），内容是指针</text>
+                <rect x="410" y="104" width="104" height="64" rx="9" fill="#161b22" stroke="#39c5cf" stroke-width="2"/>
+                <text x="462" y="132" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">file</text>
+                <text x="462" y="154" fill="#8b949e" font-size="11" text-anchor="middle">内核打开文件表项</text>
+                <rect x="542" y="104" width="100" height="64" rx="9" fill="#161b22" stroke="#39c5cf" stroke-width="2"/>
+                <text x="592" y="132" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">inode</text>
+                <text x="592" y="154" fill="#8b949e" font-size="11" text-anchor="middle">Socket 的 inode</text>
+                <rect x="670" y="86" width="176" height="106" rx="9" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="758" y="112" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">Socket 结构</text>
+                <rect x="686" y="124" width="144" height="26" rx="5" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/><text x="758" y="142" fill="#8b949e" font-size="11" text-anchor="middle">发送队列（sk_buff 链表）</text>
+                <rect x="686" y="158" width="144" height="26" rx="5" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/><text x="758" y="176" fill="#8b949e" font-size="11" text-anchor="middle">接收队列（sk_buff 链表）</text>
+                <line x1="146" y1="136" x2="164" y2="136" stroke="#8b949e" stroke-width="2" marker-end="url(#ar3)"/>
+                <line x1="384" y1="136" x2="404" y2="136" stroke="#8b949e" stroke-width="2" marker-end="url(#ar3)"/>
+                <line x1="516" y1="136" x2="536" y2="136" stroke="#8b949e" stroke-width="2" marker-end="url(#ar3)"/>
+                <line x1="644" y1="136" x2="664" y2="136" stroke="#8b949e" stroke-width="2" marker-end="url(#ar3)"/>
+                <text x="430" y="238" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">sk_buff：一个结构体走完所有协议层</text>
+                <text x="430" y="264" fill="#8b949e" font-size="12" text-anchor="middle">应用层叫 data · TCP 层叫 segment · IP 层叫 packet · 链路层叫 frame</text>
+                <text x="430" y="288" fill="#6e7681" font-size="12" text-anchor="middle">各层之间不拷贝数据，只移动 skb-&gt;data 指针：收包时右移剥离首部，发包时左移填充首部</text>
+            </svg>
+        </div>
+        <div class="highlight-box">
+            <strong>为什么全用一个 sk_buff：</strong>协议栈是分层的，如果每层都用自己的结构体，层间传递就要反复拷贝数据，CPU 效率会大幅下降。统一用一个结构体 + 移动 <code>data</code> 指针，就做到了<b>零拷贝地穿过各层</b>。
+        </div>
+    </div>
+
+    <div class="section" id="c10k">
+        <h2 class="section-title">📈 C10K：为什么「一个连接一个线程」不行</h2>
+        <p>上面最基础的 Socket 流程是<b>同步阻塞</b>的：服务端还没处理完一个客户端的 IO、或读写阻塞住时，别的客户端连不上来。只能一对一通信，太浪费了。</p>
+        <h3 style="color:var(--accent-yellow);font-size:1.05rem;margin:22px 0 10px;">单机理论上能连多少个客户端？</h3>
+        <p>TCP 连接由四元组唯一确定：<b>本机 IP、本机端口、对端 IP、对端端口</b>。服务端通常固定监听一个端口，所以本机 IP 和端口是固定的，变化的只有对端 IP 和端口：</p>
+        <div class="highlight-box">最大 TCP 连接数 = 客户端 IP 数 × 客户端端口数 = 2<sup>32</sup> × 2<sup>16</sup> = <strong>2<sup>48</sup></strong>（理论值）</div>
+        <p>理论值很丰满，现实受两个硬约束：<span class="badge badge-orange">文件描述符</span>Socket 也是文件，就占一个 fd，Linux 单进程默认上限常为 1024，可用 ulimit 调大；<span class="badge badge-orange">系统内存</span>每个 TCP 连接在内核里都有数据结构，都要占内存。</p>
+        <div class="calc">
+            <div style="font-size:0.95rem;font-weight:600;color:var(--accent-cyan);margin-bottom:12px;">🧮 并发上限估算器</div>
+            <div class="calc-row">
+                <div class="field"><label>可用内存（GB）</label><input type="number" id="c-mem" value="2" min="1" step="1"></div>
+                <div class="field"><label>每连接内核开销（KB）</label><input type="number" id="c-per" value="200" min="1" step="10"></div>
+                <div class="field"><label>fd 上限（ulimit -n）</label><input type="number" id="c-fd" value="1024" min="64" step="1024"></div>
+                <button class="btn" id="c-run" style="background:rgba(163,113,247,0.2);color:var(--accent-purple);border-color:rgba(163,113,247,0.5);">计算</button>
+            </div>
+            <div class="calc-out" id="c-out">点击「计算」查看这台机器大致能撑多少并发连接。</div>
+        </div>
+        <h3 style="color:var(--accent-yellow);font-size:1.05rem;margin:26px 0 10px;">三种并发模型，代价各在哪</h3>
+        <div class="grid-3">
+            <div class="card">
+                <h3>多进程模型</h3>
+                <p>主进程负责监听，accept 返回后用 <code>fork()</code> 创建子进程，子进程继承父进程的 fd，直接用已连接 Socket 通信。<br><br><b>代价：</b>进程上下文切换要换虚拟内存、栈、全局变量、内核堆栈、寄存器，「包袱」很重；子进程退出若不 wait/waitpid 回收会变成僵尸进程，慢慢耗尽资源。撑 100 个还行，1 万个扛不住。</p>
+            </div>
+            <div class="card">
+                <h3>多线程模型</h3>
+                <p>用 <code>pthread_create()</code> 建线程，把已连接 Socket 的 fd 传进去。同进程内的线程共享 fd 列表、地址空间、全局数据，切换时只需换私有数据，开销比进程小得多。<br><br><b>代价：</b>频繁创建销毁线程仍有开销，所以用<b>线程池</b>；线程池的全局队列要加锁。1 万个线程仍然太多。</p>
+            </div>
+            <div class="card">
+                <h3>I/O 多路复用</h3>
+                <p>一个进程维护多个 Socket。虽然任一时刻只处理一个请求，但每个请求的事件耗时压到 1 毫秒以内，一秒就能处理上千个请求——多个请求复用了同一个进程，类似 CPU 并发多进程，也叫时分多路复用。<br><br><b>这才是 C10K 的正解。</b></p>
+            </div>
+        </div>
+    </div>
+
+    <div class="section" id="mux">
+        <h2 class="section-title">🔍 I/O 多路复用：select / poll / epoll</h2>
+        <p>思路一致：把要监视的连接（fd）交给内核，内核告诉你哪些有事件了，你再处理。差别全在「怎么交、怎么查、怎么回」。</p>
+        <div class="mux-box">
+            <div class="ctrl-bar">
+                <button class="btn active" data-m="select">select</button>
+                <button class="btn" data-m="poll">poll</button>
+                <button class="btn" data-m="epoll">epoll</button>
+            </div>
+            <div class="mux-flow" id="mux-flow"></div>
+            <div class="highlight-box" id="mux-note"></div>
+        </div>
+        <table>
+            <thead><tr><th>机制</th><th>数据结构</th><th>fd 数量限制</th><th>每次调用要做什么</th><th>复杂度</th></tr></thead>
+            <tbody>
+                <tr><td>select</td><td>固定长度 BitsMap（fd_set）</td><td>受 FD_SETSIZE 限制，默认 1024</td><td>集合拷入内核 → 内核线性遍历 → 集合拷回用户态 → 用户态再遍历一遍</td><td>O(n)</td></tr>
+                <tr><td>poll</td><td>动态数组，链表组织</td><td>突破 1024，仍受系统 fd 上限约束</td><td>与 select 本质相同，只是不再用 BitsMap</td><td>O(n)</td></tr>
+                <tr><td>epoll</td><td>内核红黑树 + 就绪链表</td><td>上限即进程可打开的最大 fd 数</td><td>epoll_ctl 维护红黑树；内核回调把就绪 fd 挂进就绪链表；epoll_wait 只取就绪的</td><td>获取就绪接近 O(1)</td></tr>
+            </tbody>
+        </table>
+        <h3 style="color:var(--accent-yellow);font-size:1.05rem;margin:26px 0 10px;">epoll 的三个调用</h3>
+        <pre>int s = socket(AF_INET, SOCK_STREAM, 0);
+bind(s, ...);
+listen(s, ...);
+
+int epfd = epoll_create(...);          // 创建 epoll 实例
+epoll_ctl(epfd, EPOLL_CTL_ADD, s, ...); // 把要监听的 socket 加进去
+
+while (1) {
+    int n = epoll_wait(epfd, events, ...);  // 等待就绪事件
+    for (每个就绪的 socket) {
+        // 处理
+    }
+}</pre>
+        <div class="highlight-box">
+            <strong>epoll 赢在哪两点：</strong>① 内核用<b>红黑树</b>持有全部待检测的 socket，增删改 O(log n)，不必每次把整个集合传进内核，省掉大量拷贝与内存分配；② <b>事件驱动</b>——socket 有事件时由回调挂进<b>就绪链表</b>，epoll_wait 只返回真正就绪的那些，不需要轮询扫描全集合。
+        </div>
+        <div class="warn-box">
+            <strong>辟谣：epoll_wait 没有用共享内存。</strong>网上不少文章说「用户态和内核态指向同一个就绪链表，所以零拷贝」——这是错的。看过内核源码就知道，epoll_wait 的实现里调用了 <code>__put_user</code>，这个函数正是把数据从内核拷到用户空间。它<b>省的是「遍历」和「整集合来回拷贝」，不是就绪事件的那次拷贝</b>。
+        </div>
+    </div>
+
+    <div class="section" id="etlt">
+        <h2 class="section-title">⚡ 水平触发 vs 边缘触发</h2>
+        <p>epoll 支持两种事件触发模式。用快递箱很好理解：</p>
+        <div class="grid-2">
+            <div class="card">
+                <h3>水平触发 LT（默认）</h3>
+                <p>快递放进快递箱，只要你没取走，它就<b>不停地</b>给你发短信提醒，直到你取出为止。<br><br>对应到 IO：只要内核缓冲区里还有数据可读，就一直把这个可读事件报给你。没读完会反复唤醒你，所以你不必一次读完。</p>
+            </div>
+            <div class="card">
+                <h3>边缘触发 ET</h3>
+                <p>快递放进快递箱，它<b>只发一次</b>短信；你一直不去取，也不会有第二条。<br><br>对应到 IO：只在状态变化的那一刻通知一次。如果你没把缓冲区读完，剩余数据就再也没有新通知了——所以必须<b>循环读写直到返回 EAGAIN / EWOULDBLOCK</b>。</p>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <strong>为什么 ET 必须配非阻塞 IO：</strong>ET 要求你循环读写直到系统告诉你「没了」。如果 fd 是阻塞的，最后一次 read/write 会直接<b>卡在那里</b>，整个事件循环停摆。所以 ET 模式下 fd 必须设成非阻塞。<br>一般 ET 效率更高，因为能减少 epoll_wait 的系统调用次数；但 LT 更不容易写错。select/poll 只有 LT，epoll 默认 LT，可按场景切成 ET。
+        </div>
+        <div class="warn-box">
+            <strong>另一个容易忽略的点：多路复用说「可读」，未必真的读得到。</strong>Linux 手册对 select 有明确说明：数据到达后可能因校验和错误被丢弃，也可能出现被虚假报告为就绪的情况。若用阻塞 IO，接下来的 read 就会真的阻塞住。因此<b>使用 I/O 多路复用时，最好一律搭配非阻塞 IO</b>。
+        </div>
+    </div>
+
+    <div class="section" id="redis">
+        <h2 class="section-title">🚀 Redis 怎么坐在这套地基上</h2>
+        <p>Redis 的选择非常克制：<b>非阻塞 Socket + I/O 多路复用 + 单线程事件循环（Reactor）</b>。</p>
+        <h3 style="color:var(--accent-yellow);font-size:1.05rem;margin:22px 0 10px;">ae：一层薄薄的跨平台封装</h3>
+        <p>不同操作系统提供不同的多路复用机制，Redis 在<b>编译期</b>按性能从高到低挑第一个可用的：</p>
+        <pre>#ifdef HAVE_EVPORT
+#include "ae_evport.c"   // Solaris event ports
+#else
+#ifdef HAVE_EPOLL
+#include "ae_epoll.c"    // Linux epoll  ← 最常用
+#else
+#ifdef HAVE_KQUEUE
+#include "ae_kqueue.c"   // macOS / BSD kqueue
+#else
+#include "ae_select.c"   // 兜底：O(n)，且 fd 上限 1024
+#endif
+#endif
+#endif</pre>
+        <p>四种实现对外暴露同一套 API（<code>aeApiCreate</code> / <code>aeApiAddEvent</code> / <code>aeApiDelEvent</code> / <code>aeApiPoll</code> / <code>aeApiName</code>），上层完全不用关心底下是 epoll 还是 kqueue。这就是工厂模式的好处。</p>
+        <h3 style="color:var(--accent-yellow);font-size:1.05rem;margin:26px 0 10px;">一次命令的完整链路</h3>
+        <div class="diagram">
+            <svg viewBox="0 0 860 340" role="img" aria-label="Redis 一次请求的完整链路">
+                <defs><marker id="ar4" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#58a6ff"/></marker></defs>
+                <rect x="16" y="30" width="150" height="80" rx="10" fill="#161b22" stroke="#a371f7" stroke-width="2"/>
+                <text x="91" y="58" fill="#a371f7" font-size="13" font-weight="700" text-anchor="middle">① 监听 fd 可读</text>
+                <text x="91" y="80" fill="#8b949e" font-size="11" text-anchor="middle">acceptTcpHandler</text>
+                <text x="91" y="98" fill="#8b949e" font-size="11" text-anchor="middle">客户端发起 connect</text>
+                <rect x="190" y="30" width="150" height="80" rx="10" fill="#161b22" stroke="#a371f7" stroke-width="2"/>
+                <text x="265" y="58" fill="#a371f7" font-size="13" font-weight="700" text-anchor="middle">② accept 建连</text>
+                <text x="265" y="80" fill="#8b949e" font-size="11" text-anchor="middle">createClient()</text>
+                <text x="265" y="98" fill="#8b949e" font-size="11" text-anchor="middle">拿到已连接 fd</text>
+                <rect x="364" y="30" width="150" height="80" rx="10" fill="#161b22" stroke="#a371f7" stroke-width="2"/>
+                <text x="439" y="58" fill="#a371f7" font-size="13" font-weight="700" text-anchor="middle">③ 注册可读事件</text>
+                <text x="439" y="80" fill="#8b949e" font-size="11" text-anchor="middle">readQueryFromClient</text>
+                <text x="439" y="98" fill="#8b949e" font-size="11" text-anchor="middle">并设为非阻塞</text>
+                <rect x="538" y="30" width="150" height="80" rx="10" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+                <text x="613" y="58" fill="#58a6ff" font-size="13" font-weight="700" text-anchor="middle">④ epoll_wait 返回</text>
+                <text x="613" y="80" fill="#8b949e" font-size="11" text-anchor="middle">该 fd 出现在就绪链表</text>
+                <text x="613" y="98" fill="#8b949e" font-size="11" text-anchor="middle">ae 分派给对应 handler</text>
+                <rect x="712" y="30" width="136" height="80" rx="10" fill="#161b22" stroke="#58a6ff" stroke-width="2"/>
+                <text x="780" y="58" fill="#58a6ff" font-size="13" font-weight="700" text-anchor="middle">⑤ read()</text>
+                <text x="780" y="80" fill="#8b949e" font-size="11" text-anchor="middle">读进输入缓冲区</text>
+                <text x="780" y="98" fill="#8b949e" font-size="11" text-anchor="middle">（循环读到 EAGAIN）</text>
+                <line x1="168" y1="70" x2="186" y2="70" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="342" y1="70" x2="360" y2="70" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="516" y1="70" x2="534" y2="70" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="690" y1="70" x2="708" y2="70" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <path d="M780 114 C790 160,800 168,780 176" fill="none" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <rect x="712" y="180" width="136" height="80" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="2"/>
+                <text x="780" y="208" fill="#39c5cf" font-size="13" font-weight="700" text-anchor="middle">⑥ RESP 解析</text>
+                <text x="780" y="230" fill="#8b949e" font-size="11" text-anchor="middle">解析成命令与参数</text>
+                <rect x="538" y="180" width="150" height="80" rx="10" fill="#161b22" stroke="#ff6b6b" stroke-width="2"/>
+                <text x="613" y="208" fill="#ff6b6b" font-size="13" font-weight="700" text-anchor="middle">⑦ 执行命令</text>
+                <text x="613" y="230" fill="#8b949e" font-size="11" text-anchor="middle">查命令表 → 操作内存数据</text>
+                <text x="613" y="248" fill="#8b949e" font-size="11" text-anchor="middle">严格单线程，无需加锁</text>
+                <rect x="364" y="180" width="150" height="80" rx="10" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="439" y="208" fill="#3fb950" font-size="13" font-weight="700" text-anchor="middle">⑧ 写入 reply 缓冲区</text>
+                <text x="439" y="230" fill="#8b949e" font-size="11" text-anchor="middle">结果先放进 client 的输出缓冲</text>
+                <rect x="190" y="180" width="150" height="80" rx="10" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="265" y="208" fill="#3fb950" font-size="13" font-weight="700" text-anchor="middle">⑨ 注册可写事件</text>
+                <text x="265" y="230" fill="#8b949e" font-size="11" text-anchor="middle">sendReplyToClient</text>
+                <rect x="16" y="180" width="150" height="80" rx="10" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="91" y="208" fill="#3fb950" font-size="13" font-weight="700" text-anchor="middle">⑩ 写回客户端</text>
+                <text x="91" y="230" fill="#8b949e" font-size="11" text-anchor="middle">写完后删除可写事件</text>
+                <line x1="708" y1="220" x2="690" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="534" y1="220" x2="516" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="360" y1="220" x2="342" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <line x1="186" y1="220" x2="168" y2="220" stroke="#58a6ff" stroke-width="2" marker-end="url(#ar4)"/>
+                <text x="430" y="300" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">注意第 ⑦ 步：所有命令的执行始终只有一个线程在做</text>
+                <text x="430" y="322" fill="#6e7681" font-size="12" text-anchor="middle">这就是 Redis 不需要锁、Lua 脚本与事务天然原子的根本原因，也是 6.0 多线程不敢碰的部分</text>
+            </svg>
+        </div>
+        <div class="highlight-box">
+            <strong>单线程为什么还这么快：</strong>瓶颈不在 CPU——数据全在内存里，操作极快；真正耗时的是网络读写与系统调用。用一个线程 + epoll 把「等」的时间全部交给内核，自己只做「处理就绪事件」这一件事，就避开了多线程的锁竞争与上下文切换。
+        </div>
+    </div>
+
+    <div class="section" id="threads">
+        <h2 class="section-title">🧵 Redis 6.0 多线程 IO：到底改了什么</h2>
+        <p>网络硬件越来越快，瓶颈逐渐转移到<b>网络 IO 的读写</b>上。6.0 的改动很克制：只把「读写 socket + 协议解析」分给一组 IO 线程，<b>命令执行仍然严格单线程</b>。</p>
+        <div class="flow-container">
+            <div class="flow-steps">
+                <div class="flow-step"><div class="step-num">1</div><div class="step-content"><h5>主线程接收事件、建立连接</h5><p>取出这批就绪的 socket，放进一个全局队列。</p></div></div>
+                <div class="flow-step"><div class="step-num">2</div><div class="step-content"><h5>IO 线程并行读 + 解析</h5><p>按轮询（Round-Robin）把待读 socket 分给 IO 线程，并行完成网络读与协议解析。主线程在此期间阻塞等待。</p></div></div>
+                <div class="flow-step"><div class="step-num">3</div><div class="step-content"><h5>主线程串行执行命令</h5><p>队列全部处理完后，主线程依次执行这些命令，把结果写进内存缓冲区。这一步永远单线程。</p></div></div>
+                <div class="flow-step"><div class="step-num">4</div><div class="step-content"><h5>IO 线程并行写回</h5><p>再次把写回网卡的活分给 IO 线程，并行发回各客户端；主线程清空队列，接收下一批。</p></div></div>
+            </div>
+        </div>
+        <div class="grid-2" style="margin-top:20px;">
+            <div class="card">
+                <h3>两个配置项，别只配一个</h3>
+                <p><code>io-threads</code> 默认 <b>1</b>，即关闭多线程 IO。设为 N 表示启用 N-1 个 IO 线程（主线程本身也算一个）。<br><br><code>io-threads-do-reads</code> 默认 <b>no</b>：也就是说<b>默认只并行写回，读取仍由主线程做</b>。想要读写都并行，必须把它设为 yes——很多人只配了 io-threads 就以为全开了。</p>
+            </div>
+            <div class="card">
+                <h3>官方建议与适用条件</h3>
+                <p>只在机器<b>至少 4 核</b>时才考虑开启，且至少留一个备用核：4 核建议设 2 或 3，8 核建议 6，<b>线程数不要超过核数</b>，超过 8 基本没有意义。<br><br>低 QPS 场景开启反而可能因线程间数据传递的开销而变慢。生产环境改动前<b>先压测对比</b>。</p>
+            </div>
+        </div>
+        <div class="highlight-box">
+            <strong>一句话：</strong>多线程 IO 只分担「搬数据」的体力活，<b>碰数据的永远只有主线程一个人</b>。所以 Lua 脚本、事务、SETNX 依然是绝对原子的，业务层不需要因为 6.0 多线程而加任何锁。
+        </div>
+    </div>
+
+    <div class="section" id="myth">
+        <h2 class="section-title">🚫 六个常见误区</h2>
+        <table>
+            <thead><tr><th>误区</th><th>事实</th></tr></thead>
+            <tbody>
+                <tr><td>epoll_wait 用共享内存，零拷贝</td><td>错。内核实现里用了 __put_user 把就绪事件拷到用户空间。省掉的是「遍历全集合」和「整集合来回拷贝」。</td></tr>
+                <tr><td>Redis 6.0 多线程 = 命令并行执行</td><td>错。命令执行始终单线程；多线程只负责 socket 的读写与协议解析。</td></tr>
+                <tr><td>多路复用报「可读」就一定能读到数据</td><td>不一定。数据可能因校验和错误被丢弃，也可能被虚假报告为就绪，因此必须配非阻塞 IO。</td></tr>
+                <tr><td>监听 Socket 和已连接 Socket 是同一个</td><td>不是。监听 fd 全程只有一个、只负责 accept；每个客户端对应一个独立的已连接 fd。</td></tr>
+                <tr><td>ET 一定比 LT 好</td><td>ET 系统调用更少、效率更高，但必须一次把数据读完，且必须配非阻塞，写错就会漏事件。LT 更不容易出错。</td></tr>
+                <tr><td>epoll 比 select 快是因为「不用拷贝」</td><td>不准确。epoll 的优势主要来自红黑树（避免重复传入全集合）和就绪链表（避免遍历全集合），拷贝次数确实少了，但就绪数据仍要拷一次。</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section" id="summary">
+        <h2 class="section-title">📌 速记</h2>
+        <div class="keypoint-grid">
+            <div class="keypoint"><div class="kp-icon">🔌</div><h4>Socket 六步</h4><p>socket → bind → listen → accept → read/write；客户端另有 connect 触发三次握手。</p></div>
+            <div class="keypoint"><div class="kp-icon">🧬</div><h4>fd 是一条链</h4><p>fd → file → inode → socket → 收发队列里的 sk_buff；sk_buff 靠移动 data 指针穿过各层，不拷贝。</p></div>
+            <div class="keypoint"><div class="kp-icon">📈</div><h4>C10K</h4><p>理论上限 2 的 48 次方；现实卡在 fd 数与内存。多线程/进程都扛不住 1 万，正解是多路复用。</p></div>
+            <div class="keypoint"><div class="kp-icon">🔍</div><h4>epoll 赢在哪</h4><p>红黑树持有全集（免重复传入）+ 就绪链表只报就绪（免遍历）。select/poll 是两次遍历 + 两次拷贝。</p></div>
+            <div class="keypoint"><div class="kp-icon">⚡</div><h4>ET / LT</h4><p>LT 一直提醒到你读完；ET 只提醒一次，必须循环读到 EAGAIN，且必须配非阻塞。</p></div>
+            <div class="keypoint"><div class="kp-icon">🚀</div><h4>Redis 的落点</h4><p>非阻塞 + 多路复用 + 单线程 Reactor；ae 在编译期从 evport / epoll / kqueue / select 中挑一个。</p></div>
+        </div>
+        <div class="highlight-box" style="margin-top:22px;">
+            <strong>一句话串起来：</strong>内核用 epoll 帮 Redis <b>盯着成千上万个 fd</b>，Redis 用一个线程把就绪的 fd <b>取出来依次处理</b>；等的时间全交给内核，自己的时间全花在内存操作上——这就是 Redis 网络 IO 的全部秘密。
+        </div>
+        <div class="links">
+            <a href="redis-network-io.html"><b>Redis 网络 IO 设计原理</b><span>本篇讲地基，这篇讲 Redis 侧：单线程为什么快、请求流程、6.0 多线程。</span></a>
+            <a href="redis-ae-event-loop.html"><b>Redis ae 事件循环</b><span>aeEventLoop / aeFileEvent / aeTimeEvent / aeFiredEvent 四个结构体与关键 API。</span></a>
+            <a href="redis-ae-source.html"><b>Redis ae 源码精讲</b><span>顺着源码看 aeMain 与 aeProcessEvents 到底做了什么。</span></a>
+            <a href="../architecture/io-model.html"><b>Redis IO 模型</b><span>从模型角度再梳理一遍 IO 模型的分类与取舍。</span></a>
+            <a href="../architecture/redis-multithreading.html"><b>Redis 多线程</b><span>除了网络 IO 多线程，Redis 还有哪些后台线程。</span></a>
+            <a href="../architecture/redis_connection_structure.html"><b>Redis 连接结构</b><span>client 结构体里那些输入输出缓冲区长什么样。</span></a>
+        </div>
+    </div>
+
+</div>
+
+<footer>数据库系统 · Redis 网络 IO 的地基 — Socket 系统调用、文件描述符、C10K、select/poll/epoll、ET/LT</footer>
+
+<script>
+    const MUX = {
+        select: {
+            steps: [
+                ['1', '把已连接 Socket 都放进一个 fd 集合（fd_set，固定长度 BitsMap）', ''],
+                ['2', '调用 select，把整个集合从用户态拷贝到内核态', 'cost'],
+                ['3', '内核线性遍历整个集合，检查是否有网络事件', 'cost'],
+                ['4', '有事件的 Socket 被标记为可读/可写，整个集合再拷回用户态', 'cost'],
+                ['5', '用户态还要再遍历一遍整个集合，才能找出可读/可写的那些', 'cost']
+            ],
+            note: '<strong>两次遍历 + 两次拷贝。</strong>而且 fd_set 是固定长度 BitsMap，受 FD_SETSIZE 限制，默认最多 1024 个 fd。并发越高，遍历和拷贝的开销越呈指数级上升，扛不住 C10K。'
+        },
+        poll: {
+            steps: [
+                ['1', '用动态数组（链表组织）存放关注的 fd，不再用 BitsMap', 'win'],
+                ['2', '调用 poll，把集合拷进内核', 'cost'],
+                ['3', '内核线性遍历集合检查事件', 'cost'],
+                ['4', '集合拷回用户态', 'cost'],
+                ['5', '用户态再遍历一遍找就绪的 fd', 'cost']
+            ],
+            note: '<strong>突破 1024 是唯一实质改进。</strong>poll 与 select 没有本质区别——底层仍是线性结构，仍要遍历、仍要来回拷贝，时间复杂度还是 O(n)。'
+        },
+        epoll: {
+            steps: [
+                ['1', 'epoll_create 创建 epoll 实例', ''],
+                ['2', 'epoll_ctl 把要监听的 socket 加入内核红黑树（增删改 O(log n)）', 'win'],
+                ['3', 'socket 有事件时，内核通过回调把它挂进就绪链表', 'win'],
+                ['4', 'epoll_wait 只返回就绪的那些 fd，不需要传入整个集合，也不必遍历全集', 'win'],
+                ['5', '用户态直接处理这批就绪 fd 即可', 'win']
+            ],
+            note: '<strong>红黑树 + 就绪链表。</strong>内核常驻了待检测全集，所以不必每次重传；事件驱动只报就绪的，所以不必轮询扫描。监听的 fd 越多，效率下降越不明显，上限就是进程能打开的最大 fd 数——这才是解决 C10K 的利器。'
+        }
+    };
+    const muxFlow = document.getElementById('mux-flow');
+    const muxNote = document.getElementById('mux-note');
+    function setMux(k) {
+        const m = MUX[k];
+        muxFlow.innerHTML = m.steps.map(function (s) {
+            return '<div class="mux-step ' + s[2] + '"><span class="si">' + s[0] + '</span><span class="st">' + s[1] + '</span></div>';
+        }).join('');
+        muxNote.innerHTML = m.note;
+    }
+    setMux('select');
+    document.querySelectorAll('[data-m]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            document.querySelectorAll('[data-m]').forEach(function (x) { x.classList.toggle('active', x === b); });
+            setMux(b.dataset.m);
+        });
+    });
+
+    function calcConns() {
+        const memGB = parseFloat(document.getElementById('c-mem').value);
+        const perKB = parseFloat(document.getElementById('c-per').value);
+        const fdLimit = parseInt(document.getElementById('c-fd').value, 10);
+        if (!memGB || !perKB || !fdLimit) {
+            document.getElementById('c-out').innerHTML = '请填写有效的数值。';
+            return;
+        }
+        const byMem = Math.floor(memGB * 1024 * 1024 / perKB);
+        const real = Math.min(byMem, fdLimit);
+        const bottleneck = byMem < fdLimit ? '内存' : '文件描述符上限';
+        document.getElementById('c-out').innerHTML =
+            '按内存算：' + memGB + ' GB ÷ ' + perKB + ' KB/连接 ≈ <b>' + byMem.toLocaleString() + '</b> 条<br>' +
+            '按 fd 上限算：<b>' + fdLimit.toLocaleString() + '</b> 条<br>' +
+            '取两者较小值 → 实际并发上限约 <b>' + real.toLocaleString() + '</b> 条，当前瓶颈是<b>' + bottleneck + '</b>。<br>' +
+            '<span style="color:#6e7681">注：这是量级估算，真实值还受应用自身内存、带宽与 CPU 影响。</span>';
+    }
+    document.getElementById('c-run').addEventListener('click', calcConns);
+    calcConns();
+</script>
+</body>
+</html>

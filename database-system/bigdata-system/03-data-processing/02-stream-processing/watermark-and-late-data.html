@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Watermark 与迟到数据：流处理如何判断"时间到没到"</title>
+<style>
+:root{
+  --bg:#0f172a; --surface:#1e293b; --surface2:#334155; --border:#475569;
+  --text:#e2e8f0; --dim:#94a3b8;
+  --accent:#38bdf8; --accent2:#818cf8; --green:#4ade80; --orange:#fb923c;
+  --pink:#f472b6; --red:#f87171; --yellow:#facc15;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);
+  font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  line-height:1.75;}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+.topbar{position:sticky;top:0;z-index:50;background:rgba(15,23,42,.93);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+.topbar .inner{max-width:1080px;margin:0 auto;padding:12px 28px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.topbar a{color:var(--dim);text-decoration:none;font-size:.86rem}
+.topbar a:hover{color:var(--accent)}
+.topbar .sep{color:var(--border)}
+.hero{padding:56px 0 34px;border-bottom:1px solid var(--border);margin-bottom:38px}
+.hero .eyebrow{display:inline-block;background:rgba(56,189,248,.12);
+  border:1px solid rgba(56,189,248,.3);color:var(--accent);
+  padding:4px 14px;border-radius:20px;font-size:.8rem;margin-bottom:16px}
+.hero h1{font-size:2.15rem;font-weight:800;line-height:1.35;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:14px}
+.hero p{color:var(--dim);font-size:1.02rem;max-width:780px}
+.sec{margin-bottom:56px;scroll-margin-top:70px}
+.sec h2{font-size:1.45rem;font-weight:750;margin-bottom:6px;
+  display:flex;align-items:center;gap:11px;color:#f1f5f9}
+.sec h2 .n{display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:8px;background:rgba(56,189,248,.14);
+  color:var(--accent);font-size:.95rem;font-weight:800;flex-shrink:0}
+.sec h3{font-size:1.08rem;font-weight:700;margin:26px 0 10px;color:var(--accent)}
+.sec p{margin-bottom:12px}
+.sec ul,.sec ol{padding-left:22px;margin-bottom:12px}
+.sec li{margin-bottom:6px}
+.sec .lead{color:var(--dim);margin-bottom:20px;font-size:.96rem}
+b,strong{color:#f8fafc}
+code{background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:.86em;
+  color:var(--yellow);font-family:'SF Mono',Menlo,Consolas,monospace}
+pre{background:#0b1220;border:1px solid var(--border);border-radius:10px;
+  padding:16px 18px;overflow-x:auto;margin:14px 0;font-size:.85rem;line-height:1.65}
+pre code{background:none;padding:0;color:#cbd5e1}
+.note{border-left:3px solid var(--accent);background:rgba(56,189,248,.07);
+  border-radius:0 8px 8px 0;padding:14px 18px;margin:16px 0;font-size:.92rem}
+.note.warn{border-left-color:var(--orange);background:rgba(251,146,60,.07)}
+.note.key{border-left-color:var(--green);background:rgba(74,222,128,.07)}
+.note b{display:block;margin-bottom:4px;color:var(--accent)}
+.note.warn b{color:var(--orange)}
+.note.key b{color:var(--green)}
+.tbl-wrap{overflow-x:auto;margin:18px 0}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{background:var(--surface2);color:var(--accent);padding:11px 14px;text-align:left;
+  font-weight:650;border:1px solid var(--border);white-space:nowrap}
+td{padding:10px 14px;border:1px solid var(--border);vertical-align:top}
+tr:nth-child(even) td{background:rgba(30,41,59,.5)}
+tr:hover td{background:rgba(56,189,248,.06)}
+.svgbox{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:22px;margin:20px 0;overflow-x:auto;text-align:center}
+.svgbox svg{max-width:100%;height:auto}
+.cap{color:var(--dim);font-size:.82rem;margin-top:10px;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:18px 0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:17px}
+.card:hover{border-color:var(--accent)}
+.card h4{margin:0 0 7px;font-size:.98rem;display:flex;align-items:center;gap:7px;color:#f1f5f9}
+.card p{color:var(--dim);font-size:.87rem;margin:0}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;justify-content:center;margin:20px 0}
+.fnode{background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+  padding:10px 16px;font-size:.85rem;font-weight:600;text-align:center;white-space:nowrap}
+.fnode.blue{border-color:var(--accent);color:var(--accent)}
+.fnode.purple{border-color:var(--accent2);color:var(--accent2)}
+.fnode.green{border-color:var(--green);color:var(--green)}
+.fnode.orange{border-color:var(--orange);color:var(--orange)}
+.farrow{display:flex;align-items:center;color:var(--dim);padding:0 7px;font-size:1.05rem}
+.faq{border:1px solid var(--border);border-radius:10px;margin:10px 0;overflow:hidden}
+.faq>summary{padding:13px 18px;cursor:pointer;font-weight:650;font-size:.93rem;
+  background:var(--surface);list-style:none;user-select:none}
+.faq>summary::-webkit-details-marker{display:none}
+.faq>summary::before{content:'▸ ';color:var(--accent)}
+.faq[open]>summary::before{content:'▾ '}
+.faq>summary:hover{background:rgba(56,189,248,.07)}
+.faq .body{padding:14px 18px;font-size:.9rem;color:var(--dim);border-top:1px solid var(--border)}
+.faq .body b{color:#f1f5f9}
+footer{border-top:1px solid var(--border);margin-top:60px;padding:22px 0;
+  color:var(--dim);font-size:.85rem;text-align:center}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <a href="../../index.html">← 大数据系统</a>
+  <span class="sep">/</span>
+  <span style="color:var(--dim);font-size:.86rem">流处理</span>
+  <span class="sep">/</span>
+  <span style="color:var(--text)">时间语义与 Watermark</span>
+</div></div>
+
+<div class="wrap">
+
+<div class="hero">
+  <span class="eyebrow">05 流处理 · 时间语义</span>
+  <h1>Watermark 与迟到数据：流处理如何判断"时间到没到"</h1>
+  <p>批处理里，"这个小时的数据"是明确的——跑任务时数据都躺在磁盘上。但流处理里，数据是边来边算的：<strong>系统根本不知道还有没有 10:00 的数据在路上</strong>。Watermark 就是为了回答这个问题而发明的机制：它是一种<strong>"我确信不会再有更早数据了"的声明</strong>。本文讲清三种时间语义、乱序的根源、Watermark 如何推进窗口，以及迟到数据的三条处理路线。</p>
+</div>
+
+<!-- 1 -->
+<div class="sec" id="s1">
+  <h2><span class="n">1</span>先分清三种"时间"</h2>
+  <p class="lead">一切混乱的源头：一条数据至少带着三个不同的时间戳，而窗口该按哪个切，决定了结果的正确性。</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 900 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="三种时间语义">
+    <defs><style>
+      .t{font-family:-apple-system,'PingFang SC',sans-serif}
+      .h{font-size:13px;font-weight:700}
+      .s{font-size:11px;fill:#94a3b8}
+      .n{font-size:11.5px;fill:#e2e8f0}
+    </style></defs>
+
+    <!-- 时间轴 -->
+    <line x1="70" y1="200" x2="860" y2="200" stroke="#475569" stroke-width="2"/>
+    <text class="t s" x="70" y="222">时间轴 →</text>
+
+    <!-- 事件发生 -->
+    <circle cx="120" cy="60" r="7" fill="#4ade80"/>
+    <text class="t n" x="100" y="44" fill="#4ade80">事件发生</text>
+    <text class="t s" x="88" y="86">10:00:05</text>
+    <line x1="120" y1="70" x2="120" y2="196" stroke="#4ade80" stroke-width="1.4"/>
+
+    <!-- 进入 Kafka -->
+    <circle cx="330" cy="60" r="7" fill="#38bdf8"/>
+    <text class="t n" x="298" y="44" fill="#38bdf8">进入消息队列</text>
+    <text class="t s" x="300" y="86">10:00:11</text>
+    <line x1="330" y1="70" x2="330" y2="196" stroke="#38bdf8" stroke-width="1.4"/>
+
+    <!-- 被处理 -->
+    <circle cx="620" cy="60" r="7" fill="#fb923c"/>
+    <text class="t n" x="588" y="44" fill="#fb923c">Flink 处理到它</text>
+    <text class="t s" x="590" y="86">10:00:19</text>
+    <line x1="620" y1="70" x2="620" y2="196" stroke="#fb923c" stroke-width="1.4"/>
+
+    <!-- 区间标注 -->
+    <rect x="120" y="120" width="210" height="26" fill="#4ade80" fill-opacity=".12" rx="4"/>
+    <text class="t s" x="132" y="138" fill="#4ade80">传输+排队 6s</text>
+    <rect x="330" y="120" width="290" height="26" fill="#fb923c" fill-opacity=".12" rx="4"/>
+    <text class="t s" x="342" y="138" fill="#fb923c">拉取+反序列化+算子排队 8s</text>
+
+    <!-- 底部说明 -->
+    <rect x="70" y="14" width="790" height="0" fill="none"/>
+    <text class="t s" x="700" y="120">这条数据总共"迟到"</text>
+    <text class="t s" x="700" y="138" fill="#f87171">14 秒才被处理</text>
+  </svg>
+  </div>
+  <p class="cap">同一条数据上的三个时间戳</p>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>时间语义</th><th>取自哪里</th><th>确定性</th><th>典型用途</th></tr></thead>
+    <tbody>
+      <tr><td><b>Event Time</b><br>事件时间</td><td>数据<b>自身携带</b>的业务时间戳（由产生端写入）</td><td style="color:var(--green)"><b>确定、可重现</b>：重放历史数据结果一致</td><td><b>绝大多数业务场景的正确选择</b>：按"用户行为发生的小时"统计</td></tr>
+      <tr><td><b>Processing Time</b><br>处理时间</td><td>算子所在机器的<b>系统时钟</b></td><td style="color:var(--red)"><b>不确定</b>：重跑结果会变，受负载影响</td><td>只关心"现在"的监控告警；对乱序零容忍、要求极低延迟</td></tr>
+      <tr><td><b>Ingestion Time</b><br>摄入时间</td><td>数据<b>进入 Flink / 引擎时</b>由 Source 打的当前时间</td><td>介于两者之间</td><td>源端没带时间戳，又想要比 Processing Time 稳定一点的场景</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note key"><b>为什么 Event Time 才是"对"的？</b>业务问的是"昨天 10 点有多少订单"，不是"机器昨天 10 点处理了多少条"。如果按 Processing Time 切窗口，一次 GC 停顿、一次回溯消费历史数据、一次作业重启，都会让结果<b>完全不同</b>。Event Time 保证：<b>同样的输入数据，无论何时跑、跑几次，结果都一样</b>——这是流处理的正确性基石。</div>
+</div>
+
+<!-- 2 -->
+<div class="sec" id="s2">
+  <h2><span class="n">2</span>乱序：为什么数据不按时间先后到达</h2>
+  <p class="lead">如果数据严格按 Event Time 递增到达，窗口到点就能直接关。但现实永远不会这么理想：</p>
+  <div class="grid">
+    <div class="card"><h4>📶 网络抖动</h4><p>移动端 App 埋点，弱网时数据缓存在本地，恢复后一次性补传——几小时前的数据现在才到。</p></div>
+    <div class="card"><h4>🔀 多分区并行</h4><p>Kafka 一个 Topic 有 8 个分区，消费者并发拉取。<b>分区之间没有任何顺序保证</b>，Partition-3 拉到 10:05 的数据时，Partition-7 可能还在处理 10:01 的。</p></div>
+    <div class="card"><h4>🐢 上游系统延迟</h4><p>数据库 CDC 同步卡了、批处理任务补数、跨机房同步——都会制造"旧数据晚到"。</p></div>
+    <div class="card"><h4>🔁 作业故障回溯</h4><p>作业挂了从 Checkpoint 恢复，会重新消费一段历史数据，这些数据的 Event Time 远早于当前。</p></div>
+  </div>
+  <div class="note warn"><b>核心矛盾</b>窗口不能无限等下去（否则永远不出结果、状态无限膨胀），但关早了又会漏掉迟到的数据。<b>Watermark 就是在"等多久"和"多快出结果"之间的一个显式、可调的折中。</b></div>
+</div>
+
+<!-- 3 -->
+<div class="sec" id="s3">
+  <h2><span class="n">3</span>Watermark 是什么：一句话定义</h2>
+  <div class="note key"><b>Watermark(t) 的含义</b>一条流中插入的特殊标记，声明：<b>"事件时间 ≤ t 的数据，我已经全部看完了，后面不会再来了。"</b><br>
+  它是一个<b>单调递增</b>的时钟，告诉引擎"可以把 t 之前的窗口关掉、触发计算了"。<br>
+  ⚠️ 注意：这是一个<b>启发式的猜测</b>，不是绝对保证——它猜错了，就会有迟到数据。</div>
+
+  <h3>单调递增乱序（Bounded Out-of-Orderness）最常见的生成方式</h3>
+  <pre><code>// Flink：允许 3 秒乱序
+WatermarkStrategy
+  .&lt;Event&gt;forBoundedOutOfOrderness(Duration.ofSeconds(3))
+  .withTimestampAssigner((event, ts) -&gt; event.getEventTime());
+
+// 生成规则：Watermark = 目前见过的最大 EventTime - 3秒 - 1毫秒
+// 含义：我容忍最多 3 秒的乱序，超过 3 秒才来的就是迟到数据</code></pre>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Watermark 推进示意">
+    <defs><style>
+      .t{font-family:-apple-system,'PingFang SC',sans-serif}
+      .h{font-size:13px;font-weight:700}
+      .s{font-size:10.5px;fill:#94a3b8}
+      .n{font-size:11px;fill:#e2e8f0}
+    </style></defs>
+
+    <text class="t h" x="30" y="26" fill="#e2e8f0">到达顺序（Event Time，允许 3s 乱序）</text>
+
+    <!-- 数据点 -->
+    <g>
+      <rect x="40" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="48" y="72">10:03</text>
+      <rect x="100" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="108" y="72">10:05</text>
+      <rect x="160" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="168" y="72">10:04</text>
+      <text class="t s" x="216" y="72" fill="#fb923c">← 乱序了</text>
+      <rect x="270" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="278" y="72">10:08</text>
+      <rect x="330" y="50" width="52" height="34" fill="#f87171" fill-opacity=".2" stroke="#f87171" rx="4"/>
+      <text class="t n" x="338" y="72">10:02</text>
+      <text class="t s" x="388" y="72" fill="#f87171">← 迟到！</text>
+      <rect x="450" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="458" y="72">10:09</text>
+      <rect x="510" y="50" width="52" height="34" fill="#334155" stroke="#475569" rx="4"/>
+      <text class="t n" x="518" y="72">10:12</text>
+    </g>
+
+    <!-- watermark 线 -->
+    <text class="t h" x="30" y="120" fill="#38bdf8">Watermark 推进</text>
+    <line x1="40" y1="150" x2="880" y2="150" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text class="t s" x="44" y="142" fill="#38bdf8">W = maxEventTime − 3s</text>
+
+    <circle cx="66" cy="150" r="5" fill="#38bdf8"/><text class="t s" x="58" y="172">10:00</text>
+    <circle cx="126" cy="150" r="5" fill="#38bdf8"/><text class="t s" x="118" y="172">10:02</text>
+    <circle cx="126" cy="150" r="5" fill="#475569"/><text class="t s" x="176" y="172">10:02</text>
+    <circle cx="296" cy="150" r="5" fill="#38bdf8"/><text class="t s" x="288" y="172">10:05</text>
+    <circle cx="296" cy="150" r="5" fill="#475569"/><text class="t s" x="346" y="172">10:05</text>
+    <circle cx="476" cy="150" r="5" fill="#38bdf8"/><text class="t s" x="468" y="172">10:06</text>
+    <circle cx="536" cy="150" r="5" fill="#38bdf8"/><text class="t s" x="528" y="172">10:09</text>
+
+    <text class="t s" x="596" y="150" fill="#4ade80">单调递增 ↓ 只涨不跌</text>
+
+    <!-- 窗口触发区 -->
+    <rect x="40" y="200" width="860" height="80" fill="#334155" fill-opacity=".4" stroke="#475569" rx="8"/>
+    <text class="t h" x="56" y="224" fill="#4ade80">窗口触发时刻</text>
+    <text class="t s" x="56" y="246">窗口 [10:00, 10:10) 在 <tspan fill="#4ade80">Watermark ≥ 10:10</tspan> 时触发 ——</text>
+    <text class="t s" x="56" y="266">也就是"最大事件时间 ≥ 10:13"的那一刻。</text>
+    <text class="t s" x="600" y="246" fill="#fb923c">迟到数据 10:02 在 W=10:05 之后到达</text>
+    <text class="t s" x="600" y="266" fill="#f87171">→ 窗口已关，它没被算进去</text>
+  </svg>
+  </div>
+  <p class="cap">Watermark 推进与迟到数据的产生</p>
+</div>
+
+<!-- 4 -->
+<div class="sec" id="s4">
+  <h2><span class="n">4</span>Watermark 如何决定窗口关闭</h2>
+  <div class="flow">
+    <div class="fnode blue">Watermark 到达算子</div><div class="farrow">→</div>
+    <div class="fnode purple">检查所有窗口<br><span style="font-weight:400;font-size:.78rem">窗口 end ≤ Watermark ?</span></div><div class="farrow">→</div>
+    <div class="fnode green">触发计算<br><span style="font-weight:400;font-size:.78rem">输出窗口结果</span></div><div class="farrow">→</div>
+    <div class="fnode orange">（默认）清理状态</div>
+  </div>
+  <div class="note"><b>关键规则</b>一个窗口 <code>[start, end)</code> 会在 <b>Watermark ≥ end</b> 时被触发。注意"≥ end"，不是"> start"——窗口是<b>左闭右开</b>的，<code>end</code> 本身属于下一个窗口。</div>
+
+  <h3>多并行度下的取小规则</h3>
+  <p>一个算子并行度为 4，每个子任务各有自己的 Watermark。下游算子看到的 Watermark 是<b>所有上游的最小值</b>：</p>
+  <pre><code>上游分区 Watermark:  [10:05]  [10:08]  [10:03]  [10:07]
+                                  ↓ 取 min
+下游算子看到的:      [10:03]     ← 必须取最小，否则会漏数据
+
+// 直觉：木桶效应。最慢的那一路还没到 10:05，
+// 下游就不能假设"10:05 之前的数据都齐了"。</code></pre>
+  <div class="note warn"><b>Idle Source（空闲源）陷阱</b>如果某个 Kafka 分区长时间没有数据，它的 Watermark 会<b>卡住不动</b>，导致整个下游的 Watermark（取 min）永远不推进 —— <b>所有窗口都不触发，作业看起来"卡死"了</b>。<br>
+  解法：标记空闲源 <code>.withIdleness(Duration.ofMinutes(1))</code>，让空闲分区在一定时间后暂停参与 min 计算。</div>
+</div>
+
+<!-- 5 -->
+<div class="sec" id="s5">
+  <h2><span class="n">5</span>迟到数据：三条处理路线</h2>
+  <p class="lead">Watermark 是猜测，猜错了必然有迟到数据。怎么处理，取决于业务能不能接受"结果后来被修正"。</p>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>路线</th><th>做法</th><th>结果正确性</th><th>状态开销</th><th>适用</th></tr></thead>
+    <tbody>
+      <tr><td><b>① 直接丢弃</b><br>（默认）</td><td>窗口触发后清状态，迟到数据扔掉</td><td style="color:var(--red)"><b>会丢数据</b></td><td style="color:var(--green)">最小</td><td>实时监控大屏、趋势类指标，少量丢失无妨</td></tr>
+      <tr><td><b>② 允许迟到<br>allowedLateness</b></td><td>窗口触发后状态<b>再保留一段时间</b>，期间每条迟到数据<b>重新触发一次计算</b></td><td style="color:var(--green)"><b>最终正确</b>（但会输出多次结果）</td><td>中等</td><td>要求准确、下游能接受<b>增量修正</b>结果</td></tr>
+      <tr><td><b>③ 侧输出<br>sideOutput</b></td><td>超过允许迟到期的数据，丢到一条<b>独立的旁路流</b></td><td style="color:var(--green)"><b>不丢</b>，只是分流</td><td>可控</td><td>需要兜底：迟到数据单独落库、事后对账补偿</td></tr>
+    </tbody>
+  </table></div>
+
+  <pre><code>// Flink：完整兜底组合
+OutputTag&lt;Event&gt; lateTag = new OutputTag&lt;Event&gt;("late-data") {};
+
+SingleOutputStreamOperator&lt;Result&gt; result = stream
+    .keyBy(Event::getUserId)
+    .window(TumblingEventTimeWindows.of(Time.minutes(10)))
+    .allowedLateness(Time.minutes(2))          // ② 窗口再等 2 分钟
+    .sideOutputLateData(lateTag)               // ③ 超时的丢到旁路
+    .aggregate(new MyAggregateFunction());
+
+// 单独消费旁路，落库/告警/对账
+DataStream&lt;Event&gt; lateStream = result.getSideOutput(lateTag);
+lateStream.addSink(new LateDataSink());</code></pre>
+
+  <div class="note key"><b>语义提醒</b>开了 <code>allowedLateness</code> 后，一个窗口<b>可能输出多次结果</b>（首次触发 + 每条迟到数据再触发一次）。如果下游是"只写一次"的存储（如 HBase 覆盖写），这没问题；如果是"累加"的存储（如 <code>INSERT</code> 到 MySQL），<b>必须改成幂等 upsert</b>，否则数字会重复累加。</div>
+</div>
+
+<!-- 6 -->
+<div class="sec" id="s6">
+  <h2><span class="n">6</span>乱序容忍度设多大：一个实操方法</h2>
+  <p>设太小 → 大量迟到数据被丢，结果不准；设太大 → 窗口迟迟不触发，<b>延迟变高、状态堆积</b>。经验做法：</p>
+  <ol>
+    <li><b>先量化再拍板</b>：在作业里埋一个指标，统计 <code>ProcessingTime - EventTime</code> 的<b>分位数</b>（P95 / P99 / P99.9）。</li>
+    <li><b>初始值</b>：取 <b>P99</b> 作为乱序容忍度。这样 99% 的数据都能进窗口。</li>
+    <li><b>再观察</b>：看侧输出流里迟到数据的量。若占比 &gt; 0.1%，说明设小了，往上调。</li>
+    <li><b>权衡延迟</b>：乱序容忍度 = 3s，意味着窗口最快也要等到 <code>窗口结束 + 3s</code> 才输出，这就是<b>额外的固有延迟</b>。</li>
+  </ol>
+  <div class="note warn"><b>不要设成几分钟"保险"</b>乱序容忍度直接转化为两部分成本：① 结果延迟；② 状态大小（所有未触发窗口的数据都得留在 State 里）。设成 5 分钟，意味着状态里始终压着 5 分钟的数据量，Checkpoint 也会变大变慢。</div>
+</div>
+
+<!-- 7 -->
+<div class="sec" id="s7">
+  <h2><span class="n">7</span>常见误区</h2>
+
+  <details class="faq"><summary>"Watermark 到了，说明所有数据都到齐了"</summary>
+    <div class="body"><b>错。</b>Watermark 只是一个<b>启发式声明</b>——"我猜不会再有更早的了"。它<b>不保证</b>。正因为会猜错，才需要 allowedLateness 和侧输出兜底。</div>
+  </details>
+
+  <details class="faq"><summary>"Watermark 会随真实时钟自动走"</summary>
+    <div class="body"><b>错。</b>Watermark <b>只会随数据推进</b>——它由"目前见到的最大 Event Time"推导出来。如果上游<b>完全不发数据</b>，Watermark 就<b>永远不动</b>，窗口永远不触发。这正是 <b>Idle Source</b> 问题的根源。</div>
+  </details>
+
+  <details class="faq"><summary>"用 Processing Time 就没有乱序问题，所以更好"</summary>
+    <div class="body"><b>代价是正确性。</b>Processing Time 窗口确实永不迟到、延迟最低，但结果是<b>不可重现的</b>：一次作业重启、一次回溯消费、一次机器负载波动，同一份数据算出来的数都不一样。除了"实时性压倒一切"的监控场景，业务统计都应该用 Event Time。</div>
+  </details>
+
+  <details class="faq"><summary>"allowedLateness 开得越大越准，那就开大点"</summary>
+    <div class="body"><b>有代价。</b>窗口状态要一直保留到 <code>allowedLateness</code> 结束，状态越大 → Checkpoint 越大越慢 → 恢复越久；同时结果延迟也越大。正确做法是<b>先量测真实乱序分布，再按需设置</b>，而不是拍脑袋开大。</div>
+  </details>
+</div>
+
+<div class="sec">
+  <h2><span class="n">📚</span>相关阅读</h2>
+  <div class="grid">
+    <div class="card"><h4>🔍 回到大数据系统总览</h4><p><a href="../../index.html" style="color:var(--accent)">查看完整知识结构 →</a></p></div>
+    <div class="card"><h4>🗺️ 大数据核心概念全景</h4><p><a href="../../00-overview/bigdata-concepts.html" style="color:var(--accent)">先建立整体技术地图 →</a></p></div>
+  </div>
+</div>
+
+</div>
+
+<footer>&copy; 2026 Visuals · 大数据系统 · 流处理</footer>
+</body>
+</html>

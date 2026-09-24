@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spark Shuffle 到底发生了什么：为什么它是 Spark 最贵的操作</title>
+<style>
+:root{
+  --bg:#0f172a; --surface:#1e293b; --surface2:#334155; --border:#475569;
+  --text:#e2e8f0; --dim:#94a3b8;
+  --accent:#38bdf8; --accent2:#818cf8; --green:#4ade80; --orange:#fb923c;
+  --pink:#f472b6; --red:#f87171; --yellow:#facc15;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);
+  font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  line-height:1.75;}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+.topbar{position:sticky;top:0;z-index:50;background:rgba(15,23,42,.93);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+.topbar .inner{max-width:1080px;margin:0 auto;padding:12px 28px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.topbar a{color:var(--dim);text-decoration:none;font-size:.86rem}
+.topbar a:hover{color:var(--accent)}
+.topbar .sep{color:var(--border)}
+.hero{padding:56px 0 34px;border-bottom:1px solid var(--border);margin-bottom:38px}
+.hero .eyebrow{display:inline-block;background:rgba(56,189,248,.12);
+  border:1px solid rgba(56,189,248,.3);color:var(--accent);
+  padding:4px 14px;border-radius:20px;font-size:.8rem;margin-bottom:16px}
+.hero h1{font-size:2.15rem;font-weight:800;line-height:1.35;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:14px}
+.hero p{color:var(--dim);font-size:1.02rem;max-width:780px}
+.sec{margin-bottom:56px;scroll-margin-top:70px}
+.sec h2{font-size:1.45rem;font-weight:750;margin-bottom:6px;
+  display:flex;align-items:center;gap:11px;color:#f1f5f9}
+.sec h2 .n{display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:8px;background:rgba(56,189,248,.14);
+  color:var(--accent);font-size:.95rem;font-weight:800;flex-shrink:0}
+.sec h3{font-size:1.08rem;font-weight:700;margin:26px 0 10px;color:var(--accent)}
+.sec p{margin-bottom:12px}
+.sec ul,.sec ol{padding-left:22px;margin-bottom:12px}
+.sec li{margin-bottom:6px}
+.sec .lead{color:var(--dim);margin-bottom:20px;font-size:.96rem}
+b,strong{color:#f8fafc}
+code{background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:.86em;
+  color:var(--yellow);font-family:'SF Mono',Menlo,Consolas,monospace}
+pre{background:#0b1220;border:1px solid var(--border);border-radius:10px;
+  padding:16px 18px;overflow-x:auto;margin:14px 0;font-size:.85rem;line-height:1.65}
+pre code{background:none;padding:0;color:#cbd5e1}
+.note{border-left:3px solid var(--accent);background:rgba(56,189,248,.07);
+  border-radius:0 8px 8px 0;padding:14px 18px;margin:16px 0;font-size:.92rem}
+.note.warn{border-left-color:var(--orange);background:rgba(251,146,60,.07)}
+.note.key{border-left-color:var(--green);background:rgba(74,222,128,.07)}
+.note b{display:block;margin-bottom:4px;color:var(--accent)}
+.note.warn b{color:var(--orange)}
+.note.key b{color:var(--green)}
+.tbl-wrap{overflow-x:auto;margin:18px 0}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{background:var(--surface2);color:var(--accent);padding:11px 14px;text-align:left;
+  font-weight:650;border:1px solid var(--border);white-space:nowrap}
+td{padding:10px 14px;border:1px solid var(--border);vertical-align:top}
+tr:nth-child(even) td{background:rgba(30,41,59,.5)}
+tr:hover td{background:rgba(56,189,248,.06)}
+.svgbox{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:22px;margin:20px 0;overflow-x:auto;text-align:center}
+.svgbox svg{max-width:100%;height:auto}
+.cap{color:var(--dim);font-size:.82rem;margin-top:10px;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:18px 0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:17px}
+.card:hover{border-color:var(--accent)}
+.card h4{margin:0 0 7px;font-size:.98rem;display:flex;align-items:center;gap:7px;color:#f1f5f9}
+.card p{color:var(--dim);font-size:.87rem;margin:0}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;justify-content:center;margin:20px 0}
+.fnode{background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+  padding:10px 16px;font-size:.85rem;font-weight:600;text-align:center;white-space:nowrap}
+.fnode.blue{border-color:var(--accent);color:var(--accent)}
+.fnode.purple{border-color:var(--accent2);color:var(--accent2)}
+.fnode.green{border-color:var(--green);color:var(--green)}
+.fnode.orange{border-color:var(--orange);color:var(--orange)}
+.farrow{display:flex;align-items:center;color:var(--dim);padding:0 7px;font-size:1.05rem}
+.faq{border:1px solid var(--border);border-radius:10px;margin:10px 0;overflow:hidden}
+.faq>summary{padding:13px 18px;cursor:pointer;font-weight:650;font-size:.93rem;
+  background:var(--surface);list-style:none;user-select:none}
+.faq>summary::-webkit-details-marker{display:none}
+.faq>summary::before{content:'▸ ';color:var(--accent)}
+.faq[open]>summary::before{content:'▾ '}
+.faq>summary:hover{background:rgba(56,189,248,.07)}
+.faq .body{padding:14px 18px;font-size:.9rem;color:var(--dim);border-top:1px solid var(--border)}
+.faq .body b{color:#f1f5f9}
+footer{border-top:1px solid var(--border);margin-top:60px;padding:22px 0;
+  color:var(--dim);font-size:.85rem;text-align:center}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <a href="../../index.html">← 大数据系统</a>
+  <span class="sep">/</span>
+  <span style="color:var(--dim);font-size:.86rem">批处理计算</span>
+  <span class="sep">/</span>
+  <span style="color:var(--text)">Spark Shuffle</span>
+</div></div>
+
+<div class="wrap">
+
+<div class="hero">
+  <span class="eyebrow">04 批处理计算 · Shuffle 与分区</span>
+  <h1>Spark Shuffle 到底发生了什么<br>为什么它是 Spark 最贵的操作</h1>
+  <p>一句 <code>groupBy</code> 或 <code>join</code> 就能让原本跑 3 分钟的作业变成 30 分钟。这个"突然变慢"的开关就是 <strong>Shuffle</strong>：它强制把数据按 key 重新洗牌，跨网络、跨磁盘搬一遍。本文把 Shuffle 的两端（Map 端写、Reduce 端读）拆开讲清楚，说清它到底在哪些地方花掉了时间，以及为什么"AQE + 广播 join + 预聚合"能救命。</p>
+</div>
+
+<!-- 1 -->
+<div class="sec" id="s1">
+  <h2><span class="n">1</span>Shuffle 是什么：一句话定义</h2>
+  <p class="lead"><strong>Shuffle（洗牌）= 把数据按 key 重新分发，让"相同 key 的所有记录"最终落到同一个分区里。</strong></p>
+
+  <div class="note key"><b>为什么必须要洗牌？</b>要算 <code>groupBy(city).sum(amount)</code>，就必须保证"所有 city='BJ' 的记录"在同一个计算任务里才能求和。但数据原本按文件块分散在 100 台机器上，BJ 的记录散落各处。Shuffle 就是那个"把散落的同 key 数据聚到一起"的动作——它无法避免，只能优化。</div>
+
+  <h3>哪些操作会触发 Shuffle</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>算子</th><th>是否 Shuffle</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>groupByKey</code> / <code>reduceByKey</code> / <code>aggregateByKey</code></td><td style="color:var(--red)"><b>是</b></td><td>按 key 聚合，必须重分发</td></tr>
+      <tr><td><code>join</code> / <code>leftOuterJoin</code> / <code>cogroup</code></td><td style="color:var(--red)"><b>是</b></td><td>两张表按 join key 对齐</td></tr>
+      <tr><td><code>distinct</code></td><td style="color:var(--red)"><b>是</b></td><td>本质是按整行做 groupBy</td></tr>
+      <tr><td><code>repartition(n)</code></td><td style="color:var(--red)"><b>是</b></td><td>强制全量重分区（含随机打散）</td></tr>
+      <tr><td><code>sortBy</code> / <code>orderBy</code></td><td style="color:var(--red)"><b>是</b></td><td>全局排序需范围重分布</td></tr>
+      <tr><td><code>coalesce(n)</code>（减少分区）</td><td style="color:var(--green)"><b>否</b></td><td>只合并已有分区，不跨节点搬数据</td></tr>
+      <tr><td><code>map</code> / <code>filter</code> / <code>flatMap</code></td><td style="color:var(--green)"><b>否</b></td><td>窄依赖，一条进一条出，原地算</td></tr>
+      <tr><td><code>union</code></td><td style="color:var(--green)"><b>否</b></td><td>只是把分区拼起来</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note warn"><b>宽依赖 vs 窄依赖</b>触发 Shuffle 的算子产生<b>宽依赖</b>（父分区被多个子分区依赖，Stage 必须在此切开）；不触发的产生<b>窄依赖</b>（一对一或多对一，可在同一 Stage 内流水线执行）。<b>Stage 的边界就是 Shuffle 的边界</b>——你在 Spark UI 上看到几个 Stage，基本就是几次 Shuffle + 1。</div>
+</div>
+
+<!-- 2 -->
+<div class="sec" id="s2">
+  <h2><span class="n">2</span>Shuffle 全景：Map 端写 + Reduce 端读</h2>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Spark Shuffle 两阶段流程">
+    <defs><style>
+      .t{font-family:-apple-system,'PingFang SC',sans-serif}
+      .h{font-size:13px;font-weight:700}
+      .s{font-size:10.5px;fill:#94a3b8}
+      .n{font-size:11px;fill:#e2e8f0}
+    </style></defs>
+
+    <!-- Map 侧标题 -->
+    <rect x="20" y="16" width="330" height="26" fill="#38bdf8" fill-opacity=".14" stroke="#38bdf8" rx="5"/>
+    <text class="t h" x="185" y="34" fill="#38bdf8" text-anchor="middle">① Map 端 · Shuffle Write</text>
+
+    <!-- Map tasks -->
+    <rect x="30" y="58" width="140" height="86" fill="#1e293b" stroke="#475569" rx="6"/>
+    <text class="t n" x="44" y="78">Map Task 1</text>
+    <text class="t s" x="44" y="98">本分区数据:</text>
+    <text class="t s" x="44" y="114">BJ 10 · SH 5 · GZ 8</text>
+    <text class="t s" x="44" y="130">BJ 3 · SH 7</text>
+
+    <rect x="30" y="156" width="140" height="86" fill="#1e293b" stroke="#475569" rx="6"/>
+    <text class="t n" x="44" y="176">Map Task 2</text>
+    <text class="t s" x="44" y="196">本分区数据:</text>
+    <text class="t s" x="44" y="212">GZ 2 · BJ 9 · SH 1</text>
+    <text class="t s" x="44" y="228">GZ 4 · BJ 6</text>
+
+    <rect x="30" y="254" width="140" height="60" fill="#1e293b" stroke="#475569" rx="6"/>
+    <text class="t n" x="44" y="274">Map Task 3</text>
+    <text class="t s" x="44" y="294">… SH 3 · GZ 5 …</text>
+
+    <!-- Map 端写出 -->
+    <text class="t s" x="180" y="84">每个 Map 按</text>
+    <text class="t s" x="180" y="100">hash(key) % R</text>
+    <text class="t s" x="180" y="116">分到 R 个桶</text>
+    <text class="t s" x="180" y="140">↓</text>
+    <text class="t s" x="180" y="156">本地磁盘产出：</text>
+    <rect x="180" y="164" width="160" height="52" fill="#38bdf8" fill-opacity=".1" stroke="#38bdf8" rx="5"/>
+    <text class="t n" x="190" y="184">shuffle_0_0.data</text>
+    <text class="t s" x="190" y="202">+ .index（各段偏移）</text>
+
+    <rect x="180" y="226" width="160" height="52" fill="#38bdf8" fill-opacity=".1" stroke="#38bdf8" rx="5"/>
+    <text class="t n" x="190" y="246">shuffle_1_0.data</text>
+    <text class="t s" x="190" y="264">+ .index</text>
+
+    <text class="t s" x="180" y="300">（已分区 + 已排序</text>
+    <text class="t s" x="180" y="316">+ 溢写合并后的文件）</text>
+
+    <!-- 中间连线 -->
+    <rect x="360" y="58" width="180" height="256" fill="#f87171" fill-opacity=".07" stroke="#f87171" stroke-dasharray="4 3" rx="8"/>
+    <text class="t h" x="450" y="90" fill="#f87171" text-anchor="middle">② 网络 Shuffle Read</text>
+    <text class="t s" x="450" y="112" text-anchor="middle">Reduce Task 主动</text>
+    <text class="t s" x="450" y="128" text-anchor="middle">向所有 Map 拉取</text>
+    <text class="t s" x="450" y="144" text-anchor="middle">属于自己的那一段</text>
+
+    <line x1="372" y1="180" x2="500" y2="112" stroke="#f87171" stroke-width="1.2" stroke-opacity=".6"/>
+    <line x1="372" y1="180" x2="500" y2="212" stroke="#f87171" stroke-width="1.2" stroke-opacity=".6"/>
+    <line x1="372" y1="242" x2="500" y2="112" stroke="#f87171" stroke-width="1.2" stroke-opacity=".6"/>
+    <line x1="372" y1="242" x2="500" y2="212" stroke="#f87171" stroke-width="1.2" stroke-opacity=".6"/>
+    <text class="t s" x="382" y="176" fill="#f87171">N×R 连接</text>
+    <text class="t s" x="450" y="300" text-anchor="middle" fill="#f87171">这是最贵的部分：</text>
+    <text class="t s" x="450" y="316" text-anchor="middle" fill="#f87171">随机小 IO + 网络</text>
+
+    <!-- Reduce 侧 -->
+    <rect x="560" y="16" width="320" height="26" fill="#4ade80" fill-opacity=".14" stroke="#4ade80" rx="5"/>
+    <text class="t h" x="720" y="34" fill="#4ade80" text-anchor="middle">③ Reduce 端 · 聚合输出</text>
+
+    <rect x="570" y="90" width="290" height="52" fill="#4ade80" fill-opacity=".1" stroke="#4ade80" rx="6"/>
+    <text class="t n" x="582" y="110">Reduce 0（BJ 分区）</text>
+    <text class="t s" x="582" y="130">拉 BJ 段 → 归并排序 → sum = 28</text>
+
+    <rect x="570" y="156" width="290" height="52" fill="#818cf8" fill-opacity=".1" stroke="#818cf8" rx="6"/>
+    <text class="t n" x="582" y="176">Reduce 1（SH 分区）</text>
+    <text class="t s" x="582" y="196">拉 SH 段 → 归并排序 → sum = 16</text>
+
+    <rect x="570" y="222" width="290" height="52" fill="#facc15" fill-opacity=".1" stroke="#facc15" rx="6"/>
+    <text class="t n" x="582" y="242">Reduce 2（GZ 分区）</text>
+    <text class="t s" x="582" y="262">拉 GZ 段 → 归并排序 → sum = 19</text>
+
+    <!-- 成本标注 -->
+    <rect x="20" y="336" width="860" height="72" fill="#334155" fill-opacity=".5" stroke="#475569" rx="8"/>
+    <text class="t h" x="36" y="360" fill="#fb923c">Shuffle 的四笔账单</text>
+    <text class="t s" x="36" y="380">① Map 端排序 + 溢写（CPU + 磁盘写）　② 落盘产生 N×R 个文件段（磁盘空间 + 随机 IO）</text>
+    <text class="t s" x="36" y="398">③ 跨网络拉取（网络带宽 + 序列化/反序列化）　④ Reduce 端归并 + 聚合（内存 + 可能再溢写）</text>
+  </svg>
+  </div>
+  <p class="cap">Shuffle 的两阶段：Map 端按分区写好放本地，Reduce 端跨网络去拉</p>
+</div>
+
+<!-- 3 -->
+<div class="sec" id="s3">
+  <h2><span class="n">3</span>Map 端（Shuffle Write）内部细节</h2>
+  <p class="lead">每个 Map Task 都要为下游 R 个 Reduce 各准备一份数据。Spark 的做法不是"开 R 个文件"，而是<strong>内存中分区 + 排序 → 溢写 → 最后合并成一对文件</strong>。</p>
+
+  <div class="flow">
+    <div class="fnode blue">逐条读记录</div><div class="farrow">→</div>
+    <div class="fnode purple">分区器算桶<br><span style="font-weight:400;font-size:.78rem">hash(key)%R</span></div><div class="farrow">→</div>
+    <div class="fnode orange">写入内存缓冲<br><span style="font-weight:400;font-size:.78rem">PartitionedPairBuffer</span></div><div class="farrow">→</div>
+    <div class="fnode green">满了→排序→溢写</div><div class="farrow">→</div>
+    <div class="fnode blue">合并成<br>data + index</div>
+  </div>
+
+  <h3>三个关键设计</h3>
+  <div class="grid">
+    <div class="card"><h4>🗂 只产出 2 个文件</h4><p>每个 Map Task 最终只写 <b>1 个 <code>.data</code> + 1 个 <code>.index</code></b>。所有 Reduce 分区的数据段顺序拼在 <code>.data</code> 里，<code>.index</code> 记录每段起始偏移。这样文件数从 <b>M×R 降到 2×M</b>，彻底解决了早期 Hash Shuffle 的文件句柄爆炸问题。</p></div>
+    <div class="card"><h4>📐 排序（可关）</h4><p>默认按 <b>partitionId + key</b> 排序落盘，好处是 Reduce 端归并代价低、且能提前聚合。但排序本身要 CPU。若下游不需要排序（如 <code>groupBy</code> 后直接写文件），可关掉排序换 CPU。</p></div>
+    <div class="card"><h4>⚡ Map 端预聚合</h4><p><code>reduceByKey</code> 会先在 <b>Map 端对每个桶内做一次局部合并</b>再发送，网络传输量骤降。<code>groupByKey</code> <b>不会</b>预聚合，全量搬运——这是两者性能差距巨大的根本原因。</p></div>
+  </div>
+
+  <div class="note warn"><b>经典坑：groupByKey vs reduceByKey</b><br>
+  同样是"按 key 求和"，<code>groupByKey</code> 把每个 key 的<b>全部原始值</b>都搬到 Reduce 端（10 亿条 → 搬 10 亿条）；<code>reduceByKey</code> 在 Map 端先局部 sum（10 亿条 → 每个 Map 每 key 只发 1 条）。<b>能用 reduceByKey / aggregateByKey，永远不要写 groupByKey。</b></div>
+</div>
+
+<!-- 4 -->
+<div class="sec" id="s4">
+  <h2><span class="n">4</span>Reduce 端（Shuffle Read）内部细节</h2>
+  <ol>
+    <li><b>发请求</b>：Reduce Task 启动后，先向 Driver 的 <code>MapOutputTracker</code> 查询"每个 Map Task 在哪台机器、哪个文件"，然后向所有 Map 所在节点发起拉取。</li>
+    <li><b>边拉边聚合</b>：数据到达后进入内存缓冲区，<code>reduceByKey</code> 类算子会<b>边拉边做 combine</b>，把内存占用压住。</li>
+    <li><b>内存不够就溢写</b>：缓冲满了就排序后溢写到磁盘，最后把所有溢写段 + 内存中的数据做<b>多路归并</b>，得到按 key 有序的结果。</li>
+    <li><b>输出</b>：归并后的结果交给下游算子，或写为新的 RDD 分区。</li>
+  </ol>
+
+  <div class="note"><b>为什么 Reduce 端容易 OOM？</b>如果某个 key 的数据量极大（<b>数据倾斜</b>），那么这一个 Reduce Task 要拉取的数据量就是其他的成百上千倍——缓冲区撑爆、溢写写满本地磁盘、且整个 Stage 要等它一个人跑完。这就是为什么倾斜会让作业"卡在最后 1 个 Task 上 99%"。</div>
+</div>
+
+<!-- 5 -->
+<div class="sec" id="s5">
+  <h2><span class="n">5</span>Shuffle 的演进：四种实现</h2>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>实现</th><th>核心思路</th><th>文件数</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td><b>Hash Shuffle</b><br>（Spark 0.8 之前）</td><td>每个 Map 为<b>每个 Reduce</b> 各写一个独立文件</td><td style="color:var(--red)"><b>M × R</b></td><td>已废弃。1000 Map × 1000 Reduce = 100 万个文件，句柄与随机写直接崩溃</td></tr>
+      <tr><td><b>Consolidated Hash Shuffle</b></td><td>同核上先后执行的 Map 复用同一批文件</td><td><b>C × R</b>（C=核数）</td><td>缓解但未根治，已废弃</td></tr>
+      <tr><td><b>Sort Shuffle</b><br>（Spark 1.2+ 默认）</td><td>内存分区 → 排序 → 溢写 → <b>合并成 data+index 两个文件</b></td><td style="color:var(--green)"><b>2 × M</b></td><td><b>当前默认</b>。文件数与 R 无关，顺序 IO</td></tr>
+      <tr><td><b>Tungsten Sort Shuffle</b></td><td>操作<b>二进制页</b>而非 Java 对象，避开反序列化与 GC</td><td>2 × M</td><td>自动启用（条件满足时）：无聚合、无排序、分区数 &lt; 16777216</td></tr>
+      <tr><td><b>Push-based Shuffle</b><br>（Spark 3.2+）</td><td>Map 端<b>主动推送</b>并合并到中间 External Shuffle Service，而非 Reduce 来拉</td><td>合并后更少</td><td>适合超大规模 Shuffle（数千 Executor），减少随机小 IO</td></tr>
+    </tbody>
+  </table></div>
+</div>
+
+<!-- 6 -->
+<div class="sec" id="s6">
+  <h2><span class="n">6</span>怎么优化：从最有效到最次要</h2>
+
+  <div class="grid">
+    <div class="card"><h4>🥇 广播 join 代替 Shuffle join</h4><p>小表（默认 &lt; 10MB，可调 <code>spark.sql.autoBroadcastJoinThreshold</code>）直接<b>广播到每个 Executor 内存</b>，大表原地查，<b>完全没有 Shuffle</b>。收益最大，永远优先检查这一条。</p></div>
+    <div class="card"><h4>🥈 能预聚合就预聚合</h4><p><code>reduceByKey</code> / <code>aggregateByKey</code> 代替 <code>groupByKey</code>；SQL 里优先让 <code>SUM/COUNT</code> 在 Map 端先合并（Spark 会自动做部分聚合）。</p></div>
+    <div class="card"><h4>🥉 先过滤再 Shuffle</h4><p>把 <code>filter</code> / 列裁剪<b>尽量提前</b>。Shuffle 的数据量 = 参与的数据行数 × 列宽，能在洗牌前砍掉 90% 行，Shuffle 就省 90%。</p></div>
+    <div class="card"><h4>4️⃣ 合理设置分区数</h4><p><code>spark.sql.shuffle.partitions</code> 默认 <b>200</b>——小数据量时 200 个空任务纯浪费；大数据量时又太少导致单 Task 过大。<b>经验值：总数据量 / 每个 Task 期望处理 128~256MB。</b></p></div>
+    <div class="card"><h4>5️⃣ 开启 AQE（自适应查询执行）</h4><p>Spark 3.0+ <code>spark.sql.adaptive.enabled=true</code>。它能在运行时<b>看到真实数据量</b>后：自动合并过小的分区、自动拆分倾斜分区、自动把 SortMergeJoin 转成 BroadcastJoin。<b>现代 Spark 强烈建议开启。</b></p></div>
+    <div class="card"><h4>6️⃣ 解决数据倾斜</h4><p>加盐（salt）打散热点 key、两阶段聚合、广播小表、开启 AQE 倾斜处理。详见本学科「数据倾斜」专题。</p></div>
+  </div>
+
+  <pre><code>// 典型生产配置（Spark 3.x）
+spark.sql.adaptive.enabled=true                    // 开 AQE
+spark.sql.adaptive.skewJoin.enabled=true           // 自动处理 join 倾斜
+spark.sql.adaptive.coalescePartitions.enabled=true // 自动合并小分区
+spark.sql.autoBroadcastJoinThreshold=64MB          // 放宽广播阈值
+spark.sql.shuffle.partitions=800                   // 按数据量估算
+spark.shuffle.file.buffer=1m                       // Map 端写缓冲
+spark.reducer.maxSizeInFlight=96m                  // Reduce 单次拉取上限</code></pre>
+</div>
+
+<!-- 7 -->
+<div class="sec" id="s7">
+  <h2><span class="n">7</span>常见误区</h2>
+
+  <details class="faq"><summary>"Shuffle 慢就是网络慢，加带宽就好"</summary>
+    <div class="body"><b>不一定。</b>Shuffle 的瓶颈常常是<b>磁盘随机 IO</b>（Reduce 从 N 台机器各拉一小段 = 大量小随机读）和 <b>CPU</b>（排序、序列化、压缩）。盲目加带宽收益有限，更有效的是<b>减少 Shuffle 数据量本身</b>（广播、预聚合、提前过滤）。</div>
+  </details>
+
+  <details class="faq"><summary>"分区数越多越并行，就越快"</summary>
+    <div class="body"><b>错。</b>分区数 R 决定了：文件段数 = M×R（虽合并但段变多）、Reduce Task 数（调度开销）、每个 Task 的数据量。R 过大 → 海量小 Task、元数据爆炸、小文件问题；过小 → 单 Task 数据过大、容易 OOM、并行度不足。<b>让单个 Task 处理 128~256MB 是常用起点。</b></div>
+  </details>
+
+  <details class="faq"><summary>"repartition 和 coalesce 差不多"</summary>
+    <div class="body"><b>完全不同。</b><code>repartition(n)</code> <b>一定触发全量 Shuffle</b>（因为它要保证数据均匀分布，会做随机打散）；<code>coalesce(n)</code> 减少分区时<b>只把相邻分区合并，不 Shuffle</b>。想减少分区用 <code>coalesce</code>，想重新打散（比如解决倾斜）才用 <code>repartition</code>。</div>
+  </details>
+
+  <details class="faq"><summary>"Shuffle 数据一定会落盘，很安全不会丢"</summary>
+    <div class="body"><b>落盘不等于不重算。</b>Shuffle 中间文件写在 Executor 本地磁盘。如果 Executor 所在节点宕机、或开启了动态资源回收把 Executor 撤掉，那些文件就<b>没了</b>——Spark 会重新调度上游 Stage 重算一遍（这就是 <b>Stage 重试</b> 代价巨大的原因）。生产上常配合 <b>External Shuffle Service</b>，让文件生命周期脱离 Executor。</div>
+  </details>
+</div>
+
+<div class="sec">
+  <h2><span class="n">📚</span>相关阅读</h2>
+  <div class="grid">
+    <div class="card"><h4>🔍 回到大数据系统总览</h4><p><a href="../../index.html" style="color:var(--accent)">查看完整知识结构 →</a></p></div>
+    <div class="card"><h4>⚖️ 数据倾斜怎么解</h4><p><a href="../../03-data-processing/05-performance-tuning/data-skew-solutions.html" style="color:var(--accent)">Shuffle 最常见的事故 →</a></p></div>
+  </div>
+</div>
+
+</div>
+
+<footer>&copy; 2026 Visuals · 大数据系统 · 批处理计算</footer>
+</body>
+</html>

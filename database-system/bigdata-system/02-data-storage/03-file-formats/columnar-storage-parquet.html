@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>列式存储与 Parquet：为什么只查 3 列就能快 10 倍</title>
+<style>
+:root{
+  --bg:#0f172a; --surface:#1e293b; --surface2:#334155; --border:#475569;
+  --text:#e2e8f0; --dim:#94a3b8;
+  --accent:#38bdf8; --accent2:#818cf8; --green:#4ade80; --orange:#fb923c;
+  --pink:#f472b6; --red:#f87171; --yellow:#facc15;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);
+  font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  line-height:1.75;}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+
+/* Top bar */
+.topbar{position:sticky;top:0;z-index:50;background:rgba(15,23,42,.93);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border);}
+.topbar .inner{max-width:1080px;margin:0 auto;padding:12px 28px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.topbar a{color:var(--dim);text-decoration:none;font-size:.86rem}
+.topbar a:hover{color:var(--accent)}
+.topbar .sep{color:var(--border)}
+
+/* Hero */
+.hero{padding:56px 0 34px;border-bottom:1px solid var(--border);margin-bottom:38px}
+.hero .eyebrow{display:inline-block;background:rgba(56,189,248,.12);
+  border:1px solid rgba(56,189,248,.3);color:var(--accent);
+  padding:4px 14px;border-radius:20px;font-size:.8rem;margin-bottom:16px}
+.hero h1{font-size:2.15rem;font-weight:800;line-height:1.35;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:14px}
+.hero p{color:var(--dim);font-size:1.02rem;max-width:760px}
+
+/* Section */
+.sec{margin-bottom:56px;scroll-margin-top:70px}
+.sec h2{font-size:1.45rem;font-weight:750;margin-bottom:6px;
+  display:flex;align-items:center;gap:11px;color:#f1f5f9}
+.sec h2 .n{display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:8px;background:rgba(56,189,248,.14);
+  color:var(--accent);font-size:.95rem;font-weight:800;flex-shrink:0}
+.sec h3{font-size:1.08rem;font-weight:700;margin:26px 0 10px;color:var(--accent)}
+.sec h4{font-size:.98rem;font-weight:700;margin:18px 0 8px;color:#cbd5e1}
+.sec p{margin-bottom:12px}
+.sec ul,.sec ol{padding-left:22px;margin-bottom:12px}
+.sec li{margin-bottom:6px}
+.sec .lead{color:var(--dim);margin-bottom:20px;font-size:.96rem}
+b,strong{color:#f8fafc}
+code{background:var(--surface2);padding:2px 6px;border-radius:4px;
+  font-size:.86em;color:var(--yellow);
+  font-family:'SF Mono',Menlo,Consolas,monospace}
+pre{background:#0b1220;border:1px solid var(--border);border-radius:10px;
+  padding:16px 18px;overflow-x:auto;margin:14px 0;font-size:.85rem;line-height:1.65}
+pre code{background:none;padding:0;color:#cbd5e1}
+
+/* Callouts */
+.note{border-left:3px solid var(--accent);background:rgba(56,189,248,.07);
+  border-radius:0 8px 8px 0;padding:14px 18px;margin:16px 0;font-size:.92rem}
+.note.warn{border-left-color:var(--orange);background:rgba(251,146,60,.07)}
+.note.key{border-left-color:var(--green);background:rgba(74,222,128,.07)}
+.note b{display:block;margin-bottom:4px;color:var(--accent)}
+.note.warn b{color:var(--orange)}
+.note.key b{color:var(--green)}
+
+/* Table */
+.tbl-wrap{overflow-x:auto;margin:18px 0}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{background:var(--surface2);color:var(--accent);padding:11px 14px;
+  text-align:left;font-weight:650;border:1px solid var(--border);white-space:nowrap}
+td{padding:10px 14px;border:1px solid var(--border);vertical-align:top}
+tr:nth-child(even) td{background:rgba(30,41,59,.5)}
+tr:hover td{background:rgba(56,189,248,.06)}
+
+/* SVG box */
+.svgbox{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:22px;margin:20px 0;overflow-x:auto;text-align:center}
+.svgbox svg{max-width:100%;height:auto}
+.cap{color:var(--dim);font-size:.82rem;margin-top:10px;text-align:center}
+
+/* Cards grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:18px 0}
+.card{background:var(--surface);border:1px solid var(--border);
+  border-radius:10px;padding:17px}
+.card:hover{border-color:var(--accent)}
+.card h4{margin:0 0 7px;font-size:.98rem;display:flex;align-items:center;gap:7px;color:#f1f5f9}
+.card p{color:var(--dim);font-size:.87rem;margin:0}
+
+/* Flow pipeline */
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;
+  justify-content:center;margin:20px 0}
+.fnode{background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+  padding:10px 16px;font-size:.85rem;font-weight:600;text-align:center;white-space:nowrap}
+.fnode.blue{border-color:var(--accent);color:var(--accent)}
+.fnode.purple{border-color:var(--accent2);color:var(--accent2)}
+.fnode.green{border-color:var(--green);color:var(--green)}
+.fnode.orange{border-color:var(--orange);color:var(--orange)}
+.farrow{display:flex;align-items:center;color:var(--dim);padding:0 7px;font-size:1.05rem}
+
+/* FAQ */
+.faq{border:1px solid var(--border);border-radius:10px;margin:10px 0;overflow:hidden}
+.faq>summary{padding:13px 18px;cursor:pointer;font-weight:650;font-size:.93rem;
+  background:var(--surface);list-style:none;user-select:none}
+.faq>summary::-webkit-details-marker{display:none}
+.faq>summary::before{content:'▸ ';color:var(--accent)}
+.faq[open]>summary::before{content:'▾ '}
+.faq>summary:hover{background:rgba(56,189,248,.07)}
+.faq .body{padding:14px 18px;font-size:.9rem;color:var(--dim);border-top:1px solid var(--border)}
+.faq .body b{color:#f1f5f9}
+
+footer{border-top:1px solid var(--border);margin-top:60px;padding:22px 0;
+  color:var(--dim);font-size:.85rem;text-align:center}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="inner">
+  <a href="../../index.html">← 大数据系统</a>
+  <span class="sep">/</span>
+  <span style="color:var(--dim);font-size:.86rem">存储与文件格式</span>
+  <span class="sep">/</span>
+  <span style="color:var(--text)">列式存储与 Parquet</span>
+</div></div>
+
+<div class="wrap">
+
+<div class="hero">
+  <span class="eyebrow">02 存储与文件格式 · 文件格式</span>
+  <h1>列式存储与 Parquet：为什么只查 3 列就能快 10 倍</h1>
+  <p>一张 100 列的表，你只查其中 3 列。行式存储要把 100 列全读出来再丢掉 97 列；列式存储只把那 3 列读出来。这不是"优化"，而是两种根本不同的<strong>字节排布方式</strong>带来的必然结果。本文从磁盘上的字节怎么摆开始，一路讲到 Parquet 的三层结构、编码压缩、统计信息裁剪，以及嵌套数据的 Dremel 模型。</p>
+</div>
+
+<!-- ① -->
+<div class="sec" id="s1">
+  <h2><span class="n">1</span>先给结论</h2>
+  <p class="lead">列式存储快，靠的不是"某种神奇压缩"，而是四个可叠加的独立收益：</p>
+
+  <div class="grid">
+    <div class="card"><h4>① IO 裁剪</h4><p>只读取查询真正用到的列。100 列里查 3 列，磁盘 IO 直接降到约 3%。</p></div>
+    <div class="card"><h4>② 压缩比高</h4><p>同一列数据类型一致、值域相近，字典编码 / RLE / 差分编码都能吃得下，体积常降到 1/5 ~ 1/10。</p></div>
+    <div class="card"><h4>③ 向量化执行</h4><p>同列连续存放，可以一次把 1024 个值加载进 CPU 向量寄存器批量算，而不是一个一个判断类型。</p></div>
+    <div class="card"><h4>④ 统计裁剪</h4><p>每个数据块带 min/max 统计，<code>WHERE age &gt; 30</code> 可以直接整块跳过，连读都不读。</p></div>
+  </div>
+
+  <div class="note key"><b>一句话记忆</b>行式 = "一条记录的所有字段挨着放"，适合<strong>整行读写</strong>（OLTP，点查一条订单）；列式 = "一列的所有值挨着放"，适合<strong>少列大批</strong>（OLAP，扫一亿行算个汇总）。</div>
+</div>
+
+<!-- ② -->
+<div class="sec" id="s2">
+  <h2><span class="n">2</span>行式 vs 列式：磁盘上的字节到底怎么摆</h2>
+  <p class="lead">这是理解一切的起点。假设有 4 行、5 列的用户表：</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 900 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="行式与列式存储布局对比">
+    <defs>
+      <style>
+        .t{font-family:-apple-system,'PingFang SC',sans-serif}
+        .hd{font-size:14px;font-weight:700}
+        .lb{font-size:11px;fill:#94a3b8}
+        .vl{font-size:11px;fill:#e2e8f0}
+        .vlx{font-size:11px;fill:#475569}
+      </style>
+    </defs>
+
+    <!-- 行式标题 -->
+    <text class="t hd" x="30" y="26" fill="#fb923c">行式存储（Row-oriented）</text>
+    <text class="t lb" x="230" y="26">一行的所有列连续排在一起</text>
+
+    <!-- 行式 4 行 -->
+    <g>
+      <rect x="30" y="40" width="160" height="30" fill="#fb923c" fill-opacity=".18" stroke="#fb923c" stroke-width="1" rx="3"/>
+      <text class="t vl" x="40" y="60">1 · Alice · 28 · BJ · 9900</text>
+    </g>
+    <g>
+      <rect x="30" y="76" width="160" height="30" fill="#fb923c" fill-opacity=".18" stroke="#fb923c" stroke-width="1" rx="3"/>
+      <text class="t vl" x="40" y="96">2 · Bob · 34 · SH · 8700</text>
+    </g>
+    <g>
+      <rect x="30" y="112" width="160" height="30" fill="#fb923c" fill-opacity=".18" stroke="#fb923c" stroke-width="1" rx="3"/>
+      <text class="t vl" x="40" y="132">3 · Cindy · 28 · GZ · 7600</text>
+    </g>
+    <g>
+      <rect x="30" y="148" width="160" height="30" fill="#fb923c" fill-opacity=".18" stroke="#fb923c" stroke-width="1" rx="3"/>
+      <text class="t vl" x="40" y="168">4 · Dan · 41 · BJ · 8300</text>
+    </g>
+
+    <!-- 列式标题 -->
+    <text class="t hd" x="470" y="26" fill="#38bdf8">列式存储（Column-oriented）</text>
+    <text class="t lb" x="670" y="26">一列的所有值连续排在一起</text>
+
+    <!-- 列式 id -->
+    <rect x="470" y="40" width="90" height="138" fill="#38bdf8" fill-opacity=".15" stroke="#38bdf8" stroke-width="1" rx="4"/>
+    <text class="t vl" x="494" y="60">1</text><text class="t vl" x="494" y="94">2</text>
+    <text class="t vl" x="494" y="128">3</text><text class="t vl" x="494" y="162">4</text>
+    <text class="t lb" x="490" y="190">id</text>
+
+    <!-- 列式 name -->
+    <rect x="568" y="40" width="100" height="138" fill="#818cf8" fill-opacity=".15" stroke="#818cf8" stroke-width="1" rx="4"/>
+    <text class="t vl" x="580" y="60">Alice</text><text class="t vl" x="580" y="94">Bob</text>
+    <text class="t vl" x="580" y="128">Cindy</text><text class="t vl" x="580" y="162">Dan</text>
+    <text class="t lb" x="592" y="190">name</text>
+
+    <!-- 列式 age -->
+    <rect x="676" y="40" width="70" height="138" fill="#4ade80" fill-opacity=".15" stroke="#4ade80" stroke-width="1" rx="4"/>
+    <text class="t vl" x="694" y="60">28</text><text class="t vl" x="694" y="94">34</text>
+    <text class="t vl" x="694" y="128">28</text><text class="t vl" x="694" y="162">41</text>
+    <text class="t lb" x="690" y="190">age</text>
+
+    <!-- 列式 city -->
+    <rect x="754" y="40" width="70" height="138" fill="#facc15" fill-opacity=".15" stroke="#facc15" stroke-width="1" rx="4"/>
+    <text class="t vl" x="770" y="60">BJ</text><text class="t vl" x="770" y="94">SH</text>
+    <text class="t vl" x="770" y="128">GZ</text><text class="t vl" x="770" y="162">BJ</text>
+    <text class="t lb" x="766" y="190">city</text>
+
+    <!-- 列式 salary -->
+    <rect x="832" y="40" width="42" height="138" fill="#f472b6" fill-opacity=".15" stroke="#f472b6" stroke-width="1" rx="4"/>
+    <text class="t vl" x="840" y="60">9900</text><text class="t vl" x="840" y="94">8700</text>
+    <text class="t vl" x="840" y="128">7600</text><text class="t vl" x="840" y="162">8300</text>
+    <text class="t lb" x="832" y="190">salary</text>
+
+    <!-- 查询标注 -->
+    <rect x="470" y="215" width="112" height="46" fill="none" stroke="#f87171" stroke-width="1.6" stroke-dasharray="5 4" rx="6"/>
+    <text class="t" x="466" y="278" font-size="12" fill="#f87171" font-weight="600">SELECT avg(age) FROM t</text>
+    <text class="t" x="466" y="296" font-size="11" fill="#94a3b8">→ 只读 age 这一列，其余 4 列完全不碰</text>
+
+    <rect x="30" y="215" width="160" height="46" fill="none" stroke="#f87171" stroke-width="1.6" stroke-dasharray="5 4" rx="6"/>
+    <text class="t" x="30" y="278" font-size="12" fill="#f87171" font-weight="600">SELECT avg(age) FROM t</text>
+    <text class="t" x="30" y="296" font-size="11" fill="#94a3b8">→ 4 行整行都要读，再丢掉 80% 字段</text>
+
+    <line x1="20" y1="320" x2="880" y2="320" stroke="#334155" stroke-width="1"/>
+    <text class="t" x="20" y="336" font-size="11" fill="#475569">同一份数据，同一块磁盘 —— 区别只在于「谁和谁挨着」</text>
+  </svg>
+  </div>
+  <p class="cap">行式：一条记录的字段紧挨着；列式：一列的值紧挨着</p>
+
+  <div class="note warn"><b>关键推论</b>磁盘的最小读取单位是<strong>块</strong>（HDFS block 通常 128MB，SSD page 4KB）。你不可能"只读一行里的 age 那个字段"——行式下 age 被夹在 name 和 city 中间，必须把周围的字节一并读进来。这就是列式省 IO 的物理根源。</div>
+</div>
+
+<!-- ③ -->
+<div class="sec" id="s3">
+  <h2><span class="n">3</span>Parquet 的三层结构：Row Group → Column Chunk → Page</h2>
+  <p class="lead">Parquet 不是"简单地按列存"，它是一个精心分层的容器。三层结构是它既能裁剪、又能并行、还能支持嵌套的关键。</p>
+
+  <div class="svgbox">
+  <svg viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Parquet 文件三层结构">
+    <defs><style>
+      .t{font-family:-apple-system,'PingFang SC',sans-serif}
+      .h{font-size:13px;font-weight:700}
+      .s{font-size:11px;fill:#94a3b8}
+      .n{font-size:11px;fill:#e2e8f0}
+    </style></defs>
+
+    <!-- File -->
+    <rect x="20" y="20" width="860" height="360" fill="none" stroke="#475569" stroke-width="1.5" rx="8"/>
+    <text class="t h" x="36" y="44" fill="#e2e8f0">Parquet File</text>
+    <text class="t s" x="150" y="44">（文件头 Header + 若干个 Row Group + 文件尾 Footer）</text>
+
+    <!-- Row Group 1 -->
+    <rect x="40" y="62" width="820" height="140" fill="#38bdf8" fill-opacity=".07" stroke="#38bdf8" stroke-width="1.4" rx="6"/>
+    <text class="t h" x="54" y="84" fill="#38bdf8">Row Group #1</text>
+    <text class="t s" x="150" y="84">一次并行扫描的单元 · 默认 128MB · 包含该分片内所有列的全部行</text>
+
+    <rect x="60" y="96" width="170" height="92" fill="#38bdf8" fill-opacity=".16" stroke="#38bdf8" stroke-width="1" rx="4"/>
+    <text class="t n" x="70" y="116">Column Chunk: id</text>
+    <text class="t s" x="70" y="136">Page 1 / Page 2 / …</text>
+    <text class="t s" x="70" y="156">min=1  max=500000</text>
+    <text class="t s" x="70" y="176">encoding=RLE_DICT</text>
+
+    <rect x="240" y="96" width="170" height="92" fill="#818cf8" fill-opacity=".16" stroke="#818cf8" stroke-width="1" rx="4"/>
+    <text class="t n" x="250" y="116">Column Chunk: name</text>
+    <text class="t s" x="250" y="136">Page 1 / Page 2 / …</text>
+    <text class="t s" x="250" y="156">dictionary 字典页</text>
+    <text class="t s" x="250" y="176">compression=SNAPPY</text>
+
+    <rect x="420" y="96" width="170" height="92" fill="#4ade80" fill-opacity=".16" stroke="#4ade80" stroke-width="1" rx="4"/>
+    <text class="t n" x="430" y="116">Column Chunk: age</text>
+    <text class="t s" x="430" y="136">Page 1 / Page 2 / …</text>
+    <text class="t s" x="430" y="156">min=18  max=65</text>
+    <text class="t s" x="430" y="176">统计信息 → 可裁剪</text>
+
+    <rect x="600" y="96" width="170" height="92" fill="#facc15" fill-opacity=".16" stroke="#facc15" stroke-width="1" rx="4"/>
+    <text class="t n" x="610" y="116">Column Chunk: city</text>
+    <text class="t s" x="610" y="136">Page 1 / Page 2 / …</text>
+    <text class="t s" x="610" y="156">min=BJ  max=SH</text>
+    <text class="t s" x="610" y="176">compression=ZSTD</text>
+
+    <text class="t s" x="782" y="140">… 其余</text>
+    <text class="t s" x="782" y="156">96 列</text>
+
+    <!-- Row Group 2 -->
+    <rect x="40" y="214" width="820" height="110" fill="#818cf8" fill-opacity=".07" stroke="#818cf8" stroke-width="1.4" rx="6"/>
+    <text class="t h" x="54" y="236" fill="#818cf8">Row Group #2</text>
+    <text class="t s" x="150" y="236">结构完全相同 · 可被另一个 Task 并行处理</text>
+
+    <rect x="60" y="248" width="170" height="60" fill="#38bdf8" fill-opacity=".12" stroke="#38bdf8" stroke-width="1" rx="4"/>
+    <text class="t n" x="70" y="270">Column Chunk: id</text>
+    <text class="t s" x="70" y="290">min=500001  max=1000000</text>
+
+    <rect x="240" y="248" width="170" height="60" fill="#818cf8" fill-opacity=".12" stroke="#818cf8" stroke-width="1" rx="4"/>
+    <text class="t n" x="250" y="270">Column Chunk: name</text>
+    <text class="t s" x="250" y="290">独立字典页</text>
+
+    <rect x="420" y="248" width="170" height="60" fill="#4ade80" fill-opacity=".12" stroke="#4ade80" stroke-width="1" rx="4"/>
+    <text class="t n" x="430" y="270">Column Chunk: age</text>
+    <text class="t s" x="430" y="290">min=19  max=70</text>
+
+    <rect x="600" y="248" width="170" height="60" fill="#facc15" fill-opacity=".12" stroke="#facc15" stroke-width="1" rx="4"/>
+    <text class="t n" x="610" y="270">Column Chunk: city</text>
+    <text class="t s" x="610" y="290">min=BJ  max=SZ</text>
+
+    <!-- Footer -->
+    <rect x="40" y="336" width="820" height="32" fill="#334155" fill-opacity=".6" stroke="#475569" stroke-width="1" rx="5"/>
+    <text class="t n" x="54" y="357">Footer：Schema + 所有 Row Group / Column Chunk 的偏移量与统计信息（min/max、null 计数、编码方式）</text>
+  </svg>
+  </div>
+  <p class="cap">Parquet 三层结构：读取时先读 Footer（很小），再决定跳到哪些 Row Group 的哪些 Column Chunk</p>
+
+  <h3>三层的分工</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>层级</th><th>是什么</th><th>典型大小</th><th>它解决了什么</th></tr></thead>
+    <tbody>
+      <tr><td><b>Row Group</b><br>行组</td><td>数据水平切分后的一个分片，含该分片所有列</td><td>默认 128MB<br>（<code>parquet.block.size</code>）</td><td><b>并行 + 粗粒度裁剪</b>。不同 Row Group 交给不同 Task 并行扫；每个 Row Group 带 min/max，能整组跳过</td></tr>
+      <tr><td><b>Column Chunk</b><br>列块</td><td>一个 Row Group 内某一列的全部数据</td><td>不定（取决于列宽）</td><td><b>列裁剪</b>。只打开查询涉及的列块，其余列的字节完全不读</td></tr>
+      <tr><td><b>Page</b><br>页</td><td>列块内部的更小切分，是压缩 / 编码的最小单位</td><td>默认 1MB<br>（<code>page.size</code>）</td><td><b>细粒度裁剪 + 解压粒度</b>。Page Index 记录每页 min/max，可跳过单个页；解压时只解一页而非整列</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><b>为什么 Row Group 不能太小也不能太大？</b>太小 → 文件里 Row Group 数量爆炸，Footer 元数据变大、顺序读变差、压缩字典重复；太大 → 并行度不够（一个 Row Group 只能被一个 Task 扫），且裁剪粒度变粗。128MB 与 HDFS block 对齐是经验最优。</div>
+</div>
+
+<!-- ④ -->
+<div class="sec" id="s4">
+  <h2><span class="n">4</span>编码与压缩：为什么同一列能压到 1/10</h2>
+  <p class="lead">很多人把"编码（Encoding）"和"压缩（Compression）"混为一谈。Parquet 里这是两个先后执行的独立步骤，作用完全不同。</p>
+
+  <div class="flow">
+    <div class="fnode blue">原始列值</div><div class="farrow">→</div>
+    <div class="fnode purple">① 编码 Encoding<br><span style="font-weight:400;font-size:.78rem">针对数据特征重排表示</span></div><div class="farrow">→</div>
+    <div class="fnode orange">② 压缩 Compression<br><span style="font-weight:400;font-size:.78rem">通用字节流压缩</span></div><div class="farrow">→</div>
+    <div class="fnode green">落盘</div>
+  </div>
+
+  <h3>四种核心编码</h3>
+  <div class="grid">
+    <div class="card"><h4>📖 字典编码 Dictionary</h4><p>把列里的去重值建成字典，原数据只存<b>整数下标</b>。<code>city</code> 只有 "BJ/SH/GZ" 三个值时，字符串变 0/1/2，体积骤降。字典过大时自动退回 PLAIN。</p></div>
+    <div class="card"><h4>🔁 游程编码 RLE</h4><p>连续重复值存成「值 + 重复次数」。<code>status</code> 列连续 5 万个 "OK" → 存为 <code>(OK, 50000)</code>。常与字典编码配合（RLE_DICTIONARY）。</p></div>
+    <div class="card"><h4>📦 位打包 Bit-packing</h4><p>值域小就少用几位。0~15 只需 4 bit，一个字节塞两个值，比 int32 省 8 倍。</p></div>
+    <div class="card"><h4>📉 差分编码 Delta</h4><p>递增数值（时间戳、自增 ID）只存<b>相邻差值</b>。1,2,3…1000000 → 1,1,1… 差分后几乎全是 1，再叠 RLE 压到极致。</p></div>
+  </div>
+
+  <h3>通用压缩算法怎么选</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>算法</th><th>压缩比</th><th>解压速度</th><th>是否可切分</th><th>适用场景</th></tr></thead>
+    <tbody>
+      <tr><td><b>Snappy</b></td><td>中（~2-3x）</td><td><b>最快</b></td><td>否（但 Parquet 按 Page 切，所以不影响并行）</td><td>默认选择，CPU 与体积平衡最好</td></tr>
+      <tr><td><b>Gzip</b></td><td><b>高</b>（~4-6x）</td><td>慢</td><td>否</td><td>冷数据归档、存储成本优先</td></tr>
+      <tr><td><b>ZSTD</b></td><td>高（接近 Gzip）</td><td>快（接近 Snappy）</td><td>否</td><td><b>新项目首选</b>，综合最优，支持压缩级别 1-22</td></tr>
+      <tr><td><b>LZO</b></td><td>中</td><td>快</td><td>需额外建索引</td><td>老集群兼容，新项目少用</td></tr>
+      <tr><td><b>none</b></td><td>1x</td><td>—</td><td>—</td><td>已加密 / 已压缩数据（如 JPEG、protobuf），再压纯浪费 CPU</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note key"><b>为什么列存的压缩比天然更高？</b>压缩算法的本质是"消除重复模式"。<code>city</code> 这一列翻来覆去只有几十个城市名，模式极密集；而行式存储里 city 后面紧跟 salary、再紧跟时间戳，模式被彻底打乱。这就是"同列同构"带来的红利——它和压缩算法本身无关，是<b>排布方式</b>的红利。</div>
+</div>
+
+<!-- ⑤ -->
+<div class="sec" id="s5">
+  <h2><span class="n">5</span>统计信息裁剪：连读都不读</h2>
+  <p class="lead">列式存储最"暴力"的一招：靠元数据直接判定某些数据块不可能命中，于是跳过整块 IO。</p>
+
+  <pre><code>-- 查询：找 60 岁以上的北京用户
+SELECT name FROM users WHERE city = 'BJ' AND age &gt; 60;</code></pre>
+
+  <p>Footer 里存着每个 Row Group、每个 Column Chunk 的 <code>min/max</code>。执行过程：</p>
+  <div class="flow">
+    <div class="fnode blue">读 Footer<br><span style="font-weight:400;font-size:.78rem">几十 KB</span></div><div class="farrow">→</div>
+    <div class="fnode purple">Row Group 裁剪<br><span style="font-weight:400;font-size:.78rem">age.max &lt; 60 → 整组跳过</span></div><div class="farrow">→</div>
+    <div class="fnode orange">Page 裁剪<br><span style="font-weight:400;font-size:.78rem">用 Page Index 再细跳</span></div><div class="farrow">→</div>
+    <div class="fnode green">只读 city+name<br><span style="font-weight:400;font-size:.78rem">其余 98 列不碰</span></div>
+  </div>
+
+  <div class="note warn"><b>裁剪失效的典型情况</b>① 数据<b>未排序</b>：如果 age 随机分布，几乎每个 Row Group 的 min/max 都横跨 18~70，一个也跳不掉。② 谓词<b>取反 / 函数包裹</b>：<code>WHERE upper(city)='BJ'</code> 无法直接用 min/max 判定。③ 高基数列且分布均匀。
+  <br>→ <b>对策</b>：写数据时按常用的过滤列 <code>SORT BY</code> / 分区，让 min/max 范围变窄，裁剪率立刻上去（这就是 Z-Order 与聚簇优化的动机）。</div>
+</div>
+
+<!-- ⑥ -->
+<div class="sec" id="s6">
+  <h2><span class="n">6</span>嵌套数据：Parquet 怎么存 List 和 Struct</h2>
+  <p class="lead">列式存储最反直觉的难题：JSON 那样的嵌套结构，怎么"按列"存？Parquet 用的是 Google Dremel 论文的 <b>Repetition Level / Definition Level</b> 方案。</p>
+
+  <pre><code>// 一行数据（一个用户有多个订单）
+{
+  "id": 1,
+  "orders": [           // repeated group，可重复
+    {"item": "A", "price": 10},
+    {"item": "B", "price": 20}
+  ]
+}</code></pre>
+
+  <p>存成列时需要两个额外的小整数列，才能无损还原层次：</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>概念</th><th>全称</th><th>回答的问题</th><th>取值范围</th></tr></thead>
+    <tbody>
+      <tr><td><b>R</b></td><td>Repetition Level<br>重复级别</td><td>"这个值是在哪一级发生了<b>重复</b>？"（0 = 新的一条记录）</td><td>0 ~ 嵌套深度</td></tr>
+      <tr><td><b>D</b></td><td>Definition Level<br>定义级别</td><td>"这个值在 <code>optional/repeated</code> 路径上，<b>定义到第几层</b>？"（小于最大层数 = 该值是 NULL / 空）</td><td>0 ~ 该字段最大层数</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><b>直觉理解</b>把嵌套结构拍平成一张大表后，光看 <code>item</code> 这一列你无法知道"A 和 B 属于同一个用户，还是两个不同用户"。<b>R</b> 就是用来标记"从这里开始换了新记录 / 新的一层重复"；<b>D</b> 用来标记"这个位置原本有值，还是因为父级缺失导致的 NULL"。两个整数列非常小（RLE 后几乎可忽略），却让列存完整支持嵌套。</div>
+</div>
+
+<!-- ⑦ -->
+<div class="sec" id="s7">
+  <h2><span class="n">7</span>Parquet / ORC / Avro 横向对比</h2>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>维度</th><th>Parquet</th><th>ORC</th><th>Avro</th></tr></thead>
+    <tbody>
+      <tr><td><b>存储模型</b></td><td>列式</td><td>列式</td><td><b>行式</b></td></tr>
+      <tr><td><b>Schema</b></td><td>文件内嵌（自描述）</td><td>文件内嵌</td><td><b>读写双方各自持有</b>（schema registry）</td></tr>
+      <tr><td><b>压缩比</b></td><td>高</td><td><b>最高</b>（内置更激进的编码）</td><td>中</td></tr>
+      <tr><td><b>嵌套支持</b></td><td><b>原生（Dremel R/D）</b></td><td>支持，较弱</td><td><b>原生</b>（本身就是 JSON 模型）</td></tr>
+      <tr><td><b>Schema 演进</b></td><td>支持（加列 / 改名）</td><td>支持有限</td><td><b>最强</b>（专为演进设计）</td></tr>
+      <tr><td><b>事务 / ACID</b></td><td>靠上层表格式<br>（Iceberg / Hudi / Delta）</td><td>靠上层（Hive ACID）</td><td>不支持</td></tr>
+      <tr><td><b>主战场</b></td><td><b>分析型</b>（Spark、Trino、湖仓表格式底层）</td><td>Hive 生态、Presto</td><td><b>Kafka 消息序列化</b>、CDC 传输</td></tr>
+      <tr><td><b>典型选择</b></td><td>湖仓分析事实上的标准</td><td>纯 Hive 栈、追求极致压缩</td><td>管道传输、需要 schema 频繁演进</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note key"><b>一句话选型</b>要分析 → Parquet；要传输/演进 → Avro；已在纯 Hive 栈且要极限压缩 → ORC。现代湖仓（Iceberg / Hudi / Delta）底层数据文件<b>几乎都是 Parquet</b>，Avro 通常只用于表格式自己的元数据文件。</div>
+</div>
+
+<!-- ⑧ -->
+<div class="sec" id="s8">
+  <h2><span class="n">8</span>什么时候不该用列式存储</h2>
+  <div class="grid">
+    <div class="card"><h4>❌ 点查单条记录</h4><p><code>WHERE id = 123</code> 取整行。列存要把 N 个列块各读一小段再拼起来，比行存一次顺序读慢得多。这是 OLTP 数据库（MySQL / Postgres）坚持行存的原因。</p></div>
+    <div class="card"><h4>❌ 频繁整行写入 / 更新</h4><p>列存下一个 INSERT 要往 N 个列块各追加一点，写放大严重。这也是为什么湖仓要靠<b>批量追加 + 表格式事务</b>而不是行级 UPDATE。</p></div>
+    <div class="card"><h4>❌ 查询几乎总是全列</h4><p>每次都 <code>SELECT *</code>，列裁剪的收益归零，只剩压缩收益，还要承担组装行的开销。</p></div>
+    <div class="card"><h4>❌ 小文件堆积</h4><p>列存的元数据（Footer、字典）有固定开销。几 KB 的小 Parquet 文件，Footer 可能比数据还大，且无法有效裁剪。<b>必须做小文件合并（Compaction）。</b></p></div>
+  </div>
+</div>
+
+<!-- ⑨ -->
+<div class="sec" id="s9">
+  <h2><span class="n">9</span>常见误区</h2>
+
+  <details class="faq"><summary>"列式存储 = 压缩算法更强？"</summary>
+    <div class="body"><b>错。</b>用的是完全相同的通用算法（Snappy / ZSTD）。差别在于<b>喂给算法的数据</b>：列式把同类型、同值域的值聚在一起，模式密集；行式把异类字段混在一起，模式被打散。红利来自<b>排布</b>，不来自算法。</div>
+  </details>
+
+  <details class="faq"><summary>"Parquet 具有事务能力，能 UPDATE 单行？"</summary>
+    <div class="body"><b>错。</b>Parquet 是<b>不可变文件格式</b>，写完就不能改。所谓"湖仓支持 UPDATE / DELETE"是上层的<b>表格式</b>（Iceberg / Hudi / Delta）通过"重写数据文件 + 元数据原子切换"实现的，不是 Parquet 文件本身变了。</div>
+  </details>
+
+  <details class="faq"><summary>"Row Group 越小，裁剪越精准，性能越好？"</summary>
+    <div class="body"><b>不见得。</b>Row Group 太小会导致：Footer 元数据膨胀、每个 Row Group 各建一遍压缩字典（重复浪费）、顺序读退化成大量小随机读、并行 Task 数暴涨带来调度开销。默认 128MB 是平衡值，一般不要动。</div>
+  </details>
+
+  <details class="faq"><summary>"只要转成 Parquet 就一定快？"</summary>
+    <div class="body"><b>不一定。</b>如果数据<b>没有排序</b>、且查询的过滤列分散在各 Row Group 全值域，min/max 裁剪完全失效；同时若查询老是全列，列裁剪也失效。此时收益只剩压缩。<b>分区 + 排序 + 合理 Row Group 大小</b>才是让 Parquet 真正飞起来的三件套。</div>
+  </details>
+</div>
+
+<div class="sec">
+  <h2><span class="n">📚</span>相关阅读</h2>
+  <p>继续深入本学科的其他主题：</p>
+  <div class="grid">
+    <div class="card"><h4>🔍 回到大数据系统总览</h4><p><a href="../../index.html" style="color:var(--accent)">查看完整知识结构 →</a></p></div>
+    <div class="card"><h4>🗺️ 大数据核心概念全景</h4><p><a href="../../00-overview/bigdata-concepts.html" style="color:var(--accent)">先建立整体技术地图 →</a></p></div>
+  </div>
+</div>
+
+</div>
+
+<footer>&copy; 2026 Visuals · 大数据系统 · 存储与文件格式</footer>
+</body>
+</html>

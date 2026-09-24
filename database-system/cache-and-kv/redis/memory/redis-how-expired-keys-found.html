@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redis 是如何"找到"过期 Key 的：惰性 + 定期扫描全解</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.8;
+            color: #2c3e50;
+            background: #f5f7fa;
+            padding: 0;
+        }
+
+        /* 顶部 sticky 导航 */
+        nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(255,255,255,0.96);
+            backdrop-filter: blur(8px);
+            border-bottom: 1px solid #e2e8f0;
+            padding: 12px 24px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 18px;
+            align-items: center;
+        }
+        nav .brand {
+            font-weight: 700;
+            color: #764ba2;
+            margin-right: 8px;
+        }
+        nav a {
+            color: #4a5568;
+            text-decoration: none;
+            font-size: 0.9em;
+            padding: 4px 10px;
+            border-radius: 20px;
+            transition: all 0.2s;
+        }
+        nav a:hover, nav a.active { background: #764ba2; color: #fff; }
+
+        .container {
+            max-width: 1180px;
+            margin: 24px auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 56px 40px;
+            text-align: center;
+        }
+        header h1 { font-size: 2.3em; margin-bottom: 12px; text-shadow: 2px 2px 4px rgba(0,0,0,0.2); }
+        header p { font-size: 1.15em; opacity: 0.92; }
+
+        .content { padding: 40px; }
+
+        .section { margin-bottom: 52px; scroll-margin-top: 70px; }
+        .section > h2 {
+            color: #5a3ea8;
+            font-size: 1.9em;
+            margin-bottom: 18px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #764ba2;
+        }
+        .section h3 { color: #764ba2; font-size: 1.35em; margin: 26px 0 12px; }
+        .section p { margin-bottom: 14px; text-align: justify; }
+        .section ul, .section ol { margin: 10px 0 16px 36px; }
+        .section li { margin: 7px 0; }
+
+        .lead {
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin: 16px 0;
+            font-size: 1.02em;
+        }
+        .note {
+            background: #fff7ed;
+            border-left: 4px solid #f59e0b;
+            padding: 14px 18px;
+            border-radius: 8px;
+            margin: 16px 0;
+        }
+        .warn {
+            background: #fef2f2;
+            border-left: 4px solid #ef4444;
+            padding: 14px 18px;
+            border-radius: 8px;
+            margin: 16px 0;
+        }
+        .key {
+            background: #eefaf1;
+            border-left: 4px solid #22a06b;
+            padding: 14px 18px;
+            border-radius: 8px;
+            margin: 16px 0;
+        }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin: 22px 0; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 18px; margin: 22px 0; }
+        .card-box {
+            background: #f8f9fc;
+            border: 1px solid #e6e9f0;
+            border-radius: 12px;
+            padding: 20px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card-box:hover { transform: translateY(-3px); box-shadow: 0 8px 22px rgba(118,75,162,0.12); }
+        .card-box h4 { color: #5a3ea8; font-size: 1.1em; margin-bottom: 10px; }
+        .card-box .num { font-size: 2em; font-weight: 800; color: #764ba2; }
+
+        svg { max-width: 100%; height: auto; display: block; margin: 18px auto; }
+        .diagram-wrap { background: #fbfcfe; border: 1px solid #eef1f6; border-radius: 12px; padding: 14px; }
+
+        .code-block {
+            background: #282c34; color: #abb2bf; padding: 18px 20px;
+            border-radius: 10px; overflow-x: auto; margin: 18px 0;
+            font-family: "Courier New", Courier, monospace; font-size: 0.88em; line-height: 1.7;
+        }
+        .code-block .kw { color: #c678dd; }
+        .code-block .fn { color: #61afef; }
+        .code-block .cm { color: #5c6370; font-style: italic; }
+        .code-block .st { color: #98c379; }
+        .code-block .nm { color: #d19a66; }
+
+        table.cmp {
+            width: 100%; border-collapse: collapse; margin: 22px 0;
+            box-shadow: 0 2px 14px rgba(0,0,0,0.06); border-radius: 10px; overflow: hidden;
+        }
+        table.cmp thead { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; }
+        table.cmp th, table.cmp td { padding: 13px 16px; text-align: left; border-bottom: 1px solid #eef1f6; }
+        table.cmp tbody tr:nth-child(even) { background: #f8f9fc; }
+        table.cmp tbody tr:hover { background: #f0ecfa; }
+
+        .tag { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 0.82em; font-weight: 600; }
+        .tag.pass { background: #fee2e2; color: #b91c1c; }
+        .tag.act { background: #dbeafe; color: #1d4ed8; }
+
+        /* 交互模拟器 */
+        .sim {
+            background: linear-gradient(135deg, #f5f3ff 0%, #eef2ff 100%);
+            border: 1px solid #ddd6fe; border-radius: 14px; padding: 24px; margin: 22px 0;
+        }
+        .sim h4 { color: #5a3ea8; margin-bottom: 6px; }
+        .sim .ctrl { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 14px 0; }
+        .sim label { font-weight: 600; font-size: 0.92em; }
+        .sim input[type=range] { width: 220px; }
+        .sim button {
+            background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+            border: none; padding: 10px 22px; border-radius: 24px; font-size: 0.95em;
+            cursor: pointer; font-weight: 600; transition: transform 0.15s;
+        }
+        .sim button:hover { transform: scale(1.04); }
+        .sim button.ghost { background: #cbd5e1; color: #334155; }
+        .grid-cells { display: grid; grid-template-columns: repeat(12, 1fr); gap: 5px; margin: 14px 0; }
+        .cell { aspect-ratio: 1; border-radius: 5px; font-size: 0; transition: all 0.25s; }
+        .cell.alive { background: #86efac; }
+        .cell.dead { background: #fca5a5; }
+        .cell.gone { background: #e5e7eb; opacity: 0.4; }
+        .cell.hit { outline: 3px solid #7c3aed; outline-offset: -1px; }
+        .sim .log {
+            background: #1e1e2e; color: #e2e8f0; border-radius: 10px; padding: 14px 16px;
+            font-family: "Courier New", monospace; font-size: 0.85em; line-height: 1.6;
+            max-height: 220px; overflow-y: auto; margin-top: 12px; white-space: pre-wrap;
+        }
+        .budget { height: 14px; background: #e5e7eb; border-radius: 7px; overflow: hidden; margin-top: 10px; }
+        .budget > i { display: block; height: 100%; background: linear-gradient(90deg,#22c55e,#eab308,#ef4444); width: 0; transition: width 0.3s; }
+
+        .links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+        .links a {
+            flex: 1 1 220px; background: #f3f0fb; border: 1px solid #e2d9f7; color: #5a3ea8;
+            text-decoration: none; padding: 12px 16px; border-radius: 10px; font-size: 0.92em; font-weight: 600;
+            transition: all 0.2s;
+        }
+        .links a:hover { background: #764ba2; color: #fff; }
+
+        footer {
+            background: #2d3748; color: #fff; text-align: center; padding: 28px; font-size: 0.9em;
+        }
+        footer a { color: #c4b5fd; text-decoration: none; }
+
+        @media (max-width: 768px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .content { padding: 22px; }
+            header h1 { font-size: 1.7em; }
+        }
+    </style>
+</head>
+<body>
+<nav>
+    <span class="brand">🔴 Redis 过期发现机制</span>
+    <a href="#s1">① 存储结构</a>
+    <a href="#s2">② 被动·惰性</a>
+    <a href="#s3">③ 主动·定期扫描</a>
+    <a href="#s4">④ 扫描模拟器</a>
+    <a href="#s5">⑤ 三道防线</a>
+    <a href="#s6">⑥ 监控与调优</a>
+    <a href="#s7">⑦ 速查总结</a>
+</nav>
+
+<div class="container">
+    <header>
+        <h1>Redis 是如何"找到"过期 Key 的？</h1>
+        <p>被动（惰性）检查 + 主动（定期）自适应抽样扫描，一条不漏地说清楚</p>
+    </header>
+
+    <div class="content">
+
+        <!-- ① 核心问题与结论 -->
+        <section class="section" id="s1">
+            <h2>① 先说结论：Redis 不维护"过期列表"</h2>
+            <div class="lead">
+                <strong>Redis 没有一张"已过期 Key 清单"，也不会给每个 Key 挂定时器。</strong>
+                所谓"找到过期 Key"，靠的是<strong>两条并行的发现路径</strong>：
+                <ul style="margin-top:10px">
+                    <li><span class="tag pass">被动</span> <strong>惰性删除（Lazy / Passive）</strong>：<em>你访问到它时</em>才顺手查一下、过期就删。</li>
+                    <li><span class="tag act">主动</span> <strong>定期删除（Periodic / Active）</strong>：后台定时<em>随机抽一批</em> Key 检查，过期就删。</li>
+                </ul>
+                你的判断完全正确：确实就是"被动 + 主动"两种。下面先把"Key 到底存在哪、过期时间记在哪"讲清楚，否则后面两条路都没法理解。
+            </div>
+
+            <h3>每个 Redis 数据库（redisDb）其实有两张表</h3>
+            <div class="diagram-wrap">
+                <svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+                    <text x="20" y="26" fill="#2c3e50" font-size="15" font-weight="bold">一个 redisDb 的内部结构</text>
+                    <!-- dict 全量键 -->
+                    <rect x="30" y="50" width="290" height="210" rx="10" fill="#eef2ff" stroke="#667eea" stroke-width="2"/>
+                    <text x="175" y="78" fill="#5a3ea8" font-size="14" text-anchor="middle" font-weight="bold">dict（全量键空间）</text>
+                    <text x="175" y="100" fill="#5a3ea8" font-size="11" text-anchor="middle">所有 key → value</text>
+                    <rect x="55" y="115" width="240" height="26" rx="5" fill="#fff" stroke="#c7d2fe"/>
+                    <text x="65" y="133" fill="#334155" font-size="12">user:1 → "{...}"</text>
+                    <rect x="55" y="148" width="240" height="26" rx="5" fill="#fff" stroke="#c7d2fe"/>
+                    <text x="65" y="166" fill="#334155" font-size="12">session:9 → "{...}"</text>
+                    <rect x="55" y="181" width="240" height="26" rx="5" fill="#fff" stroke="#c7d2fe"/>
+                    <text x="65" y="199" fill="#334155" font-size="12">cache:hot → "{...}"</text>
+                    <rect x="55" y="214" width="240" height="26" rx="5" fill="#fff" stroke="#c7d2fe"/>
+                    <text x="65" y="232" fill="#334155" font-size="12">… 千万个 key</text>
+
+                    <!-- expires 只存带 TTL 的 -->
+                    <rect x="360" y="90" width="290" height="170" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="2"/>
+                    <text x="505" y="118" fill="#b91c1c" font-size="14" text-anchor="middle" font-weight="bold">expires（过期时间表）</text>
+                    <text x="505" y="138" fill="#b91c1c" font-size="11" text-anchor="middle">仅"设了 TTL 的 key" → 过期时间戳</text>
+                    <rect x="385" y="152" width="240" height="24" rx="5" fill="#fff" stroke="#fecaca"/>
+                    <text x="395" y="169" fill="#334155" font-size="12">session:9 → 1716…(绝对时间)</text>
+                    <rect x="385" y="183" width="240" height="24" rx="5" fill="#fff" stroke="#fecaca"/>
+                    <text x="395" y="200" fill="#334155" font-size="12">cache:hot → 1716…(绝对时间)</text>
+                    <rect x="385" y="214" width="240" height="24" rx="5" fill="#fff" stroke="#fecaca"/>
+                    <text x="395" y="231" fill="#334155" font-size="12">token:a → 1716…(绝对时间)</text>
+
+                    <!-- 箭头：expires 是 dict 的子集 -->
+                    <path d="M320 200 C 345 200, 345 175, 360 175" stroke="#9ca3af" stroke-width="2" fill="none" marker-end="url(#ah)"/>
+                    <text x="350" y="240" fill="#6b7280" font-size="11" text-anchor="middle">expires 是 dict 的「子集」</text>
+                    <defs>
+                        <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+                            <path d="M0,0 L8,3 L0,6 Z" fill="#9ca3af"/>
+                        </marker>
+                    </defs>
+                </svg>
+            </div>
+            <div class="key">
+                <strong>怎么判断一个 Key 过期了？</strong> 看它在 <code>expires</code> 表里有没有记录，再拿<strong>当前 Unix 时间戳</strong>和那条记录比较：<code>当前时间 &gt; expires[key]</code> 就过期。没在 <code>expires</code> 表里的 Key 就是"永不过期"。所以"找过期 Key"本质就是<strong>查这张 expires 表</strong>。
+            </div>
+            <div class="warn">
+                <strong>为什么不用定时器（定时删除）？</strong> 给每个带 TTL 的 Key 挂一个定时器，过期瞬间触发删除——内存最友好，但几百万 Key 就要维护几百万个定时器，CPU 直接被打爆。Redis <strong>事实上放弃了这种方案</strong>，只保留惰性 + 定期两条路。
+            </div>
+        </section>
+
+        <!-- ② 被动路径 -->
+        <section class="section" id="s2">
+            <h2>② 被动路径：惰性删除（你访问到才查）</h2>
+            <p>这是最直觉的一条路。<strong>任何读写命令在执行前，都会先调用 <code>expireIfNeeded()</code></strong> 问一句"这个 Key 过期没？"。没过期就正常执行；过期了就当场删除，再告诉客户端"没有这个 Key"。</p>
+
+            <div class="diagram-wrap">
+                <svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+                    <text x="20" y="24" fill="#2c3e50" font-size="15" font-weight="bold">被动路径：命令执行前的"把关"</text>
+                    <!-- 节点 -->
+                    <rect x="20" y="60" width="150" height="56" rx="9" fill="#ede9fe" stroke="#764ba2" stroke-width="2"/>
+                    <text x="95" y="84" fill="#5a3ea8" font-size="13" text-anchor="middle" font-weight="bold">客户端请求</text>
+                    <text x="95" y="103" fill="#6b7280" font-size="11" text-anchor="middle">GET / DEL / …</text>
+
+                    <rect x="200" y="60" width="170" height="56" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+                    <text x="285" y="84" fill="#1d4ed8" font-size="13" text-anchor="middle" font-weight="bold">expireIfNeeded()</text>
+                    <text x="285" y="103" fill="#6b7280" font-size="11" text-anchor="middle">命令前先查 expires 表</text>
+
+                    <rect x="410" y="45" width="160" height="50" rx="9" fill="#dcfce7" stroke="#22a06b" stroke-width="2"/>
+                    <text x="490" y="68" fill="#15803d" font-size="13" text-anchor="middle" font-weight="bold">未过期 → 正常执行</text>
+                    <text x="490" y="86" fill="#6b7280" font-size="11" text-anchor="middle">返回 value</text>
+
+                    <rect x="410" y="120" width="160" height="50" rx="9" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+                    <text x="490" y="143" fill="#b91c1c" font-size="13" text-anchor="middle" font-weight="bold">已过期 → 删除</text>
+                    <text x="490" y="161" fill="#6b7280" font-size="11" text-anchor="middle">返回 nil（不存在）</text>
+
+                    <!-- 箭头 -->
+                    <path d="M170 88 L198 88" stroke="#64748b" stroke-width="2" marker-end="url(#a2)"/>
+                    <path d="M370 80 C 392 70, 398 66, 410 66" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+                    <path d="M370 95 C 392 130, 398 135, 410 135" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#a2)"/>
+                    <defs><marker id="a2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/></marker></defs>
+
+                    <text x="430" y="200" fill="#6b7280" font-size="11" text-anchor="middle">删除动作：从 dict 和 expires 同时移除 + 发 AOF/Del 同步</text>
+                </svg>
+            </div>
+
+            <div class="code-block">
+<span class="cm">// db.c / expireIfNeeded() 简化逻辑（已核实，勿改）</span>
+<span class="kw">int</span> <span class="fn">expireIfNeeded</span>(redisDb *db, robj *key) {
+    <span class="kw">if</span> (!<span class="fn">keyIsExpired</span>(db, key)) <span class="kw">return</span> <span class="nm">0</span>;   <span class="cm">// expires 里没记录 或 未过期</span>
+    <span class="kw">if</span> (server.masterhost != NULL) <span class="kw">return</span> <span class="nm">1</span>; <span class="cm">// 从节点不主动删，等主节点 DEL 同步</span>
+    <span class="fn">notifyKeyspaceEvent</span>(NOTIFY_EXPIRED, <span class="st">"expired"</span>, key, db->id);
+    <span class="kw">return</span> <span class="fn">dbDelete</span>(db, key);          <span class="cm">// 删：dict + expires 一起摘掉</span>
+}
+            </div>
+
+            <div class="grid-2">
+                <div class="card-box">
+                    <h4>✅ 优点</h4>
+                    <p>对 CPU 极友好——只有"被访问"的 Key 才付检查成本，不空转、不扫全库。</p>
+                </div>
+                <div class="card-box">
+                    <h4>❌ 代价</h4>
+                    <p>一个 Key 如果<strong>永远没人访问</strong>，就算早过期了也会一直占着内存——这就是"被动路径兜不住"的内存泄漏风险，所以需要下面的主动路径补位。</p>
+                </div>
+            </div>
+            <div class="note">
+                <strong>主从细节（易考点）：</strong> 从节点本身<strong>不执行删除</strong>，它只是被动等主节点发来的 <code>DEL</code> 命令来同步删除。Redis 3.2 之后从节点在<em>读取</em>时也会顺手过滤掉过期 Key（返回空），但"删除动作"仍只发生在主节点，保证主从一致。
+            </div>
+        </section>
+
+        <!-- ③ 主动路径 -->
+        <section class="section" id="s3">
+            <h2>③ 主动路径：定期删除（后台"随机抽一批"扫描）</h2>
+            <p>这是你问题里的重点——"<strong>主动扫描，怎么扫的？</strong>"。答案先给出来：<strong>不遍历全库，而是自适应随机抽样</strong>。</p>
+
+            <div class="lead">
+                <strong>核心算法（activeExpireCycle，expire.c）：</strong> 后台每隔一小段时间，从 <code>expires</code> 表里<strong>随机抽 20 个</strong> Key 检查；把过期的删掉；<strong>如果这 20 个里过期比例 &gt; 25%（即 &gt; 5 个），就再抽 20 个继续扫</strong>，直到比例降到 25% 以下或时间预算用完。
+            </div>
+
+            <h3>为什么是"抽样"而不是"扫全库"？</h3>
+            <div class="warn">
+                如果真去遍历全部几千万个 Key 找过期，一次就要卡好几秒甚至几分钟，主线程直接阻塞、请求全超时。随机抽样每次只看 20 个，成本固定且极小；再加上它<strong>每秒跑约 10 次</strong>，正常情况每秒就能清掉约 200 个过期 Key，足够把长期不被访问的过期 Key 慢慢清干净，同时几乎不占 CPU。
+            </div>
+
+            <div class="diagram-wrap">
+                <svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+                    <text x="20" y="24" fill="#2c3e50" font-size="15" font-weight="bold">主动扫描算法流程图（activeExpireCycle）</text>
+
+                    <rect x="20" y="50" width="190" height="54" rx="9" fill="#ede9fe" stroke="#764ba2" stroke-width="2"/>
+                    <text x="115" y="74" fill="#5a3ea8" font-size="13" text-anchor="middle" font-weight="bold">按 current_db 续扫</text>
+                    <text x="115" y="93" fill="#6b7280" font-size="11" text-anchor="middle">轮询各 db，不重不漏</text>
+
+                    <rect x="250" y="50" width="190" height="54" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+                    <text x="345" y="74" fill="#1d4ed8" font-size="13" text-anchor="middle" font-weight="bold">随机抽 20 个</text>
+                    <text x="345" y="93" fill="#6b7280" font-size="11" text-anchor="middle">dictGetRandomKey(expires)</text>
+
+                    <rect x="480" y="50" width="180" height="54" rx="9" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+                    <text x="570" y="74" fill="#b91c1c" font-size="13" text-anchor="middle" font-weight="bold">逐一过期就删</text>
+                    <text x="570" y="93" fill="#6b7280" font-size="11" text-anchor="middle">删 N 个</text>
+
+                    <rect x="250" y="140" width="280" height="54" rx="9" fill="#fef9c3" stroke="#ca8a04" stroke-width="2"/>
+                    <text x="390" y="164" fill="#854d0e" font-size="13" text-anchor="middle" font-weight="bold">本轮过期 N 个 &gt; 5（25%）？</text>
+                    <text x="390" y="183" fill="#6b7280" font-size="11" text-anchor="middle">阈值：20 × 25% = 5</text>
+
+                    <rect x="250" y="230" width="200" height="48" rx="9" fill="#dcfce7" stroke="#22a06b" stroke-width="2"/>
+                    <text x="350" y="259" fill="#15803d" font-size="13" text-anchor="middle" font-weight="bold">否 → 换下一个 db</text>
+
+                    <rect x="480" y="230" width="180" height="48" rx="9" fill="#fbcfe8" stroke="#db2777" stroke-width="2"/>
+                    <text x="570" y="259" fill="#9d174d" font-size="13" text-anchor="middle" font-weight="bold">是 → 再抽 20 循环</text>
+
+                    <!-- 箭头 -->
+                    <path d="M210 77 L248 77" stroke="#64748b" stroke-width="2" marker-end="url(#a3)"/>
+                    <path d="M440 77 L478 77" stroke="#64748b" stroke-width="2" marker-end="url(#a3)"/>
+                    <path d="M570 104 L390 138" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+                    <path d="M390 194 L350 228" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+                    <path d="M530 194 L570 228" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+                    <path d="M570 278 C 560 300, 540 300, 470 290" stroke="#db2777" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+                    <defs><marker id="a3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/></marker></defs>
+
+                    <text x="60" y="312" fill="#6b7280" font-size="11">时间预算（slow 模式约 25ms）耗尽 → 停止本轮，记下 current_db 下次续扫</text>
+                </svg>
+            </div>
+
+            <h3>两个关键设计，决定了它"聪明又温柔"</h3>
+            <div class="grid-2">
+                <div class="card-box">
+                    <h4>🔁 current_db 指针（轮询）</h4>
+                    <p>有个<strong>静态变量</strong>记住"上次扫到第几个 db"。下次从那里接着扫，扫完所有 db 再回到 0。这样 16 个库被<strong>均匀轮询</strong>，不会出现"某个 db 一直没被扫到、过期 Key 堆积"。</p>
+                </div>
+                <div class="card-box">
+                    <h4>⏱ 时间预算 + 自适应循环</h4>
+                    <p>每轮有 CPU 时间上限（slow 模式约 25ms）。过期比例低就很快收工；一旦某批抽样里过期 &gt; 25%，说明"过期潮"来了，它就<strong>自动加力多扫几轮</strong>，把内存水位压下去——平时几乎不占 CPU，忙时才多干活。</p>
+                </div>
+            </div>
+
+            <h3>SLOW 模式 vs FAST 模式（双档自适应）</h3>
+            <p>主动扫描其实有<strong>两个档位</strong>，配合起来既省 CPU 又能救急：</p>
+            <table class="cmp">
+                <thead><tr><th>维度</th><th>SLOW 模式（默认巡逻）</th><th>FAST 模式（救急补漏）</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>触发入口</strong></td><td>时间事件 <code>serverCron</code></td><td>事件循环 <code>beforeSleep()</code>（进入 epoll_wait 前）</td></tr>
+                    <tr><td><strong>执行频率</strong></td><td>每秒约 10 次（hz 默认 10，每 100ms 一次）</td><td>最高每秒约 1000 次（每 ~1ms 一次）</td></tr>
+                    <tr><td><strong>单次时长上限</strong></td><td>约 <strong>25ms</strong>（= 1000000×25÷100÷hz 微秒）</td><td>仅 <strong>1ms</strong>（硬上限，极短）</td></tr>
+                    <tr><td><strong>触发条件</strong></td><td>定时触发，无条件</td><td>仅当上次 SLOW 因超时被中断，或预估过期占比 &gt; 10% 时才跑（距上次 &lt; 2ms 会跳过）</td></tr>
+                    <tr><td><strong>目的</strong></td><td>日常巡逻，控制内存整体水位</td><td>在新请求到来前顺手清掉过期 Key，避免请求时触发惰性删除造成延迟毛刺</td></tr>
+                </tbody>
+            </table>
+
+            <h3>一图速记的关键数字（已核实，勿改）</h3>
+            <div class="grid-3">
+                <div class="card-box"><div class="num">10×/s</div><p><strong>hz 默认 10</strong>：SLOW 每秒约扫 10 次</p></div>
+                <div class="card-box"><div class="num">20</div><p><strong>每轮抽样数</strong>（ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP）</p></div>
+                <div class="card-box"><div class="num">25%</div><p>抽样中过期 &gt; 25%（即 &gt; 5 个）则继续循环</p></div>
+                <div class="card-box"><div class="num">25ms</div><p>SLOW 模式单次时间预算（hz=10 时）</p></div>
+                <div class="card-box"><div class="num">1ms</div><p>FAST 模式单次硬上限</p></div>
+                <div class="card-box"><div class="num">≈200/s</div><p>正常情况每秒被动清掉的过期 Key 量级</p></div>
+            </div>
+        </section>
+
+        <!-- ④ 交互模拟器 -->
+        <section class="section" id="s4">
+            <h2>④ 交互：亲手"跑"一次扫描</h2>
+            <p>下面这个模拟器把"主动扫描"做成可视化的。把"带 TTL 的 Key 中已过期占比"调到不同值，点「扫描一轮」，看它怎么抽、怎么删、以及什么时候会触发"继续循环"。</p>
+            <div class="sim">
+                <h4>🧪 Redis 过期扫描模拟器</h4>
+                <p style="font-size:0.9em;color:#6b7280">小方块 = expires 表里的一批 Key；<span style="color:#16a34a;font-weight:700">绿=未过期</span>，<span style="color:#dc2626;font-weight:700">红=已过期</span>，<span style="color:#9ca3af;font-weight:700">灰=已被删</span>。每轮随机抽 20 个（描紫边）。</p>
+                <div class="ctrl">
+                    <label>整体过期占比：<span id="ratioVal">40</span>%</label>
+                    <input type="range" id="ratio" min="0" max="95" value="40" oninput="onRatio()">
+                    <button onclick="scanOnce()">▶ 扫描一轮</button>
+                    <button class="ghost" onclick="resetSim()">↺ 重置</button>
+                </div>
+                <div class="grid-cells" id="cells"></div>
+                <div style="font-size:0.88em;color:#5a3ea8">CPU 时间预算（演示上限 10 轮）：</div>
+                <div class="budget"><i id="budgetBar"></i></div>
+                <div class="log" id="log">点「扫描一轮」开始…\n（规则：每轮随机抽 20 个，过期数 &gt; 5 → 自动再扫一轮）</div>
+            </div>
+            <div class="note">
+                <strong>观察要点：</strong> 当过期占比低（比如 10%），往往一轮就"过期数 ≤ 5"收工；当占比高（比如 70%），几乎每轮都会触发 &gt;25% 而<strong>连续循环</strong>——这正是 Redis 在"过期潮"时自动加力的真实行为。样本小会有随机波动，多扫几次就看出规律。
+            </div>
+        </section>
+
+        <!-- ⑤ 三道防线 -->
+        <section class="section" id="s5">
+            <h2>⑤ 两条路怎么配合？还有第三道防线</h2>
+            <div class="diagram-wrap">
+                <svg viewBox="0 0 680 170" xmlns="http://www.w3.org/2000/svg">
+                    <text x="20" y="22" fill="#2c3e50" font-size="15" font-weight="bold">过期 Key 的"三道防线"</text>
+                    <rect x="20" y="50" width="190" height="80" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+                    <text x="115" y="82" fill="#1d4ed8" font-size="13" text-anchor="middle" font-weight="bold">① 惰性删除</text>
+                    <text x="115" y="104" fill="#6b7280" font-size="11" text-anchor="middle">最后把关：被访问的</text>
+                    <text x="115" y="120" fill="#6b7280" font-size="11" text-anchor="middle">Key 绝不会返回脏数据</text>
+
+                    <rect x="245" y="50" width="190" height="80" rx="10" fill="#ede9fe" stroke="#764ba2" stroke-width="2"/>
+                    <text x="340" y="82" fill="#5a3ea8" font-size="13" text-anchor="middle" font-weight="bold">② 定期删除</text>
+                    <text x="340" y="104" fill="#6b7280" font-size="11" text-anchor="middle">日常巡逻：抽样清理</text>
+                    <text x="340" y="120" fill="#6b7280" font-size="11" text-anchor="middle">长期不访问的过期 Key</text>
+
+                    <rect x="470" y="50" width="190" height="80" rx="10" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+                    <text x="565" y="82" fill="#b91c1c" font-size="13" text-anchor="middle" font-weight="bold">③ 内存淘汰</text>
+                    <text x="565" y="104" fill="#6b7280" font-size="11" text-anchor="middle">救急：内存写满时</text>
+                    <text x="565" y="120" fill="#6b7280" font-size="11" text-anchor="middle">按策略删（含未过期）</text>
+
+                    <path d="M210 90 L243 90" stroke="#94a3b8" stroke-width="2" marker-end="url(#a5)"/>
+                    <path d="M435 90 L468 90" stroke="#94a3b8" stroke-width="2" marker-end="url(#a5)"/>
+                    <defs><marker id="a5" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+                </svg>
+            </div>
+            <div class="lead">
+                <strong>分工一句话：</strong> 惰性删除是"最后一道关"（保证你读到的一定干净）；定期删除是"日常保洁"（把没人访问的过期 Key 慢慢扫掉，控内存水位）；两者都兜不住、内存真写满了，就交给<strong>内存淘汰策略</strong>（可能删掉<em>还没过期</em>的 Key）来救急——但那是另一回事，详见《过期删除 vs 内存淘汰的区别》一文。
+            </div>
+        </section>
+
+        <!-- ⑥ 监控调优 -->
+        <section class="section" id="s6">
+            <h2>⑥ 怎么知道它在干活？监控与调优</h2>
+            <div class="code-block">
+<span class="cm"># INFO stats 里看这几个字段</span>
+expired_keys                 <span class="cm"># 累计被「过期逻辑」删掉的 Key 总数（惰性+定期都算）</span>
+expired_stale_perc           <span class="cm"># 预估「已过期但还没删」的 Key 占带 TTL Key 的比例（FAST 模式触发依据）</span>
+expired_time_cap_reached_count <span class="cm"># 定期删除「撞到时间预算上限」的次数；持续增长说明过期潮压力大</span>
+            </div>
+            <div class="grid-2">
+                <div class="card-box">
+                    <h4>⚙️ 调 hz 提高清理频率</h4>
+                    <p><code>hz 10</code>（默认）→ 调到 <code>hz 50~100</code> 会让 SLOW 扫描更频繁，过期 Key 清得更快，但更费 CPU。<strong>不建议随便破百</strong>。</p>
+                </div>
+                <div class="card-box">
+                    <h4>🌊 警惕"过期风暴"</h4>
+                    <p>大量 Key 在同一秒集中过期（如都用 <code>EXPIREAT</code> 同一时刻），会让抽样里过期比例瞬间 &gt; 25%，定期删除被迫循环加力，造成延迟毛刺。给 TTL 加随机抖动（如 3600 + rand(0,300)）即可化解。</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ⑦ 总结 -->
+        <section class="section" id="s7">
+            <h2>⑦ 速查总结</h2>
+            <div class="key">
+                <ol>
+                    <li><strong>不维护过期列表、不挂定时器</strong>：过期信息只存在每个 db 的 <code>expires</code> 表（key → 绝对过期时间戳）。</li>
+                    <li><strong>被动（惰性）</strong>：命令执行前 <code>expireIfNeeded()</code> 查 expires 表，过期就删、返回 nil。CPU 友好，但没人访问就清不掉。</li>
+                    <li><strong>主动（定期）</strong>：后台自适应<strong>随机抽样</strong>——每轮从 expires 抽 20 个，删过期的；抽样过期 &gt; 25% 就继续循环；用 <code>current_db</code> 轮询各库、有 CPU 时间预算（slow≈25ms）。</li>
+                    <li><strong>双档</strong>：SLOW（serverCron，10×/s，25ms）日常巡逻；FAST（beforeSleep，~1ms）救急补漏。</li>
+                    <li><strong>三道防线</strong>：惰性把关 → 定期巡逻 → 内存淘汰救急。</li>
+                </ol>
+            </div>
+
+            <div class="links">
+                <a href="redis-expiration-strategies.html">📚 三种过期删除策略总览（定时/惰性/定期）</a>
+                <a href="redis-expiration-vs-eviction.html">🔀 过期删除 vs 内存淘汰，到底有啥区别？</a>
+                <a href="redis-key-expiration.html">⏰ 集中过期（过期风暴）问题与规避</a>
+                <a href="redis-memory-full-what-next.html">🧹 内存写满了怎么办：8 种淘汰策略</a>
+            </div>
+        </section>
+
+    </div>
+
+    <footer>
+        <p>🔴 Redis 如何"找到"过期 Key · 惰性 + 定期扫描全解</p>
+        <p style="margin-top:8px"><a href="../../index.html">← 返回 Redis / 内存索引</a></p>
+    </footer>
+</div>
+
+<script>
+    // ===== scroll-spy =====
+    const navLinks = [...document.querySelectorAll('nav a')];
+    const secs = navLinks.map(a => document.querySelector(a.getAttribute('href')));
+    const spy = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+            if (e.isIntersecting) {
+                const id = '#' + e.target.id;
+                navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id));
+            }
+        });
+    }, { rootMargin: '-70px 0px -70% 0px' });
+    secs.forEach(s => s && spy.observe(s));
+
+    // ===== 扫描模拟器 =====
+    const TOTAL = 60;          // 可视化的格子数（代表 expires 表的一批样本）
+    const SAMPLE = 20;         // 每轮抽 20 个
+    const THRESH = 5;          // 25% * 20 = 5
+    const MAX_LOOPS = 10;      // 演示用预算上限
+    let cells = [];            // {expired, deleted}
+    let ratio = 40;
+    let loops = 0;
+
+    function onRatio() {
+        ratio = +document.getElementById('ratio').value;
+        document.getElementById('ratioVal').textContent = ratio;
+        resetSim();
+    }
+
+    function buildGrid() {
+        cells = [];
+        // 按 ratio 随机决定每个格子是否过期（用洗牌保证比例接近）
+        const n = Math.round(TOTAL * ratio / 100);
+        const arr = Array(TOTAL).fill(0).map((_, i) => i < n ? 1 : 0);
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        cells = arr.map(ex => ({ expired: ex === 1, deleted: false }));
+        render();
+    }
+
+    function render() {
+        const box = document.getElementById('cells');
+        box.innerHTML = '';
+        cells.forEach((c, i) => {
+            const d = document.createElement('div');
+            d.className = 'cell ' + (c.deleted ? 'gone' : (c.expired ? 'dead' : 'alive'));
+            d.dataset.i = i;
+            box.appendChild(d);
+        });
+    }
+
+    function log(msg) {
+        const el = document.getElementById('log');
+        el.textContent += '\n' + msg;
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function setBudget() {
+        document.getElementById('budgetBar').style.width = Math.min(100, loops / MAX_LOOPS * 100) + '%';
+    }
+
+    function drawSample() {
+        // 从未删除的格子里随机抽 SAMPLE 个
+        const avail = cells.map((c, i) => i).filter(i => !cells[i].deleted);
+        const picks = [];
+        for (let k = 0; k < SAMPLE && avail.length; k++) {
+            const idx = Math.floor(Math.random() * avail.length);
+            picks.push(avail.splice(idx, 1)[0]);
+        }
+        // 高亮
+        document.querySelectorAll('.cell.hit').forEach(e => e.classList.remove('hit'));
+        picks.forEach(i => document.querySelector('.cell[data-i="' + i + '"]').classList.add('hit'));
+        return picks;
+    }
+
+    function scanOnce() {
+        if (loops >= MAX_LOOPS) { log('⏹ 已达演示预算上限（10 轮），点重置再试。'); return; }
+        loops++;
+        setBudget();
+        const picks = drawSample();
+        let expiredHit = 0;
+        picks.forEach(i => {
+            if (cells[i].expired && !cells[i].deleted) {
+                cells[i].deleted = true;
+                expiredHit++;
+            }
+        });
+        render();
+        const pct = (expiredHit / picks.length * 100).toFixed(0);
+        log('第' + loops + '轮：抽 ' + picks.length + ' 个，过期 ' + expiredHit + ' 个（' + pct + '%）');
+        if (expiredHit > THRESH) {
+            log('  → 过期 ' + expiredHit + ' > 5（25%），继续循环…');
+            setTimeout(scanOnce, 550);   // 自动再来一轮，体现"自适应加力"
+        } else {
+            log('  → 过期 ' + expiredHit + ' ≤ 5，本轮结束 ✔');
+        }
+    }
+
+    function resetSim() {
+        loops = 0; setBudget();
+        document.getElementById('log').textContent = '点「扫描一轮」开始…\n（规则：每轮随机抽 20 个，过期数 > 5 → 自动再扫一轮）';
+        buildGrid();
+    }
+
+    resetSim();
+</script>
+</body>
+</html>
