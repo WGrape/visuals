@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-C-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 执行计划详解：它是什么、怎么产生、数据结构、为什么需要</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #9ba3b5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.8;
+    font-size: 16px;
+  }
+  .container { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 {
+    font-size: 2.2rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .subtitle { color: var(--text2); font-size: 1rem; margin-bottom: 28px; }
+
+  .toc {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 22px; margin-bottom: 40px; display: flex; flex-wrap: wrap; gap: 8px 14px;
+  }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 0.9rem; padding: 3px 10px; border-radius: 7px; background: rgba(108,140,255,0.08); }
+  .toc a:hover { background: rgba(108,140,255,0.18); }
+
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 1.35rem; font-weight: 700; color: var(--accent); margin-bottom: 16px; padding-left: 14px; border-left: 3px solid var(--accent); }
+  .section-title .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 7px; margin-right: 8px;
+    background: var(--accent); color: #fff; font-size: 0.85rem; font-weight: 700; vertical-align: middle;
+  }
+
+  .callout { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin: 16px 0; }
+  .callout.tip { border-left: 4px solid var(--green); }
+  .callout.warn { border-left: 4px solid var(--orange); }
+  .callout.danger { border-left: 4px solid var(--red); }
+  .callout-key { font-weight: 700; color: var(--green); margin-bottom: 4px; }
+  .callout.warn .callout-key { color: var(--orange); }
+  .callout.danger .callout-key { color: var(--red); }
+
+  p { margin-bottom: 14px; }
+  h3 { color: var(--accent2); font-size: 1.08rem; margin: 20px 0 8px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 6px; }
+
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 16px 0; font-size: 14px; line-height: 1.7; }
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; }
+  pre code { color: var(--text); }
+  :not(pre) > code { background: var(--surface2); padding: 2px 7px; border-radius: 4px; font-size: 0.9em; color: var(--accent2); }
+  .kw { color: var(--accent); } .fn { color: var(--accent2); } .str { color: var(--green); } .cmt { color: #5a6078; font-style: italic; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.95rem; }
+  thead th { background: var(--surface2); padding: 12px 16px; text-align: left; font-weight: 700; font-size: 0.88rem; color: var(--accent); border-bottom: 2px solid var(--border); }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: var(--surface); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+  .badge-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-no  { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge-partial { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  .widget { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; }
+  .widget-title { font-weight: 700; color: var(--accent2); margin-bottom: 4px; font-size: 1rem; }
+  .widget-desc { color: var(--text2); font-size: 0.86rem; margin-bottom: 14px; }
+  .field { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .field label { min-width: 120px; color: var(--text2); font-size: 0.9rem; }
+  select, .btn {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 0.95rem; font-family: inherit;
+  }
+  .btn { background: rgba(108,140,255,0.14); border-color: var(--accent); color: var(--accent); cursor: pointer; }
+  .btn:hover { background: rgba(108,140,255,0.26); }
+  .btn.active { background: var(--accent); color: #fff; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  .node-btn { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .node-btn .btn { min-width: 0; font-size: 0.82rem; padding: 6px 10px; }
+  .node-detail { padding: 16px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); }
+  .node-detail .nh { font-weight: 800; color: var(--accent); font-size: 1.05rem; margin-bottom: 6px; }
+  .node-detail .nt { font-size: 0.92rem; color: var(--text2); line-height: 1.7; }
+
+  .phase { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .phase .btn { flex: 1; min-width: 120px; text-align: center; }
+  .phase-panel { display: none; padding: 16px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); }
+  .phase-panel.show { display: block; }
+
+  footer { text-align: center; color: #5a6078; font-size: 0.85rem; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .links { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>MySQL 执行计划详解</h1>
+    <p class="subtitle">它是什么 · 怎么产生 · 数据结构是啥 · 为什么需要 —— 优化器系列（四）</p>
+  </header>
+
+  <nav class="toc">
+    <a href="#what">① 执行计划是什么</a>
+    <a href="#where">② 在链路的位置</a>
+    <a href="#why">③ 为什么需要</a>
+    <a href="#structure">④ 数据结构：QEP_TAB→AccessPath</a>
+    <a href="#volcano">⑤ 火山模型怎么跑</a>
+    <a href="#produce">⑥ 怎么产生的</a>
+    <a href="#format">⑦ 长什么样：三种格式</a>
+    <a href="#cheat">⑧ 速查清单</a>
+  </nav>
+
+  <!-- ① -->
+  <div class="section" id="what">
+    <div class="section-title"><span class="num">①</span>执行计划是什么</div>
+    <p><b>执行计划（Execution Plan）</b>是 MySQL 优化器做完决策后、交给执行器的一份「作战方案书」。它把一条声明式的 SQL，翻译成一串<b>确定、可执行</b>的操作步骤，告诉执行器：</p>
+    <ul>
+      <li><b>每张表怎么访问</b>：全表扫描？走哪个索引？索引范围扫描还是等值 REF 查找？（这叫<b>访问路径 Access Path</b>）</li>
+      <li><b>多张表怎么连接</b>：先扫哪张、再连哪张（<b>连接顺序</b>）？用嵌套循环、哈希连接还是块嵌套循环（<b>连接算法</b>）？</li>
+      <li><b>怎么处理排序 / 分组 / 去重 / LIMIT</b>：要不要 filesort？要不要建临时表？在哪一步截断行数？</li>
+    </ul>
+    <div class="callout tip">
+      <div class="callout-key">一句话</div>
+      执行计划 = 优化器的<b>产出物</b>，是一棵描述「用什么方法、什么顺序、取哪些数据」的<b>树</b>。你敲 <code>EXPLAIN</code> 看到的，就是这棵树的「打印版」（详见<a href="mysql-explain.html">《EXPLAIN 详解》</a>）。
+    </div>
+  </div>
+
+  <!-- ② -->
+  <div class="section" id="where">
+    <div class="section-title"><span class="num">②</span>它在 SQL 执行链路里的位置</div>
+    <p>一条 SQL 从发出来到拿到结果，中间要经过一串组件。执行计划正好卡在「优化器产出」与「执行器消费」的交界处——它是优化器劳动的成果，也是执行器开工的依据。</p>
+    <div class="diagram">
+      <svg viewBox="0 0 760 150" width="760" height="150" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#9ba3b5"></path>
+          </marker>
+        </defs>
+        <g font-family="sans-serif" font-size="13" text-anchor="middle">
+          <rect x="10" y="55" width="100" height="40" rx="8" fill="#232733" stroke="#2e3345"></rect>
+          <text x="60" y="80" fill="#e4e7ef">SQL 语句</text>
+          <rect x="130" y="55" width="100" height="40" rx="8" fill="#232733" stroke="#2e3345"></rect>
+          <text x="180" y="80" fill="#e4e7ef">解析器</text>
+          <rect x="250" y="55" width="100" height="40" rx="8" fill="#232733" stroke="#2e3345"></rect>
+          <text x="300" y="80" fill="#e4e7ef">优化器</text>
+          <rect x="370" y="48" width="120" height="54" rx="8" fill="#6c8cff" stroke="#a78bfa"></rect>
+          <text x="430" y="74" fill="#ffffff" font-weight="700">执行计划</text>
+          <text x="430" y="92" fill="#dfe6ff" font-size="11">AccessPath 树</text>
+          <rect x="510" y="55" width="100" height="40" rx="8" fill="#232733" stroke="#2e3345"></rect>
+          <text x="560" y="80" fill="#e4e7ef">执行器</text>
+          <rect x="630" y="55" width="120" height="40" rx="8" fill="#232733" stroke="#2e3345"></rect>
+          <text x="690" y="80" fill="#e4e7ef">存储引擎</text>
+          <line x1="110" y1="75" x2="128" y2="75" stroke="#9ba3b5" stroke-width="2" marker-end="url(#ar)"></line>
+          <line x1="230" y1="75" x2="248" y2="75" stroke="#9ba3b5" stroke-width="2" marker-end="url(#ar)"></line>
+          <line x1="350" y1="75" x2="368" y2="75" stroke="#9ba3b5" stroke-width="2" marker-end="url(#ar)"></line>
+          <line x1="490" y1="75" x2="508" y2="75" stroke="#9ba3b5" stroke-width="2" marker-end="url(#ar)"></line>
+          <line x1="610" y1="75" x2="628" y2="75" stroke="#9ba3b5" stroke-width="2" marker-end="url(#ar)"></line>
+          <text x="430" y="120" fill="#9ba3b5" font-size="11">↑ 实线是真正的执行链路；执行计划是「优化器→执行器」之间的中间产物</text>
+        </g>
+      </svg>
+    </div>
+    <p>注意：<b>执行计划本身不是优化器</b>（那是上一个系列讲的角色），也不是执行器。它只是两者之间的「交接物」。优化器负责想，执行器负责干，计划就是想出来的方案。</p>
+  </div>
+
+  <!-- ③ -->
+  <div class="section" id="why">
+    <div class="section-title"><span class="num">③</span>为什么需要执行计划</div>
+    <p>你可能会问：SQL 不是「声明式」吗？我只要说「我要什么」，数据库直接给我不就行了，为什么中间非得多一份「计划」？原因有四点：</p>
+
+    <h3>1. SQL 是「要什么」，而取数必须「怎么做」</h3>
+    <p>SQL 只描述结果（<code>SELECT ... FROM ... WHERE ...</code>），但从磁盘把数据捞出来的每一步——扫哪张表、走不走索引、先连谁——都需要一个<b>确定的线性步骤</b>。这份步骤就是执行计划。没有它，执行器根本不知道先干哪步。</p>
+
+    <h3>2. 解耦「决策」与「执行」</h3>
+    <p>把「选最优方案」（优化器，重脑力、读统计信息、算代价）和「机械取数」（执行器，调存储引擎、读页、取行）拆开，两个组件各自演进、互不干扰。现代 MySQL 能独立把执行器重构成「迭代器模型」，正是因为有执行计划这层稳定中间表示当「契约」。</p>
+
+    <h3>3. 让「优化」可被观测、可被验证</h3>
+    <p>正因为计划是一棵结构化、可被序列化的树，才有了 <code>EXPLAIN</code>（看方案）、<code>EXPLAIN ANALYZE</code>（看实测）、<code>optimizer_trace</code>（看决策过程）这些工具。你才能知道「它到底打算怎么跑」「为什么选了全表扫描」。</p>
+
+    <h3>4. 统一表示「一切查询都是 JOIN」</h3>
+    <p>MySQL 内部把所有查询（哪怕单表查询）都当作 JOIN 来处理。执行计划用同一套树结构表达「单表扫描」「多表连接」「子查询物化」等所有情形，避免为每种 SQL 硬编码一套执行逻辑——没有这层统一表示，优化器根本没法通用地选路。</p>
+
+    <div class="callout warn">
+      <div class="callout-key">反例</div>
+      如果不要计划、让执行器直接按 SQL 字面意思硬跑，会出现两个灾难：① 没法选路，永远只能一种固定跑法（永远全表扫描）；② 优化器想做的「谓词下推 / 连接重排 / 子查询扁平化」全部无从落地。计划，是 MySQL 能「智能选路」的前提。
+    </div>
+  </div>
+
+  <!-- ④ -->
+  <div class="section" id="structure">
+    <div class="section-title"><span class="num">④</span>执行计划的数据结构：从 QEP_TAB 到 AccessPath</div>
+    <p>执行计划得有具体的数据结构来承载。MySQL 的表示方式经历过一次重要演进（<b>已核实，勿改</b>）：</p>
+    <table>
+      <thead><tr><th>版本</th><th>核心结构</th><th>形态</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>8.0.22 之前</td><td><code>JOIN</code> + <code>QEP_TAB</code><br>（Query Execution Plan Table）</td><td>一个<b>数组</b>（左深树）</td><td>每个 QEP_TAB 描述一张表怎么访问、上一个表用什么 join 方式连它。数组天然只能表示<b>左深树</b>。</td></tr>
+        <tr><td>8.0.22 及之后</td><td><code>AccessPath</code> 树</td><td>一棵真正的<b>树</b></td><td>每个节点代表一种访问路径（扫描 / 连接 / 排序 / 聚合…）。树能表达更灵活的<b>稠密树（bushy tree）</b>，也直接对应 EXPLAIN FORMAT=TREE 的输出。</td></tr>
+      </tbody>
+    </table>
+    <p>规划好后，执行器再调用 <code>CreateIteratorFromAccessPath()</code>，把 AccessPath 树的每个节点<b>翻译</b>成对应的 <code>RowIterator</code> 对象，形成一棵「迭代器树」真正去跑。所以链路是：<b>AccessPath 树 → RowIterator 树</b>。</p>
+
+    <h3>AccessPath 里有哪些「节点类型」？</h3>
+    <p>下面是一棵示例查询的执行计划树（<code>SELECT ... FROM orders o JOIN customers c ON o.cid=c.id WHERE o.status='paid' ORDER BY o.created_at DESC LIMIT 10</code>）。点一下节点类型，看它对应什么迭代器、什么时候出现：</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 720 300" width="720" height="300" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#6c8cff"></path>
+          </marker>
+        </defs>
+        <g font-family="sans-serif" font-size="12.5" text-anchor="middle">
+          <!-- root -->
+          <rect x="290" y="14" width="140" height="38" rx="8" fill="#1a1d27" stroke="#6c8cff"></rect>
+          <text x="360" y="38" fill="#e4e7ef" font-weight="700">LIMIT_OFFSET(10)</text>
+          <!-- sort -->
+          <rect x="290" y="78" width="140" height="38" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="360" y="102" fill="#e4e7ef">SORT(created_at DESC)</text>
+          <!-- join -->
+          <rect x="290" y="142" width="140" height="38" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="360" y="166" fill="#e4e7ef">NESTED_LOOP_JOIN</text>
+          <!-- left scan -->
+          <rect x="70" y="206" width="180" height="38" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="160" y="222" fill="#e4e7ef">INDEX_RANGE_SCAN</text>
+          <text x="160" y="238" fill="#9ba3b5" font-size="11">orders (status='paid')</text>
+          <!-- right ref -->
+          <rect x="430" y="206" width="200" height="38" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="530" y="222" fill="#e4e7ef">REF on customers</text>
+          <text x="530" y="238" fill="#9ba3b5" font-size="11">PRIMARY (id = o.cid)</text>
+          <!-- edges -->
+          <line x1="360" y1="52" x2="360" y2="76" stroke="#6c8cff" stroke-width="2" marker-end="url(#ar2)"></line>
+          <line x1="360" y1="116" x2="360" y2="140" stroke="#6c8cff" stroke-width="2" marker-end="url(#ar2)"></line>
+          <line x1="320" y1="180" x2="200" y2="204" stroke="#6c8cff" stroke-width="2" marker-end="url(#ar2)"></line>
+          <line x1="400" y1="180" x2="520" y2="204" stroke="#6c8cff" stroke-width="2" marker-end="url(#ar2)"></line>
+        </g>
+      </svg>
+    </div>
+
+    <div class="widget">
+      <div class="widget-title">AccessPath 节点探索器</div>
+      <div class="widget-desc">点一种节点类型，看它是什么访问路径、对应哪个 RowIterator、什么时候出现。所有条目均为 MySQL 8.0 既有节点类型（已核实）。</div>
+      <div class="node-btn" id="nodeBtns"></div>
+      <div class="node-detail" id="nodeDetail">
+        <div class="nh">选择上方节点 →</div>
+        <div class="nt">每个 AccessPath 节点都对应执行器里的一个具体迭代器类，优化器选好节点后由 CreateIteratorFromAccessPath 一一实例化。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ⑤ -->
+  <div class="section" id="volcano">
+    <div class="section-title"><span class="num">⑤</span>火山模型：执行计划怎么被「跑」起来</div>
+    <p>AccessPath 树生成后，执行器会把它变成一棵 <b>RowIterator 树</b>，然后按<b>火山模型（Volcano / Iterator Model）</b>运行。这是数据库执行最经典、最广泛使用的模型（PostgreSQL、SQL Server、Presto 等都用）。</p>
+
+    <h3>每个迭代器三个方法</h3>
+    <div class="phase">
+      <div class="btn active" data-phase="init">Init()</div>
+      <div class="btn" data-phase="read">Read()</div>
+      <div class="btn" data-phase="cleanup">Cleanup()</div>
+    </div>
+    <div class="phase-panel show" id="p-init">
+      <p><b>Init()（初始化）</b>：从根迭代器往下递归调用，打开表、分配 buffer、建立连接状态。这一步把所有准备工作一次做完，真正的取数推迟到 Read。</p>
+    </div>
+    <div class="phase-panel" id="p-read">
+      <p><b>Read()（取一行）</b>：根迭代器反复调用 <code>Read()</code>，返回 <code>0</code> 表示「拿到一行」，返回 <code>-1</code> 表示「没了」。每次 Read 内部会递归向下拉取子迭代器的行、做本节点的处理（过滤 / 投影 / 连接 / 排序…）。这就是<b>拉取模型（Pull-based）</b>：数据自底向上被拉取、自顶向下调用。</p>
+    </div>
+    <div class="phase-panel" id="p-cleanup">
+      <p><b>Cleanup()（收尾）</b>：迭代器析构、关闭表、释放临时表与内存。一次查询的生命周期到此结束。</p>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 640 200" width="640" height="200" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ar3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#a78bfa"></path>
+          </marker>
+        </defs>
+        <g font-family="sans-serif" font-size="12.5" text-anchor="middle">
+          <rect x="250" y="14" width="140" height="36" rx="8" fill="#1a1d27" stroke="#a78bfa"></rect>
+          <text x="320" y="37" fill="#e4e7ef" font-weight="700">LimitIterator</text>
+          <rect x="250" y="74" width="140" height="36" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="320" y="97" fill="#e4e7ef">SortIterator</text>
+          <rect x="250" y="134" width="140" height="36" rx="8" fill="#1a1d27" stroke="#2e3345"></rect>
+          <text x="320" y="157" fill="#e4e7ef">NestedLoopIterator</text>
+          <text x="430" y="152" fill="#9ba3b5" font-size="11">→ TableScanIterator</text>
+          <text x="430" y="170" fill="#9ba3b5" font-size="11">→ RefIterator</text>
+          <line x1="320" y1="50" x2="320" y2="72" stroke="#a78bfa" stroke-width="2" marker-end="url(#ar3)"></line>
+          <line x1="320" y1="110" x2="320" y2="132" stroke="#a78bfa" stroke-width="2" marker-end="url(#ar3)"></line>
+          <text x="320" y="190" fill="#9ba3b5" font-size="11">Read() 自顶向下调用，数据自底向上拉取（火山喷发：从下往上冒）</text>
+        </g>
+      </svg>
+    </div>
+    <div class="callout tip">
+      <div class="callout-key">为什么叫「火山」</div>
+      迭代器像火山口，调用 <code>Read()</code> 像在火山口喊「下一行」，数据像岩浆一样从最底层的表扫描节点，一层层向上喷涌、被各层处理，最终到达顶部交给客户端。这正是火山模型名字的由来。
+    </div>
+  </div>
+
+  <!-- ⑥ -->
+  <div class="section" id="produce">
+    <div class="section-title"><span class="num">⑥</span>执行计划怎么产生的（产生过程）</div>
+    <p>执行计划不是凭空出现的。它的产生，就是优化器工作过程的<b>产物</b>（详见<a href="mysql-optimizer-workflow.html">《优化器工作过程》</a>）。串起来看一条 SQL 的完整诞生路径：</p>
+    <ol>
+      <li><b>解析</b>：词法 + 语法分析，得到 AST。</li>
+      <li><b>预处理 / 名称解析</b>：绑定表、列、类型，展开视图。</li>
+      <li><b>逻辑优化</b>：子查询扁平化、外连接转内连接、<b>谓词下推</b>、等值推导、常量折叠——在不改变结果的前提下重写查询。</li>
+      <li><b>物理优化</b>（核心）：基于代价模型，给每张表选<b>访问路径</b>（全表扫描 vs 索引）、选<b>连接顺序</b>与<b>连接算法</b>（NLJ / Hash Join / BNL），并估算代价。</li>
+      <li><b>生成 AccessPath 树</b>：把上面选出的方案，结构化成那棵执行计划树（④ 里的形态）。</li>
+      <li><b>CreateIteratorFromAccessPath</b>：把树翻译成 RowIterator 树，交给执行器的火山模型去跑。</li>
+    </ol>
+    <div class="callout tip">
+      <div class="callout-key">入口函数</div>
+      在源码里，这一切的起点是 <code>JOIN::optimize()</code>——它把每个 Query_block 最终优化成 AccessPath。所以「执行计划的产生」=「优化器物理优化的收尾动作」。
+    </div>
+    <p>一句话记忆：<b>解析出语义 → 逻辑重写 → 物理选路 → 树化计划 → 迭代器化执行</b>。执行计划，正是中间「树化计划」这一步的结晶。</p>
+  </div>
+
+  <!-- ⑦ -->
+  <div class="section" id="format">
+    <div class="section-title"><span class="num">⑦</span>执行计划长什么样：EXPLAIN 三种格式</div>
+    <p>既然计划是一棵树，MySQL 提供了三种「打印」方式（详见<a href="mysql-explain.html">《EXPLAIN 详解》</a>），对应不同的可读性层级：</p>
+    <table>
+      <thead><tr><th>格式</th><th>形态</th><th>直观度</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>FORMAT=TRADITIONAL</code><br>（默认）</td><td>一张二维表：一行一个表、id/select_type/type/key/rows/Extra…</td><td><span class="badge badge-partial">中</span></td><td>最常用，看每步走了什么访问类型、用了哪个索引。</td></tr>
+        <tr><td><code>FORMAT=JSON</code></td><td>嵌套 JSON 对象，原样反映树的层级与代价。</td><td><span class="badge badge-yes">高</span></td><td>需要看完整树结构、成本分解、优化器决策细节时用。</td></tr>
+        <tr><td><code>FORMAT=TREE</code></td><td>缩进的树状文本，每个 <code>-&gt;</code> 是一个迭代器节点。</td><td><span class="badge badge-yes">高</span></td><td>最贴近 AccessPath / 迭代器树的真实形态，读起来就是「执行顺序」。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout warn">
+      <div class="callout-key">TREE 的阅读法则</div>
+      缩进最深的节点先跑（最底层先取数），向上每一层消费其子节点的行。<b>从下往上读，就是真正的执行顺序</b>。这正是火山模型「数据自底向上拉取」在 EXPLAIN 输出上的体现。
+    </div>
+    <p>所以「执行计划长什么样」这个问题，答案就是：<b>三种格式本质上都是同一棵 AccessPath / 迭代器树的序列化</b>——只是表格、JSON、缩进树三种不同的呈现。</p>
+  </div>
+
+  <!-- ⑧ -->
+  <div class="section" id="cheat">
+    <div class="section-title"><span class="num">⑧</span>速查清单</div>
+    <ul>
+      <li><b>是什么</b>：优化器产出、交给执行器的「作战方案书」；描述访问路径 + 连接顺序/算法 + 排序/分组/LIMIT 怎么处理；本质是一棵<b>树</b>。</li>
+      <li><b>在哪</b>：卡在「优化器产出」与「执行器消费」的交界，是两者的中间产物（不是优化器本身）。</li>
+      <li><b>为什么需要</b>：SQL 是声明式必须转成确定性步骤；解耦决策与执行；可观测（EXPLAIN / trace）；统一表示「一切查询都是 JOIN」。</li>
+      <li><b>数据结构</b>：8.0.22 前是 <code>JOIN + QEP_TAB</code> 数组（只能左深树）；8.0.22 后是 <code>AccessPath</code> 树（可 bushy）；再由 <code>CreateIteratorFromAccessPath</code> 转成 RowIterator 树。</li>
+      <li><b>怎么跑</b>：火山模型 / 迭代器模型，每个迭代器 <code>Init() / Read() / Cleanup()</code>，Read 返回 0=行、-1=结束，拉取式自底向上取数。</li>
+      <li><b>怎么产生</b>：解析 → 逻辑优化 → 物理优化（选路）→ 树化 AccessPath → 迭代器化执行，起点是 <code>JOIN::optimize()</code>。</li>
+      <li><b>长什么样</b>：TRADITIONAL 表 / JSON / TREE 三种格式，都是同一棵树的序列化；TREE 从下往上读即执行顺序。</li>
+    </ul>
+  </div>
+
+  <footer>
+    <p>WorkBuddy · 数据库系统 · MySQL · 优化器系列（四）</p>
+    <p class="links">同系列：<a href="mysql-optimizer-intro.html">优化器是什么（一）</a> · <a href="mysql-optimizer-workflow.html">优化器工作过程（二）</a> · <a href="mysql-explain.html">EXPLAIN 详解（三）</a> · 姊妹篇：<a href="../02-indexes/mysql-null-value.html">NULL 值与索引失效</a> · <a href="../03-query/mysql-sql-execution-flow.html">SQL 执行全过程</a></p>
+    <p style="margin-top:8px"><a href="../../index.html">← 返回 MySQL / 关系型数据库索引</a></p>
+  </footer>
+</div>
+
+<script>
+/* ---------- AccessPath 节点探索器（纯数据查表，稳定可靠） ---------- */
+(function () {
+  var DATA = {
+    'TABLE_SCAN': { it: 'TableScanIterator', desc: '全表扫描：从头到尾读每一行。大表最贵，通常要消除；但小表或没合适索引时它就是最优解。' },
+    'INDEX_SCAN': { it: 'IndexScanIterator', desc: '全索引扫描：按索引顺序读全部条目（有序但不过滤），常用于避免额外排序。' },
+    'INDEX_RANGE_SCAN': { it: 'IndexRangeScanIterator', desc: '索引范围扫描：WHERE 命中索引的一个范围（如 status=\'paid\'），只扫命中的索引区间 + 必要回表。' },
+    'REF': { it: 'RefIterator', desc: '等值 REF 查找：用上一个表的列，去另一个表上做「等于常数」的索引查找（如 customers.id = o.cid），每次返回少量行，嵌套循环里最常见。' },
+    'EQ_REF': { it: 'RefIterator (unique)', desc: '唯一 REF：最多匹配一行（如主键/唯一索引等值），连接时最理想的访问方式之一。' },
+    'NESTED_LOOP_JOIN': { it: 'NestedLoopIterator', desc: '嵌套循环连接：外层每取一行，内层按连接键探测一次。内层有索引时高效。' },
+    'HASH_JOIN': { it: 'HashJoinIterator', desc: '哈希连接（8.0.18+）：把一侧建哈希表，另一侧逐行探测。无可用索引的大表连接首选。' },
+    'BLOCK_NESTED_LOOP': { it: 'NestedLoopIterator (BNL)', desc: '块嵌套循环：把外层的块攒在 join buffer，内层每表扫一次，减少内层扫描次数。' },
+    'FILTER': { it: 'FilterIterator', desc: '过滤：应用一个无法下推进索引的谓词（如 o.total > 500），逐行丢弃不匹配的行。' },
+    'SORT': { it: 'SortingIterator', desc: '排序：执行 ORDER BY / 需要有序的输入。没走上索引有序时产生 filesort，是常见优化点。' },
+    'AGGREGATE': { it: 'AggregateIterator', desc: '聚合：执行 GROUP BY / 聚合函数（SUM/COUNT/AVG），可能借助临时表。' },
+    'TEMP_TABLE': { it: 'MaterializeIterator', desc: '物化 / 临时表：把子查询结果、派生表、UNION 结果物化到临时表，供上层多次读取。' },
+    'LIMIT_OFFSET': { it: 'LimitOffsetIterator', desc: 'Limit/Offset：在指定位置截断行数，越早截断越省事（如本例 LIMIT 10 在最顶层）。' }
+  };
+  var ORDER = ['TABLE_SCAN','INDEX_SCAN','INDEX_RANGE_SCAN','REF','EQ_REF','NESTED_LOOP_JOIN','HASH_JOIN','BLOCK_NESTED_LOOP','FILTER','SORT','AGGREGATE','TEMP_TABLE','LIMIT_OFFSET'];
+  var box = document.getElementById('nodeBtns');
+  var detail = document.getElementById('nodeDetail');
+  ORDER.forEach(function (k) {
+    var b = document.createElement('button');
+    b.className = 'btn'; b.textContent = k; b.dataset.k = k;
+    b.addEventListener('click', function () {
+      var d = DATA[k];
+      detail.innerHTML = '<div class="nh">' + k + '</div>' +
+        '<div class="nt"><b>对应迭代器：</b><code>' + d.it + '</code><br><br>' + d.desc + '</div>';
+      Array.prototype.forEach.call(box.children, function (c) { c.classList.remove('active'); });
+      b.classList.add('active');
+    });
+    box.appendChild(b);
+  });
+})();
+
+/* ---------- 火山模型三阶段切换 ---------- */
+(function () {
+  var btns = document.querySelectorAll('.phase .btn');
+  var panels = { init: 'p-init', read: 'p-read', cleanup: 'p-cleanup' };
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var k = b.dataset.phase;
+      btns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      Object.keys(panels).forEach(function (p) {
+        document.getElementById(panels[p]).classList.toggle('show', p === k);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

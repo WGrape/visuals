@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InnoDB B+ 树完整结构：每个节点都是一页 - Visuals</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f8f9fa;
+    --border: #e2e4e9;
+    --text: #1a1c1e;
+    --text-muted: #6b7280;
+    --accent: #534AB7;
+    --accent-light: #EEEDFE;
+    --blue: #378ADD;
+    --blue-light: #E6F1FB;
+    --green: #1D9E75;
+    --green-light: #E1F5EE;
+    --coral: #D85A30;
+    --coral-light: #FAECE7;
+    --amber: #BA7517;
+    --amber-light: #FAEEDA;
+    --radius: 12px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.75;
+    font-size: 15px;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  h1 { font-size: 28px; font-weight: 650; letter-spacing: -0.5px; margin-bottom: 10px; }
+  h2 { font-size: 20px; font-weight: 650; margin: 50px 0 14px; padding-top: 18px; border-top: 1px solid var(--border); scroll-margin-top: 16px; }
+  h3 { font-size: 16px; font-weight: 650; margin: 26px 0 8px; }
+  p { margin: 11px 0; }
+  ul, ol { margin: 11px 0; padding-left: 23px; }
+  li { margin: 6px 0; }
+  code { font-family: var(--mono); background: var(--accent-light); color: var(--accent); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  .sub { color: var(--text-muted); font-size: 15px; }
+
+  .note { background: var(--blue-light); border-left: 3px solid var(--blue); padding: 11px 15px; margin: 16px 0; border-radius: 0 8px 8px 0; font-size: 14px; color: #0C447C; }
+  .note.key { background: var(--green-light); border-left-color: var(--green); color: #085041; }
+  .note.warn { background: var(--amber-light); border-left-color: var(--amber); color: #633806; }
+
+  .figure { margin: 22px 0; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+  .figure svg { display: block; width: 100%; height: auto; }
+  .fig-cap { font-size: 13px; color: var(--text-muted); margin-top: 10px; text-align: center; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--surface); font-weight: 650; }
+  td.mono { font-family: var(--mono); font-size: 12.5px; }
+
+  .toc-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 17px; margin: 24px 0 6px; }
+  .toc-box strong { font-size: 13px; color: var(--text-muted); letter-spacing: .05em; }
+  .toc-box ol { margin: 7px 0 0; padding-left: 20px; }
+  .toc-box li { margin: 3px 0; font-size: 13.5px; }
+  .toc-box a { color: var(--text); text-decoration: none; }
+  .toc-box a:hover { color: var(--accent); }
+
+  footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--border); font-size: 13.5px; color: var(--text-muted); }
+  footer a { color: var(--accent); text-decoration: none; margin-right: 13px; }
+  footer a:hover { text-decoration: underline; }
+
+  .pg rect.box { transition: stroke-width .15s; }
+  .pg:hover rect.box { stroke-width: 3; }
+
+  @media (max-width: 700px) { body { padding: 32px 16px 60px; } }
+</style>
+</head>
+<body>
+
+<h1>InnoDB B+ 树完整结构：每个节点都是一页</h1>
+<p class="sub">这一篇只讲结构：MySQL 在 B+ 树里存了什么、索引怎么找到数据、页和页怎么串起来。</p>
+
+<div class="note key">
+<b>一句话钥匙：</b>B+ 树上<strong>每一个节点就是一个 16KB 的数据页</strong>，页与页靠<strong>「页号」</strong>互相引用。
+下面所有内容都是这句话的展开。
+</div>
+
+<div class="toc-box">
+  <strong>结构路线</strong>
+  <ol>
+    <li><a href="#s1">整棵树长什么样</a></li>
+    <li><a href="#s2">格子里的数字：键 / 页号 / 行 id</a></li>
+    <li><a href="#s3">换成非聚簇（二级）索引，图怎么变</a></li>
+    <li><a href="#s4">哪些连续、哪些不连续（叶子层与页号）</a></li>
+    <li><a href="#s5">一页里面有什么</a></li>
+    <li><a href="#s6">索引与数据怎么关联</a></li>
+    <li><a href="#s7">速记卡</a></li>
+  </ol>
+</div>
+
+<h2 id="s1">1. 整棵树长什么样</h2>
+
+<p>
+下面是一棵真实的 InnoDB B+ 树。<strong>每个方框 = 一页</strong>，框顶写页号；
+页里从上到下是<strong>页目录（槽）</strong>和<strong>记录格子</strong>。
+每个记录格子分成两半：<strong>上半是「键」，下半是它「指向」的东西</strong>
+（非叶页指向子页号，叶子页直接就是数据）。
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 1020 830" width="100%" role="img" aria-label="InnoDB 聚簇索引 B+ 树结构：每个节点一个数据页">
+<defs>
+<marker id="dg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.6" stroke-linecap="round"/></marker>
+<marker id="dgl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#1D9E75" stroke-width="1.8" stroke-linecap="round"/></marker>
+</defs>
+<text x="10" y="26" font-size="11.5" fill="#6b7280">第 3 层（根）</text>
+<text x="10" y="296" font-size="11.5" fill="#6b7280">第 2 层（非叶）</text>
+<text x="8" y="598" font-size="11.5" fill="#6b7280">第 0 层</text><text x="8" y="614" font-size="11.5" fill="#6b7280">（叶子）</text>
+<g class="pg">
+<rect class="box" x="360" y="36" width="300" height="138" rx="10" fill="#ffffff" stroke="#BA7517" stroke-width="1.8"/>
+<rect x="360" y="36" width="300" height="24" rx="9" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.4"/>
+<rect x="360" y="50" width="300" height="10" fill="#FAEEDA"/>
+<text x="510" y="53" font-size="12" font-weight="650" text-anchor="middle" fill="#633806">根页（页 38）</text>
+<rect x="374" y="66" width="272" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="510" y="80" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="414.0" y="94" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="427.0" y="126" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="427.0" y="138" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="448.0" y="94" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="477.0" y="112" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">1</text>
+<line x1="453.0" y1="120" x2="501.0" y2="120" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="453.0" y="125" width="48" height="34" rx="4" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.9"/>
+<text x="477.0" y="145" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">页 30</text>
+<rect x="514.0" y="94" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="543.0" y="112" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">7</text>
+<line x1="519.0" y1="120" x2="567.0" y2="120" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="519.0" y="125" width="48" height="34" rx="4" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.9"/>
+<text x="543.0" y="145" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">页 36</text>
+<rect x="580.0" y="94" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="593.0" y="126" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="593.0" y="138" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="250" y="286" width="300" height="138" rx="10" fill="#ffffff" stroke="#378ADD" stroke-width="1.8"/>
+<rect x="250" y="286" width="300" height="24" rx="9" fill="#E6F1FB" stroke="#378ADD" stroke-width="1.4"/>
+<rect x="250" y="300" width="300" height="10" fill="#E6F1FB"/>
+<text x="400" y="303" font-size="12" font-weight="650" text-anchor="middle" fill="#0C447C">非叶页（页 30）</text>
+<rect x="264" y="316" width="272" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="400" y="330" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="271.0" y="344" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="284.0" y="376" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="284.0" y="388" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="305.0" y="344" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="334.0" y="362" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">1</text>
+<line x1="310.0" y1="370" x2="358.0" y2="370" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="310.0" y="375" width="48" height="34" rx="4" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.9"/>
+<text x="334.0" y="395" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">页 10</text>
+<rect x="371.0" y="344" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="400.0" y="362" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">3</text>
+<line x1="376.0" y1="370" x2="424.0" y2="370" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="376.0" y="375" width="48" height="34" rx="4" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.9"/>
+<text x="400.0" y="395" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">页 22</text>
+<rect x="437.0" y="344" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="466.0" y="362" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">5</text>
+<line x1="442.0" y1="370" x2="490.0" y2="370" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="442.0" y="375" width="48" height="34" rx="4" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.9"/>
+<text x="466.0" y="395" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">页 16</text>
+<rect x="503.0" y="344" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="516.0" y="376" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="516.0" y="388" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="640" y="286" width="230" height="138" rx="10" fill="#ffffff" stroke="#378ADD" stroke-width="1.8"/>
+<rect x="640" y="286" width="230" height="24" rx="9" fill="#E6F1FB" stroke="#378ADD" stroke-width="1.4"/>
+<rect x="640" y="300" width="230" height="10" fill="#E6F1FB"/>
+<text x="755" y="303" font-size="12" font-weight="650" text-anchor="middle" fill="#0C447C">非叶页（页 36）</text>
+<rect x="654" y="316" width="202" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="755" y="330" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="692.0" y="344" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="705.0" y="376" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="705.0" y="388" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="726.0" y="344" width="58" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="755.0" y="362" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">7</text>
+<line x1="731.0" y1="370" x2="779.0" y2="370" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="731.0" y="375" width="48" height="34" rx="4" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.9"/>
+<text x="755.0" y="395" font-size="10" text-anchor="middle" fill="#0C447C" font-family="monospace">页 8</text>
+<rect x="792.0" y="344" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="805.0" y="376" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="805.0" y="388" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="60" y="566" width="210" height="150" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="60" y="566" width="210" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="60" y="580" width="210" height="10" fill="#E1F5EE"/>
+<text x="165" y="583" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 10）</text>
+<rect x="74" y="596" width="182" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="165" y="610" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="69.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="82.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="82.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="103.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="132.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">1</text>
+<line x1="108.0" y1="650" x2="156.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="108.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="132.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="169.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="198.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">2</text>
+<line x1="174.0" y1="650" x2="222.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="174.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="198.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="235.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="248.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="248.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="308" y="566" width="210" height="150" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="308" y="566" width="210" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="308" y="580" width="210" height="10" fill="#E1F5EE"/>
+<text x="413" y="583" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 22）</text>
+<rect x="322" y="596" width="182" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="413" y="610" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="317.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="330.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="330.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="351.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="380.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">3</text>
+<line x1="356.0" y1="650" x2="404.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="356.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="380.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="417.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="446.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">4</text>
+<line x1="422.0" y1="650" x2="470.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="422.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="446.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="483.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="496.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="496.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="556" y="566" width="210" height="150" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="556" y="566" width="210" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="556" y="580" width="210" height="10" fill="#E1F5EE"/>
+<text x="661" y="583" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 16）</text>
+<rect x="570" y="596" width="182" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="661" y="610" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="565.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="578.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="578.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="599.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="628.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">5</text>
+<line x1="604.0" y1="650" x2="652.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="604.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="628.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="665.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="694.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">6</text>
+<line x1="670.0" y1="650" x2="718.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="670.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="694.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="731.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="744.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="744.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="804" y="566" width="210" height="150" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="804" y="566" width="210" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="804" y="580" width="210" height="10" fill="#E1F5EE"/>
+<text x="909" y="583" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 8）</text>
+<rect x="818" y="596" width="182" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="909" y="610" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="813.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="826.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="826.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="847.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="876.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">7</text>
+<line x1="852.0" y1="650" x2="900.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="852.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="876.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="913.0" y="624" width="58" height="80" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="942.0" y="642" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">8</text>
+<line x1="918.0" y1="650" x2="966.0" y2="650" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="918.0" y="655" width="48" height="46" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="942.0" y="681" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">data</text>
+<rect x="979.0" y="624" width="26" height="80" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="992.0" y="662" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="992.0" y="674" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<path d="M334 424 C 334 486, 165 498, 165 574" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#dg)"/>
+<path d="M400 424 C 400 486, 413 498, 413 574" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#dg)"/>
+<path d="M466 424 C 466 486, 661 498, 661 574" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#dg)"/>
+<path d="M755 424 C 755 486, 909 498, 909 574" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#dg)"/>
+<path d="M477 174 C 477 230, 400 236, 400 284" stroke="#888780" stroke-width="1.5" fill="none" marker-end="url(#dg)"/>
+<path d="M543 174 C 543 230, 755 236, 755 284" stroke="#888780" stroke-width="1.5" fill="none" marker-end="url(#dg)"/>
+<path d="M552 355 L 636 355" stroke="#1D9E75" stroke-width="1.8" marker-end="url(#dgl)" marker-start="url(#dgl)"/>
+<text x="594" y="344" font-size="10" text-anchor="middle" fill="#1D9E75">同层兄弟页</text>
+<path d="270 660 L 308 660" stroke="#1D9E75" stroke-width="2" marker-end="url(#dgl)" marker-start="url(#dgl)"/>
+<path d="518 660 L 556 660" stroke="#1D9E75" stroke-width="2" marker-end="url(#dgl)" marker-start="url(#dgl)"/>
+<path d="766 660 L 804 660" stroke="#1D9E75" stroke-width="2" marker-end="url(#dgl)" marker-start="url(#dgl)"/>
+<text x="510" y="736" font-size="12.5" text-anchor="middle" fill="#1D9E75" font-weight="650">这一排：键是连续的 1 → 2 → … → 8（一个不缺）；页号却是 10 → 22 → 16 → 8（不递增，只是物理位置）</text>
+<rect x="20" y="752" width="980" height="28" rx="8" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="36" y="771" font-size="11.5" fill="#6b7280">橙色边框 = 根页　｜　蓝色 = 非叶页（键 + 子页号）　｜　绿色 = 叶子页（键 + 整行数据）　｜　小格子：上半是键，下半是指向的东西</text>
+<rect x="20" y="786" width="980" height="28" rx="8" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="36" y="805" font-size="11.5" fill="#6b7280">「页 38 / 页 30」= 页的物理编号（与键值无关）　｜　父页的键 = 子页里「最小的键」（边界路标，如 7 表示页 36 子树最小是 7）</text>
+<rect x="672" y="60" width="330" height="52" rx="8" fill="#FFFBEF" stroke="#BA7517" stroke-width="1.2"/>
+<text x="686" y="80" font-size="11.5" font-weight="600" fill="#633806">根页里的 1 / 7 是什么？</text>
+<text x="686" y="98" font-size="11" fill="#7a4a10">子页里最小的键（边界）——不是别的页号</text>
+</svg>
+<p class="fig-cap">根页用页号向下指，非叶页继续向下指；叶子页之间用双向箭头串成一条有序链表</p>
+</div>
+
+<div class="note">
+只要抓住三层：<b>页 38 是根</b>（只有 2 个键）、<b>页 30 / 页 36 是非叶页</b>（装「键 + 子页号」）、
+<b>页 10 / 22 / 16 / 8 是叶子页</b>（装真正的数据）。从根走到任意叶子，最多 3 步。
+</div>
+
+<h2 id="s2">2. 格子里的数字：键 / 页号 / 行 id</h2>
+
+<p>图上出现好几种数字，最容易混。它们是三件不同的东西：</p>
+
+<table>
+  <tr><th style="width:20%">概念</th><th style="width:44%">是什么</th><th>说明</th></tr>
+  <tr>
+    <td><b>键</b></td>
+    <td><b>索引列的值</b>。聚簇索引里就是主键值（= 行 id）；二级索引里是索引列的值。</td>
+    <td>决定排序与查找方向，<b>这才是我们要查的东西</b></td>
+  </tr>
+  <tr>
+    <td><b>页号</b></td>
+    <td>页的<b>物理编号</b>（页 30 = 第 30 号页）。</td>
+    <td>只用来定位「去哪儿读这一页」；<b>和键值毫无关系</b>，也不连号</td>
+  </tr>
+  <tr>
+    <td><b>行 id</b></td>
+    <td>主键列的值 —— 它<b>就是聚簇索引里的那个键</b>，只是换了个说法。</td>
+    <td>二级索引靠它回表找到整行</td>
+  </tr>
+</table>
+
+<h3>同一个数字出现在好几层，是同一回事吗</h3>
+<p>是<strong>同一个值</strong>，但用途不同。以 7 为例：</p>
+<ul>
+  <li>根页里的 7 → 意思是「<b>页 36 子树里最小的键是 7</b>」；</li>
+  <li>页 36 里的 7 → 同样只是边界；</li>
+  <li><b>只有页 8（叶子页）里的 7 是真实数据行</b>——id=7 那一整行。</li>
+</ul>
+
+<div class="note key">
+<b>父页只存「边界值」，不是所有键。</b>所以 1 / 3 / 5 / 7 出现在父页（各子页的最小值），
+而 <b>2 / 4 / 6 / 8 只在叶子页</b>。父页那份是刻意保留的副本，只为「比大小决定往哪走」；
+真正的数据永远只有叶子页那一份。
+</div>
+
+<div class="note warn">
+<b>键指向一行还是一页？</b>非叶页的键指向<b>一个子页</b>：<code>3 → 页22</code> 读作
+「<b>id ≥ 3 的记录从页 22 开始找</b>」，而不是「id=3 在页 22」。只有叶子页的键才指向<b>一行</b>。
+</div>
+
+<h2 id="s3">3. 换成非聚簇（二级）索引，图怎么变</h2>
+
+<p>
+结构<strong>一点没变</strong>，变的只有<strong>键的值</strong>和<strong>叶子页里放的东西</strong>：
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 1020 420" width="100%" role="img" aria-label="二级索引的 B+ 树：键换成索引列的值">
+<defs>
+<marker id="sg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.6" stroke-linecap="round"/></marker>
+<marker id="sgl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#1D9E75" stroke-width="1.8" stroke-linecap="round"/></marker>
+</defs>
+<text x="20" y="24" font-size="13" font-weight="650" fill="#BA7517">假设给 name 列建了索引：整棵树结构一模一样，只是「键」换成了 name 的值</text>
+<g class="pg">
+<rect class="box" x="340" y="40" width="340" height="138" rx="10" fill="#ffffff" stroke="#BA7517" stroke-width="1.8"/>
+<rect x="340" y="40" width="340" height="24" rx="9" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.4"/>
+<rect x="340" y="54" width="340" height="10" fill="#FAEEDA"/>
+<text x="510" y="57" font-size="12" font-weight="650" text-anchor="middle" fill="#633806">根页（页 5）</text>
+<rect x="354" y="70" width="312" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="510" y="84" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="402.0" y="98" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="415.0" y="130" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="415.0" y="142" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="436.0" y="98" width="70" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="471.0" y="116" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">ann</text>
+<line x1="441.0" y1="124" x2="501.0" y2="124" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="441.0" y="129" width="60" height="34" rx="4" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.9"/>
+<text x="471.0" y="149" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">页 20</text>
+<rect x="514.0" y="98" width="70" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="549.0" y="116" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">carl</text>
+<line x1="519.0" y1="124" x2="579.0" y2="124" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="519.0" y="129" width="60" height="34" rx="4" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.9"/>
+<text x="549.0" y="149" font-size="10" text-anchor="middle" fill="#633806" font-family="monospace">页 24</text>
+<rect x="592.0" y="98" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="605.0" y="130" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="605.0" y="142" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="110" y="280" width="360" height="138" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="110" y="280" width="360" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="110" y="294" width="360" height="10" fill="#E1F5EE"/>
+<text x="290" y="297" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 20）</text>
+<rect x="124" y="310" width="332" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="290" y="324" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="148.0" y="338" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="161.0" y="370" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="161.0" y="382" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="182.0" y="338" width="104" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="234.0" y="356" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">ann</text>
+<line x1="187.0" y1="364" x2="281.0" y2="364" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="187.0" y="369" width="94" height="34" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="234.0" y="389" font-size="9.5" text-anchor="middle" fill="#085041" font-family="monospace">(ann, 1)</text>
+<rect x="294.0" y="338" width="104" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="346.0" y="356" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">betty</text>
+<line x1="299.0" y1="364" x2="393.0" y2="364" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="299.0" y="369" width="94" height="34" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="346.0" y="389" font-size="9.5" text-anchor="middle" fill="#085041" font-family="monospace">(betty, 3)</text>
+<rect x="406.0" y="338" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="419.0" y="370" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="419.0" y="382" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<g class="pg">
+<rect class="box" x="560" y="280" width="360" height="138" rx="10" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="560" y="280" width="360" height="24" rx="9" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="560" y="294" width="360" height="10" fill="#E1F5EE"/>
+<text x="740" y="297" font-size="12" font-weight="650" text-anchor="middle" fill="#085041">叶子页（页 24）</text>
+<rect x="574" y="310" width="332" height="20" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.2"/>
+<text x="740" y="324" font-size="10.5" text-anchor="middle" fill="#26215C">页目录（槽）</text>
+<rect x="598.0" y="338" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="611.0" y="370" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="611.0" y="382" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<rect x="632.0" y="338" width="104" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="684.0" y="356" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">carl</text>
+<line x1="637.0" y1="364" x2="731.0" y2="364" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="637.0" y="369" width="94" height="34" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="684.0" y="389" font-size="9.5" text-anchor="middle" fill="#085041" font-family="monospace">(carl, 2)</text>
+<rect x="744.0" y="338" width="104" height="68" rx="6" fill="#ffffff" stroke="#c9ccd1" stroke-width="1.2"/>
+<text x="796.0" y="356" font-size="10" text-anchor="middle" fill="#085041" font-family="monospace">dave</text>
+<line x1="749.0" y1="364" x2="843.0" y2="364" stroke="#c9ccd1" stroke-width="1"/>
+<rect x="749.0" y="369" width="94" height="34" rx="4" fill="#E1F5EE" stroke="#1D9E75" stroke-width="0.9"/>
+<text x="796.0" y="389" font-size="9.5" text-anchor="middle" fill="#085041" font-family="monospace">(dave, 4)</text>
+<rect x="856.0" y="338" width="26" height="68" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="869.0" y="370" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="869.0" y="382" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+</g>
+<path d="M471 178 C 471 232, 290 238, 290 278" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#sg)"/>
+<path d="M549 178 C 549 232, 740 238, 740 278" stroke="#888780" stroke-width="1.4" fill="none" marker-end="url(#sg)"/>
+<path d="M472 349 L 558 349" stroke="#1D9E75" stroke-width="2" marker-end="url(#sgl)" marker-start="url(#sgl)"/>
+<text x="515" y="342" font-size="10.5" text-anchor="middle" fill="#1D9E75">叶子链表</text>
+<rect x="16" y="152" width="286" height="76" rx="8" fill="#FFFBEF" stroke="#BA7517" stroke-width="1.2"/>
+<text x="30" y="172" font-size="11.5" font-weight="600" fill="#633806">非叶页里的 ann / carl</text>
+<text x="30" y="190" font-size="11" fill="#7a4a10">= 子页里最小的 name（边界）</text>
+<text x="30" y="210" font-size="11" fill="#7a4a10">仍然指向「页」，不是指向某一行</text>
+<rect x="700" y="152" width="300" height="76" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.2"/>
+<text x="714" y="172" font-size="11.5" font-weight="600" fill="#085041">叶子页里的 (ann, 1)</text>
+<text x="714" y="190" font-size="11" fill="#0a5c46">= 索引列 + 主键，只有两样东西</text>
+<text x="714" y="210" font-size="11" fill="#0a5c46">不是整行 → 要其它列必须回表</text>
+</svg>
+<p class="fig-cap">同一棵树建在 name 列上：键从 1/3/5/7 变成 ann/betty/carl/dave</p>
+</div>
+
+<table>
+  <tr><th style="width:18%"></th><th style="width:34%">聚簇索引（主键树）</th><th>二级索引（如 name）</th></tr>
+  <tr><td><b>键</b></td><td>主键值 = 行 id</td><td>索引列的值（name）</td></tr>
+  <tr><td><b>叶子页记录</b></td><td>键 + <b>整行所有列</b></td><td>键 + <b>主键值</b>，就两样：<code>(ann, 1)</code></td></tr>
+  <tr><td><b>非叶页的键</b></td><td>子页里最小的主键</td><td>子页里最小的 name</td></tr>
+  <tr><td><b>取数</b></td><td>叶子页里就是整行，直接返回</td><td>只拿到主键，还得<b>回表</b></td></tr>
+</table>
+
+<div class="note key">
+所以「格子里的数字是什么」<b>没有固定答案</b>：它取决于这棵树建在哪一列上——
+主键树里是主键值，name 索引里是 name 值，联合索引 <code>(a,b)</code> 就是「先比 a 再比 b」。
+<b>页号的含义始终不变</b>。
+</div>
+
+<h2 id="s4">4. 哪些连续、哪些不连续（叶子层与页号）</h2>
+
+<p>这是最容易误解的一点，分三句话说：</p>
+
+<table>
+  <tr><th style="width:26%">对象</th><th style="width:14%">连续？</th><th>说明</th></tr>
+  <tr>
+    <td><b>键</b></td><td style="color:#1D9E75"><b>连续</b></td>
+    <td>主图那一排是 1 → 2 → … → 8，<b>一个不缺、不重叠、不留空洞</b>。任何存在的键都能在某一页找到。</td>
+  </tr>
+  <tr>
+    <td><b>页号</b></td><td style="color:#D85A30"><b>不连续</b></td>
+    <td>同一排是 10 → 22 → 16 → 8，<b>根本不递增</b>；而且也不从 0 开始（页 0/1/2 是元数据页）。</td>
+  </tr>
+  <tr>
+    <td><b>叶子链表顺序</b></td><td>—</td>
+    <td>由页头 prev / next 串成，顺序 = <b>键的顺序</b>，与页号大小无关。</td>
+  </tr>
+</table>
+
+<div class="figure">
+<svg viewBox="0 0 1020 250" width="100%" role="img" aria-label="表空间里的页号分布：索引页是散布的">
+<text x="20" y="24" font-size="13" font-weight="650" fill="#1a1c1e">一个 .ibd 文件里的页，是按「分配顺序」编号的</text>
+<rect x="40" y="46" width="88" height="58" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.6"/>
+<text x="84" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#26215C" font-family="monospace">页 0</text>
+<text x="84" y="88" font-size="10" text-anchor="middle" fill="#26215C">表空间头</text>
+<rect x="135" y="46" width="88" height="58" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.6"/>
+<text x="179" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#26215C" font-family="monospace">页 1</text>
+<text x="179" y="88" font-size="10" text-anchor="middle" fill="#26215C">ibuf bitmap</text>
+<rect x="230" y="46" width="88" height="58" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.6"/>
+<text x="274" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#26215C" font-family="monospace">页 2</text>
+<text x="274" y="88" font-size="10" text-anchor="middle" fill="#26215C">INODE</text>
+<rect x="325" y="46" width="88" height="58" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="369" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#085041" font-family="monospace">页 3</text>
+<text x="369" y="88" font-size="10" text-anchor="middle" fill="#085041">聚簇索引根</text>
+<rect x="420" y="46" width="88" height="58" rx="8" fill="#f1f2f4" stroke="#c9ccd1" stroke-width="1.6"/>
+<text x="464" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#6b7280" font-family="monospace">页 5</text>
+<text x="464" y="88" font-size="10" text-anchor="middle" fill="#6b7280">二级索引根</text>
+<rect x="515" y="46" width="88" height="58" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="559" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#085041" font-family="monospace">页 8</text>
+<text x="559" y="88" font-size="10" text-anchor="middle" fill="#085041">聚簇叶子</text>
+<rect x="610" y="46" width="88" height="58" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="654" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#085041" font-family="monospace">页 10</text>
+<text x="654" y="88" font-size="10" text-anchor="middle" fill="#085041">聚簇叶子</text>
+<rect x="705" y="46" width="88" height="58" rx="8" fill="#f1f2f4" stroke="#c9ccd1" stroke-width="1.6"/>
+<text x="749" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#6b7280" font-family="monospace">页 12</text>
+<text x="749" y="88" font-size="10" text-anchor="middle" fill="#6b7280">undo 页</text>
+<rect x="800" y="46" width="88" height="58" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="844" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#085041" font-family="monospace">页 16</text>
+<text x="844" y="88" font-size="10" text-anchor="middle" fill="#085041">聚簇叶子</text>
+<rect x="895" y="46" width="88" height="58" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="939" y="68" font-size="11.5" font-weight="650" text-anchor="middle" fill="#085041" font-family="monospace">页 22</text>
+<text x="939" y="88" font-size="10" text-anchor="middle" fill="#085041">聚簇叶子</text>
+<path d="M128 75 L 135 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M223 75 L 230 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M318 75 L 325 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M413 75 L 420 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M508 75 L 515 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M603 75 L 610 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M698 75 L 705 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M793 75 L 800 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<path d="M888 75 L 895 75" stroke="#c9ccd1" stroke-width="1.2"/>
+<rect x="40" y="132" width="300" height="100" rx="10" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="56" y="154" font-size="12" font-weight="650" fill="#1a1c1e">紫色：元数据页（固定）</text>
+<text x="56" y="174" font-size="11.5" fill="#6b7280">页 0 = 表空间头　页 1 = ibuf bitmap</text>
+<text x="56" y="192" font-size="11.5" fill="#6b7280">页 2 = INODE。所以数据页的页号</text>
+<text x="56" y="210" font-size="11.5" fill="#6b7280">永远不会从 0 开始，一般从 3 往后。</text>
+<rect x="360" y="132" width="300" height="100" rx="10" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="376" y="154" font-size="12" font-weight="650" fill="#085041">绿色：属于这棵索引树</text>
+<text x="376" y="174" font-size="11.5" fill="#6b7280">页 3、8、10、16、22 —— 并不连号。</text>
+<text x="376" y="192" font-size="11.5" fill="#6b7280">同一棵树的页在文件里是散布的，靠页号</text>
+<text x="376" y="210" font-size="11.5" fill="#6b7280">互相引用，而不是靠位置相邻。</text>
+<rect x="680" y="132" width="300" height="100" rx="10" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="696" y="154" font-size="12" font-weight="650" fill="#6b7280">灰色：别的对象的页</text>
+<text x="696" y="174" font-size="11.5" fill="#6b7280">二级索引、undo、blob、空闲页会夹在中间。</text>
+<text x="696" y="192" font-size="11.5" fill="#6b7280">所以「叶子层每页都连号」是误解：连号的</text>
+<text x="696" y="210" font-size="11.5" fill="#6b7280">只有「键的区间」，不是页号本身。</text>
+</svg>
+<p class="fig-cap">页号按分配顺序增长；「哪一页属于这棵索引树」是跳着的</p>
+</div>
+
+<div class="note warn">
+<b>结论：连续的是「键」，不是「页号」。</b>
+键区间完整覆盖（所以范围扫描不漏），但页在文件里是散布的、编号是跳的——
+0/1/2 是表空间元数据页，数据页从 3 往后按需分配，中间还夹着二级索引、undo、blob 的页。
+图上那些页号只是示意，<b>别当成「第几页就是第几段数据」</b>。
+</div>
+
+<h2 id="s5">5. 一页里面有什么</h2>
+
+<p>
+不管根页、非叶页还是叶子页，内部布局都是同一套模板，永远三样：
+<strong>页目录（槽）</strong>、<strong>记录单向链表</strong>、<strong>最小 / 最大记录</strong>。
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 1020 380" width="100%" role="img" aria-label="InnoDB 数据页内部结构：页目录槽与记录分组">
+<defs>
+<marker id="pga" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#534AB7" stroke-width="1.8" stroke-linecap="round"/></marker>
+<marker id="pgn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#D85A30" stroke-width="1.8" stroke-linecap="round"/></marker>
+</defs>
+<rect x="24" y="26" width="620" height="320" rx="12" fill="#ffffff" stroke="#1D9E75" stroke-width="1.8"/>
+<rect x="24" y="26" width="620" height="26" rx="11" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.4"/>
+<rect x="24" y="40" width="620" height="12" fill="#E1F5EE"/>
+<text x="334" y="44" font-size="12.5" font-weight="650" text-anchor="middle" fill="#085041">一个数据页 = 16KB（以叶子页为例）</text>
+<rect x="40" y="60" width="588" height="24" rx="6" fill="#E6F1FB" stroke="#378ADD" stroke-width="1.2"/>
+<text x="334" y="77" font-size="11.5" text-anchor="middle" fill="#0C447C">页头（Page Header）：本页层级、记录数、槽数 ｜ prev / next 页号也在页头里（同层链表）</text>
+<text x="334" y="104" font-size="11.5" text-anchor="middle" fill="#26215C">页目录（Page Directory）：每 <tspan font-weight="650">4~8 条记录</tspan> 归成一个槽，一个槽只管自己那一组</text>
+<rect x="70" y="114" width="252" height="26" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.4"/>
+<text x="196" y="131" font-size="11.5" text-anchor="middle" fill="#26215C">槽 1　→　指向组内最大：id=3</text>
+<rect x="330" y="114" width="252" height="26" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.4"/>
+<text x="456" y="131" font-size="11.5" text-anchor="middle" fill="#26215C">槽 2　→　指向组内最大：id=6</text>
+<rect x="70" y="148" width="252" height="86" rx="8" fill="#F7F5FF" stroke="#B9B0EE" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="196" y="164" font-size="10" text-anchor="middle" fill="#534AB7">↑ 槽 1 覆盖这一组 3 条记录</text>
+<rect x="330" y="148" width="252" height="86" rx="8" fill="#F7F5FF" stroke="#B9B0EE" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="456" y="164" font-size="10" text-anchor="middle" fill="#534AB7">↑ 槽 2 覆盖这一组 3 条记录</text>
+<path d="M196 142 C 196 176, 262 176, 274 184" stroke="#534AB7" stroke-width="1.4" fill="none" marker-end="url(#pga)"/>
+<path d="M456 142 C 456 176, 522 176, 534 184" stroke="#534AB7" stroke-width="1.4" fill="none" marker-end="url(#pga)"/>
+<rect x="76" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="114" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=1</text>
+<text x="114" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="114" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<rect x="158" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="196" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=2</text>
+<text x="196" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="196" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<rect x="240" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="278" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=3</text>
+<text x="278" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="278" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<rect x="336" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="374" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=4</text>
+<text x="374" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="374" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<rect x="418" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="456" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=5</text>
+<text x="456" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="456" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<rect x="500" y="170" width="76" height="58" rx="6" fill="#ffffff" stroke="#1D9E75" stroke-width="1.3"/>
+<text x="538" y="190" font-size="11" text-anchor="middle" fill="#085041" font-family="monospace">id=6</text>
+<text x="538" y="207" font-size="10" text-anchor="middle" fill="#6b7280">整行数据</text>
+<text x="538" y="222" font-size="8.5" text-anchor="middle" fill="#9aa0a6">next →</text>
+<path d="M152 199 L 158 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<path d="M234 199 L 240 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<path d="M316 199 L 336 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<path d="M412 199 L 418 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<path d="M494 199 L 500 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<rect x="40" y="170" width="26" height="58" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="53" y="194" font-size="9" text-anchor="middle" fill="#633806">最小</text>
+<text x="53" y="208" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<path d="M66 199 L 76 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<rect x="578" y="170" width="26" height="58" rx="5" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.1" stroke-dasharray="3 2"/>
+<text x="591" y="194" font-size="9" text-anchor="middle" fill="#633806">最大</text>
+<text x="591" y="208" font-size="9" text-anchor="middle" fill="#633806">记录</text>
+<path d="M576 199 L 578 199" stroke="#D85A30" stroke-width="1.6" marker-end="url(#pgn)"/>
+<text x="334" y="254" font-size="11" text-anchor="middle" fill="#534AB7">一个槽 = 一组（4~8 条），槽里存的是这组「最大」那条的位置</text>
+<rect x="40" y="266" width="588" height="22" rx="6" fill="#f8f9fa" stroke="#c9ccd1" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="334" y="282" font-size="11" text-anchor="middle" fill="#6b7280">空闲空间：新记录从这里分配，用完触发页分裂</text>
+<rect x="40" y="296" width="588" height="22" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.1"/>
+<text x="334" y="312" font-size="11" text-anchor="middle" fill="#26215C">页尾（File Trailer）：校验和，判断这页有没有写坏</text>
+<rect x="664" y="60" width="332" height="286" rx="12" fill="#f8f9fa" stroke="#e2e4e9"/>
+<text x="684" y="86" font-size="13" font-weight="650" fill="#1a1c1e">找一行 id=5，Page 内部是怎么走的</text>
+<text x="684" y="112" font-size="12" fill="#534AB7" font-weight="600">① 在槽上二分</text>
+<text x="684" y="131" font-size="11.5" fill="#6b7280">id=5 大于槽 1 的边界（id=3），</text>
+<text x="684" y="148" font-size="11.5" fill="#6b7280">所以落到「槽 2」这一组。</text>
+<text x="684" y="176" font-size="12" fill="#D85A30" font-weight="600">② 进组里顺着链走几步</text>
+<text x="684" y="195" font-size="11.5" fill="#6b7280">槽 2 指到的是组内最大那条（id=6），</text>
+<text x="684" y="212" font-size="11.5" fill="#6b7280">从它往前沿链表走 2 步就碰到 id=5。</text>
+<text x="684" y="240" font-size="12" fill="#1D9E75" font-weight="600">③ 命中，取出整行</text>
+<text x="684" y="259" font-size="11.5" fill="#6b7280">叶子页里的这条记录就是完整数据。</text>
+<text x="684" y="288" font-size="12" font-weight="650" fill="#1a1c1e">为什么要分组</text>
+<text x="684" y="307" font-size="11.5" fill="#6b7280">一页上百条记录，从头顺链表要走上百步；</text>
+<text x="684" y="324" font-size="11.5" fill="#6b7280">分了组先二分、再走几步，最多十几步。</text>
+</svg>
+<p class="fig-cap">一页的内部：6 条记录分成 2 组（每组 3 条），一个槽管一组、只指向组内最大的那条；所有记录仍由 next_record 串成一条链</p>
+</div>
+
+<ul>
+  <li><strong>最小 / 最大记录</strong>：两条虚拟记录，比页内所有键都小 / 都大，是链表的头和尾，让「往前找、往后找」永远有落点。</li>
+  <li><strong>记录单向链表</strong>：每条记录存了「下一条记录的偏移量」，串成一条按键值排序的链。物理位置乱序，逻辑顺序严格。</li>
+  <li><strong>页目录（槽）</strong>：把页内记录<b>按 4~8 条分成若干组</b>，每组给一个「槽」，槽里只记这组里<b>最大那条记录</b>的位置（不是每条都记）。找一行时：先在槽上<b>二分</b>判断落在哪一组，再进那一组顺着链表走几步。</li>
+</ul>
+
+<h2 id="s6">6. 索引与数据怎么关联</h2>
+
+<p>
+表本身就是一棵按主键排序的 B+ 树（聚簇索引）；每多建一个索引，就多一棵 B+ 树，
+<strong>结构完全相同，只是叶子页里装的东西不同</strong>。
+</p>
+
+<div class="figure">
+<svg viewBox="0 0 1020 400" width="100%" role="img" aria-label="聚簇索引与二级索引、回表">
+<defs>
+<marker id="cga" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M2 1L8 5L2 9" fill="none" stroke="#D85A30" stroke-width="1.8" stroke-linecap="round"/></marker>
+<marker id="cgg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+  <path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/></marker>
+</defs>
+<text x="24" y="26" font-size="13" font-weight="650" fill="#534AB7">聚簇索引（主键 id）＝ 表数据本身</text>
+<rect x="150" y="40" width="240" height="34" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.5"/>
+<text x="270" y="62" font-size="11.5" text-anchor="middle" fill="#26215C">非叶页：1 ｜ 3 ｜ 5（键 + 子页号）</text>
+<path d="M200 76 L 100 116" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<path d="M270 76 L 270 116" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<path d="M340 76 L 440 116" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<rect x="40" y="118" width="150" height="66" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.5"/>
+<text x="115" y="140" font-size="11" text-anchor="middle" fill="#085041">叶子页</text>
+<text x="115" y="158" font-size="10.5" text-anchor="middle" fill="#085041" font-family="monospace">id=1</text>
+<text x="115" y="176" font-size="10" text-anchor="middle" fill="#1D9E75">name=ann, age=18（整行）</text>
+<rect x="210" y="118" width="150" height="66" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.5"/>
+<text x="285" y="140" font-size="11" text-anchor="middle" fill="#085041">叶子页</text>
+<text x="285" y="158" font-size="10.5" text-anchor="middle" fill="#085041" font-family="monospace">id=2</text>
+<text x="285" y="176" font-size="10" text-anchor="middle" fill="#1D9E75">name=ann, age=18（整行）</text>
+<rect x="380" y="118" width="150" height="66" rx="8" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1.5"/>
+<text x="455" y="140" font-size="11" text-anchor="middle" fill="#085041">叶子页</text>
+<text x="455" y="158" font-size="10.5" text-anchor="middle" fill="#085041" font-family="monospace">id=3</text>
+<text x="455" y="176" font-size="10" text-anchor="middle" fill="#1D9E75">name=ann, age=18（整行）</text>
+<text x="24" y="216" font-size="11.5" fill="#6b7280">主键在叶子页里找到的记录 = 完整一行，直接返回</text>
+<line x1="24" y1="238" x2="996" y2="238" stroke="#e2e4e9"/>
+<text x="24" y="266" font-size="13" font-weight="650" fill="#BA7517">二级索引（name）＝ 另一棵树</text>
+<rect x="560" y="280" width="240" height="34" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.5"/>
+<text x="680" y="302" font-size="11.5" text-anchor="middle" fill="#633806">非叶页：ann ｜ bob ｜ cat</text>
+<path d="M620 314 L 540 352" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<path d="M680 314 L 680 352" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<path d="M740 314 L 820 352" stroke="#888780" stroke-width="1.3" fill="none" marker-end="url(#cgg)"/>
+<rect x="470" y="354" width="140" height="42" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.5"/>
+<text x="540" y="374" font-size="10.5" text-anchor="middle" fill="#633806" font-family="monospace">(ann, 1)</text>
+<text x="540" y="390" font-size="9.5" text-anchor="middle" fill="#BA7517">叶子：索引列 + 主键</text>
+<rect x="640" y="354" width="140" height="42" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.5"/>
+<text x="710" y="374" font-size="10.5" text-anchor="middle" fill="#633806" font-family="monospace">(bob, 2)</text>
+<text x="710" y="390" font-size="9.5" text-anchor="middle" fill="#BA7517">叶子：索引列 + 主键</text>
+<rect x="810" y="354" width="140" height="42" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.5"/>
+<text x="880" y="374" font-size="10.5" text-anchor="middle" fill="#633806" font-family="monospace">(cat, 3)</text>
+<text x="880" y="390" font-size="9.5" text-anchor="middle" fill="#BA7517">叶子：索引列 + 主键</text>
+<path d="M540 375 C 400 375, 300 240, 190 190" stroke="#D85A30" stroke-width="2" fill="none" stroke-dasharray="6 4" marker-end="url(#cga)"/>
+<text x="330" y="300" font-size="12" font-weight="600" fill="#D85A30">回表：拿到主键 1</text>
+<text x="330" y="318" font-size="12" font-weight="600" fill="#D85A30">再走一遍主键树取整行</text>
+<text x="24" y="330" font-size="11.5" fill="#6b7280">如果 SELECT 的列（含主键）</text>
+<text x="24" y="348" font-size="11.5" fill="#6b7280">全在二级索引里 → 不用回表，</text>
+<text x="24" y="366" font-size="11.5" fill="#6b7280">这就是「覆盖索引」，EXPLAIN 显示</text>
+<text x="24" y="384" font-size="11.5" fill="#6b7280">Using index。</text>
+</svg>
+<p class="fig-cap">聚簇索引的叶子装着整行；二级索引的叶子只装「索引列 + 主键」</p>
+</div>
+
+<table>
+  <tr><th style="width:24%">查询方式</th><th>过程</th></tr>
+  <tr><td><b>主键查询</b></td><td>走聚簇索引，3 步到叶子页，<b>页里就是整行</b>，直接返回。</td></tr>
+  <tr><td><b>普通列查询</b></td><td>走二级索引拿到主键值 → <b>回表</b>再走一遍聚簇索引取整行。</td></tr>
+  <tr><td><b>覆盖索引</b></td><td>SELECT 的列全在二级索引里（含主键），<b>不用回表</b>，EXPLAIN 显示 <code>Using index</code>。</td></tr>
+</table>
+
+<h3>一次查询的完整旅程</h3>
+<ol>
+  <li>拿到主键值，比如 <code>WHERE id = 7</code>；</li>
+  <li>读<b>根页</b>：在槽上二分，7 落在键 7 这一组 → 顺着记录里的页号去<b>页 36</b>；</li>
+  <li>读<b>页 36</b>：7 指向<b>页 8</b>，继续往下；</li>
+  <li>读<b>页 8（叶子页）</b>：槽上二分 + 链上走几步，找到 <code>id = 7</code> 的记录；</li>
+  <li>聚簇索引的这一条记录<b>就是整行</b>，直接返回；二级索引则取出主键<b>回表</b>再来一遍。</li>
+</ol>
+
+<div class="note">
+真正可能产生磁盘 IO 的只有第 2~4 步的「读一页」，而根页几乎永远在 Buffer Pool 里，
+所以千万级表的一次主键查询，实际往往只有 1~2 次物理 IO。
+</div>
+
+<h2 id="s7">7. 速记卡</h2>
+
+<table>
+  <tr><th style="width:40%">问题</th><th>答案</th></tr>
+  <tr><td>节点是什么</td><td>一个 16KB 的数据页，页号是它的身份</td></tr>
+  <tr><td>页里固定有什么</td><td>页头、页目录（槽）、记录单向链表、最小/最大记录、页尾校验</td></tr>
+  <tr><td>非叶页存什么</td><td>键 + 子页号，只做导航，不存行数据</td></tr>
+  <tr><td>叶子页存什么</td><td>聚簇：整行；二级索引：索引列 + 主键</td></tr>
+  <tr><td>父页的键 = ？</td><td>子页里「最小的键」，只是边界路标（副本），不是另一条数据</td></tr>
+  <tr><td>键指向一行还是一页</td><td>非叶页的键指向一页（一段区间的起点），叶子页的键才指向一行</td></tr>
+  <tr><td>叶子层每页都连号吗</td><td>键区间连续，但页号不连续、也不从 0 开始，同树的页是散布的</td></tr>
+  <tr><td>一次查询几次 IO</td><td>最多等于树高（通常 3）；根页常驻内存，实际多为 1~2 次</td></tr>
+</table>
+
+<footer>
+  相关阅读：
+  <a href="bplus-tree-structure-and-innodb-page.html">B+ 树结构与 InnoDB 存储页（详解版）</a>
+  <a href="b-plus-tree-explainer.html">B+ 树：从数据页说起</a>
+  <a href="mysql-bplus-tree-io.html">B+ 树与磁盘 IO</a>
+  <a href="mysql-clustered-index.html">聚簇索引</a>
+  <a href="mysql-covering-index.html">覆盖索引</a>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 优化器详解（二）：完整工作过程（从解析到执行计划）</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #9ba3b5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.8; font-size: 16px;
+  }
+  .container { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 2.2rem; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+  .subtitle { color: var(--text2); font-size: 1rem; margin-bottom: 28px; }
+
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-bottom: 40px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 0.9rem; padding: 3px 10px; border-radius: 7px; background: rgba(108,140,255,0.08); }
+  .toc a:hover { background: rgba(108,140,255,0.18); }
+
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 1.35rem; font-weight: 700; color: var(--accent); margin-bottom: 16px; padding-left: 14px; border-left: 3px solid var(--accent); }
+  .section-title .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; margin-right: 8px; background: var(--accent); color: #fff; font-size: 0.85rem; font-weight: 700; vertical-align: middle; }
+
+  .callout { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin: 16px 0; }
+  .callout.tip { border-left: 4px solid var(--green); }
+  .callout.warn { border-left: 4px solid var(--orange); }
+  .callout.danger { border-left: 4px solid var(--red); }
+  .callout-key { font-weight: 700; color: var(--green); margin-bottom: 4px; }
+  .callout.warn .callout-key { color: var(--orange); }
+  .callout.danger .callout-key { color: var(--red); }
+
+  p { margin-bottom: 14px; }
+  h3 { color: var(--accent2); font-size: 1.08rem; margin: 20px 0 8px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 6px; }
+
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 16px 0; font-size: 14px; line-height: 1.7; }
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; }
+  pre code { color: var(--text); }
+  :not(pre) > code { background: var(--surface2); padding: 2px 7px; border-radius: 4px; font-size: 0.9em; color: var(--accent2); }
+  .kw { color: var(--accent); } .fn { color: var(--accent2); } .str { color: var(--green); } .cmt { color: #5a6078; font-style: italic; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.95rem; }
+  thead th { background: var(--surface2); padding: 12px 16px; text-align: left; font-weight: 700; font-size: 0.88rem; color: var(--accent); border-bottom: 2px solid var(--border); }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: var(--surface); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+  .badge-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-no  { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge-partial { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .panel h4 { font-size: 1.05rem; margin-bottom: 10px; color: var(--accent); }
+
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  /* stage explorer */
+  .widget { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; }
+  .widget-title { font-weight: 700; color: var(--accent2); margin-bottom: 4px; font-size: 1rem; }
+  .widget-desc { color: var(--text2); font-size: 0.86rem; margin-bottom: 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; flex-wrap: wrap; }
+  .seg .btn { border: none; border-radius: 0; border-right: 1px solid var(--border); }
+  .seg .btn:last-child { border-right: none; }
+  .btn { background: rgba(108,140,255,0.1); color: var(--accent); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 0.88rem; font-family: inherit; cursor: pointer; }
+  .btn:hover { background: rgba(108,140,255,0.22); }
+  .btn.active { background: var(--accent); color: #fff; }
+  .stage-detail { margin-top: 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .stage-detail h4 { color: var(--accent); font-size: 1.1rem; margin-bottom: 10px; }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 14px; font-size: 0.92rem; }
+  .kv .k { color: var(--text2); }
+  .kv .v { color: var(--text); }
+
+  /* pushdown demo */
+  .pd-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .pd-rows { font-family: 'JetBrains Mono', monospace; font-size: 0.86rem; }
+  .pd-rows .row { display: flex; gap: 10px; padding: 6px 12px; border-bottom: 1px dashed var(--border); }
+  .pd-rows .row:last-child { border-bottom: none; }
+  .pd-rows .row.keep { background: rgba(52,211,153,0.12); }
+  .pd-rows .row.drop { opacity: 0.32; }
+  .pd-rows .row.filtered { background: rgba(251,146,60,0.12); }
+  .pd-stat { margin-top: 10px; font-size: 0.9rem; color: var(--text2); }
+  .pd-stat b { color: var(--accent2); }
+
+  footer { text-align: center; color: #5a6078; font-size: 0.85rem; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .links { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MySQL 优化器详解（二）</h1>
+  <p class="subtitle">完整工作过程：一条 SQL 从解析树出发，经过逻辑改写、物理优化、计划改进，最终变成一棵执行计划树交给执行器的全流水线</p>
+
+  <nav class="toc">
+    <a href="#overview">① 总览：七阶段流水线</a>
+    <a href="#parse">② 解析 Parsing</a>
+    <a href="#resolve">③ 预处理 / 解析</a>
+    <a href="#logical">④ 逻辑优化（等价改写）</a>
+    <a href="#physical">⑤ 物理优化（CBO）</a>
+    <a href="#improve">⑥ 计划改进</a>
+    <a href="#execute">⑦ 计划生成与执行</a>
+    <a href="#observe">⑧ 可观测工具</a>
+    <a href="#walkthrough">⑨ 端到端走查</a>
+  </nav>
+
+  <!-- ① -->
+  <div class="section" id="overview">
+    <div class="section-title"><span class="num">①</span>总览：七阶段流水线</div>
+    <p>前文讲过优化器「基于代价选最优计划」。这一篇把它的内部流水线摊开。一条 SQL 进入优化器后，大体经过下面几个阶段（不同版本/查询细节略有差异，但骨架一致）：</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 120" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <defs>
+          <marker id="a2" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9ba3b5"/></marker>
+        </defs>
+        <g font-size="13" text-anchor="middle">
+          <rect x="6"   y="42" width="104" height="40" rx="8" fill="#232733" stroke="#2e3345"/><text x="58"  y="67" fill="#e4e7ef">① 解析</text>
+          <rect x="124" y="42" width="104" height="40" rx="8" fill="#232733" stroke="#2e3345"/><text x="176" y="67" fill="#e4e7ef">② 预处理</text>
+          <rect x="242" y="42" width="104" height="40" rx="8" fill="rgba(167,139,250,0.16)" stroke="#a78bfa"/><text x="294" y="67" fill="#a78bfa">③ 逻辑优化</text>
+          <rect x="360" y="42" width="104" height="40" rx="8" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/><text x="412" y="67" fill="#6c8cff">④ 物理优化</text>
+          <rect x="478" y="42" width="104" height="40" rx="8" fill="#232733" stroke="#2e3345"/><text x="530" y="67" fill="#e4e7ef">⑤ 计划改进</text>
+          <rect x="596" y="42" width="104" height="40" rx="8" fill="#232733" stroke="#2e3345"/><text x="648" y="67" fill="#e4e7ef">⑥ 生成/执行</text>
+        </g>
+        <g stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#a2)">
+          <line x1="110" y1="62" x2="122" y2="62"/>
+          <line x1="228" y1="62" x2="240" y2="62"/>
+          <line x1="346" y1="62" x2="358" y2="62"/>
+          <line x1="464" y1="62" x2="476" y2="62"/>
+          <line x1="582" y1="62" x2="594" y2="62"/>
+        </g>
+        <text x="380" y="108" fill="#5a6078" font-size="12.5" text-anchor="middle">③ ④ 是优化器最核心的两步：先「等价改写」，再用「代价模型」挑路</text>
+      </svg>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-key">怎么读这张图</div>
+      ①② 是「把 SQL 变成结构化内部表示」（合法 + 语义清楚）；③④⑤ 是优化器真正做功的地方；⑥ 把优化结果交给执行器。下面逐个阶段拆解，并可点击交互卡片查看每步的<b>输入 / 输出 / 观测工具</b>。
+    </div>
+
+    <!-- stage explorer -->
+    <div class="widget">
+      <div class="widget-title">阶段探索器：点开看每一步在干什么</div>
+      <div class="widget-desc">七阶段中，优化器相关的 ③④⑤ 已高亮。点击查看该阶段的输入、输出、关键动作与可观测手段。</div>
+      <div class="seg" id="stageSeg"></div>
+      <div class="stage-detail" id="stageDetail"></div>
+    </div>
+  </div>
+
+  <!-- ② -->
+  <div class="section" id="parse">
+    <div class="section-title"><span class="num">②</span>阶段 1：解析 Parsing（词法 + 语法）</div>
+    <p>解析器（Parser）把字符串 SQL 切词、按 MySQL 语法规则构建一棵<b>解析树（Parse Tree）</b>。它只验证「这句话 MySQL 认不认得」，不读任何用户数据、也不判断执行效率。</p>
+    <ul>
+      <li><b>词法分析</b>：把 <code>SELECT</code>、<code>FROM</code>、<code>users</code>、<code>=</code> 等拆成 token。</li>
+      <li><b>语法分析</b>：依据语法规则确认结构合法，生成解析树。</li>
+    </ul>
+    <p>我们日常遇到的 <code>ERROR 1064 (42000)</code> 语法错误、<code>Unknown column</code>（列名拼错，部分在解析阶段就能发现）就在这里抛出。<b>解析阶段不做表/列是否存在的最终判定</b>——那是下一步预处理的工作。</p>
+    <div class="callout warn">
+      <div class="callout-key">易错点</div>
+      解析树只是「语法骨架」，里面还没有把 <code>t1.id</code> 真正绑定到某张表的某一列，也没有展开视图。这些都在下一阶段补全。
+    </div>
+  </div>
+
+  <!-- ③ -->
+  <div class="section" id="resolve">
+    <div class="section-title"><span class="num">③</span>阶段 2：预处理 / 名称解析（Resolve）</div>
+    <p>预处理（也叫 Resolver）在解析树基础上做<b>语义绑定</b>，把它变成一棵「语义清楚」的查询树（Query Block）：</p>
+    <ul>
+      <li>检查<b>表、列是否真的存在</b>，权限是否够；</li>
+      <li>把 <code>SELECT a FROM t</code> 里的 <code>a</code> <b>绑定</b>到 <code>t</code> 的真实列；</li>
+      <li><b>展开视图</b>：把对视图的引用替换成视图定义的底层表查询；</li>
+      <li>处理派生表（<code>FROM (SELECT ...) </code>）、合并 <code>*</code> 成具体列列表；</li>
+      <li>初步识别 <b>Const Table</b> 雏形：带主键 / 唯一索引等值条件的表，最多命中一行。</li>
+    </ul>
+    <p>到这一步结束，优化器拿到的是一棵「每个节点都知道自己在说哪张表、哪一列」的查询树，可以放心地做等价变换了。</p>
+  </div>
+
+  <!-- ④ -->
+  <div class="section" id="logical">
+    <div class="section-title"><span class="num">④</span>阶段 3：逻辑优化（等价改写，不改变语义）</div>
+    <p>这是优化器的「变形金刚」阶段：<b>在不改变查询结果的前提下，把查询重写成等价的、更容易被高效执行的形式</b>。所有变换只动「逻辑结构」，不关心底层存储。这一步的输出仍是逻辑计划，但已经「更好优化」了。</p>
+
+    <table>
+      <thead><tr><th>等价变换</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>子查询扁平化 / 上拉</td><td>把 <code>IN (SELECT ...)</code> 等子查询转成 JOIN 或半连接（semi-join），避免逐行嵌套执行</td></tr>
+        <tr><td>视图合并</td><td>把视图拆解为基础表查询，让优化器能跨视图做索引选择</td></tr>
+        <tr><td>外连接转内连接</td><td>若 WHERE 已过滤掉 NULL 侧，<code>LEFT JOIN</code> 可安全转成 <code>INNER JOIN</code>，扩大优化空间</td></tr>
+        <tr><td>谓词下推（Predicate Pushdown）</td><td>把过滤条件尽可能<b>提前到离数据最近的地方</b>，减少后续 JOIN / 计算的数据量（见下方交互）</td></tr>
+        <tr><td>等值推导 / 常量传播</td><td>由 <code>a.id = b.id AND b.id = 5</code> 推导出 <code>a.id = 5</code>，多一条可用索引路径</td></tr>
+        <tr><td>常量折叠 / 冗余消除</td><td><code>WHERE 1=1 AND status='x'</code> 化简、<code>WHERE col = col</code> 这类恒真/恒假判定</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="callout-key">可观测（已核实）</div>
+      这些改写都记录在 <code>optimizer_trace</code> 里：<code>SET optimizer_trace="enabled=on";</code> 跑完 SQL 后查 <code>information_schema.OPTIMIZER_TRACE</code>，<code>steps.transformations_to_nested_joins</code>、<code>steps.condition_processing</code> 等字段能看到改写痕迹。
+    </div>
+
+    <!-- pushdown demo -->
+    <div class="widget">
+      <div class="widget-title">谓词下推演示</div>
+      <div class="widget-desc">同一句带过滤的 JOIN：开启「下推」时，过滤在 JOIN 之前就砍掉行；关闭时，先 JOIN 一大堆再过滤。看右侧「实际处理行数」的差异。</div>
+      <div class="pd-controls">
+        <span>谓词下推：</span>
+        <div class="seg" id="pdSeg">
+          <button class="btn active" data-on="1">开启</button>
+          <button class="btn" data-on="0">关闭</button>
+        </div>
+      </div>
+      <div class="pd-rows" id="pdRows"></div>
+      <div class="pd-stat" id="pdStat"></div>
+    </div>
+  </div>
+
+  <!-- ⑤ -->
+  <div class="section" id="physical">
+    <div class="section-title"><span class="num">⑤</span>阶段 4：物理优化（CBO 核心，算代价挑路）</div>
+    <p>逻辑计划「怎么写」定了，但「怎么执行」还没定。物理优化基于<b>代价模型</b>，为查询里的每个表、每种 JOIN 组合估算代价并选最优。这是优化器最重的一块，包含四件事：</p>
+
+    <h3>4.1 初始分析 + Const Table 检测</h3>
+    <p>先对每个表估算「可能的访问行数」与代价，并识别出 <b>Const Table</b>：带主键 / 唯一索引等值条件的表，最多一行。优化器会在优化期就<b>真的去取这一行</b>，其列值在后续优化中直接当<b>常量</b>用，让估算更准；若取不到行，甚至能提前判定整条查询 0 行、直接短路。</p>
+
+    <h3>4.2 访问路径选择（Access Path）</h3>
+    <p>对每张表，在「全表扫描」与「各索引访问」之间选最便宜的：</p>
+    <table>
+      <thead><tr><th>访问方式</th><th>含义</th><th>典型 type</th></tr></thead>
+      <tbody>
+        <tr><td>全表扫描</td><td>顺序读所有行</td><td><code>ALL</code></td></tr>
+        <tr><td>ref</td><td>非唯一索引等值查找</td><td><code>ref</code></td></tr>
+        <tr><td>range</td><td>索引范围扫描（<code>BETWEEN</code> / <code>IN</code> / <code>&gt;</code>）</td><td><code>range</code></td></tr>
+        <tr><td>index / cover</td><td>纯索引扫描 / 覆盖索引（不用回表）</td><td><code>index</code></td></tr>
+        <tr><td>index merge</td><td>多个索引结果做交/并</td><td><code>index_merge</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.3 JOIN 顺序与算法选择</h3>
+    <ul>
+      <li><b>JOIN 顺序</b>：用贪心搜索（<code>best_extension_by_limited_search</code>）+ 剪枝（<code>optimizer_prune_level=1</code>）枚举顺序，优先让「小表 / 强过滤表」先做，减少后续被 JOIN 的行数。</li>
+      <li><b>JOIN 算法</b>：
+        <ul>
+          <li><b>嵌套循环 NLJ</b>：外表逐行，拿连接键去内表（有索引时很快）；</li>
+          <li><b>批量主键访问 BKA</b>：把外键批量送进内表索引，减少随机 IO；</li>
+          <li><b>哈希连接 Hash Join</b>：MySQL <b>8.0.18+</b> 引入，把内表建哈希表，适合大表无索引场景。</li>
+        </ul>
+      </li>
+    </ul>
+
+    <h3>4.4 代价估算</h3>
+    <p>对每个候选计划，用统计信息估「会扫多少行、读多少页」，代入代价模型算出总代价，<b>选最小者</b>。这一步就是上一篇讲的「统计信息 × 代价模型」的落地。</p>
+
+    <div class="callout warn">
+      <div class="callout-key">为什么有时会选错</div>
+      代价估算依赖统计信息。若统计过期（长时间没 <code>ANALYZE TABLE</code>）、或数据严重倾斜又没建直方图，估计行数会偏差，进而「全表扫描比索引便宜」的误判——表现为「有索引却不走」。用 <code>FORCE INDEX</code> 或优化器提示（hint）可临时纠偏。
+    </div>
+  </div>
+
+  <!-- ⑥ -->
+  <div class="section" id="improve">
+    <div class="section-title"><span class="num">⑥</span>阶段 5：计划改进（排序 / 分组 / 聚合）</div>
+    <p>选出基础 JOIN 计划后，优化器再做一轮针对「排序、分组、聚合」的改进，目标是<b>尽量少用临时表和文件排序（filesort）</b>：</p>
+    <ul>
+      <li><b>ORDER BY 优化</b>：若 JOIN 顺序 + 索引本身已按 <code>ORDER BY</code> 字段有序（<code>test_if_skip_sort_order</code>），则<b>直接免排序</b>；</li>
+      <li><b>GROUP BY 优化</b>：能用索引「松索引扫描（loose index scan）」跳过组内重复行最好；否则考虑流式聚合或建临时表；</li>
+      <li><b>DISTINCT</b>：尽量借索引天然去重，或退化成 GROUP BY；</li>
+      <li>决定是否需要<b>临时表</b>、用内存还是磁盘临时表（磁盘临时表代价高很多，见上一篇代价常数）。</li>
+    </ul>
+  </div>
+
+  <!-- ⑦ -->
+  <div class="section" id="execute">
+    <div class="section-title"><span class="num">⑦</span>阶段 6：执行计划生成与执行</div>
+    <p>优化结束，输出是一棵<b>执行计划树（AccessPath）</b>——描述「先扫哪张表、走哪个索引、怎么 JOIN、在哪排序」。MySQL 8.0.18+ 用 <b>Volcano（火山）迭代器模型</b>把它变成真正可执行的结构：</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 620 200" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <g font-size="13" text-anchor="middle">
+          <rect x="250" y="10" width="120" height="38" rx="8" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/><text x="310" y="33" fill="#6c8cff">LimitIterator</text>
+          <rect x="250" y="70" width="120" height="38" rx="8" fill="#232733" stroke="#2e3345"/><text x="310" y="93" fill="#e4e7ef">NestedLoop</text>
+          <rect x="80"  y="130" width="130" height="38" rx="8" fill="#232733" stroke="#2e3345"/><text x="145" y="153" fill="#e4e7ef">IndexScan(A)</text>
+          <rect x="400" y="130" width="130" height="38" rx="8" fill="#232733" stroke="#2e3345"/><text x="465" y="153" fill="#e4e7ef">Ref(B on A.id)</text>
+        </g>
+        <g stroke="#9ba3b5" stroke-width="1.5" fill="none">
+          <path d="M310,48 L310,68"/>
+          <path d="M270,108 L150,128"/>
+          <path d="M350,108 L450,128"/>
+        </g>
+        <text x="310" y="190" fill="#5a6078" font-size="12.5" text-anchor="middle">执行器自顶向下调 Read()，行像水一样从叶子（扫描）冒泡到根（Limit）</text>
+      </svg>
+    </div>
+
+    <p>执行器按火山模型驱动这棵树：从根迭代器开始，递归向下要数据，<b>Init → 反复 Read → Cleanup</b>。每一层迭代器向子层要一行、处理后再向上吐一行，直到 Limit 截断或取完。所有「读页、取行、锁、buffer pool」的脏活，都在最底层的扫描迭代器里交给存储引擎。</p>
+
+    <div class="callout tip">
+      <div class="callout-key">一句话串起两篇</div>
+      优化器产出的 AccessPath 树，就是执行器手里的「作战地图」；执行器带着这张地图去存储引擎「调兵」。优化器算得越准，执行器跑得越省。
+    </div>
+  </div>
+
+  <!-- ⑧ -->
+  <div class="section" id="observe">
+    <div class="section-title"><span class="num">⑧</span>可观测工具：看清优化器到底选了啥</div>
+    <div class="two-col">
+      <div class="panel">
+        <h4>EXPLAIN</h4>
+        <p>在 SELECT 前加 <code>EXPLAIN</code>，看选中的执行计划：<code>type</code>（访问方式）、<code>key</code>（用了哪个索引）、<code>rows</code>（估计扫描行数）、<code>Extra</code>（是否用了覆盖索引 / filesort / 临时表）。</p>
+        <p>8.0 支持 <code>FORMAT=TREE</code>（树状，直观显示 JOIN 嵌套）与 <code>FORMAT=JSON</code>（含 cost_info 详细代价）。</p>
+      </div>
+      <div class="panel">
+        <h4>optimizer_trace</h4>
+        <p><code>SET optimizer_trace="enabled=on";</code> 然后执行目标 SQL，再查 <code>information_schema.OPTIMIZER_TRACE</code>。</p>
+        <p>能看全优化器内部：考虑了哪些 JOIN 顺序、每个访问路径的代价、为什么选了某个索引、做了哪些逻辑改写。是「优化器选错」时定位根因的终极工具。</p>
+      </div>
+    </div>
+    <pre><code><span class="cmt">-- 看计划</span>
+<span class="kw">EXPLAIN</span> <span class="kw">FORMAT</span>=TREE
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> A <span class="kw">JOIN</span> B <span class="kw">ON</span> A.id=B.aid <span class="kw">WHERE</span> A.status=<span class="str">'paid'</span>;
+
+<span class="cmt">-- 看优化器内心戏</span>
+<span class="kw">SET</span> optimizer_trace=<span class="str">"enabled=on"</span>;
+<span class="kw">SELECT</span> ... ;  <span class="cmt">-- 你的目标 SQL</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> information_schema.OPTIMIZER_TRACE;</code></pre>
+  </div>
+
+  <!-- ⑨ -->
+  <div class="section" id="walkthrough">
+    <div class="section-title"><span class="num">⑨</span>端到端走查：一条 SQL 的一生</div>
+    <pre><code><span class="kw">SELECT</span> o.id, c.name
+<span class="kw">FROM</span> orders o <span class="kw">JOIN</span> customers c <span class="kw">ON</span> o.cid = c.id
+<span class="kw">WHERE</span> o.status = <span class="str">'paid'</span> <span class="kw">AND</span> c.region = <span class="str">'cn'</span>
+<span class="kw">ORDER</span> <span class="kw">BY</span> o.created_at <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> 20;</code></pre>
+    <table>
+      <thead><tr><th>阶段</th><th>这条 SQL 身上发生的事</th></tr></thead>
+      <tbody>
+        <tr><td>② 解析</td><td>确认语法合法，生成解析树。</td></tr>
+        <tr><td>③ 预处理</td><td>绑定 <code>o</code>→orders、<code>c</code>→customers，展开列，确认 <code>o.cid</code>=<code>c.id</code> 合法。</td></tr>
+        <tr><td>④ 逻辑优化</td><td>把 <code>o.status='paid'</code>、<code>c.region='cn'</code> 这两类过滤条件下推到各自表的扫描之前；无子查询/视图可合并。</td></tr>
+        <tr><td>⑤ 物理优化</td><td>估算：orders 用 <code>idx_status</code> 比全表扫便宜 → 选 ref/range；customers 用主键 <code>c.id</code> 做 NLJ 内表查找；决定先扫 orders（小结果集）再 JOIN customers。算出各组合代价取最小。</td></tr>
+        <tr><td>⑥ 计划改进</td><td><code>ORDER BY o.created_at</code>：若 <code>idx_status</code> 不含 created_at，需 filesort；优化器评估「索引顺序是否满足」决定要不要额外排序；<code>LIMIT 20</code> 让排序只需保留前 20。</td></tr>
+        <tr><td>⑦ 生成/执行</td><td>产出 AccessPath 树（IndexScan(orders) → NLJ → customers → Sort → Limit），执行器由 Limit 向下驱动，最终吐回 20 行。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p>WorkBuddy · 数据库系统 · MySQL · 优化器系列（二）</p>
+    <p class="links">同系列：<a href="mysql-optimizer-intro.html">优化器是什么 / 为什么 / 实现原理（一）</a> · 姊妹篇：<a href="../02-indexes/mysql-null-value.html">NULL 值与索引失效</a></p>
+    <p style="margin-top:8px"><a href="../../index.html">← 返回 MySQL / 关系型数据库索引</a></p>
+  </footer>
+</div>
+
+<script>
+/* ---------- 阶段探索器 ---------- */
+(function () {
+  var stages = [
+    { n:'①', name:'解析 Parsing', in:'原始 SQL 字符串', out:'解析树 Parse Tree',
+      act:'词法切词 + 语法规则构建解析树；只验证语法合法性', tool:'报错 ERROR 1064 / Unknown column', sym:'编译期错误' },
+    { n:'②', name:'预处理 Resolve', in:'解析树', out:'语义绑定的查询树 Query Block',
+      act:'检查表/列存在与权限、绑定列、展开视图/派生表、识别 Const Table 雏形', tool:'表/列不存在报错', sym:'语义错误' },
+    { n:'③', name:'逻辑优化', in:'查询树', out:'等价改写后的逻辑计划',
+      act:'子查询扁平化、视图合并、外连接转内连接、谓词下推、等值推导、常量折叠', tool:'optimizer_trace.steps.transformations', sym:'等价变换' },
+    { n:'④', name:'物理优化 (CBO)', in:'逻辑计划 + 统计信息', out:'带代价标注的候选计划集',
+      act:'Const Table 检测、访问路径选择、JOIN 顺序(贪心+剪枝)、JOIN 算法、逐计划代价估算', tool:'EXPLAIN / optimizer_trace.considered_execution_plans', sym:'算代价' },
+    { n:'⑤', name:'计划改进', in:'基础 JOIN 计划', out:'含排序/分组/聚合策略的计划',
+      act:'判断能否借索引免排序、loose index scan、是否需临时表(内存/磁盘)', tool:'EXPLAIN Extra: Using filesort / temporary', sym:'避免 filesort' },
+    { n:'⑥', name:'生成与执行', in:'最终执行计划树 AccessPath', out:'结果集',
+      act:'火山迭代器模型：执行器 Init→Read→Cleanup，驱动存储引擎取数', tool:'慢查询日志 / EXPLAIN ANALYZE', sym:'真正跑' },
+    { n:'⚙', name:'统计信息(贯穿)', in:'数据抽样', out:'cardinality / 直方图',
+      act:'InnoDB 持久化统计(默认开)，供 ④ 估算行数；会失真需 ANALYZE TABLE', tool:'mysql.innodb_table_stats / innodb_index_stats', sym:'被 ④ 依赖' }
+  ];
+  var seg = document.getElementById('stageSeg');
+  var detail = document.getElementById('stageDetail');
+  stages.forEach(function (s, i) {
+    var b = document.createElement('button');
+    b.className = 'btn' + (i === 0 ? ' active' : '');
+    b.textContent = s.n + ' ' + s.name;
+    b.addEventListener('click', function () {
+      document.querySelectorAll('#stageSeg .btn').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      render(s);
+    });
+    seg.appendChild(b);
+  });
+  function render(s) {
+    detail.innerHTML =
+      '<h4>' + s.n + ' ' + s.name + '</h4>' +
+      '<div class="kv">' +
+        '<div class="k">输入</div><div class="v">' + s.in + '</div>' +
+        '<div class="k">输出</div><div class="v">' + s.out + '</div>' +
+        '<div class="k">关键动作</div><div class="v">' + s.act + '</div>' +
+        '<div class="k">观测工具</div><div class="v">' + s.tool + '</div>' +
+        '<div class="k">本质</div><div class="v">' + s.sym + '</div>' +
+      '</div>';
+  }
+  render(stages[0]);
+})();
+
+/* ---------- 谓词下推演示 ---------- */
+(function () {
+  // 模拟：orders 1000 行，过滤后剩 50 行；再 JOIN customers
+  var all = 1000, filtered = 50;
+  var seg = document.getElementById('pdSeg');
+  var rows = document.getElementById('pdRows');
+  var stat = document.getElementById('pdStat');
+
+  function render(on) {
+    var html = '';
+    if (on) {
+      // 下推：先过滤 orders 到 filtered 行，再 JOIN
+      html += row('orders 扫描(过滤后)', filtered, 'keep');
+      html += row('customers 被 JOIN 探测', filtered, 'keep');
+      html += row('最终返回', filtered, 'keep');
+    } else {
+      // 不下推：先 JOIN 全部 all 行，再过滤
+      html += row('orders 扫描(全量)', all, 'keep');
+      html += row('customers 被 JOIN 探测', all, 'drop');
+      html += row('JOIN 后过滤剩', filtered, 'filtered');
+    }
+    rows.innerHTML = html;
+    var process = on ? filtered * 2 : all * 2;
+    stat.innerHTML = '实际流经 JOIN 的行数：<b>' + process.toLocaleString() + '</b> 行' +
+      (on ? '（过滤提前，数据量骤减 ✅）' : '（先 JOIN 全部再砍，浪费 ' + (all - filtered) + ' 行处理 ❌）');
+  }
+  function row(label, n, cls) {
+    return '<div class="row ' + cls + '"><span>' + label + '</span><span style="margin-left:auto">' + n.toLocaleString() + ' 行</span></div>';
+  }
+
+  seg.querySelectorAll('.btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      seg.querySelectorAll('.btn').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      render(b.dataset.on === '1');
+    });
+  });
+  render(true);
+})();
+</script>
+</body>
+</html>

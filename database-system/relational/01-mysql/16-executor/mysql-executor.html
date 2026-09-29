@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 执行器详解：输入是执行计划，输出是结果集，中间怎么跑</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #9ba3b5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.8; font-size: 16px;
+  }
+  .container { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 2.2rem; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+  .subtitle { color: var(--text2); font-size: 1rem; margin-bottom: 28px; }
+
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-bottom: 40px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 0.9rem; padding: 3px 10px; border-radius: 7px; background: rgba(108,140,255,0.08); }
+  .toc a:hover { background: rgba(108,140,255,0.18); }
+
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 1.35rem; font-weight: 700; color: var(--accent); margin-bottom: 16px; padding-left: 14px; border-left: 3px solid var(--accent); }
+  .section-title .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; margin-right: 8px; background: var(--accent); color: #fff; font-size: 0.85rem; font-weight: 700; vertical-align: middle; }
+
+  .callout { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin: 16px 0; }
+  .callout.tip { border-left: 4px solid var(--green); }
+  .callout.warn { border-left: 4px solid var(--orange); }
+  .callout.danger { border-left: 4px solid var(--red); }
+  .callout-key { font-weight: 700; color: var(--green); margin-bottom: 4px; }
+  .callout.warn .callout-key { color: var(--orange); }
+  .callout.danger .callout-key { color: var(--red); }
+
+  p { margin-bottom: 14px; }
+  h3 { color: var(--accent2); font-size: 1.08rem; margin: 20px 0 8px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 6px; }
+
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 16px 0; font-size: 14px; line-height: 1.7; }
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; }
+  pre code { color: var(--text); }
+  :not(pre) > code { background: var(--surface2); padding: 2px 7px; border-radius: 4px; font-size: 0.9em; color: var(--accent2); }
+  .kw { color: var(--accent); } .fn { color: var(--accent2); } .str { color: var(--green); } .cmt { color: #5a6078; font-style: italic; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.95rem; }
+  thead th { background: var(--surface2); padding: 12px 16px; text-align: left; font-weight: 700; font-size: 0.88rem; color: var(--accent); border-bottom: 2px solid var(--border); }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: var(--surface); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+  .badge-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-no  { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge-partial { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .panel h4 { font-size: 1.05rem; margin-bottom: 10px; color: var(--accent); }
+
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  /* widget */
+  .widget { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; }
+  .widget-title { font-weight: 700; color: var(--accent2); margin-bottom: 4px; font-size: 1rem; }
+  .widget-desc { color: var(--text2); font-size: 0.86rem; margin-bottom: 14px; }
+  .btn { background: rgba(108,140,255,0.1); color: var(--accent); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 0.88rem; font-family: inherit; cursor: pointer; }
+  .btn:hover { background: rgba(108,140,255,0.22); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .step-badge { color: var(--text2); font-size: 0.86rem; font-family: 'JetBrains Mono', monospace; }
+
+  /* 迭代器树 */
+  .itree { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+  .itree-lvl { display: flex; justify-content: center; gap: 18px; }
+  .inode {
+    border: 1px solid var(--border); border-radius: 9px; padding: 9px 14px; font-size: 0.9rem;
+    background: var(--surface); color: var(--text2); font-family: 'JetBrains Mono', monospace;
+    text-align: center; min-width: 150px; transition: all .18s ease;
+  }
+  .inode.active { border-color: var(--accent); background: rgba(108,140,255,0.18); color: #fff; font-weight: 700; box-shadow: 0 0 0 2px rgba(108,140,255,0.25); }
+  .inode.emit { border-color: var(--green); background: rgba(52,211,153,0.18); color: #fff; font-weight: 700; }
+  .iarrow { text-align: center; color: #5a6078; font-size: 0.9rem; line-height: 1.4; }
+  .ibranch { display: flex; justify-content: center; gap: 18px; align-items: flex-start; }
+  .ibir { text-align: center; }
+
+  /* 执行轨迹 */
+  .trace { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; max-height: 260px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.75; }
+  .trace .tl { color: var(--text2); }
+  .trace .tl.cur { color: var(--accent); font-weight: 700; }
+  .trace .tag { color: var(--orange); }
+  .trace .ok { color: var(--green); }
+  .cur-desc { margin-top: 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; padding: 12px 16px; font-size: 0.92rem; color: var(--text); }
+
+  footer { text-align: center; color: #5a6078; font-size: 0.85rem; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .links { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MySQL 执行器详解</h1>
+  <p class="subtitle">输入是优化器给的执行计划（AccessPath 树），输出是一行行的结果——中间靠一棵 RowIterator 树把它们跑出来</p>
+
+  <nav class="toc">
+    <a href="#s1">① 先给结论</a>
+    <a href="#s2">② 输入：AccessPath</a>
+    <a href="#s3">③ 计划 → 迭代器树</a>
+    <a href="#s4">④ 统一接口 RowIterator</a>
+    <a href="#s5">⑤ 火山模型怎么跑</a>
+    <a href="#s6">⑥ 常见迭代器清单</a>
+    <a href="#s7">⑦ 新老执行器对比</a>
+    <a href="#s8">⑧ 输出是什么</a>
+    <a href="#s9">⑨ 执行过程演示</a>
+    <a href="#s10">⑩ 怎么观察 / 速记</a>
+  </nav>
+
+  <!-- ① -->
+  <div class="section" id="s1">
+    <div class="section-title"><span class="num">①</span>先给结论：输入是什么，输出是什么</div>
+
+    <p>执行器在整条 SQL 链路里的位置非常明确：它夹在<b>优化器</b>和<b>存储引擎</b>之间，是一个「照着图纸干活」的部件。</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 140" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <defs>
+          <marker id="m1" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9ba3b5"/></marker>
+        </defs>
+        <g font-size="13" text-anchor="middle">
+          <rect x="8"   y="30" width="120" height="46" rx="9" fill="#232733" stroke="#2e3345"/><text x="68" y="52" fill="#e4e7ef">解析器</text><text x="68" y="68" fill="#5a6078" font-size="11">SQL → 解析树</text>
+          <rect x="152" y="30" width="120" height="46" rx="9" fill="rgba(167,139,250,0.16)" stroke="#a78bfa"/><text x="212" y="52" fill="#a78bfa">优化器</text><text x="212" y="68" fill="#5a6078" font-size="11">选最优计划</text>
+          <rect x="296" y="24" width="160" height="58" rx="10" fill="rgba(108,140,255,0.2)" stroke="#6c8cff"/><text x="376" y="48" fill="#6c8cff" font-size="14" font-weight="700">执行器</text><text x="376" y="66" fill="#9ba3b5" font-size="11">照计划逐行取数</text><text x="376" y="80" fill="#5a6078" font-size="10">（本文主角）</text>
+          <rect x="480" y="30" width="120" height="46" rx="9" fill="rgba(52,211,153,0.14)" stroke="#34d399"/><text x="540" y="52" fill="#34d399">存储引擎</text><text x="540" y="68" fill="#5a6078" font-size="11">InnoDB 取行</text>
+          <rect x="624" y="30" width="120" height="46" rx="9" fill="#232733" stroke="#2e3345"/><text x="684" y="52" fill="#e4e7ef">客户端</text><text x="684" y="68" fill="#5a6078" font-size="11">结果集</text>
+        </g>
+        <g stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#m1)">
+          <line x1="128" y1="53" x2="150" y2="53"/>
+          <line x1="272" y1="53" x2="294" y2="53"/>
+          <line x1="456" y1="53" x2="478" y2="53"/>
+          <line x1="600" y1="53" x2="622" y2="53"/>
+        </g>
+        <g font-size="11.5" fill="#9ba3b5">
+          <text x="289" y="16" text-anchor="middle">执行计划（AccessPath 树）</text>
+          <text x="539" y="96" text-anchor="middle">一行一行</text>
+        </g>
+        <text x="376" y="124" fill="#5a6078" font-size="12" text-anchor="middle">执行器不「决定」怎么查 —— 那是优化器的活；执行器只负责「按决定好的方式把数据取出来」</text>
+      </svg>
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <h4>⬅ 输入：执行计划</h4>
+        <p>优化器产出的<b>AccessPath 树</b>——一棵描述「先访问哪张表、用什么访问方式、怎么 JOIN、怎么排序」的计划树。它<b>不是</b> <code>EXPLAIN</code> 打出来的那张表（那只是计划的一种展示形式）。详见 ②。</p>
+      </div>
+      <div class="panel">
+        <h4>➡ 输出：结果</h4>
+        <p>对 <code>SELECT</code>：一行行的<b>结果行</b>，边算边发给客户端（流式，不先把整个结果集攒在内存里）。<br>对 <code>INSERT/UPDATE/DELETE</code>：<b>影响行数</b>，并且真正去改存储引擎里的数据。详见 ⑧。</p>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-key">一句话</div>
+      执行器 = <b>把「计划树」翻译成「一行行数据」的机器</b>。它不做决策，只做执行；它的核心机制是<b>迭代器（Iterator）模型</b>。
+    </div>
+  </div>
+
+  <!-- ② -->
+  <div class="section" id="s2">
+    <div class="section-title"><span class="num">②</span>输入到底是什么：执行计划 = AccessPath 树</div>
+
+    <p>先破一个常见误解：<b>执行计划不是 <code>EXPLAIN</code> 那张表格</b>。<code>EXPLAIN</code> 只是把计划<b>打印</b>成人类可读的形式；计划本身在内存里是一棵 <code>AccessPath</code> 树，由优化器在 Optimize 阶段生成。</p>
+
+    <p>在 MySQL 8.0 的源码里，<code>AccessPath</code> 大致长这样（简化）：</p>
+
+<pre><code><span class="kw">struct</span> AccessPath {
+  <span class="cmt">// ① 这一步是什么类型的操作</span>
+  <span class="kw">enum</span> Type : uint8_t {
+    TABLE_SCAN, INDEX_SCAN, REF, REF_OR_NULL, EQ_REF,
+    ... MRR, ... DELETE_ROWS, UPDATE_ROWS
+  } type;
+
+  <span class="cmt">// ② 优化器估算出来的代价</span>
+  <span class="kw">double</span> cost{-1.0};
+
+  <span class="cmt">// ③ 不同类型各自需要的参数（用 union 省空间）</span>
+  <span class="kw">union</span> {
+    <span class="kw">struct</span> { TABLE *table; } table_scan;
+    <span class="kw">struct</span> { TABLE *table; <span class="kw">int</span> idx; <span class="kw">bool</span> use_order; <span class="kw">bool</span> reverse; } index_scan;
+    ...
+  } u;
+};</code></pre>
+
+    <div class="callout">
+      <div class="callout-key">所以「计划」到底描述了什么</div>
+      每个 <code>AccessPath</code> 节点回答三件事：<b>做什么操作</b>（type，比如全表扫 / 索引扫 / 等值引用）、<b>对谁做</b>（union 里的表、索引、方向等参数）、<b>大概多贵</b>（cost）。把这些节点按父子关系串起来，就是一条完整的取数路线。
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-key">注意：cost 是估算值，执行器并不用它</div>
+      <code>cost</code> 是优化器<b>挑路时</b>用的依据；一旦计划定下来，执行器就只是照着走，<b>运行时不再看 cost</b>。想知道真实耗时和行数，要看 <code>EXPLAIN ANALYZE</code>（见 ⑩）。
+    </div>
+  </div>
+
+  <!-- ③ -->
+  <div class="section" id="s3">
+    <div class="section-title"><span class="num">③</span>计划怎么被执行：AccessPath → RowIterator 树</div>
+
+    <p>执行器拿到 AccessPath 树后，会把它「翻译」成一棵<b>迭代器树</b>：<b>每个 AccessPath 节点对应创建一个 RowIterator 对象</b>，父子关系保持不变。</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <defs>
+          <marker id="p1" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9ba3b5"/></marker>
+        </defs>
+
+        <text x="180" y="20" font-size="13" font-weight="700" fill="#a78bfa" text-anchor="middle">AccessPath 树（优化器产出）</text>
+        <text x="580" y="20" font-size="13" font-weight="700" fill="#6c8cff" text-anchor="middle">RowIterator 树（执行器产出）</text>
+
+        <line x1="340" y1="130" x2="420" y2="130" stroke="#6c8cff" stroke-width="2" marker-end="url(#p1)"/>
+        <text x="380" y="122" font-size="11" fill="#6c8cff" text-anchor="middle">编译</text>
+
+        <!-- 左：AccessPath -->
+        <rect x="90" y="40" width="180" height="38" rx="8" fill="rgba(167,139,250,0.16)" stroke="#a78bfa"/>
+        <text x="180" y="64" font-size="12" fill="#a78bfa" text-anchor="middle">FILTER (WHERE)</text>
+
+        <line x1="180" y1="78" x2="180" y2="104" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+
+        <rect x="90" y="106" width="180" height="38" rx="8" fill="rgba(167,139,250,0.16)" stroke="#a78bfa"/>
+        <text x="180" y="130" font-size="12" fill="#a78bfa" text-anchor="middle">NESTED_LOOP_JOIN</text>
+
+        <line x1="140" y1="144" x2="115" y2="170" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+        <line x1="220" y1="144" x2="245" y2="170" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+
+        <rect x="42" y="172" width="140" height="36" rx="8" fill="#232733" stroke="#2e3345"/>
+        <text x="112" y="195" font-size="11.5" fill="#e4e7ef" text-anchor="middle">TABLE_SCAN t1</text>
+
+        <rect x="178" y="172" width="140" height="36" rx="8" fill="#232733" stroke="#2e3345"/>
+        <text x="248" y="195" font-size="11.5" fill="#e4e7ef" text-anchor="middle">REF t2 (key=a)</text>
+
+        <!-- 右：Iterator -->
+        <rect x="490" y="40" width="180" height="38" rx="8" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/>
+        <text x="580" y="64" font-size="12" fill="#6c8cff" text-anchor="middle">FilterIterator</text>
+
+        <line x1="580" y1="78" x2="580" y2="104" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+
+        <rect x="490" y="106" width="180" height="38" rx="8" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/>
+        <text x="580" y="130" font-size="12" fill="#6c8cff" text-anchor="middle">NestedLoopIterator</text>
+
+        <line x1="540" y1="144" x2="515" y2="170" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+        <line x1="620" y1="144" x2="645" y2="170" stroke="#9ba3b5" stroke-width="1.4" marker-end="url(#p1)"/>
+
+        <rect x="442" y="172" width="140" height="36" rx="8" fill="#232733" stroke="#2e3345"/>
+        <text x="512" y="195" font-size="11.5" fill="#e4e7ef" text-anchor="middle">TableScanIterator</text>
+
+        <rect x="578" y="172" width="140" height="36" rx="8" fill="#232733" stroke="#2e3345"/>
+        <text x="648" y="195" font-size="11.5" fill="#e4e7ef" text-anchor="middle">RefIterator</text>
+
+        <text x="380" y="232" font-size="12" fill="#5a6078" text-anchor="middle">一一对应：计划里一个节点 → 执行时一个迭代器对象；父子结构原样保留</text>
+      </svg>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-key">为什么叫「编译」</div>
+      因为这一步是<b>静态的翻译</b>：把「描述怎么做」的数据结构，变成「真的会做」的对象。翻译完成后，执行就只剩下反复调用同一套接口——这正是迭代器模型的好处。
+    </div>
+  </div>
+
+  <!-- ④ -->
+  <div class="section" id="s4">
+    <div class="section-title"><span class="num">④</span>统一接口：所有迭代器都只有这几个方法</div>
+
+    <p>MySQL 8.0 把执行器重写的第一件事，就是定一个通用 C++ 基类 <code>RowIterator</code>。不管是全表扫描、索引查找、JOIN、排序还是聚合，<b>全都继承它、实现同一套接口</b>：</p>
+
+<pre><code><span class="kw">class</span> RowIterator {
+ <span class="kw">public</span>:
+  <span class="cmt">// 打开：申请资源、定位到起始位置；可重复调用以重置</span>
+  <span class="kw">virtual bool</span> <span class="fn">Init</span>() = 0;
+
+  <span class="cmt">// 拉一行：把下一行读进记录缓冲。返回 0 = 拿到一行，-1 = 没有更多行了</span>
+  <span class="kw">virtual int</span> <span class="fn">Read</span>() = 0;
+
+  <span class="cmt">// 设置 NULL 行标记（外连接补 NULL 时用）</span>
+  <span class="kw">virtual void</span> <span class="fn">SetNullRowFlag</span>(<span class="kw">bool</span> is_null_row) = 0;
+
+  <span class="cmt">// 释放行锁：某行被过滤掉后，允许在低隔离级别下提前放锁</span>
+  <span class="kw">virtual void</span> <span class="fn">UnlockRow</span>() = 0;
+};</code></pre>
+
+    <table>
+      <thead><tr><th>方法</th><th>作用</th><th>关键点</th></tr></thead>
+      <tbody>
+        <tr><td><code>Init()</code></td><td>打开资源、做好取数准备</td><td><b>可以被反复调用</b>，每次调用都会把迭代器重置回起点。像 <code>SortingIterator</code> 就是把「排序」这件事放在 <code>Init()</code> 里做</td></tr>
+        <tr><td><code>Read()</code></td><td>取下一行</td><td>整个执行器的<b>心脏</b>。返回 <code>0</code> 表示拿到一行，返回 <code>-1</code> 表示数据取完了（EOF）</td></tr>
+        <tr><td><code>SetNullRowFlag()</code></td><td>标记「这行是补出来的 NULL 行」</td><td>外连接（LEFT JOIN）里右表无匹配时要补 NULL，靠它标记</td></tr>
+        <tr><td><code>UnlockRow()</code></td><td>释放该行的锁</td><td>行被 WHERE 过滤掉后，在较低隔离级别下可以提前放锁，减少锁持有时间</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ⑤ -->
+  <div class="section" id="s5">
+    <div class="section-title"><span class="num">⑤</span>火山模型：一行一行「拉」出来</div>
+
+    <p>这套 <code>Init → Read → Read → … → 结束</code> 的套路，就是数据库里经典的 <b>Volcano（火山）模型 / 迭代器模型</b>：每个关系运算都实现成迭代器，暴露 <b>open → next → close</b> 协议；MySQL 里对应 <b>Init → Read → End</b>。</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <defs>
+          <marker id="v1" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#6c8cff"/></marker>
+        </defs>
+
+        <text x="380" y="18" font-size="13" font-weight="700" fill="#e4e7ef" text-anchor="middle">拉取（Pull）模型：根问儿子要，儿子问孙子要</text>
+
+        <!-- 层级 -->
+        <rect x="290" y="34" width="180" height="40" rx="9" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/>
+        <text x="380" y="59" font-size="12" fill="#6c8cff" text-anchor="middle">根：FilterIterator</text>
+
+        <rect x="290" y="98" width="180" height="40" rx="9" fill="rgba(108,140,255,0.18)" stroke="#6c8cff"/>
+        <text x="380" y="123" font-size="12" fill="#6c8cff" text-anchor="middle">NestedLoopIterator</text>
+
+        <rect x="150" y="162" width="160" height="40" rx="9" fill="#232733" stroke="#2e3345"/>
+        <text x="230" y="187" font-size="12" fill="#e4e7ef" text-anchor="middle">TableScan t1</text>
+
+        <rect x="450" y="162" width="160" height="40" rx="9" fill="#232733" stroke="#2e3345"/>
+        <text x="530" y="187" font-size="12" fill="#e4e7ef" text-anchor="middle">Ref t2</text>
+
+        <!-- 向下请求 -->
+        <g stroke="#6c8cff" stroke-width="1.8" marker-end="url(#v1)">
+          <line x1="368" y1="74" x2="368" y2="96"/>
+          <line x1="358" y1="138" x2="248" y2="160"/>
+          <line x1="402" y1="138" x2="512" y2="160"/>
+        </g>
+        <text x="336" y="94" font-size="11" fill="#6c8cff" text-anchor="end">Read()</text>
+        <text x="300" y="156" font-size="11" fill="#6c8cff" text-anchor="end">Read()</text>
+        <text x="462" y="156" font-size="11" fill="#6c8cff">Read()</text>
+
+        <!-- 向上返回行 -->
+        <g stroke="#34d399" stroke-width="1.8" stroke-dasharray="5 3" marker-end="url(#v1)">
+          <line x1="240" y1="160" x2="352" y2="140"/>
+          <line x1="520" y1="160" x2="408" y2="140"/>
+          <line x1="392" y1="96" x2="392" y2="76"/>
+        </g>
+        <text x="600" y="100" font-size="11.5" fill="#34d399" text-anchor="start">↑ 行从叶子往根上冒</text>
+        <text x="600" y="118" font-size="11" fill="#5a6078" text-anchor="start">每次只冒一行</text>
+        <text x="600" y="140" font-size="11" fill="#5a6078" text-anchor="start">不需要先把整张表</text>
+        <text x="600" y="156" font-size="11" fill="#5a6078" text-anchor="start">装进内存</text>
+
+        <text x="380" y="222" font-size="12" fill="#5a6078" text-anchor="middle">控制流「向下」问，数据流「向上」走 —— 这就是 Pull（拉）模型</text>
+      </svg>
+    </div>
+
+    <h3>执行主循环（语义化）</h3>
+<pre><code><span class="cmt">// 执行器入口，语义化伪代码</span>
+<span class="kw">if</span> (root-&gt;<span class="fn">Init</span>()) <span class="kw">return</span> error;      <span class="cmt">// 打开整棵树</span>
+
+<span class="kw">while</span> (root-&gt;<span class="fn">Read</span>() == 0) {        <span class="cmt">// 每拉一次 = 得到一行结果</span>
+    send_row_to_client(...);       <span class="cmt">// 立刻发走，不攒着</span>
+}
+
+root-&gt;<span class="fn">End</span>();                        <span class="cmt">// 收尾，释放资源</span></code></pre>
+
+    <div class="callout tip">
+      <div class="callout-key">这个模型带来的三个直接好处</div>
+      <ul style="margin:8px 0 0 18px">
+        <li><b>流式、省内存。</b>行是一行一行往上冒的，不必先把中间结果全部物化。根拿到第 1 行就能发给客户端。</li>
+        <li><b>可自由组合。</b>每个迭代器只关心「我从儿子拉一行、加工后交给父亲」，接口统一，拼装新算子很容易。</li>
+        <li><b>易扩展也易观测。</b>想加测量（如 <code>EXPLAIN ANALYZE</code>）只要在迭代器外面<b>包一层计时/计数的壳</b>，不用改算子本身。</li>
+      </ul>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-key">别和「推送」搞混</div>
+      老执行器里<b>混用了推和拉</b>（有的算子推数据、有的拉数据），这也是它难维护的原因之一。新的迭代器执行器是<b>统一的拉取模型</b>：永远是父亲向儿子要。
+    </div>
+  </div>
+
+  <!-- ⑥ -->
+  <div class="section" id="s6">
+    <div class="section-title"><span class="num">⑥</span>常见迭代器清单</div>
+
+    <p>MySQL 8.0 实现的迭代器有很多，按职责大致分几类（下面是其中常见的代表）：</p>
+
+    <table>
+      <thead><tr><th>类别</th><th>迭代器</th><th>干什么</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="4"><b>取数</b><br>（叶子节点）</td><td><code>TableScanIterator</code></td><td>全表顺序扫描，调存储引擎 <code>ha_rnd_next</code> 一行行取</td></tr>
+        <tr><td><code>IndexScanIterator</code></td><td>全索引扫描，用 <code>ha_index_next</code> / <code>ha_index_prev</code></td></tr>
+        <tr><td><code>IndexRangeScanIterator</code></td><td>索引范围扫描，包装了老的 <code>QUICK_SELECT_I</code></td></tr>
+        <tr><td><code>ConstIterator</code> / <code>FakeSingleRowIterator</code></td><td>常量表（优化期已确定最多一行）取数</td></tr>
+
+        <tr><td rowspan="4"><b>连接</b></td><td><code>NestedLoopIterator</code></td><td>嵌套循环连接（内连接 / 外连接 / 反连接）</td></tr>
+        <tr><td><code>RefIterator</code> / <code>EQRefIterator</code></td><td>用某个键去右表取匹配行（<code>ref</code> / <code>eq_ref</code>）</td></tr>
+        <tr><td><code>RefOrNullIterator</code></td><td>类似 ref，但要额外处理 NULL 的情况</td></tr>
+        <tr><td><code>HashJoinIterator</code></td><td>哈希连接（8.0.18+）：<b>也只是「另一个迭代器」</b>，内存够就在内存做，不够就落盘</td></tr>
+
+        <tr><td rowspan="3"><b>排序</b></td><td><code>SortingIterator</code></td><td>排序；<b>排序动作发生在 <code>Init()</code> 里</b></td></tr>
+        <tr><td><code>SortBufferIterator</code> / <code>SortFileIterator</code></td><td>从内存缓冲 / 临时文件里读已排好序的结果</td></tr>
+        <tr><td><code>SortBufferIndirectIterator</code> / <code>SortFileIndirectIterator</code></td><td>先读行 ID 再回表取完整行</td></tr>
+
+        <tr><td rowspan="4"><b>其它</b></td><td><code>FilterIterator</code></td><td>过滤，实现 <code>WHERE</code> / <code>HAVING</code></td></tr>
+        <tr><td><code>AggregateIterator</code></td><td>聚合，以及可选的分组</td></tr>
+        <tr><td><code>LimitOffsetIterator</code></td><td>实现 <code>LIMIT ... OFFSET</code></td></tr>
+        <tr><td><code>MaterializeIterator</code></td><td>把结果<b>物化</b>进临时表，再从临时表里读（如某些派生表 / UNION / 去重）</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <div class="callout-key">留意「物化」这个例外</div>
+      流式是常态，但<b>不是所有算子都能流式</b>。排序必须先把数据收齐才能排；哈希连接要先建哈希表。<code>MaterializeIterator</code>、<code>SortingIterator</code> 这类节点会在内部先把数据攒起来——这也是为什么某些查询会突然产生临时表或落盘（<code>Using temporary</code> / <code>Using filesort</code>）。
+    </div>
+  </div>
+
+  <!-- ⑦ -->
+  <div class="section" id="s7">
+    <div class="section-title"><span class="num">⑦</span>为什么要重写：新执行器 vs 老执行器</div>
+
+    <p>MySQL 8.0 之所以要大改执行器，是因为老实现里有<b>六套各自为政的抽象</b>，混着 C++ 类和 C 函数指针：</p>
+
+    <table>
+      <thead><tr><th>老的抽象</th><th>负责什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>QUICK_SELECT_I</code></td><td>各种基于索引的访问方式（range scan、index merge、group min/max）</td></tr>
+        <tr><td><code>READ_RECORD</code></td><td>包装全表扫、全索引扫、sort buffer 结果等的读取</td></tr>
+        <tr><td><code>QEP_TAB</code>（<code>read_first_record</code>）</td><td>各种连接访问类型（REF / EQ_REF / 全文等）</td></tr>
+        <tr><td><code>QEP_operation</code></td><td>临时表、join buffer（BNL / BKA）</td></tr>
+        <tr><td><code>QEP_TAB::next_select</code></td><td>嵌套循环连接、GROUP BY 等</td></tr>
+        <tr><td><code>Query_result</code></td><td>UNION、EXISTS 提前结束、把结果发给客户端</td></tr>
+      </tbody>
+    </table>
+
+    <div class="two-col">
+      <div class="panel">
+        <h4>❌ 老实现的问题</h4>
+        <ul style="margin:0 0 0 18px">
+          <li>没有统一接口，扩展性差</li>
+          <li>实现方式不统一（C 函数指针 + C++ 类混用）</li>
+          <li>抽象层次不清，代码难读难懂</li>
+          <li>耦合度高，后续难以优化</li>
+          <li><b>推送与拉取两种数据模型混用</b></li>
+          <li>排序、去重、物化等操作甚至绕开了这些抽象，用特殊代码写</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h4>✅ 新实现的改进</h4>
+        <ul style="margin:0 0 0 18px">
+          <li>统一的 C++ 基类 <code>RowIterator</code></li>
+          <li>所有算子同一种写法，一套接口</li>
+          <li><b>统一的拉取（Pull）模型</b></li>
+          <li>算子可自由组合，加新算子容易</li>
+          <li>天然支持在外面包一层做测量（<code>EXPLAIN ANALYZE</code> 就是这么实现的）</li>
+          <li>逐行流式，内存占用更可控</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ⑧ -->
+  <div class="section" id="s8">
+    <div class="section-title"><span class="num">⑧</span>输出到底是什么</div>
+
+    <div class="two-col">
+      <div class="panel">
+        <h4>SELECT：一行行结果</h4>
+        <p>根迭代器每 <code>Read()</code> 出一行，就交给结果发送逻辑<b>立刻发给客户端</b>。所以：</p>
+        <ul style="margin:8px 0 0 18px">
+          <li>客户端往往<b>还没等查询跑完</b>就已经收到前几行了；</li>
+          <li>服务端不需要为整个结果集准备一大块内存；</li>
+          <li>但如果上层还需要排序/去重，就会被迫先攒齐（见 ⑥ 的物化）。</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h4>DML：改动 + 影响行数</h4>
+        <p><code>INSERT / UPDATE / DELETE</code> 走的是对应的 <code>DELETE_ROWS</code>、<code>UPDATE_ROWS</code> 等计划节点：读到的行不发给客户端，而是<b>交给存储引擎去改</b>，并累计<b>影响行数</b>返回。</p>
+        <p style="margin-top:8px">这也是为什么一条 <code>UPDATE</code> 的执行计划里，前面照样是「扫描 + 过滤」——先把要改的行捞出来，再改。</p>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-key">记住：输出是「行」，不是一个完整结果对象</div>
+      无论 SELECT 还是 DML，执行器的产出粒度都是<b>行</b>。SELECT 的行流向客户端，DML 的行流向存储引擎。这个统一的「逐行」视角，正是迭代器模型的核心。
+    </div>
+  </div>
+
+  <!-- ⑨ -->
+  <div class="section" id="s9">
+    <div class="section-title"><span class="num">⑨</span>动手看：迭代器树是怎么一步步跑的</div>
+
+    <div class="widget">
+      <div class="widget-title">执行过程演示</div>
+      <div class="widget-desc">
+        示例查询：<code>SELECT * FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.x &gt; 10</code><br>
+        点「下一步」，看控制权怎么从根往下问、行怎么从叶子往上冒。
+      </div>
+
+      <div class="itree">
+        <div class="itree-lvl"><div class="inode" id="n-filter">FilterIterator<br><span style="font-size:.8em">WHERE t1.x &gt; 10</span></div></div>
+        <div class="iarrow">↓ Read()</div>
+        <div class="itree-lvl"><div class="inode" id="n-nl">NestedLoopIterator</div></div>
+        <div class="iarrow">↓&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓</div>
+        <div class="ibranch">
+          <div class="ibir"><div class="inode" id="n-ts">TableScanIterator<br><span style="font-size:.8em">t1（叶子）</span></div></div>
+          <div class="ibir"><div class="inode" id="n-ref">RefIterator<br><span style="font-size:.8em">t2（叶子，key=t1.a）</span></div></div>
+        </div>
+      </div>
+
+      <div class="trace" id="trace"></div>
+      <div class="cur-desc" id="curDesc"></div>
+
+      <div class="btn-row" style="margin-top:14px;margin-bottom:0">
+        <button class="btn" id="btnPrev">上一步</button>
+        <button class="btn" id="btnNext">下一步 →</button>
+        <button class="btn" id="btnReset">重置</button>
+        <span class="step-badge" id="stepBadge"></span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <div class="callout-key">演示里值得注意的三件事</div>
+      <ul style="margin:8px 0 0 18px">
+        <li><b>被 WHERE 过滤掉的行不会「攒着」</b>——过滤发生在行往上冒的过程中，不合格就丢弃并继续拉下一行。</li>
+        <li><b>连接是「左边取一行、右边按 key 找匹配」</b>——这就是嵌套循环的本质，也是为什么右表有索引时快得多。</li>
+        <li><b>结束靠叶子返回 EOF</b>——t1 扫完了，<code>Read()</code> 返回 <code>-1</code>，这个「没了」的信号会一路传回根，整棵树的执行就结束了。</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ⑩ -->
+  <div class="section" id="s10">
+    <div class="section-title"><span class="num">⑩</span>怎么观察执行器 + 速记</div>
+
+    <h3>EXPLAIN FORMAT=TREE：直接看迭代器树</h3>
+    <p>普通 <code>EXPLAIN</code> 给的是表格；<code>FORMAT=TREE</code> 给的是<b>接近迭代器树形状</b>的缩进输出，最能反映执行器实际拿到的是什么。</p>
+
+<pre><code>EXPLAIN FORMAT=TREE
+SELECT * FROM t1 JOIN t2 ON t1.a = t2.a;
+
+<span class="cmt">-&gt; Inner hash join (t2.a = t1.a)  (cost=0.70 rows=1)</span>
+    <span class="cmt">-&gt; Table scan on t2  (cost=0.35 rows=1)</span>
+    <span class="cmt">-&gt; Hash</span>
+        <span class="cmt">-&gt; Table scan on t1  (cost=0.35 rows=1)</span></code></pre>
+
+    <h3>EXPLAIN ANALYZE（8.0.18+）：真跑一遍并测量</h3>
+    <p>它会在迭代器外面<b>包一层测量节点</b>，然后真正执行查询，输出<b>实际</b>的首行时间、末行时间、行数和循环次数：</p>
+
+<pre><code>EXPLAIN ANALYZE SELECT * FROM t1 JOIN t2 ON t1.a = t2.a;
+
+<span class="cmt">-&gt; Inner hash join (t2.a = t1.a) (cost=0.70 rows=1)
+   (actual time=0.441..0.441 rows=0 loops=1)</span>
+    <span class="cmt">-&gt; Table scan on t2 (cost=0.35 rows=1) (never executed)</span>
+    <span class="cmt">-&gt; Hash</span>
+        <span class="cmt">-&gt; Table scan on t1 (cost=0.35 rows=1)
+           (actual time=0.220..0.220 rows=0 loops=1)</span></code></pre>
+
+    <div class="callout warn">
+      <div class="callout-key">⚠ EXPLAIN ANALYZE 会真的执行这条 SQL</div>
+      对 <code>SELECT</code> 只是多跑一遍；但对 <code>UPDATE</code> / <code>DELETE</code>，<b>数据会被真的改掉</b>。别在生产库上对写操作直接用它。
+    </div>
+
+    <h3>速记</h3>
+    <table>
+      <thead><tr><th>问题</th><th>答案</th></tr></thead>
+      <tbody>
+        <tr><td>输入是什么</td><td>优化器产出的<b>AccessPath 执行计划树</b>（不是 EXPLAIN 表格）</td></tr>
+        <tr><td>输出是什么</td><td>SELECT → 一行行结果（流式发给客户端）；DML → 对存储引擎的改动 + 影响行数</td></tr>
+        <tr><td>怎么执行</td><td>计划树 → <b>RowIterator 迭代器树</b> → 火山/拉取模型跑起来</td></tr>
+        <tr><td>统一接口</td><td><code>Init()</code> 打开（可重置）、<code>Read()</code> 取一行（0=有行，-1=结束）、<code>SetNullRowFlag()</code>、<code>UnlockRow()</code></td></tr>
+        <tr><td>数据怎么流动</td><td>控制流向下问、数据流向上冒，<b>每次一行</b>（Pull 模型）</td></tr>
+        <tr><td>为什么 8.0 要重写</td><td>老实现六套抽象混用 C 函数指针、推拉混用、难扩展；新实现统一 C++ 接口 + 统一 Pull</td></tr>
+        <tr><td>什么时候不能流式</td><td>排序、去重、物化、哈希建表等必须先攒齐数据</td></tr>
+        <tr><td>怎么观察</td><td><code>EXPLAIN FORMAT=TREE</code>（看树形计划）、<code>EXPLAIN ANALYZE</code>（真跑并测量，写操作慎用）</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="callout-key">一句话记住执行器</div>
+      <b>优化器决定「怎么走」，执行器负责「走一遍」——它拿到一棵 AccessPath 计划树，翻译成 RowIterator 树，然后从根开始一行一行往外拉，直到叶子说「没了」。</b>
+    </div>
+  </div>
+
+  <footer>
+    <div class="links">
+      相关阅读：
+      <a href="../15-optimizer/mysql-optimizer-workflow.html">优化器：完整工作过程</a> ·
+      <a href="../15-optimizer/mysql-optimizer-intro.html">优化器：是什么/为什么/原理</a> ·
+      <a href="../15-optimizer/mysql-explain.html">EXPLAIN 详解</a> ·
+      <a href="../01-architecture/mysql-execution-plan.html">MySQL 执行计划</a> ·
+      <a href="../01-architecture/mysql-sql-execution-flow.html">一条 SQL 的执行全流程</a> ·
+      <a href="../../index.html">返回关系型数据库首页</a>
+    </div>
+    <p style="margin-top:10px">基于 MySQL 8.0 的迭代器执行器（RowIterator / AccessPath）整理；具体实现随版本演进，以官方文档与源码为准。</p>
+  </footer>
+</div>
+
+<script>
+var steps = [
+  {node:'filter', act:'Init', tag:'Init', txt:'root FilterIterator.Init()',
+   desc:'执行从根开始。根迭代器的 Init() 会沿着树往下传，把整棵树都打开。',
+   log:'Filter.Init()'},
+
+  {node:'nl', act:'Init', tag:'Init', txt:'NestedLoopIterator.Init()',
+   desc:'传到连接节点，它继续往下初始化两个子节点。',
+   log:'  NestedLoop.Init()'},
+
+  {node:'ts', act:'Init', tag:'Init', txt:'TableScanIterator(t1).Init()',
+   desc:'叶子节点真正去打开表：让存储引擎准备好，游标定位到第一行之前。',
+   log:'    TableScan(t1).Init()  → 打开表，定位到起点'},
+
+  {node:'ref', act:'Init', tag:'Init', txt:'RefIterator(t2).Init()',
+   desc:'右表的 ref 迭代器也准备好。它稍后会用「左表当前行的 a 值」作为 key 去 t2 里查。',
+   log:'    Ref(t2).Init()  → 准备好按 key 查找'},
+
+  {node:'filter', act:'Read', tag:'Read', txt:'Filter.Read() → 转调子节点',
+   desc:'初始化完成，开始取数。根要一行，自己没有数据，只能向下问。',
+   log:'Filter.Read()  → 向下要一行'},
+
+  {node:'nl', act:'Read', tag:'Read', txt:'NestedLoop.Read() → 先向左表要',
+   desc:'连接节点的逻辑：先从左边取一行，再用这行的连接键去右边找匹配。',
+   log:'  NestedLoop.Read() → 向左表要一行'},
+
+  {node:'ts', act:'Read', tag:'Read', txt:'TableScan(t1).Read() → 第 1 行 (a=1, x=5)',
+   desc:'叶子真正干活：调存储引擎接口取到一行，往上返回。这就是「数据流向上」的第一步。',
+   log:'    TableScan(t1).Read() → 返回行 (a=1, x=5)'},
+
+  {node:'ref', act:'Read', tag:'Read', txt:'Ref(t2).Read() 用 key=1 查 → 命中 1 行',
+   desc:'连接节点拿左行的 a=1 作为 key，去 t2 里查匹配行。有索引的话这一步很快——这就是 ref 访问类型的含义。',
+   log:'    Ref(t2).Read(key=1) → 命中 1 行'},
+
+  {node:'nl', act:'Read', tag:'join', txt:'拼出连接后的行，返回给 Filter',
+   desc:'左右两行拼成结果行，交给父节点。',
+   log:'  NestedLoop → 拼出行，返回给 Filter'},
+
+  {node:'filter', act:'Read', tag:'filter', txt:'Filter 判断 x=5 &gt; 10 ？不满足 → 丢弃',
+   desc:'WHERE 在这里生效。不合格的行直接丢弃（并可在低隔离级别下释放该行锁），不会被攒起来，也不会发给客户端。',
+   log:'  Filter: x=5 &gt; 10 ? 否 → 丢弃该行，UnlockRow()'},
+
+  {node:'ts', act:'Read', tag:'Read', txt:'TableScan(t1).Read() → 第 2 行 (a=2, x=20)',
+   desc:'继续拉下一行。注意：左表只前进了一行，右表会为每一行重新查找。',
+   log:'    TableScan(t1).Read() → 返回行 (a=2, x=20)'},
+
+  {node:'ref', act:'Read', tag:'Read', txt:'Ref(t2).Read() 用 key=2 查 → 命中 2 行',
+   desc:'为新的左行重新查右表，这次匹配到 2 行。',
+   log:'    Ref(t2).Read(key=2) → 命中 2 行'},
+
+  {node:'filter', act:'emit', tag:'emit', txt:'Filter 判断 x=20 &gt; 10 ？满足 → 输出给客户端',
+   desc:'这一行通过了 WHERE，于是沿着树向上返回到根，由结果发送逻辑立刻发给客户端——客户端不必等整个查询结束。',
+   log:'  Filter: x=20 &gt; 10 ? 是 → ✅ 输出一行给客户端'},
+
+  {node:'ts', act:'Read', tag:'EOF', txt:'TableScan(t1).Read() → 返回 -1（EOF）',
+   desc:'t1 扫完了。叶子返回 -1，表示「我这边没有了」。',
+   log:'    TableScan(t1).Read() → -1（EOF）'},
+
+  {node:'nl', act:'Read', tag:'EOF', txt:'NestedLoop.Read() → 返回 -1',
+   desc:'左边取不到新行了，连接自然也就结束了，把 EOF 继续往上传。',
+   log:'  NestedLoop.Read() → -1（EOF）'},
+
+  {node:'filter', act:'Read', tag:'EOF', txt:'Filter.Read() → 返回 -1 → 执行结束',
+   desc:'EOF 一路传到根，while 循环退出。最后调用 End() 收尾释放资源。',
+   log:'Filter.Read() → -1 → 循环结束，End() 释放资源'}
+];
+
+var idx = 0;
+var traceEl = document.getElementById('trace');
+var descEl = document.getElementById('curDesc');
+var badge = document.getElementById('stepBadge');
+var nodeIds = {filter:'n-filter', nl:'n-nl', ts:'n-ts', ref:'n-ref'};
+
+function render(){
+  // 高亮
+  Object.keys(nodeIds).forEach(function(k){
+    var el = document.getElementById(nodeIds[k]);
+    el.classList.remove('active','emit');
+  });
+  var st = steps[idx];
+  var activeEl = document.getElementById(nodeIds[st.node]);
+  if (st.act === 'emit') activeEl.classList.add('emit');
+  else activeEl.classList.add('active');
+
+  // 轨迹
+  var html = '';
+  for (var i = 0; i <= idx; i++){
+    var s = steps[i];
+    var cls = (i === idx) ? 'tl cur' : 'tl';
+    html += '<div class="' + cls + '"><span class="tag">[' + s.tag + ']</span> ' + s.log + '</div>';
+  }
+  traceEl.innerHTML = html;
+  traceEl.scrollTop = traceEl.scrollHeight;
+
+  descEl.innerHTML = '<b>' + st.txt + '</b><br>' + st.desc;
+  badge.textContent = '第 ' + (idx+1) + ' / ' + steps.length + ' 步';
+
+  document.getElementById('btnPrev').disabled = (idx === 0);
+  document.getElementById('btnNext').disabled = (idx === steps.length - 1);
+}
+
+document.getElementById('btnNext').onclick = function(){
+  if (idx < steps.length - 1){ idx++; render(); }
+};
+document.getElementById('btnPrev').onclick = function(){
+  if (idx > 0){ idx--; render(); }
+};
+document.getElementById('btnReset').onclick = function(){
+  idx = 0; render();
+};
+render();
+</script>
+
+</body>
+</html>

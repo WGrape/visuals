@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 优化器详解（一）：它是什么、为什么需要、实现原理</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #9ba3b5;
+    --accent: #6c8cff;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --orange: #fb923c;
+    --red: #f87171;
+    --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.8;
+    font-size: 16px;
+  }
+  .container { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 {
+    font-size: 2.2rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .subtitle { color: var(--text2); font-size: 1rem; margin-bottom: 28px; }
+
+  .toc {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 22px; margin-bottom: 40px; display: flex; flex-wrap: wrap; gap: 8px 14px;
+  }
+  .toc a { color: var(--accent); text-decoration: none; font-size: 0.9rem; padding: 3px 10px; border-radius: 7px; background: rgba(108,140,255,0.08); }
+  .toc a:hover { background: rgba(108,140,255,0.18); }
+
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 1.35rem; font-weight: 700; color: var(--accent); margin-bottom: 16px; padding-left: 14px; border-left: 3px solid var(--accent); }
+  .section-title .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 7px; margin-right: 8px;
+    background: var(--accent); color: #fff; font-size: 0.85rem; font-weight: 700; vertical-align: middle;
+  }
+
+  .callout { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin: 16px 0; }
+  .callout.tip { border-left: 4px solid var(--green); }
+  .callout.warn { border-left: 4px solid var(--orange); }
+  .callout.danger { border-left: 4px solid var(--red); }
+  .callout-key { font-weight: 700; color: var(--green); margin-bottom: 4px; }
+  .callout.warn .callout-key { color: var(--orange); }
+  .callout.danger .callout-key { color: var(--red); }
+
+  p { margin-bottom: 14px; }
+  h3 { color: var(--accent2); font-size: 1.08rem; margin: 20px 0 8px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 6px; }
+
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 16px 0; font-size: 14px; line-height: 1.7; }
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; }
+  pre code { color: var(--text); }
+  :not(pre) > code { background: var(--surface2); padding: 2px 7px; border-radius: 4px; font-size: 0.9em; color: var(--accent2); }
+  .kw { color: var(--accent); } .fn { color: var(--accent2); } .str { color: var(--green); } .cmt { color: #5a6078; font-style: italic; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.95rem; }
+  thead th { background: var(--surface2); padding: 12px 16px; text-align: left; font-weight: 700; font-size: 0.88rem; color: var(--accent); border-bottom: 2px solid var(--border); }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: var(--surface); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+  .badge-yes { background: rgba(52,211,153,0.15); color: var(--green); }
+  .badge-no  { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge-partial { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .panel h4 { font-size: 1.05rem; margin-bottom: 10px; color: var(--accent); }
+
+  .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 18px 0; }
+  @media (max-width: 760px) { .pillars { grid-template-columns: 1fr; } }
+  .pillar { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; border-top: 3px solid var(--accent); }
+  .pillar:nth-child(2) { border-top-color: var(--accent2); }
+  .pillar:nth-child(3) { border-top-color: var(--green); }
+  .pillar h4 { font-size: 1.05rem; margin-bottom: 8px; }
+  .pillar .peg { font-size: 0.78rem; color: var(--text2); margin-bottom: 10px; }
+
+  /* pipeline svg */
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; }
+
+  /* cost simulator */
+  .widget { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 18px 0; }
+  .widget-title { font-weight: 700; color: var(--accent2); margin-bottom: 4px; font-size: 1rem; }
+  .widget-desc { color: var(--text2); font-size: 0.86rem; margin-bottom: 14px; }
+  .field { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .field label { min-width: 140px; color: var(--text2); font-size: 0.9rem; }
+  input[type="number"], select, .btn {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 0.95rem; font-family: inherit;
+  }
+  input[type="number"] { width: 130px; }
+  .btn { background: rgba(108,140,255,0.14); border-color: var(--accent); color: var(--accent); cursor: pointer; }
+  .btn:hover { background: rgba(108,140,255,0.26); }
+  .btn.active { background: var(--accent); color: #fff; }
+  .plan-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; }
+  @media (max-width: 760px) { .plan-cards { grid-template-columns: 1fr; } }
+  .plan { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .plan.win { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .plan .ptitle { font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .plan .cost { font-size: 1.8rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+  .plan .rows { font-size: 0.85rem; color: var(--text2); margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
+  .plan .tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 99px; background: rgba(52,211,153,0.15); color: var(--green); }
+  .plan .formula { font-size: 0.8rem; color: var(--text2); margin-top: 8px; font-family: 'JetBrains Mono', monospace; line-height: 1.6; }
+
+  footer { text-align: center; color: #5a6078; font-size: 0.85rem; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .links { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MySQL 优化器详解（一）</h1>
+  <p class="subtitle">优化器是什么、为什么非它不可、它靠哪三块基石（统计信息 / 代价模型 / 搜索策略）算出最优执行计划</p>
+
+  <nav class="toc">
+    <a href="#what">① 优化器是什么</a>
+    <a href="#why">② 为什么需要</a>
+    <a href="#principle">③ 实现原理总览</a>
+    <a href="#stats">④ 统计信息</a>
+    <a href="#cost">⑤ 代价模型</a>
+    <a href="#search">⑥ 搜索与枚举</a>
+    <a href="#vs">⑦ 优化器 vs 执行器</a>
+    <a href="#cheat">⑧ 速查清单</a>
+  </nav>
+
+  <!-- ① -->
+  <div class="section" id="what">
+    <div class="section-title"><span class="num">①</span>优化器是什么：SQL 执行链路里的「导航规划师」</div>
+    <p>一条 SQL 从客户端发到返回结果，中间要过好几道关卡。MySQL 把整条链路拆成了职责清晰的几段，<b>优化器（Optimizer）</b>夹在「解析器」和「执行器」之间：它不碰数据、不读磁盘，只负责在内存里把「怎么执行这条 SQL 最划算」想清楚，交给执行器去干。</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 720 150" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+        <defs>
+          <marker id="arr" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L7,3 L0,6 Z" fill="#9ba3b5"/>
+          </marker>
+        </defs>
+        <!-- boxes -->
+        <g font-size="15" text-anchor="middle">
+          <rect x="10" y="55" width="110" height="46" rx="9" fill="#232733" stroke="#2e3345"/>
+          <text x="65" y="83" fill="#e4e7ef">连接器</text>
+          <rect x="150" y="55" width="110" height="46" rx="9" fill="#232733" stroke="#2e3345"/>
+          <text x="205" y="83" fill="#e4e7ef">解析器</text>
+          <!-- optimizer highlighted -->
+          <rect x="290" y="45" width="130" height="66" rx="11" fill="rgba(108,140,255,0.18)" stroke="#6c8cff" stroke-width="2"/>
+          <text x="355" y="80" fill="#6c8cff" font-weight="700">优化器</text>
+          <text x="355" y="100" fill="#9ba3b5" font-size="12">Optimizer</text>
+          <rect x="450" y="55" width="110" height="46" rx="9" fill="#232733" stroke="#2e3345"/>
+          <text x="505" y="83" fill="#e4e7ef">执行器</text>
+          <rect x="590" y="55" width="120" height="46" rx="9" fill="#232733" stroke="#2e3345"/>
+          <text x="650" y="83" fill="#e4e7ef">存储引擎</text>
+        </g>
+        <!-- arrows -->
+        <line x1="120" y1="78" x2="148" y2="78" stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#arr)"/>
+        <line x1="260" y1="78" x2="288" y2="78" stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#arr)"/>
+        <line x1="420" y1="78" x2="448" y2="78" stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#arr)"/>
+        <line x1="560" y1="78" x2="588" y2="78" stroke="#9ba3b5" stroke-width="1.5" marker-end="url(#arr)"/>
+        <!-- caption -->
+        <text x="355" y="135" fill="#5a6078" font-size="13" text-anchor="middle">输入：解析树　·　输出：一棵「执行计划树」（AccessPath）</text>
+      </svg>
+    </div>
+
+    <p>用一句形象的话：<b>SQL 是「声明式」语言</b>——你只告诉数据库「我要什么」（SELECT 哪些列、FROM 哪些表、WHERE 什么条件），<b>不告诉它「怎么拿」</b>。解析器确认「这句话语法合法、表列都存在」；而「先扫哪张表、走不走索引、两张表用什么顺序 join、join 用哪种算法」这种「路线规划」，全归优化器管。它就像 GPS / 高德地图：目的地你已经给定，它负责算一条代价最低的路。</p>
+
+    <div class="callout tip">
+      <div class="callout-key">一句话定义</div>
+      优化器是 MySQL 里「把一条合法的 SQL 转换成一棵代价最低的执行计划树」的组件；它基于<b>代价（Cost）</b>而非固定规则做决策，所以也叫 CBO（Cost-Based Optimizer，基于代价的优化器）。
+    </div>
+  </div>
+
+  <!-- ② -->
+  <div class="section" id="why">
+    <div class="section-title"><span class="num">②</span>为什么非要有优化器：同一句话，能「走」出无数条路</div>
+    <p>关键矛盾在于：<b>一条语义确定的 SQL，可以有数量极其庞大的「等价执行方案」</b>，而不同方案之间的性能差距往往是几个数量级。没有优化器，系统只有两种下场：要么每次都傻乎乎全表扫描（正确但慢死），要么把执行路径写死在 SQL 里（丧失灵活性）。</p>
+
+    <h3>例子：3 张表 JOIN + 过滤条件</h3>
+    <pre><code><span class="kw">SELECT</span> * <span class="kw">FROM</span> A <span class="kw">JOIN</span> B <span class="kw">ON</span> A.id = B.aid <span class="kw">JOIN</span> C <span class="kw">ON</span> B.id = C.bid
+<span class="kw">WHERE</span> A.status = <span class="str">'paid'</span> <span class="kw">AND</span> C.region = <span class="str">'cn'</span>;</code></pre>
+
+    <p>光是「表访问顺序」就有 <code>3! = 6</code> 种（A→B→C、A→C→B、B→A→C……）；每张表又能选择「全表扫描」还是「走某个索引」；JOIN 还能选「嵌套循环 / 哈希连接 / 批量主键访问」。<b>组合起来可能上千种计划</b>。其中有的计划要先扫大表再被 WHERE 砍掉 99% 的行（灾难），有的计划先用索引把两张表都缩到几行再 JOIN（飞快）。优化器的工作，就是从这上千种里挑出那条「最便宜」的。</p>
+
+    <div class="two-col">
+      <div class="panel">
+        <h4>❌ 糟糕的计划</h4>
+        <p>先 <code>SELECT * FROM C</code> 全表扫 1000 万行，再 JOIN、再过滤 → 处理上千万行，磁盘 IO 爆表，几秒钟才出结果。</p>
+      </div>
+      <div class="panel">
+        <h4>✅ 优化器选中的计划</h4>
+        <p>先用 <code>A.status='paid'</code> 的索引把 A 缩到 5000 行，再用 <code>B.aid</code> 索引回表 JOIN，最后用 <code>C.region</code> 索引收口 → 总共只碰几万行，毫秒级返回。</p>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-key">为什么不能「让写 SQL 的人自己决定怎么执行」</div>
+      把执行路径写死（比如强制指定 JOIN 顺序、强制走某索引）会丧失适应性：数据量变了、索引变了、统计信息变了，原本「最优」的路径可能瞬间变成最差的。优化器把「如何执行」从「写 SQL 的人」手里接管过来，根据<b>当前数据和统计</b>动态决定，这才是数据库「自治」的核心。
+    </div>
+  </div>
+
+  <!-- ③ -->
+  <div class="section" id="principle">
+    <div class="section-title"><span class="num">③</span>实现原理总览：CBO 的三大支柱</div>
+    <p>现代 MySQL 优化器是一个<b>基于代价的优化器（CBO）</b>——它为每个候选执行计划估一个「代价数字」，选最小的那个。要算代价，它依赖三块基石：<b>统计信息</b>（世界长什么样）、<b>代价模型</b>（每种操作有多贵）、<b>搜索策略</b>（怎么在海量计划里高效找最优，而不是傻傻穷举）。</p>
+
+    <div class="pillars">
+      <div class="pillar">
+        <h4>① 统计信息</h4>
+        <div class="peg">Statistics</div>
+        <p>关于「数据和索引长什么样」的概要：表有多少行、每个索引有多少不同值（cardinality）、列值分布（直方图）。代价估算靠它估计「某条件会命中多少行」。</p>
+      </div>
+      <div class="pillar">
+        <h4>② 代价模型</h4>
+        <div class="peg">Cost Model</div>
+        <p>给「读一页 / 比较一次 / 算一行」等操作定价的公式（IO 成本 + CPU 成本）。所有计划用同一把尺子量，才能比大小。</p>
+      </div>
+      <div class="pillar">
+        <h4>③ 搜索策略</h4>
+        <div class="peg">Search Strategy</div>
+        <p>计划空间爆炸，不可能全试。用贪心 + 启发式剪枝（传统）或超图动态规划（新 Hypergraph）在可控时间内逼近最优。</p>
+      </div>
+    </div>
+
+    <p>下面三节逐一拆开。记住这个等式：<b>代价(计划) = f( 统计信息 , 代价模型 )</b>，而<b>搜索策略决定要评估哪些计划</b>。</p>
+  </div>
+
+  <!-- ④ -->
+  <div class="section" id="stats">
+    <div class="section-title"><span class="num">④</span>基石一：统计信息（Optimizer 眼里的「世界地图」）</div>
+    <p>优化器从不直接扫描全表来数「这个条件命中几行」——那太慢了。它靠预先收集、持续维护的<b>统计信息</b>来估算。InnoDB 的统计信息默认就是持久化开启的。</p>
+
+    <div class="callout tip">
+      <div class="callout-key">已核实（勿改）</div>
+      InnoDB 持久化统计信息由 <code>innodb_stats_persistent = ON</code> 控制（MySQL 5.6 起默认开启），统计结果存放在系统库表 <code>mysql.innodb_table_stats</code> 和 <code>mysql.innodb_index_stats</code> 中，重启后不丢失。
+    </div>
+
+    <h3>核心统计项</h3>
+    <table>
+      <thead><tr><th>统计项</th><th>含义</th><th>优化器怎么用它</th></tr></thead>
+      <tbody>
+        <tr><td><b>n_rows</b>（表行数）</td><td>表里大约多少行</td><td>估算全表扫描要处理多少行</td></tr>
+        <tr><td><b>cardinality</b>（索引基数）</td><td>索引列有多少个不同值</td><td>基数越高，用这列过滤越「 Selective（选择性好）」，命中行越少 → 越倾向走索引</td></tr>
+        <tr><td><b>采样页</b></td><td>统计靠随机抽样若干数据页推算（<code>innodb_stats_persistent_sample_pages</code>，默认 20 页）</td><td>抽样推算，所以 cardinality 是<b>估计值</b>，可能不准</td></tr>
+        <tr><td><b>直方图 Histogram</b>（8.0 引入）</td><td>列值的真实分布分桶（<code>ANALYZE TABLE t UPDATE HISTOGRAM ON col WITH 32 BUCKETS</code>）</td><td>应对数据倾斜：当 <code>WHERE col &gt; 1000</code> 命中区间落在分布密集区时，估算更准</td></tr>
+      </tbody>
+    </table>
+
+    <p>正因为统计是「抽样估计」，<b>代价估算天然可能失真</b>——这也是为什么有时优化器会「选错索引」：它的世界里那张地图画歪了（统计过期 / 数据严重倾斜没建直方图）。<code>ANALYZE TABLE</code> 就是去重新画地图。</p>
+
+    <div class="callout warn">
+      <div class="callout-key">一个容易踩的统计坑（已核实）</div>
+      对 <code>col IN (v1,...,vN)</code> 这类「相等范围」，当范围个数 <code>N &gt;= eq_range_index_dive_limit</code>（MySQL 8.0 <b>默认 200</b>）时，优化器会放弃精确但较慢的「索引下潜（index dive）」，改用统计信息估算命中行数——估算可能严重偏差，进而影响索引选择。范围很长时若怀疑估算失准，可调大该值或强制 <code>FORCE INDEX</code>。
+    </div>
+  </div>
+
+  <!-- ⑤ -->
+  <div class="section" id="cost">
+    <div class="section-title"><span class="num">⑤</span>基石二：代价模型（给每个操作「定价」）</div>
+    <p>代价模型把「执行一个计划要消耗多少资源」折算成一个<b>逻辑上的代价数字</b>。这个数字没有物理单位，它的起源可以追溯到一个 1990 年代机械硬盘的「一次随机 IO」——随着硬件进步，各部件性价比变了，所以代价常数做成<b>可配置</b>的。</p>
+
+    <p>代价 ≈ <b>IO 成本</b>（读了多少页）+ <b>CPU 成本</b>（比较了多少次键、算了多少行）。MySQL 8.0 还做了一项关键改进：<b>区分「从内存 buffer pool 读页」和「从磁盘读页」</b>——内存页便宜得多。</p>
+
+    <div class="callout tip">
+      <div class="callout-key">已核实：MySQL 8.0 代价常数默认值（勿改）</div>
+      代价常数存在 <code>mysql.server_cost</code> 与 <code>mysql.engine_cost</code> 两张系统表里，可在会话/全局级调整：
+      <table style="margin-top:10px">
+        <thead><tr><th>常数（cost_name）</th><th>默认</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>io_block_read_cost</code></td><td><b>1.0</b></td><td>从磁盘读一个数据页</td></tr>
+          <tr><td><code>memory_block_read_cost</code></td><td><b>0.25</b></td><td>从内存（buffer pool）读一个页，比磁盘便宜 4 倍</td></tr>
+          <tr><td><code>row_evaluate_cost</code></td><td><b>0.1</b></td><td>读取并判定（evaluate）一行</td></tr>
+          <tr><td><code>key_compare_cost</code></td><td><b>0.05</b></td><td>比较一次键值</td></tr>
+          <tr><td><code>memory_temptable_create_cost</code> / <code>row_cost</code></td><td><b>1.0</b> / <b>0.1</b></td><td>建内存临时表 / 其每行成本</td></tr>
+          <tr><td><code>disk_temptable_create_cost</code> / <code>row_cost</code></td><td><b>20</b> / <b>0.5</b></td><td>建磁盘临时表 / 其每行成本（贵很多）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>代价模型的意义在于<b>统一度量衡</b>：不管你是「全表扫描 + 100 万次行判定」，还是「索引范围扫 + 5000 行判定 + 几十页读」，都用同一套公式算出一个数，谁小谁就「看起来更优」。下面这个交互让你直观感受它是怎么比大小的。</p>
+
+    <!-- cost simulator -->
+    <div class="widget">
+      <div class="widget-title">代价模型小计算器（简化教学模型）</div>
+      <div class="widget-desc">给定一张表的规模与索引命中行数，分别算「全表扫描」和「索引范围扫描」的代价，看优化器会选谁。数字为示意，真实公式更复杂（含前缀比较、缓冲区命中率等）。</div>
+      <div class="field">
+        <label>表总行数 N</label>
+        <input type="number" id="cRows" value="1000000" min="1" step="1000">
+      </div>
+      <div class="field">
+        <label>索引命中行数 S</label>
+        <input type="number" id="cHit" value="5000" min="0" step="100">
+      </div>
+      <div class="field">
+        <label>每页约行数</label>
+        <input type="number" id="cPP" value="100" min="1" step="10">
+      </div>
+      <div class="field">
+        <label>索引页数</label>
+        <input type="number" id="cIP" value="200" min="1" step="10">
+      </div>
+      <button class="btn" id="cRun">计算两种计划代价</button>
+
+      <div class="plan-cards">
+        <div class="plan" id="planA">
+          <div class="ptitle">计划 A：全表扫描 <span class="tag" id="tagA" style="display:none">被选中</span></div>
+          <div class="cost" id="costA">—</div>
+          <div class="rows" id="rowsA"></div>
+          <div class="formula" id="fA"></div>
+        </div>
+        <div class="plan" id="planB">
+          <div class="ptitle">计划 B：索引范围扫描 <span class="tag" id="tagB" style="display:none">被选中</span></div>
+          <div class="cost" id="costB">—</div>
+          <div class="rows" id="rowsB"></div>
+          <div class="formula" id="fB"></div>
+        </div>
+      </div>
+      <div class="callout" id="cmpNote" style="margin-top:14px;display:none"></div>
+    </div>
+  </div>
+
+  <!-- ⑥ -->
+  <div class="section" id="search">
+    <div class="section-title"><span class="num">⑥</span>基石三：搜索与枚举（为什么不能「全试一遍」）</div>
+    <p>理论上，把所有可能的执行计划都算一遍代价、取最小，那叫「穷举最优」。但计划空间随表数量<b>阶乘级爆炸</b>：光是 5 张表 JOIN、每张表 5 个可用索引，候选计划就可能超过 <code>5! × 5^5 ≈ 14400</code> 种。表再多，穷举本身比执行还慢。所以优化器必须用<b>启发式搜索</b>在可控时间内逼近最优。</p>
+
+    <div class="callout tip">
+      <div class="callout-key">已核实：传统优化器的搜索方式</div>
+      传统优化器（8.0 默认）用<b>贪心搜索 + 剪枝</b>：<code>best_extension_by_limited_search()</code> 逐步扩展 JOIN 顺序，配合 <code>optimizer_prune_level = 1</code>（默认开启）做启发式剪枝，提前砍掉看起来没希望的分支；<code>optimizer_search_depth</code> 限制搜索深度（默认 62，不等于强制全搜）。
+    </div>
+
+    <p>代价是：贪心可能<b>错过全局最优</b>（局部最优 ≠ 全局最优）。MySQL 8.0.31 起在 HeatWave 中引入了全新的 <b>Hypergraph Optimizer（超图优化器）</b>：把查询建模成超图，用 <b>DPhyp 动态规划</b>搜索<b>更大的计划空间</b>，对复杂多表 JOIN 往往能找到更好的计划。</p>
+
+    <div class="callout warn">
+      <div class="callout-key">已核实</div>
+      Hypergraph Optimizer 自 MySQL <b>8.0.31</b> 随 HeatWave 引入，<b>MySQL 9.0</b> 起作为 opt-in 特性可通过 <code>SET optimizer_switch='hypergraph_optimizer=on'</code> 开启。它只改变「怎么执行」的规划，不改变查询结果语义。
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <h4>传统：贪心 + 剪枝</h4>
+        <p>快、稳定，绝大多数场景够用；缺点是有概率陷入局部最优，复杂 JOIN 选错顺序。</p>
+      </div>
+      <div class="panel">
+        <h4>Hypergraph：动态规划</h4>
+        <p>搜索空间更大、复杂查询更优；代价是优化本身更耗时，极多表 JOIN 时可能反而慢。故先做成可选项。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ⑦ -->
+  <div class="section" id="vs">
+    <div class="section-title"><span class="num">⑦</span>优化器 vs 执行器：一个「想」，一个「干」</div>
+    <table>
+      <thead><tr><th>维度</th><th>优化器 Optimizer</th><th>执行器 Executor</th></tr></thead>
+      <tbody>
+        <tr><td>职责</td><td>决定「怎么执行最优」</td><td>按优化器给的计划「真正去取数、计算」</td></tr>
+        <tr><td>是否碰数据</td><td>否（只读统计信息做估算）</td><td>是（调存储引擎接口、读页、取行）</td></tr>
+        <tr><td>产物</td><td>一棵执行计划树（AccessPath）</td><td>结果集（逐行通过迭代器上送）</td></tr>
+        <tr><td>核心问题</td><td>Which plan is cheapest?</td><td>How to fetch the next row?</td></tr>
+        <tr><td>可调旋钮</td><td><code>optimizer_switch</code>、代价常数、<code>optimizer_search_depth</code></td><td>JOIN buffer、sort buffer、tmp table 引擎</td></tr>
+      </tbody>
+    </table>
+    <p>一句话：<b>优化器是「军师」，执行器是「将军」</b>。军师算好作战方案（计划树），将军带着兵（存储引擎）去打。下一篇《工作过程》会沿着这条链路，把优化器内部从解析到出计划的完整流水线走一遍。</p>
+  </div>
+
+  <!-- ⑧ -->
+  <div class="section" id="cheat">
+    <div class="section-title"><span class="num">⑧</span>速查清单</div>
+    <ul>
+      <li><b>定位</b>：优化器在解析器之后、执行器之前，把「SQL 语义」翻译成「代价最低的执行计划树」。</li>
+      <li><b>动机</b>：SQL 声明式、等价计划爆炸、代价差异巨大 → 必须有个组件来选路。</li>
+      <li><b>三大支柱</b>：统计信息（世界地图）+ 代价模型（统一定价）+ 搜索策略（高效找最优）。</li>
+      <li><b>统计</b>：InnoDB 持久化统计默认开；cardinality 是抽样估计，会失真；8.0 有直方图。</li>
+      <li><b>代价</b>：IO + CPU 逻辑单位；8.0 内存读 0.25 / 磁盘读 1.0；常数存在 server_cost / engine_cost 表。</li>
+      <li><b>搜索</b>：传统贪心+剪枝；8.0.31+ Hypergraph 动态规划（9.0 opt-in）。</li>
+      <li><b>选错索引怎么办</b>：多半是统计失真（<code>ANALYZE TABLE</code> 重算）或代价常数不匹配硬件，必要时用 <code>FORCE INDEX</code> / 优化器提示（hint）纠偏。</li>
+    </ul>
+  </div>
+
+  <footer>
+    <p>WorkBuddy · 数据库系统 · MySQL · 优化器系列（一）</p>
+    <p class="links">同系列：<a href="mysql-optimizer-workflow.html">优化器工作过程（二）</a> · 姊妹篇：<a href="../02-indexes/mysql-null-value.html">NULL 值与索引失效</a> · <a href="../03-query/mysql-sql-execution-flow.html">SQL 执行全过程</a></p>
+    <p style="margin-top:8px"><a href="../../index.html">← 返回 MySQL / 关系型数据库索引</a></p>
+  </footer>
+</div>
+
+<script>
+/* ---------- 代价模型计算器 ---------- */
+(function () {
+  var rows = document.getElementById('cRows');
+  var hit  = document.getElementById('cHit');
+  var pp   = document.getElementById('cPP');
+  var ip   = document.getElementById('cIP');
+  var btn  = document.getElementById('cRun');
+
+  var costA = document.getElementById('costA'), rowsA = document.getElementById('rowsA'), fA = document.getElementById('fA');
+  var costB = document.getElementById('costB'), rowsB = document.getElementById('rowsB'), fB = document.getElementById('fB');
+  var tagA = document.getElementById('tagA'), tagB = document.getElementById('tagB');
+  var note = document.getElementById('cmpNote');
+
+  // 8.0 默认值（已核实）
+  var IO_DISK = 1.0, IO_MEM = 0.25, ROW_EVAL = 0.1;
+
+  function calc() {
+    var N = Math.max(1, parseInt(rows.value, 10) || 0);
+    var S = Math.max(0, parseInt(hit.value, 10)  || 0);
+    var perPage = Math.max(1, parseInt(pp.value, 10) || 1);
+    var idxPages = Math.max(1, parseInt(ip.value, 10) || 1);
+
+    var dataPages = Math.ceil(N / perPage);
+
+    // 计划 A: 全表扫描
+    var aIO = dataPages * IO_DISK;          // 读所有数据页
+    var aCPU = N * ROW_EVAL;               // 逐行判定
+    var ca = aIO + aCPU;
+
+    // 计划 B: 索引范围扫描
+    var bIO = idxPages * IO_MEM            // 读索引页（多数在内存）
+            + Math.ceil(S / perPage) * IO_DISK; // 回表读命中数据页
+    var bCPU = S * ROW_EVAL;              // 只判定命中行
+    var cb = bIO + bCPU;
+
+    costA.textContent = ca.toFixed(0);
+    costB.textContent = cb.toFixed(0);
+    rowsA.textContent = '处理行数 ' + N.toLocaleString() + '　| 读页 ' + dataPages.toLocaleString();
+    rowsB.textContent = '处理行数 ' + S.toLocaleString() + '　| 索引页 ' + idxPages + ' + 回表页 ' + Math.ceil(S / perPage);
+    fA.textContent = 'IO=' + aIO.toFixed(0) + ' + CPU=' + aCPU.toFixed(0);
+    fB.textContent = 'IO=' + bIO.toFixed(1) + ' + CPU=' + bCPU.toFixed(0);
+
+    var aWin = ca <= cb;
+    document.getElementById('planA').classList.toggle('win', aWin);
+    document.getElementById('planB').classList.toggle('win', !aWin);
+    tagA.style.display = aWin ? '' : 'none';
+    tagB.style.display = aWin ? 'none' : '';
+
+    note.style.display = '';
+    if (aWin) {
+      note.className = 'callout danger';
+      note.innerHTML = '<div class="callout-key">优化器会选：全表扫描 A</div>说明索引命中行数 ' + S.toLocaleString() + ' 相对总量 ' + N.toLocaleString() + ' 太多（选择性差），走索引回表的额外 IO 反而更贵——此时全表扫描确实更划算。这正解释了「明明有索引却不走」的常见现象。';
+    } else {
+      note.className = 'callout tip';
+      note.innerHTML = '<div class="callout-key">优化器会选：索引范围扫描 B</div>索引把处理行数从 ' + N.toLocaleString() + ' 砍到 ' + S.toLocaleString() + '，CPU 与回表 IO 都骤降，代价远低于全表扫描。这就是「建对索引性能起飞」的底层原因。';
+    }
+  }
+
+  btn.addEventListener('click', calc);
+  calc();
+})();
+</script>
+</body>
+</html>
