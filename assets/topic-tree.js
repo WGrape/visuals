@@ -35,7 +35,10 @@
         history.scrollRestoration = "manual";
     }
 
-    const groups = Array.prototype.slice.call(layout.querySelectorAll(".topic-group"));
+    const groups = Array.prototype.slice.call(layout.querySelectorAll(".topic-group")).filter(function (group) {
+        const topics = group.querySelector(".topics");
+        return topics && topics.querySelector(".card");
+    });
     if (!groups.length) return;
 
     const headerEl = document.querySelector("header");

@@ -10,6 +10,8 @@
   B  卡片所在目录 != 分组 data-path → 一个分组横跨多个目录，树的分组和右侧内容对不上
   C  卡片目标文件不存在            → 断链
   D  漏挂 / 孤立文件               → 真实目录没被任何 data-path 覆盖，或文件没被任何卡片链接
+  E  空课程分组                    → 尚无课程的占位目录不应出现在知识树
+  F  重复专题 / 课程卡片            → 一个实体专题与课程页面只能有一个主入口
 
 用法： python3 check_topic_tree.py
 说明： 带 data-topic-tree 的子索引页会「自己管自己」，父级页不检查其子树。
@@ -35,8 +37,8 @@ def is_tree_index(path):
 def find_index_files():
     out = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
-        if ".git" in dirpath.split(os.sep) or ".workbuddy" in dirpath.split(os.sep):
-            continue
+        dirnames[:] = [name for name in dirnames
+                       if name not in {".git", ".claude", ".workbuddy", "node_modules"}]
         page = os.path.join(dirpath, "index.html")
         if is_tree_index(page):
             out.append(page)
@@ -87,10 +89,15 @@ def audit():
         groups, kind = extract_groups(page)
         if not groups:
             continue
-        A, B, C, D = [], [], [], []
-        covered, declared = set(), set()
+        A, B, C, D, E, F = [], [], [], [], [], []
+        covered, declared, seen_paths, seen_cards = set(), set(), set(), set()
 
         for dp, hrefs in groups:
+            if dp not in SPECIAL and dp in seen_paths:
+                F.append('重复专题 data-path="%s"（同一目录被拆成多个可见分组）' % dp)
+            seen_paths.add(dp)
+            if not hrefs:
+                E.append('空课程分组 data-path="%s"（占位目录不应显示为课程节点）' % dp)
             if dp in SPECIAL:
                 for h in hrefs:
                     covered.add(os.path.normpath(os.path.join(pagedir, h.split("#")[0])))
@@ -108,6 +115,10 @@ def audit():
                 if not hp or hp.startswith(("http", "mailto:", "/", "javascript:")):
                     continue
                 absh = os.path.normpath(os.path.join(pagedir, hp))
+                if hp.endswith(".html"):
+                    if absh in seen_cards:
+                        F.append("重复课程卡片 %s（同一页面应只有一个主入口）" % h)
+                    seen_cards.add(absh)
                 covered.add(absh)
                 if not os.path.exists(absh):
                     C.append("%s → %s（文件不存在）" % (dp, h))
@@ -120,18 +131,21 @@ def audit():
             if has_html and not any(x == d or x.startswith(d + "/") for x in declared):
                 D.append("真实目录 %s/ 未被任何 data-path 覆盖" % d)
 
-        if A or B or C or D:
-            report[rel_page] = (kind, A, B, C, D)
+        if A or B or C or D or E or F:
+            report[rel_page] = (kind, A, B, C, D, E, F)
 
     labels = [("A", "data-path 不是真实目录 → 左侧树凭空多出节点"),
               ("B", "卡片所在目录与分组 data-path 不一致 → 树的分组和内容对不上"),
               ("C", "卡片断链"),
-              ("D", "漏挂 / 孤立文件")]
-    for page, (kind, A, B, C, D) in report.items():
+              ("D", "漏挂 / 孤立文件"),
+              ("E", "空课程分组不应出现在知识树"),
+              ("F", "一个专题与课程页面应只有一个主入口")]
+    for page, (kind, A, B, C, D, E, F) in report.items():
         print("\n" + "=" * 72)
         print("### %s   [%s]" % (page, kind))
         for tag, text, items in (("A", labels[0][1], A), ("B", labels[1][1], B),
-                                 ("C", labels[2][1], C), ("D", labels[3][1], D)):
+                                 ("C", labels[2][1], C), ("D", labels[3][1], D),
+                                 ("E", labels[4][1], E), ("F", labels[5][1], F)):
             if items:
                 print("  【%s %s】%d" % (tag, text, len(items)))
                 for i in items:

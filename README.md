@@ -2,99 +2,70 @@
 
 一个以动态可视化为核心特色的 IT 在线学习平台，提供直观易懂、丰富多元的学习内容。
 
-<img width="1528" height="1351" alt="Image" src="https://github.com/user-attachments/assets/f3842819-b00c-43c5-91ad-1338bc4a0a5a" />
+<img width="1528" height="1351" alt="Visuals 知识地图" src="https://github.com/user-attachments/assets/f3842819-b00c-43c5-91ad-1338bc4a0a5a" />
 
 ## 项目简介
 
-Visuals 致力于通过可视化的方式，让复杂的计算机科学概念变得简单易懂。从计算机组成原理到AI人工智能等这一系列基础理论到高级架构的全面知识体系，全部使用可视化的动态交互、以及图表网页的方式，帮助开发者深入理解技术原理。
+Visuals 通过交互页面与可视化内容讲解计算机科学、编程、数据库、人工智能、系统工程和考试知识。
 
-## 知识体系
+## 知识目录
 
-目录既是网站导航，也是知识分类。首页按知识主题展示卡片；目录层级以实际知识边界为准，不为视觉分组额外增加物理目录。
+目录同时是网站导航与知识分类。知识内容至少采用四级物理目录；复杂主题可以继续增加第五、第六级，不必强行压平：
 
-1. **计算机科学基础**：算法、组成原理、操作系统、网络、编译与密码学。
-2. **编程与程序**：编程语言、运行时、Go / Python 与工程实践。
-3. **数据库系统**：数据建模、存储、查询、缓存、检索与扩展。
-4. **大数据系统**：数仓、湖仓、批流处理、查询引擎与数据平台。
-5. **人工智能**：模型、生命周期、大语言模型、AI 工程与 AI 开发。
-6. **系统工程**：软件工程、分布式系统、云服务架构，以及高性能、高并发、高可用。
-
-完整的分类原则、命名规则和新增内容流程见 [知识架构治理](docs/knowledge-architecture.md)；正在执行的目录调整及迁移清单见 [知识迁移蓝图](docs/knowledge-migration-blueprint.md)。
-
-## 项目结构
-
-```
+```text
 visuals/
-├── index.html                    # 全站首页：一级目录标题、二级目录卡片
-├── computer-foundations/         # 计算机科学基础
-│   ├── computer-algorithm/
-│   ├── computer-network/
-│   ├── computer-operating-system/
-├── programming-and-programs/     # 编程与程序
-│   ├── golang/                   # Go 语言与运行时
-│   └── go/                       # Go 工程实践
-├── database-system/              # 数据库系统
-├── bigdata-system/               # 大数据系统
-├── artificial-intelligence/      # 人工智能
-├── system-engineering/           # 系统工程
-│   ├── software-engineering/
-│   ├── distributed-system/
-│   ├── cloud-architecture/
-│   └── high-performance-concurrency-availability/
-├── learning-and-exams/           # 学习与考试
-│   └── kaoyan/
-├── assets/                       # 公共样式、目录树和路由脚本
-├── docs/                         # 知识体系治理与迁移文档
-├── check_html_link.sh            # HTML 链接检查脚本
-└── check_safe.sh                 # 本地链接与敏感信息检查脚本
+├── index.html                                  # 全站入口
+├── cst/                                        # 一级：计算机科学
+│   └── computer-algorithm/                     # 二级：学科，必须有 index.html
+│       ├── index.html
+│       └── 08-heaps/                           # 三级：带序号的章节
+│           ├── 00-overview/                    # 四级：章节概览专题
+│           │   └── heaps.html
+│           └── 02-max-heaps/                   # 四级：专题课程
+│               └── max-heap.html
+├── artificial-intelligence/
+├── database-system/                            # 包括 bigdata-system 与 localcache
+├── learning-and-exams/
+├── programming-and-programs/                   # 包括 golang、python 等
+├── system-engineering/
+├── assets/                                     # 公共样式、目录树和路由脚本
+├── check_knowledge_hierarchy.py               # 实体目录深度与编号
+├── check_topic_tree.py                        # 目录树和卡片所属目录
+├── check_html_link.sh                         # 页面是否被索引引用
+└── check_safe.sh                              # 本地坏链与敏感内容
 ```
+
+- 每个二级学科都必须有 `index.html` 和至少一个三级章节；**每个三级章节（包括尚无课程的占位章节）都必须带序号并包含至少一个四级专题目录**。课程 HTML、Markdown 不直接存放在二级或三级目录；概览课程可以放在 `00-overview/`。三级 `index.html` 仅作为有需要的导航入口，不代替四级知识内容。
+- 四级目录要表达真实的知识边界，例如基础概念、检索策略、评估与优化；同一主题较复杂时继续细分。**不能用与上级同义的目录凑满四层**；当课程标题已经有独立章节（如数学的行列式、矩阵）时，继续设置第五级专题，不把章节只留在文件名里。单篇课程也可以构成真实专题，不按文章数量强行合并。暂时无课程的专题用 `.gitkeep` 保留实体目录，不为凑层级新增虚构课程页面。
+- 每篇课程只有一个主要归属：通用原理放在概念专题，具体产品实现放在产品专题，跨主题的比较归共同上位专题；其他学习路径通过正文或说明性链接关联，不复制课程、也不把跨目录卡片塞入错误的 `data-path`。独立的历史与数学知识不放进“其他”兜底学科。
+- 空占位可以保留在文件系统中用于规划，但不添加没有课程卡片的 `topic-group`，不让它在正式目录树里显示为可学习专题；完全没有课程的学科入口应明确标注“建设中”。
+- 学科页的 `data-path` 必须与真实目录一致；一个分组的课程卡片应位于它声明的目录中。含 `assets/card-link-router.js` 的索引应设置与自身目录深度一致的 `<html data-app-root="…">`，并为新课程添加可见的索引卡片。
+- 移动文章时同时修正卡片、文章互链、资源路径、返回链接和跨学科链接。静态站点不会自动转发旧 URL；目录迁移后原直达书签可能失效。2026-09-30 的课程与索引旧→新路径见 [`docs/knowledge-relocations.json`](docs/knowledge-relocations.json)，用于更新外部引用，**不是**站点重定向规则。
 
 ## 本地运行
 
-直接用浏览器打开 `index.html` 即可，或者启动本地 HTTP 服务器：
+直接打开 `index.html`，或在仓库根目录运行：
 
 ```bash
-# Python 3
 python3 -m http.server 8000
-
-# 然后访问 http://localhost:8000
 ```
 
-## 开发工具
+浏览器访问 <http://localhost:8000/>。发布到 `/visuals/` 路径时，普通课程卡片会通过 `container.html` 打开。
 
-### check_html_link.sh
+## 新增内容与验证
 
-用于检查每个 HTML 文件是否被正确链接到对应的上级 `index.html` 文件中，防止新增页面遗漏添加链接。
-
-**使用方式：**
+1. 确认学科入口和三级编号章节，按实际知识分类选择四级或更深的专题目录。
+2. 添加课程与相关索引卡片，校验 `data-path`、相对路径和 `data-app-root`。
+3. 在仓库根目录运行：
 
 ```bash
-bash ./check_html_link.sh
-
-# 或者添加执行权限（首次使用）后直接执行
-chmod +x check_html_link.sh
-./check_html_link.sh
+python3 -B check_knowledge_hierarchy.py
+python3 -B check_topic_tree.py
+bash check_html_link.sh
+bash check_safe.sh
 ```
 
-**功能说明：**
-
-- 自动遍历项目中所有 HTML 文件
-- 检查文件是否在对应的上级 `index.html` 中有链接引用
-- 支持多级目录结构，并沿祖先目录查找可发现该页面的 `index.html`
-- 用颜色标记检查结果（绿色=已链接，红色=未链接，黄色=跳过）
-- 显示统计摘要：总计、已链接、未链接数量
-
-**检查规则：**
-
-- `computer-foundations/computer-algorithm/data-structures/trees/binary_tree_traversal.html` → 由其祖先目录中的索引发现
-- `system-engineering/high-performance-concurrency-availability/high-concurrency/kafka/kafka-partition-explained.html` → 由对应领域索引发现
-
-## 贡献指南
-
-1. 新增内容时，请在对应板块的目录下创建 HTML 文件
-2. 确保在上级 `index.html` 中添加新页面的链接卡片
-3. 使用 `./check_html_link.sh` 检查链接是否完整
-4. 保持页面风格与现有设计一致
+第一项会提醒尚未填充的占位目录，只有结构错误会使其失败；其余检查分别验证目录树、链接可发现性和本地坏链。检查器不会扫描 `.claude`、`.git` 等工具目录。
 
 ## License
 

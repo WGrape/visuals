@@ -40,6 +40,20 @@ while IFS= read -r -d '' html_file; do
     # 获取文件的相对路径（去掉开头的./）
     relative_path="${html_file#./}"
 
+    # 二级学科索引的上级是仓库首页，而不是学科自己的 index.html。
+    subject_dir="${relative_path%/index.html}"
+    if [[ "$relative_path" == */index.html && "$subject_dir" == */* && "$subject_dir" != */*/* ]]; then
+        if grep -q "href=\"${relative_path}\"" index.html; then
+            echo -e "${GREEN}✓ $relative_path${NC}"
+            found=$((found + 1))
+        else
+            echo -e "${RED}✗ $relative_path -> 首页缺少入口${NC}"
+            missing=$((missing + 1))
+            missing_files="${missing_files}${missing_files:+, }${relative_path} -> 首页缺少入口"
+        fi
+        continue
+    fi
+
     # 查找祖先 index.html：从文件所在目录开始，逐级向上查找，直到仓库根目录。
     # 只要任意一级祖先索引包含指向该文件的链接，即视为已链接；未完成物理迁移
     # 的跨学科内容则由下方 canonical prefix 规则做额外验证。这样可以正确处理嵌套目录（如
@@ -115,7 +129,7 @@ while IFS= read -r -d '' html_file; do
                     canonical_pages=$(printf '%s' "$next_pages" | sort -u)
                 done
             done < <(grep -o 'data-canonical-prefix="[^"]*"' "$canonical_index" 2>/dev/null)
-        done < <(find . -name "index.html" -print)
+        done < <(find . \( -name .git -o -name .claude -o -name .workbuddy -o -name node_modules \) -type d -prune -o -type f -name "index.html" -print)
     fi
 
     if [[ "$linked" -eq 1 ]]; then
@@ -143,7 +157,7 @@ while IFS= read -r -d '' html_file; do
         fi
     fi
 
-done < <(find . -name "*.html" -print0)
+done < <(find . \( -name .git -o -name .claude -o -name .workbuddy -o -name node_modules \) -type d -prune -o -type f -name "*.html" -print0)
 
 echo "=============================="
 echo "检查完成！"
