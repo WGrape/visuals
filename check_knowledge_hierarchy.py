@@ -9,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 ROOTS = (
-    "artificial-intelligence", "cst", "database-system", "learning-and-exams",
+    "artificial-intelligence", "cst", "database-system",
     "programming-and-programs", "system-engineering",
 )
 NUMBERED = re.compile(r"^\d{2}-")
