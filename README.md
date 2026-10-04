@@ -24,10 +24,10 @@ visuals/
 │           └── 02-max-heaps/                   # 四级：专题课程
 │               └── max-heap.html
 ├── artificial-intelligence/
-├── database-system/                            # 包括 bigdata-system 与 localcache
+├── database-system/                            # 关系型 / NoSQL / 向量 / 本地缓存
 ├── learning-and-exams/
 ├── programming-and-programs/                   # 包括 golang、python 等
-├── system-engineering/
+├── system-engineering/                        # 包括 bigdata-system、分布式系统等
 ├── assets/                                     # 公共样式、目录树和路由脚本
 ├── check_knowledge_hierarchy.py               # 实体目录深度与编号
 ├── check_topic_tree.py                        # 目录树和卡片所属目录
