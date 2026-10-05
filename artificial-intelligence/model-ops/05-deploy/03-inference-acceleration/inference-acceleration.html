@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>推理加速进阶：Continuous Batching、PagedAttention、投机解码</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:42px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  ul{margin:10px 0 10px 22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">推理优化</span>
+    <h1>推理加速进阶：Continuous Batching、PagedAttention、投机解码</h1>
+    <p class="lead">大模型推理的瓶颈不在算力，而在显存带宽和调度浪费。本文讲清推理的两个阶段差异、为什么 KV Cache 会成为显存杀手，以及 continuous batching、PagedAttention、投机解码这三项把吞吐拉起来的核心技术。</p>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="wrap">
+    <h2>推理的两个阶段，瓶颈完全不同</h2>
+    <div class="grid2">
+      <div class="kbox">
+        <b>Prefill（预填充）</b>
+        <ul>
+          <li>一次性处理整个 prompt</li>
+          <li>大量矩阵乘，<span class="hl2">算力密集 compute-bound</span></li>
+          <li>决定 <b>TTFT</b>（首 token 延迟）</li>
+        </ul>
+      </div>
+      <div class="kbox">
+        <b>Decode（解码）</b>
+        <ul>
+          <li>每次只生成一个 token</li>
+          <li>要反复读模型权重和 KV Cache，<span class="hl">带宽密集 memory-bound</span></li>
+          <li>决定 <b>TPOT / 出字速度</b></li>
+        </ul>
+      </div>
+    </div>
+    <div class="warn">绝大多数在线服务的 token 都花在 <b>decode</b> 阶段，而 decode 的瓶颈是"把权重从显存搬到计算单元"的<b>带宽</b>，不是算力。所以推理优化的第一原则是：<span class="hl">提高 batch 大小，让一次权重加载服务更多请求</span>。</div>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="wrap">
+    <h2>KV Cache：提速的关键，也是显存杀手</h2>
+    <p>decode 时为了避免重算历史，把每一层注意力的 Key/Value 缓存下来。代价是显存随 <b>batch × 序列长度 × 层数 × 头数</b> 线性增长，长上下文场景下非常可观。</p>
+    <div class="note">已知优化方向：MQA / GQA 减少 KV 头数、KV Cache 量化（fp8/int8）、跨请求前缀共享（Prompt Caching）、以及下面要讲的<b>分页管理</b>。</div>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="wrap">
+    <h2>Continuous Batching：别让 GPU 空等</h2>
+    <div class="svgbox fade">
+      <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+        <text x="30" y="26" fill="#9aa7b4" font-size="13">静态批处理：整批一起进一起出，先结束的请求要空等最慢的那个</text>
+        <rect x="30" y="40" width="300" height="22" rx="5" fill="#1c2230" stroke="#58a6ff"/><text x="180" y="55" fill="#e6edf3" font-size="12" text-anchor="middle">请求 A（生成 8 个 token）</text>
+        <rect x="30" y="68" width="120" height="22" rx="5" fill="#1c2230" stroke="#58a6ff"/><text x="90" y="83" fill="#e6edf3" font-size="12" text-anchor="middle">请求 B</text>
+        <rect x="150" y="68" width="180" height="22" rx="5" fill="#3a1f1f" stroke="#ff7b72"/><text x="240" y="83" fill="#ff7b72" font-size="12" text-anchor="middle">空等（B 早就结束了）</text>
+        <rect x="30" y="96" width="300" height="22" rx="5" fill="#1c2230" stroke="#58a6ff"/><text x="180" y="111" fill="#e6edf3" font-size="12" text-anchor="middle">请求 C</text>
+        <text x="350" y="75" fill="#ff7b72" font-size="13">GPU 利用率被拖低</text>
+        <text x="30" y="150" fill="#9aa7b4" font-size="13">Continuous Batching：谁结束谁走，空出的槽位立刻补新请求</text>
+        <rect x="30" y="164" width="300" height="22" rx="5" fill="#1c2230" stroke="#3fb950"/><text x="180" y="179" fill="#3fb950" font-size="12" text-anchor="middle">槽位始终被填满，无空等</text>
+        <text x="350" y="179" fill="#3fb950" font-size="13">吞吐显著提升</text>
+      </svg>
+    </div>
+    <div class="good"><b>核心思想</b>：把"批"从静态改为<b>动态</b>——调度粒度从"整批"降到"单步"。某个请求生成结束（遇到 EOS）就立刻退出，空出的槽位马上塞入排队的新请求。<span class="hl">这是现代推理框架（vLLM、TGI、SGLang 等）吞吐远超朴素实现的最大原因。</span></div>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="wrap">
+    <h2>PagedAttention：解决 KV Cache 的碎片与预留浪费</h2>
+    <p>朴素实现会为每个请求<b>按最大长度预留一整块连续显存</b>。问题：</p>
+    <div class="grid2">
+      <div class="kbox"><b>内部碎片</b>：请求只生成 200 token 却占了 2048 的坑，剩下的用不上也给别人用不了</div>
+      <div class="kbox"><b>外部碎片</b>：不同长度的请求反复申请释放，显存被切成碎块，明明有空间却分配不出</div>
+    </div>
+    <div class="card fade">
+      <p><span class="hl3">PagedAttention 的解法</span>：借鉴操作系统的<b>虚拟内存分页</b>——把 KV Cache 切成固定大小的"页"（block），按需分配、逻辑上连续但物理上可以不连续，用页表做映射。</p>
+    </div>
+    <div class="good">收益：① 显存浪费大幅下降 → 同样的卡能塞下<b>更大的 batch</b> → 吞吐更高；② 相同前缀的请求可以<b>共享页</b>（如相同的 system prompt、并行采样、beam search），进一步省显存。</div>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="wrap">
+    <h2>投机解码 Speculative Decoding</h2>
+    <p>decode 阶段一次只出 1 个 token，却要完整读一遍模型权重，非常浪费。<b>投机解码</b>用"小模型先猜、大模型批量验"来打破这个限制：</p>
+    <div class="svgbox fade">
+      <svg viewBox="0 0 860 160" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="45" width="170" height="60" rx="10" fill="#1c2230" stroke="#e3b341"/>
+        <text x="115" y="70" fill="#e6edf3" font-size="14" text-anchor="middle">① 小模型草稿</text>
+        <text x="115" y="90" fill="#9aa7b4" font-size="12" text-anchor="middle">快速猜出 γ 个 token</text>
+        <rect x="230" y="45" width="190" height="60" rx="10" fill="#1c2230" stroke="#58a6ff"/>
+        <text x="325" y="70" fill="#e6edf3" font-size="14" text-anchor="middle">② 大模型并行验证</text>
+        <text x="325" y="90" fill="#9aa7b4" font-size="12" text-anchor="middle">一次前向校验整段</text>
+        <rect x="450" y="45" width="190" height="60" rx="10" fill="#1c2230" stroke="#3fb950"/>
+        <text x="545" y="70" fill="#e6edf3" font-size="14" text-anchor="middle">③ 接受匹配前缀</text>
+        <text x="545" y="90" fill="#9aa7b4" font-size="12" text-anchor="middle">拒绝处重新采样</text>
+        <rect x="670" y="45" width="170" height="60" rx="10" fill="#1c2230" stroke="#bc8cff"/>
+        <text x="755" y="70" fill="#e6edf3" font-size="14" text-anchor="middle">一次出多个 token</text>
+        <text x="755" y="90" fill="#9aa7b4" font-size="12" text-anchor="middle">墙钟时间下降</text>
+        <line x1="200" y1="75" x2="226" y2="75" stroke="#58a6ff" stroke-width="2"/>
+        <line x1="420" y1="75" x2="446" y2="75" stroke="#58a6ff" stroke-width="2"/>
+        <line x1="640" y1="75" x2="666" y2="75" stroke="#58a6ff" stroke-width="2"/>
+        <text x="430" y="132" fill="#9aa7b4" font-size="12" text-anchor="middle">关键点：验证是"并行"的，一次前向检查多个位置，因此总算力没变多但步骤变少</text>
+      </svg>
+    </div>
+    <div class="good"><b>为什么能加速</b>：decode 是带宽瓶颈而非算力瓶颈，把"γ 次权重读取"压成"1 次"，就把串行变成了并行。<span class="hl">理论上可保证输出分布不变</span>（无损加速），实际加速比取决于草稿模型的命中率。</div>
+    <div class="note">命中率受<b>任务类型</b>影响很大：代码、格式化输出、常见套话命中率高（加速明显）；高度发散的创作类命中率低，收益有限甚至反而变慢。</div>
+  </div>
+</section>
+
+<section id="s6">
+  <div class="wrap">
+    <h2>其它常用手段速览</h2>
+    <table>
+      <tr><th>手段</th><th>解决什么</th></tr>
+      <tr><td><b>算子融合 / FlashAttention</b></td><td>减少显存读写次数（把多步合并成一个 kernel），注意力显存从 O(n²) 降到 O(n)</td></tr>
+      <tr><td><b>量化（INT8/FP8/INT4）</b></td><td>减少权重体积与带宽压力，直接提速；详见「大模型量化详解」</td></tr>
+      <tr><td><b>Prompt Caching / 前缀缓存</b></td><td>相同前缀只算一次，显著降低 TTFT 与成本</td></tr>
+      <tr><td><b>张量并行（推理侧）</b></td><td>模型太大单卡放不下时切分，并分摊带宽压力</td></tr>
+      <tr><td><b>MQA / GQA</b></td><td>减少 KV 头数，直接缩小 KV Cache</td></tr>
+      <tr><td><b>分离式部署（prefill/decode 分开）</b></td><td>两阶段特性不同，分开部署可各自优化资源配比</td></tr>
+    </table>
+  </div>
+</section>
+
+<section id="s7">
+  <div class="wrap">
+    <h2>怎么衡量优化效果</h2>
+    <div class="grid3">
+      <div class="kbox"><b>TTFT</b><br>首 token 延迟，用户"等多久开始出字"</div>
+      <div class="kbox"><b>TPOT / tokens-per-sec</b><br>出字速度，决定长回答体验</div>
+      <div class="kbox"><b>吞吐 tokens/sec</b><br>整集群的总产出，决定成本</div>
+    </div>
+    <div class="warn">吞吐和延迟往往<b>互相拉扯</b>：batch 越大吞吐越高，但单请求排队更久、延迟上升。选型时要按业务定 SLO（比如 P99 TTFT &lt; 1s），再在此约束下把吞吐压到最高。</div>
+  </div>
+</section>
+
+<section id="s8">
+  <div class="wrap">
+    <h2>面试速记卡</h2>
+    <div class="card fade">
+      <ul>
+        <li><b>两阶段</b>：prefill 算力密集（定 TTFT），decode 带宽密集（定出字速度）。</li>
+        <li><b>第一原则</b>：decode 是带宽瓶颈 → <span class="hl">加大 batch</span> 让一次权重读取服务更多请求。</li>
+        <li><b>Continuous Batching</b>：调度粒度降到单步，结束即补位，是吞吐提升的最大来源。</li>
+        <li><b>PagedAttention</b>：KV Cache 分页管理，消除碎片与预留浪费，支持前缀共享。</li>
+        <li><b>投机解码</b>：小模型草稿 + 大模型并行验证，<span class="hl2">分布不变的无损加速</span>；收益取决于命中率。</li>
+        <li><b>指标三角</b>：TTFT / TPOT / 吞吐，吞吐与延迟互相拉扯，按 SLO 定。</li>
+      </ul>
+    </div>
+    <div class="pill">prefill</div><div class="pill">decode</div><div class="pill">Continuous Batching</div>
+    <div class="pill">PagedAttention</div><div class="pill">投机解码</div><div class="pill">FlashAttention</div>
+    <div class="pill">TTFT</div><div class="pill">吞吐</div><div class="pill">前缀缓存</div>
+  </div>
+</section>
+
+<footer><p>Visuals · 模型运维 / 推理优化</p></footer>
+
+<script>
+const sections=[...document.querySelectorAll('section[id]')];
+const toc=document.getElementById('toc');
+const names={s1:'两阶段',s2:'KV Cache',s3:'Batching',s4:'Paged',s5:'投机',s6:'其它',s7:'指标',s8:'速记'};
+sections.forEach(s=>{
+  const a=document.createElement('a');a.href='#'+s.id;a.title=names[s.id]||s.id;
+  a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:'smooth'})};toc.appendChild(a);
+});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{rootMargin:'0px 0px -10% 0px'});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+</body>
+</html>
