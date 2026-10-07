@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClickHouse 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>ClickHouse 原理图解</h1>
+  <p>为什么它能单机秒级扫描几十亿行——存储引擎、索引与查询执行</p>
+  <span class="tag">列存</span><span class="tag">MergeTree</span><span class="tag">稀疏索引</span><span class="tag">向量化</span><span class="tag">OLAP</span>
+</header>
+<nav>
+  <a href="#what">① 定位</a>
+  <a href="#arch">② 整体架构</a>
+  <a href="#mergetree">③ MergeTree</a>
+  <a href="#index">④ 稀疏索引</a>
+  <a href="#exec">⑤ 查询执行</a>
+  <a href="#tradeoff">⑥ 优势与坑</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>ClickHouse 是一台<b>为「大宽表 + 明细扫描 + 聚合」而生的列式 OLAP 引擎</b>。
+  它快的核心不是某个银弹，而是四个设计叠加：列式存储、极其稀疏的主键索引、
+  后台异步合并的 LSM 式写入，以及贯穿全链路的向量化执行。
+</div>
+
+<section id="what">
+  <h2><span class="n">01</span>它是什么，不是什么</h2>
+  <table>
+    <tr><th>✅ ClickHouse 擅长</th><th>❌ ClickHouse 不擅长</th></tr>
+    <tr><td>几十亿～千亿行的明细表聚合（GROUP BY、SUM、COUNT）</td><td>高并发点查（QPS 高的 KV 查询）</td></tr>
+    <tr><td>宽表 scan + 过滤，秒级返回</td><td>单行 UPDATE / DELETE（弱支持，异步 mutation）</td></tr>
+    <tr><td>日志、埋点、时序、用户行为分析</td><td>事务（无 ACID 事务）</td></tr>
+    <tr><td>实时写入 + 实时查询（追加为主）</td><td>复杂多表 JOIN / 子查询（较弱，需改写）</td></tr>
+    <tr><td>高压缩比（10× 常见），省存储</td><td>强一致、低延迟的主数据存储</td></tr>
+  </table>
+  <div class="lead warn">
+    <b>定位提醒：</b>ClickHouse 是<b>分析引擎</b>不是主数据库。它通常位于数据链路的下游——
+    业务数据从 MySQL / 消息队列经 CDC 或 Flink 同步进来，供看板和 adhoc 查询使用。
+    <b>不要拿它当业务库用。</b>
+  </div>
+</section>
+
+<section id="arch">
+  <h2><span class="n">02</span>整体架构</h2>
+  <div class="fig">
+    <svg width="720" height="290" viewBox="0 0 720 290">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+        </marker>
+      </defs>
+      <!-- client -->
+      <rect x="270" y="14" width="180" height="40" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+      <text x="360" y="39" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">客户端 HTTP / Native TCP</text>
+      <line x1="360" y1="56" x2="360" y2="84" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#ah)"/>
+
+      <!-- server layer -->
+      <rect x="120" y="88" width="480" height="72" rx="10" fill="#171b26" stroke="#2b3142"/>
+      <text x="360" y="112" text-anchor="middle" font-size="14" font-weight="700" fill="#6ea8fe">Server 层（无状态）</text>
+      <text x="360" y="134" text-anchor="middle" font-size="12" fill="#94a3b8">SQL 解析 → 查询改写 → 生成 pipeline → 调度执行</text>
+      <text x="360" y="152" text-anchor="middle" font-size="12" fill="#94a3b8">多节点时负责分布式计划下发与结果汇总</text>
+
+      <line x1="360" y1="162" x2="360" y2="190" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#ah)"/>
+
+      <!-- storage layer -->
+      <rect x="120" y="194" width="480" height="84" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+      <text x="360" y="218" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">存储引擎层 MergeTree 家族</text>
+      <text x="360" y="240" text-anchor="middle" font-size="12" fill="#94a3b8">Part 目录 · 稀疏主键索引 · 列文件 (bin) · 标记文件 (mrk)</text>
+      <text x="360" y="258" text-anchor="middle" font-size="12" fill="#94a3b8">后台线程持续 merge 小 Part → 大 Part</text>
+      <text x="360" y="274" text-anchor="middle" font-size="11.5" fill="#7ee787">数据按 PARTITION BY 分区，目录独立</text>
+    </svg>
+    <div class="cap">图 1：ClickHouse 分层——Server 无状态可扩展，存储引擎是性能核心</div>
+  </div>
+
+  <h3>几个关键概念</h3>
+  <div class="grid">
+    <div class="card">
+      <h4>📦 Part</h4>
+      <p>每次批量 INSERT 生成一个<b>不可变的 Part 目录</b>。Part 内数据按主键有序。
+      后台线程不断把小 Part 合并成大 Part。这是典型的 <b>LSM 风格写入</b>——写入只做顺序追加，代价转给后台合并。</p>
+    </div>
+    <div class="card">
+      <h4>🗂️ Partition</h4>
+      <p><code>PARTITION BY toYYYYMM(date)</code> 按月分区。
+      查询带分区条件时直接<b>剪枝掉整个目录</b>，是最有效的一级过滤。</p>
+    </div>
+    <div class="card">
+      <h4>🔑 Primary Key（排序键）</h4>
+      <p>ClickHouse 的主键<b>不是唯一约束</b>，而是<b>排序键</b>——决定数据在 Part 内的物理顺序。
+      这是它最容易被误解的地方，详见「稀疏索引」一节。</p>
+    </div>
+    <div class="card">
+      <h4>🔄 Merge</h4>
+      <p>后台合并同分区的 Part：去重（ReplacingMergeTree）、预聚合（AggregatingMergeTree）、
+      或单纯排序合并。合并是<b>异步且幂等</b>的。</p>
+    </div>
+  </div>
+</section>
+
+<section id="mergetree">
+  <h2><span class="n">03</span>MergeTree 引擎家族</h2>
+  <p><code>MergeTree</code> 是基础引擎，加前缀/后缀衍生出适配不同语义的变体：</p>
+  <table>
+    <tr><th>引擎</th><th>额外行为</th><th>典型用途</th></tr>
+    <tr><td><b>MergeTree</b></td><td>基础：排序 + 分区 + 后台合并</td><td>日志、事实明细表</td></tr>
+    <tr><td><b>ReplacingMergeTree</b></td><td>合并时按排序键<b>保留最后一行</b>（去重）</td><td>CDC 同步的 upsert 语义</td></tr>
+    <tr><td><b>AggregatingMergeTree</b></td><td>合并时把多行<b>预聚合</b>成一行状态</td><td>物化视图增量聚合</td></tr>
+    <tr><td><b>SummingMergeTree</b></td><td>合并时数值列直接 <b>SUM</b></td><td>简单累加指标</td></tr>
+    <tr><td><b>CollapsingMergeTree</b></td><td>用 sign 列（+1/-1）抵消旧值</td><td>需要精确更新的场景</td></tr>
+    <tr><td><b>ReplicatedMergeTree</b></td><td>基于 <b>ZooKeeper / Keeper</b> 的多副本复制</td><td>生产高可用必备</td></tr>
+    <tr><td><b>Distributed</b></td><td>本身不存数据，是<b>分片路由视图</b></td><td>集群分布式表</td></tr>
+  </table>
+
+  <div class="fig">
+    <svg width="720" height="230" viewBox="0 0 720 230">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">Part 的生成与后台合并</text>
+      <!-- writes -->
+      <g font-family="monospace" font-size="11.5">
+        <rect x="40" y="40" width="120" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="60" fill="#94a3b8">INSERT batch1</text>
+        <rect x="40" y="78" width="120" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="98" fill="#94a3b8">INSERT batch2</text>
+        <rect x="40" y="116" width="120" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="136" fill="#94a3b8">INSERT batch3</text>
+        <rect x="40" y="154" width="120" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="174" fill="#94a3b8">INSERT batch4</text>
+      </g>
+      <text x="100" y="200" text-anchor="middle" font-size="11.5" fill="#94a3b8">每次写入生成一个小 Part</text>
+
+      <!-- arrow -->
+      <text x="215" y="105" font-size="24" fill="#6ea8fe">→</text>
+
+      <!-- parts -->
+      <g font-family="monospace" font-size="11">
+        <rect x="250" y="45" width="70" height="24" fill="#2a2340" stroke="#d2a8ff"/><text x="260" y="61" fill="#d2a8ff">part_1</text>
+        <rect x="250" y="73" width="70" height="24" fill="#2a2340" stroke="#d2a8ff"/><text x="260" y="89" fill="#d2a8ff">part_2</text>
+        <rect x="250" y="101" width="70" height="24" fill="#2a2340" stroke="#d2a8ff"/><text x="260" y="117" fill="#d2a8ff">part_3</text>
+        <rect x="250" y="129" width="70" height="24" fill="#2a2340" stroke="#d2a8ff"/><text x="260" y="145" fill="#d2a8ff">part_4</text>
+      </g>
+      <text x="285" y="170" text-anchor="middle" font-size="11.5" fill="#d2a8ff">Part 内按主键有序</text>
+      <text x="285" y="200" text-anchor="middle" font-size="11.5" fill="#94a3b8">Part 之间无序</text>
+
+      <!-- merge arrow -->
+      <text x="385" y="105" font-size="24" fill="#7ee787">→</text>
+
+      <!-- merged -->
+      <rect x="430" y="70" width="250" height="70" fill="#1b3a2a" stroke="#7ee787"/>
+      <text x="555" y="96" text-anchor="middle" font-size="13" font-weight="700" fill="#7ee787">合并后的大 Part</text>
+      <text x="555" y="118" text-anchor="middle" font-size="11.5" fill="#94a3b8">全局有序 · 旧 Part 标记删除</text>
+      <text x="555" y="192" text-anchor="middle" font-size="11.5" fill="#7ee787">后台线程持续进行，Part 数趋向收敛</text>
+    </svg>
+    <div class="cap">图 2：LSM 式写入——写入即追加，排序与去重交给后台 merge</div>
+  </div>
+</section>
+
+<section id="index">
+  <h2><span class="n">04</span>稀疏索引：最容易被误解的设计</h2>
+  <p>MySQL 的 B+ 树索引能精确定位到<b>每一行</b>；ClickHouse 的主键索引是<b>稀疏的</b>——
+  它只记录「每 <code>index_granularity</code> 行（默认 8192）的第一行的主键值」。</p>
+
+  <div class="fig">
+    <svg width="720" height="240" viewBox="0 0 720 240">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#6ea8fe">稀疏索引 vs 稠密索引</text>
+      <!-- data marks -->
+      <text x="40" y="52" font-size="12" fill="#94a3b8">数据（granule = 8192 行）：</text>
+      <g font-family="monospace" font-size="10.5">
+        <rect x="40" y="60" width="640" height="24" fill="#1f2433" stroke="#2b3142"/>
+        <text x="48" y="76" fill="#94a3b8">g0: 1..8192</text>
+        <text x="168" y="76" fill="#94a3b8">g1: 8193..16384</text>
+        <text x="308" y="76" fill="#94a3b8">g2: 16385..24576</text>
+        <text x="464" y="76" fill="#94a3b8">g3: 24577..32768</text>
+        <text x="610" y="76" fill="#94a3b8">g4...</text>
+      </g>
+
+      <text x="40" y="118" font-size="12" fill="#7ee787">稀疏索引（只存 granule 首行主键）：</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="126" width="128" height="26" fill="#1b3a2a" stroke="#7ee787"/><text x="50" y="144" fill="#7ee787">mark0 → 1</text>
+        <rect x="170" y="126" width="128" height="26" fill="#1b3a2a" stroke="#7ee787"/><text x="180" y="144" fill="#7ee787">mark1 → 8193</text>
+        <rect x="300" y="126" width="140" height="26" fill="#1b3a2a" stroke="#7ee787"/><text x="310" y="144" fill="#7ee787">mark2 → 16385</text>
+        <rect x="442" y="126" width="140" height="26" fill="#1b3a2a" stroke="#7ee787"/><text x="452" y="144" fill="#7ee787">mark3 → 24577</text>
+      </g>
+      <text x="360" y="176" text-anchor="middle" font-size="12" fill="#7ee787">整个索引常驻内存，几十亿行也只有几 MB</text>
+
+      <text x="360" y="208" text-anchor="middle" font-size="12.5" fill="#f0a868">查 id=20000 → 二分定位到 mark2 → 只扫描 g2 这 8192 行（而非全表）</text>
+      <text x="360" y="228" text-anchor="middle" font-size="11.5" fill="#94a3b8">粒度内仍需扫描：所以它不是点查引擎，是「粗筛 + 批扫」引擎</text>
+    </svg>
+    <div class="cap">图 3：稀疏索引用极小的内存代价，把扫描范围缩小到 granule 级</div>
+  </div>
+
+  <h3>由此推出的建表原则</h3>
+  <ol>
+    <li><b>主键 = 最常用的过滤/排序维度</b>，按「基数从低到高」排列。
+    低基数列放前面，后续列的索引效果会被削弱。</li>
+    <li><b>分区键选时间</b>（<code>toYYYYMM</code> 或 <code>toDate</code>），让按时间范围的查询直接剪掉整个目录。</li>
+    <li><b>不要建太多索引</b>——主键只有一个，靠 ORDER BY 决定；额外的用 <b>跳数索引（Data Skipping Index）</b> 如 minmax、set、bloom_filter。</li>
+    <li><b>主键列尽量短</b>，因为它决定了内存里 mark 的大小。</li>
+  </ol>
+</section>
+
+<section id="exec">
+  <h2><span class="n">05</span>查询执行：向量化流水线</h2>
+  <p>ClickHouse 不用火山模型，而是<b>推送式（push-based）向量化 pipeline</b>：
+  数据以 Block（默认 8192 行，按列组织的连续内存）为单位在算子间流动。</p>
+
+  <div class="fig">
+    <svg width="720" height="150" viewBox="0 0 720 150">
+      <defs>
+        <marker id="ah2" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#56d4dd"/>
+        </marker>
+      </defs>
+      <g>
+        <rect x="20" y="52" width="120" height="46" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="80" y="73" text-anchor="middle" font-size="12" fill="#e2e8f0">ReadFromPart</text>
+        <text x="80" y="90" text-anchor="middle" font-size="11" fill="#94a3b8">读列 + 剪枝</text>
+
+        <rect x="160" y="52" width="120" height="46" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="220" y="73" text-anchor="middle" font-size="12" fill="#e2e8f0">Filter</text>
+        <text x="220" y="90" text-anchor="middle" font-size="11" fill="#94a3b8">WHERE 向量化</text>
+
+        <rect x="300" y="52" width="140" height="46" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="370" y="73" text-anchor="middle" font-size="12" fill="#e2e8f0">Aggregate</text>
+        <text x="370" y="90" text-anchor="middle" font-size="11" fill="#94a3b8">局部聚合（哈希）</text>
+
+        <rect x="460" y="52" width="120" height="46" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="520" y="73" text-anchor="middle" font-size="12" fill="#e2e8f0">Sort / Limit</text>
+        <text x="520" y="90" text-anchor="middle" font-size="11" fill="#94a3b8">排序截断</text>
+
+        <rect x="600" y="52" width="100" height="46" rx="8" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="650" y="80" text-anchor="middle" font-size="12" fill="#7ee787">输出</text>
+      </g>
+      <line x1="142" y1="75" x2="156" y2="75" stroke="#56d4dd" stroke-width="1.8" marker-end="url(#ah2)"/>
+      <line x1="282" y1="75" x2="296" y2="75" stroke="#56d4dd" stroke-width="1.8" marker-end="url(#ah2)"/>
+      <line x1="442" y1="75" x2="456" y2="75" stroke="#56d4dd" stroke-width="1.8" marker-end="url(#ah2)"/>
+      <line x1="582" y1="75" x2="596" y2="75" stroke="#56d4dd" stroke-width="1.8" marker-end="url(#ah2)"/>
+      <text x="360" y="128" text-anchor="middle" font-size="12" fill="#94a3b8">每个算子一次处理一个 Block（8192 行 × 按列连续内存）</text>
+    </svg>
+    <div class="cap">图 4：向量化流水线——Block 在算子间批量流动，全程列式内存布局</div>
+  </div>
+
+  <p>此外还有两个关键优化：</p>
+  <ul>
+    <li><b>PREWHERE</b>：先只读过滤列的少量数据确定行号，再读其余列——<b>延迟物化</b>的教科书实现。</li>
+    <li><b>多线程并行</b>：Part 之间并行、Part 内按 granule 并行，把多核全部吃满。</li>
+  </ul>
+</section>
+
+<section id="tradeoff">
+  <h2><span class="n">06</span>优势与常见坑</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>✅ 优势</h4>
+      <p>· 扫描性能极强，压缩比高<br>
+      · 写入吞吐高（顺序追加）<br>
+      · SQL 兼容度不错，学习成本低<br>
+      · 单机即可撑起 TB 级分析<br>
+      · 生态成熟（物化视图、MySQL/HTTP 接口）</p>
+    </div>
+    <div class="card">
+      <h4>⚠️ 常见坑</h4>
+      <p>· <b>不能高并发点查</b>——每次查询都倾向吃满 CPU<br>
+      · <b>UPDATE/DELETE 是异步 mutation</b>，不是实时生效<br>
+      · <b>JOIN 能力弱</b>，大表 JOIN 容易 OOM，建议宽表化<br>
+      · <b>没有事务</b>，一致性靠上游保证<br>
+      · 写入要<b>批量</b>（几千行一批），小批量写入会产生大量 Part 拖垮合并</p>
+    </div>
+  </div>
+
+  <div class="qa">
+    <b>Q：为什么我 INSERT 单行很慢，还报 "Too many parts"？</b><br>
+    A：ClickHouse 每次 INSERT 都会生成一个 Part，单行插入意味着<b>海量小 Part</b>，
+    后台合并跟不上就会触发 <code>Too many parts</code> 报错。
+    正确做法是<b>客户端攒批</b>（建议 ≥ 1000 行/批，或每秒不超过 1 次写入），
+    或用 Buffer 引擎 / Kafka 引擎在服务端缓冲。
+  </div>
+  <div class="qa">
+    <b>Q：ClickHouse 的主键能保证唯一吗？</b><br>
+    A：<b>不能。</b>它只是排序键，没有唯一约束。
+    要去重需要用 <code>ReplacingMergeTree</code> + <code>ORDER BY</code>，
+    但去重发生在<b>后台合并时</b>，所以查询时要用 <code>FINAL</code> 或 <code>argMax()</code> 才能保证结果正确——这也是一个常见陷阱。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP / ClickHouse ·
+  <a href="../../index.html">返回 ClickHouse 目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

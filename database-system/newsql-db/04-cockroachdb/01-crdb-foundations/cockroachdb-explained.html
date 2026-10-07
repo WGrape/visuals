@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CockroachDB 架构与原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>CockroachDB 架构与原理</h1>
+  <p>Serializable 的分布式 SQL——Google Spanner 的开源追随者</p>
+  <span class="tag">CockroachDB</span><span class="tag">Spanner</span><span class="tag">Serializable</span><span class="tag">Raft</span><span class="tag">HLC</span>
+</header>
+<nav>
+  <a href="#pos">① 定位与血统</a>
+  <a href="#arch">② 对等架构</a>
+  <a href="#clock">③ 混合逻辑时钟</a>
+  <a href="#txn">④ 可串行化事务</a>
+  <a href="#geo">⑤ 地理分区</a>
+  <a href="#vs">⑥ 对比与选型</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>CockroachDB 的设计目标是「<b>打不死的 Postgres</b>」——
+  完全对等无单点、跨地域部署原生、并且提供分布式数据库中最强的
+  <b>Serializable（可串行化）</b>隔离级别。它是对 Google Spanner 论文的开源实现。
+</div>
+
+<section id="pos">
+  <h2><span class="n">01</span>定位与血统</h2>
+  <table>
+    <tr><th>特性</th><th>说明</th></tr>
+    <tr><td>血统</td><td>受 <b>Google Spanner</b> 论文启发（但不用 TrueTime 硬件时钟）</td></tr>
+    <tr><td>协议</td><td>兼容 <b>PostgreSQL 线协议</b>（不是 MySQL）</td></tr>
+    <tr><td>一致性</td><td>默认 <b>Serializable</b>——最高隔离级别</td></tr>
+    <tr><td>部署</td><td>原生支持跨地域/跨云多活</td></tr>
+    <tr><td>语言</td><td>Go 编写，单二进制部署简单</td></tr>
+    <tr><td>名字由来</td><td>蟑螂（Cockroach）——寓意"杀不死"</td></tr>
+  </table>
+
+  <div class="lead warn">
+    <b>与 Spanner 的关键差异：</b>Spanner 依赖 Google 数据中心的
+    <b>原子钟 + GPS（TrueTime）</b>硬件来保证全局时间误差极小。
+    普通机房没有这种硬件，所以 CockroachDB 改用
+    <b>HLC（混合逻辑时钟）+ 不确定性区间</b>来近似——这是它最重要的技术创新。
+  </div>
+</section>
+
+<section id="arch">
+  <h2><span class="n">02</span>完全对等的架构</h2>
+  <div class="fig">
+    <svg width="720" height="250" viewBox="0 0 720 250">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">无单点：每个节点都完全对等</text>
+      <!-- nodes -->
+      <g font-size="11.5">
+        <rect x="40" y="36" width="180" height="70" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="130" y="58" text-anchor="middle" font-size="12.5" fill="#e2e8f0">Node 1</text>
+        <text x="130" y="78" text-anchor="middle" fill="#94a3b8">SQL 层 + KV 层 + Range 副本</text>
+        <text x="130" y="96" text-anchor="middle" fill="#94a3b8">可作为 Gateway 接入</text>
+
+        <rect x="270" y="36" width="180" height="70" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="360" y="58" text-anchor="middle" font-size="12.5" fill="#e2e8f0">Node 2</text>
+        <text x="360" y="78" text-anchor="middle" fill="#94a3b8">SQL 层 + KV 层 + Range 副本</text>
+        <text x="360" y="96" text-anchor="middle" fill="#94a3b8">可作为 Gateway 接入</text>
+
+        <rect x="500" y="36" width="180" height="70" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="590" y="58" text-anchor="middle" font-size="12.5" fill="#e2e8f0">Node 3</text>
+        <text x="590" y="78" text-anchor="middle" fill="#94a3b8">SQL 层 + KV 层 + Range 副本</text>
+        <text x="590" y="96" text-anchor="middle" fill="#94a3b8">可作为 Gateway 接入</text>
+      </g>
+
+      <rect x="40" y="126" width="640" height="46" rx="8" fill="#171b26" stroke="#d2a8ff"/>
+      <text x="360" y="148" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d2a8ff">Range（默认 64MB）+ Raft Group，三副本分散在不同节点</text>
+      <text x="360" y="166" text-anchor="middle" font-size="11.5" fill="#94a3b8">元数据（Range 位置）也存在一个特殊的两层 Range 索引里，同样多副本</text>
+
+      <rect x="40" y="186" width="640" height="46" rx="8" fill="#171b26" stroke="#2b3142"/>
+      <text x="360" y="208" text-anchor="middle" font-size="12" fill="#7ee787">没有 PD、没有 RootService、没有 Proxy —— 任何节点故障都不影响集群可用</text>
+      <text x="360" y="226" text-anchor="middle" font-size="11.5" fill="#94a3b8">客户端可连任意节点（Gateway），由它代为路由，且会自动重试</text>
+    </svg>
+    <div class="cap">图 1：CockroachDB 没有中心化组件——这是它与 TiDB / OceanBase 最大的架构差异</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h4>🔀 Gateway 节点</h4>
+      <p>客户端连到的那个节点叫 Gateway，负责 SQL 解析与路由。
+      但<b>任何节点都能当 Gateway</b>，挂了换一个连即可。</p>
+    </div>
+    <div class="card">
+      <h4>📦 Range</h4>
+      <p>数据按 key 范围切成 Range（默认 64 MB，比 TiDB 的 Region 小），
+      每个 Range 一个 Raft Group，超过阈值自动分裂。</p>
+    </div>
+    <div class="card">
+      <h4>🗺️ 元数据存储</h4>
+      <p>Range 的位置信息<b>也存在 KV 里</b>（两层 meta Range），
+      同样是 Raft 多副本。避免了独立的元数据服务。</p>
+    </div>
+  </div>
+</section>
+
+<section id="clock">
+  <h2><span class="n">03</span>混合逻辑时钟 HLC</h2>
+  <p>分布式事务需要全局排序，而物理时钟在跨节点间必然有偏差（时钟漂移）。
+  CockroachDB 的解法是 <b>HLC（Hybrid Logical Clock，混合逻辑时钟）</b>：</p>
+
+  <div class="fig">
+    <svg width="720" height="200" viewBox="0 0 720 200">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">HLC = 物理时间 + 逻辑计数</text>
+      <rect x="40" y="34" width="640" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="360" y="56" text-anchor="middle" font-family="monospace" font-size="12.5" fill="#e2e8f0">HLC = (wall_time, logical)</text>
+
+      <text x="40" y="92" font-size="12" fill="#94a3b8">节点间通信时，HLC 取 max(本地, 对方) 并推进：</text>
+      <g font-family="monospace" font-size="11.5">
+        <rect x="40" y="100" width="300" height="26" fill="#171b26" stroke="#2b3142"/>
+        <text x="52" y="118" fill="#94a3b8">Node A: (100, 0)</text>
+        <rect x="360" y="100" width="320" height="26" fill="#171b26" stroke="#2b3142"/>
+        <text x="372" y="118" fill="#94a3b8">Node B: (98, 0)</text>
+      </g>
+      <text x="360" y="146" text-anchor="middle" font-size="12" fill="#56d4dd">A 发消息给 B → B 更新为 (100, 1)  ← 物理取大，逻辑 +1</text>
+
+      <text x="360" y="178" text-anchor="middle" font-size="11.5" fill="#f0a868">物理时钟偏差无法消除，因此每个事务还要记录一个「不确定性区间 [t, t+ε]」</text>
+      <text x="360" y="196" text-anchor="middle" font-size="11.5" fill="#94a3b8">事务遇到落在不确定区间的写入时，会「推进不确定性」重试，以此保证可串行化</text>
+    </svg>
+    <div class="cap">图 2：HLC 用「物理时间取大 + 逻辑计数」在没有原子钟的条件下近似全局时钟</div>
+  </div>
+
+  <div class="lead ok">
+    <b>为什么这很重要：</b>有了全局定序，CockroachDB 才能实现
+    <b>分布式 Serializable</b>——整个集群的事务看起来像按某个顺序串行执行。
+    这是它能放心用于金融、库存等强一致场景的基础，
+    也是它相比 TiDB（只支持 SI 快照隔离）最显著的优势。
+  </div>
+</section>
+
+<section id="txn">
+  <h2><span class="n">04</span>事务：Serializable + 无锁</h2>
+  <table>
+    <tr><th>机制</th><th>说明</th></tr>
+    <tr><td><b>隔离级别</b></td><td>默认 <b>Serializable</b>；可降级为 Snapshot（性能更好）</td></tr>
+    <tr><td><b>并发控制</b></td><td><b>MVCC + 乐观并发</b>，读不加锁，写不阻塞读</td></tr>
+    <tr><td><b>提交协议</b></td><td>并行提交（Parallel Commits）优化过的 2PC，把 2 次 RTT 降为 1 次</td></tr>
+    <tr><td><b>写意向</b></td><td>写入先写 <b>Write Intent</b>（带事务标记），提交时转为正式值</td></tr>
+    <tr><td><b>冲突处理</b></td><td>检测到读写冲突时，后到的事务<b>重启（retry）</b>而非阻塞</td></tr>
+    <tr><td><b>不确定性重启</b></td><td>读到落在时钟不确定区间的值 → 主动推进时间戳重试</td></tr>
+  </table>
+
+  <div class="fig">
+    <svg width="720" height="190" viewBox="0 0 720 190">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">并行提交 Parallel Commits</text>
+      <!-- traditional 2PC -->
+      <text x="180" y="44" text-anchor="middle" font-size="12" fill="#ff7b72">传统 2PC：2 次 RTT</text>
+      <g font-size="11.5">
+        <rect x="40" y="54" width="280" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="180" y="74" text-anchor="middle" fill="#94a3b8">① Prepare 所有写入</text>
+        <rect x="40" y="90" width="280" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="180" y="110" text-anchor="middle" fill="#94a3b8">② 事务表标记 committed</text>
+        <rect x="40" y="126" width="280" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="180" y="146" text-anchor="middle" fill="#94a3b8">③ 清理 intents</text>
+      </g>
+      <text x="180" y="172" text-anchor="middle" font-size="11" fill="#ff7b72">提交需等两轮网络确认</text>
+
+      <!-- parallel commits -->
+      <text x="540" y="44" text-anchor="middle" font-size="12" fill="#7ee787">并行提交：1 次 RTT</text>
+      <g font-size="11.5">
+        <rect x="400" y="54" width="280" height="30" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="540" y="74" text-anchor="middle" fill="#7ee787">① 写入时直接标记 STAGING</text>
+        <rect x="400" y="90" width="280" height="30" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="540" y="110" text-anchor="middle" fill="#7ee787">② 所有写入都成功 = 已提交</text>
+        <rect x="400" y="126" width="280" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="540" y="146" text-anchor="middle" fill="#94a3b8">③ 异步清理（不阻塞返回）</text>
+      </g>
+      <text x="540" y="172" text-anchor="middle" font-size="11" fill="#7ee787">客户端少等一个 RTT，跨地域收益巨大</text>
+    </svg>
+    <div class="cap">图 3：并行提交把事务提交延迟从 2 RTT 降到 1 RTT</div>
+  </div>
+</section>
+
+<section id="geo">
+  <h2><span class="n">05</span>地理分区：跨地域部署的杀手锏</h2>
+  <p>CockroachDB 可以按<b>行的某个字段值</b>把数据固定在特定地域，
+  满足数据主权（GDPR）与低延迟访问的需求。</p>
+
+  <pre><code>-- 按 region 字段把数据钉在对应地域
+ALTER TABLE users
+  PARTITION BY LIST (region) (
+    PARTITION us_west VALUES IN ('us-west'),
+    PARTITION eu      VALUES IN ('europe'),
+    PARTITION ap      VALUES IN ('asia')
+  );
+
+-- 让欧洲用户的读写只在欧洲节点完成，延迟从 200ms 降到 5ms
+ALTER PARTITION europe OF TABLE users
+  CONFIGURE ZONE USING
+    constraints = '[+region=eu]',
+    lease_preferences = '[[+region=eu]]';</code></pre>
+
+  <div class="grid">
+    <div class="card">
+      <h4>🌍 低延迟</h4>
+      <p>把数据的 <b>Raft Lease（租约）</b>放在离用户最近的地域，
+      读无需跨洲，延迟大幅下降。</p>
+    </div>
+    <div class="card">
+      <h4>⚖️ 合规</h4>
+      <p>用 <code>constraints</code> 强制某国数据不出境，
+      满足 GDPR 等数据驻留要求。</p>
+    </div>
+    <div class="card">
+      <h4>🛡️ 存活目标</h4>
+      <p>可配置 <code>zone survivability</code>（机房级）
+      或 <code>region survivability</code>（城市级），按业务等级选择。</p>
+    </div>
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>三者对比与选型</h2>
+  <table>
+    <tr><th>维度</th><th>TiDB</th><th>OceanBase</th><th>CockroachDB</th></tr>
+    <tr><td>协议</td><td>MySQL</td><td>MySQL + Oracle</td><td><b>PostgreSQL</b></td></tr>
+    <tr><td>最高隔离级别</td><td>SI（快照隔离）</td><td>SI / RC</td><td><b>Serializable（默认）</b></td></tr>
+    <tr><td>架构</td><td>存算分离</td><td>存算一体</td><td><b>完全对等，无中心组件</b></td></tr>
+    <tr><td>全局时钟</td><td>TSO（PD 单点授时）</td><td>GTS</td><td><b>HLC（无单点）</b></td></tr>
+    <tr><td>存储引擎</td><td>RocksDB</td><td>自研 LSM + 每日合并</td><td>自研 Pebble（LSM）</td></tr>
+    <tr><td>多租户</td><td>无</td><td><b>原生硬隔离</b></td><td>弱</td></tr>
+    <tr><td>HTAP</td><td><b>TiFlash，最成熟</b></td><td>行列混存</td><td>弱</td></tr>
+    <tr><td>跨地域多活</td><td>支持</td><td><b>三地五中心，最强</b></td><td><b>地理分区，最灵活</b></td></tr>
+    <tr><td>国内生态</td><td><b>最活跃</b></td><td>金融行业强</td><td>国内较少</td></tr>
+  </table>
+
+  <div class="lead">
+    <b>选型一句话：</b><br>
+    · 要 <b>PostgreSQL 兼容 + 最强一致性 + 跨地域灵活部署</b> → CockroachDB<br>
+    · 要 <b>MySQL 兼容 + HTAP + 国内社区活跃</b> → TiDB<br>
+    · 要 <b>金融级多活 + 高压缩比 + 多租户整合</b> → OceanBase
+  </div>
+
+  <div class="qa">
+    <b>Q：CockroachDB 的 Serializable 有什么代价？</b><br>
+    A：为了可串行化，事务遇到冲突或时钟不确定性时会<b>自动重启（retry）</b>，
+    高冲突场景下重试率上升、吞吐下降。应用需要实现<b>重试逻辑</b>。
+    实践中可用 <code>SELECT FOR UPDATE</code> 提前加锁减少冲突，
+    或在对一致性要求不高的场景降级到 Snapshot 隔离换取性能。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / NewSQL / CockroachDB ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

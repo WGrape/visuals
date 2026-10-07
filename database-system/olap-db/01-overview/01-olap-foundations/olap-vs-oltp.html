@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OLAP 与 OLTP · 行存列存与 MPP 架构图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>OLAP 与 OLTP · 行存列存与 MPP 架构</h1>
+  <p>为什么分析查询不能跑在交易库上——从数据布局、扫描代价到并行执行</p>
+  <span class="tag">OLAP vs OLTP</span><span class="tag">行存 / 列存</span><span class="tag">MPP</span><span class="tag">数据立方体</span>
+</header>
+<nav>
+  <a href="#why">① 两种 workload</a>
+  <a href="#layout">② 行存 vs 列存</a>
+  <a href="#compress">③ 压缩与向量化</a>
+  <a href="#mpp">④ MPP 并行</a>
+  <a href="#model">⑤ 数据模型</a>
+  <a href="#choose">⑥ 如何选型</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>OLTP 是「一行一行的增删改」，OLAP 是「一列一列的聚合」。
+  前者优化点写延迟，后者优化批量扫描吞吐。两者对数据布局的要求天然冲突，
+  所以现代架构一定会把它们拆开——用 CDC 把 OLTP 的数据同步到 OLAP 引擎再算。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>两种不同的 workload</h2>
+  <p>同一个业务，两类查询的访问模式完全不同。理解这张表，后面所有设计取舍都顺理成章。</p>
+  <table>
+    <tr><th>维度</th><th>OLTP（在线事务处理）</th><th>OLAP（在线分析处理）</th></tr>
+    <tr><td>典型场景</td><td>下单、支付、扣库存</td><td>日报、留存、漏斗、大盘看板</td></tr>
+    <tr><td>读写比</td><td>读写均衡，单行操作</td><td>几乎只读，批量导入</td></tr>
+    <tr><td>单次涉及行数</td><td>几条～几百条</td><td>百万～百亿条</td></tr>
+    <tr><td>涉及列数</td><td>整行（SELECT *）</td><td>少数几列（SELECT SUM(amount)）</td></tr>
+    <tr><td>延迟要求</td><td>毫秒级，要求稳定 P99</td><td>秒～分钟级可接受</td></tr>
+    <tr><td>数据时效</td><td>当前最新状态</td><td>历史全量 + 追加</td></tr>
+    <tr><td>代表产品</td><td>MySQL、PostgreSQL、Oracle</td><td>ClickHouse、Doris、StarRocks</td></tr>
+  </table>
+
+  <div class="fig">
+    <svg width="720" height="250" viewBox="0 0 720 250">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+        </marker>
+      </defs>
+      <!-- OLTP side -->
+      <rect x="40" y="30" width="300" height="190" rx="12" fill="#171b26" stroke="#2b3142"/>
+      <text x="190" y="58" text-anchor="middle" font-size="15" font-weight="700" fill="#6ea8fe">OLTP：点查点写</text>
+      <!-- table rows, highlight one row -->
+      <g font-family="monospace" font-size="11">
+        <rect x="60" y="75" width="260" height="22" fill="#1f2433"/>
+        <text x="70" y="90" fill="#94a3b8">id name amount city</text>
+        <rect x="60" y="99" width="260" height="22" fill="#1f2433"/>
+        <text x="70" y="114" fill="#94a3b8">1  tom   100    BJ</text>
+        <rect x="60" y="123" width="260" height="26" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="70" y="140" fill="#7ee787">2  amy   350    SH</text>
+        <rect x="60" y="151" width="260" height="22" fill="#1f2433"/>
+        <text x="70" y="166" fill="#94a3b8">3  bob   80     GZ</text>
+        <rect x="60" y="175" width="260" height="22" fill="#1f2433"/>
+        <text x="70" y="190" fill="#94a3b8">4  kate  220    SZ</text>
+      </g>
+      <text x="190" y="212" text-anchor="middle" font-size="12.5" fill="#7ee787">一次只碰 1 行 → 索引直达</text>
+
+      <!-- OLAP side -->
+      <rect x="380" y="30" width="300" height="190" rx="12" fill="#171b26" stroke="#2b3142"/>
+      <text x="530" y="58" text-anchor="middle" font-size="15" font-weight="700" fill="#d2a8ff">OLAP：全列聚合</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="400" y="75" width="260" height="22" fill="#1f2433"/>
+        <text x="410" y="90" fill="#94a3b8">id name amount city</text>
+        <rect x="400" y="99" width="260" height="22" fill="#1f2433"/>
+        <text x="410" y="114" fill="#94a3b8">1  tom   100    BJ</text>
+        <!-- highlight amount column only -->
+        <rect x="516" y="123" width="52" height="22" fill="#2a2340" stroke="#d2a8ff"/>
+        <rect x="516" y="145" width="52" height="22" fill="#2a2340" stroke="#d2a8ff"/>
+        <rect x="516" y="167" width="52" height="22" fill="#2a2340" stroke="#d2a8ff"/>
+        <rect x="400" y="123" width="260" height="22" fill="#1f2433"/>
+        <text x="410" y="138" fill="#94a3b8">2  amy   350    SH</text>
+        <text x="524" y="138" fill="#d2a8ff">350</text>
+        <rect x="400" y="145" width="260" height="22" fill="#1f2433"/>
+        <text x="410" y="160" fill="#94a3b8">3  bob   80     GZ</text>
+        <text x="524" y="160" fill="#d2a8ff">80</text>
+        <rect x="400" y="167" width="260" height="22" fill="#1f2433"/>
+        <text x="410" y="182" fill="#94a3b8">4  kate  220    SZ</text>
+        <text x="524" y="182" fill="#d2a8ff">220</text>
+      </g>
+      <text x="530" y="212" text-anchor="middle" font-size="12.5" fill="#d2a8ff">只碰 1 列 → 顺序读全部行</text>
+      <line x1="350" y1="125" x2="375" y2="125" stroke="#6ea8fe" stroke-width="2" marker-end="url(#ah)"/>
+    </svg>
+    <div class="cap">图 1：OLTP 用索引精确定位一行；OLAP 扫描整列做聚合——访问模式的根本差异</div>
+  </div>
+
+  <div class="qa">
+    <b>Q：为什么大表上跑 <code>SELECT COUNT(*)</code> 或全量报表会把 MySQL 拖垮？</b><br>
+    A：这类查询会把几千万行的<b>整行长数据</b>（含你根本不 SELECT 的字段）从磁盘读入内存，
+    还要占用大量 buffer pool，把业务热点页挤出去。同一份数据在行存引擎里，
+    OLAP 读到的无用字节比有用字节多几十倍。所以规则很简单——<b>分析查询不要跑在主库上</b>。
+  </div>
+</section>
+
+<section id="layout">
+  <h2><span class="n">02</span>行存 vs 列存：布局决定性能</h2>
+  <p>这是 OLAP 引擎最核心的一个设计决定。同样的数据，两种排布方式的 IO 量天差地别。</p>
+
+  <div class="fig">
+    <svg width="720" height="270" viewBox="0 0 720 270">
+      <text x="180" y="26" text-anchor="middle" font-size="15" font-weight="700" fill="#6ea8fe">行存 Row-oriented</text>
+      <g font-family="monospace" font-size="10.5">
+        <!-- rows on disk -->
+        <rect x="60" y="45" width="72" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="66" y="62" fill="#94a3b8">1 tom</text>
+        <rect x="134" y="45" width="46" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="140" y="62" fill="#94a3b8">100</text>
+        <rect x="182" y="45" width="58" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="188" y="62" fill="#94a3b8">BJ</text>
+        <rect x="60" y="73" width="72" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="66" y="90" fill="#94a3b8">2 amy</text>
+        <rect x="134" y="73" width="46" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="140" y="90" fill="#94a3b8">350</text>
+        <rect x="182" y="73" width="58" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="188" y="90" fill="#94a3b8">SH</text>
+        <rect x="60" y="101" width="72" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="66" y="118" fill="#94a3b8">3 bob</text>
+        <rect x="134" y="101" width="46" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="140" y="118" fill="#94a3b8">80</text>
+        <rect x="182" y="101" width="58" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="188" y="118" fill="#94a3b8">GZ</text>
+        <rect x="60" y="129" width="72" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="66" y="146" fill="#94a3b8">4 kate</text>
+        <rect x="134" y="129" width="46" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="140" y="146" fill="#94a3b8">220</text>
+        <rect x="182" y="129" width="58" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="188" y="146" fill="#94a3b8">SZ</text>
+      </g>
+      <!-- query wants amount only, but reads all -->
+      <text x="140" y="182" text-anchor="middle" font-size="12" fill="#ff7b72">查 SUM(amount) 仍需读全部 4 行 × 全部列</text>
+      <text x="140" y="204" text-anchor="middle" font-size="12.5" fill="#6ea8fe">写入友好：一次 IO 落一整行</text>
+      <text x="140" y="226" text-anchor="middle" font-size="12.5" fill="#94a3b8">适合：INSERT / UPDATE / 点查</text>
+
+      <text x="540" y="26" text-anchor="middle" font-size="15" font-weight="700" fill="#d2a8ff">列存 Column-oriented</text>
+      <g font-family="monospace" font-size="10.5">
+        <rect x="420" y="45" width="220" height="26" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="428" y="62" fill="#d2a8ff">id:   1 | 2 | 3 | 4</text>
+        <rect x="420" y="73" width="220" height="26" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="428" y="90" fill="#d2a8ff">name: tom | amy | bob | kate</text>
+        <rect x="420" y="101" width="220" height="26" fill="#3d2f55" stroke="#d2a8ff" stroke-width="2"/>
+        <text x="428" y="118" fill="#d2a8ff">amount: 100 | 350 | 80 | 220</text>
+        <rect x="420" y="129" width="220" height="26" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="428" y="146" fill="#d2a8ff">city:  BJ | SH | GZ | SZ</text>
+      </g>
+      <text x="530" y="182" text-anchor="middle" font-size="12" fill="#7ee787">只连续读 amount 一段，其余列完全不碰</text>
+      <text x="530" y="204" text-anchor="middle" font-size="12.5" fill="#d2a8ff">写入较弱：一行要拆成多次写</text>
+      <text x="530" y="226" text-anchor="middle" font-size="12.5" fill="#94a3b8">适合：聚合 / 扫描 / 压缩比高</text>
+    </svg>
+    <div class="cap">图 2：列存把同字段的值物理上连续存放，分析查询的无效 IO 大幅下降</div>
+  </div>
+
+  <h3>量化看差距</h3>
+  <p>假设一张 20 列的表共 1 亿行，查询只用到其中 3 列：</p>
+  <table>
+    <tr><th>方案</th><th>需要读取的数据量</th><th>相对代价</th></tr>
+    <tr><td>行存全表扫描</td><td>20 列 × 1 亿行</td><td>1×</td></tr>
+    <tr><td>行存 + 覆盖索引</td><td>3 列 × 1 亿行（但索引本身有维护成本）</td><td>≈0.2×</td></tr>
+    <tr><td><b>列存</b></td><td>3 列 × 1 亿行，且压缩后通常再小 5～10 倍</td><td><b>≈0.02×</b></td></tr>
+  </table>
+  <p class="muted">这就是为什么 ClickHouse 能在单机上秒级扫描几十亿行——省掉的 IO 不是一个数量级的差别。</p>
+</section>
+
+<section id="compress">
+  <h2><span class="n">03</span>压缩与向量化执行</h2>
+  <p>列存还带来两个额外红利，这是它比"行存 + 覆盖索引"更优的关键。</p>
+
+  <div class="grid">
+    <div class="card">
+      <h4>🗜️ 极高压缩比</h4>
+      <p>同列数据类型一致、值域相似，极易压缩。常用手段：<b>字典编码</b>（city 只有几十个值 → 存成整数）、
+      <b>RLE 游程编码</b>（排序列连续相同值 → 存「值 + 重复次数」）、<b>Delta 编码</b>（时间戳存差值）、<b>位图</b>。</p>
+      <p>压缩不只是省磁盘——它直接<b>减少磁盘 IO 和内存带宽</b>，这才是分析查询的瓶颈所在。</p>
+    </div>
+    <div class="card">
+      <h4>⚡ 向量化执行</h4>
+      <p>行存引擎通常「一次处理一行」的火山模型，函数调用开销巨大。
+      列存可以<b>一次处理一批（一个 Block，通常 8192 行）</b>：
+      循环内没有分支判断、数据类型已知、函数单行执行，CPU cache 命中率极高，还能吃到 SIMD 指令。</p>
+      <p>这是 ClickHouse 得名的原因（Click + House = 点击即出结果的数仓）。</p>
+    </div>
+  </div>
+
+  <div class="lead ok">
+    <b>关键直觉：</b>分析型查询的瓶颈几乎从不在 CPU 计算，而在「把数据从磁盘搬进 CPU」的路上。
+    列存 + 压缩 + 向量化，三件事都是在砍这条搬运链路上的开销。
+  </div>
+</section>
+
+<section id="mpp">
+  <h2><span class="n">04</span>MPP：把一台机器扩展到多台</h2>
+  <p>单节点列存再快也有上限。MPP（Massively Parallel Processing，大规模并行处理）的思路是：
+  <b>数据分片存、查询并行算</b>。</p>
+
+  <div class="fig">
+    <svg width="720" height="280" viewBox="0 0 720 280">
+      <defs>
+        <marker id="ah2" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#56d4dd"/>
+        </marker>
+      </defs>
+      <!-- coordinator -->
+      <rect x="270" y="18" width="180" height="46" rx="10" fill="#1f2433" stroke="#56d4dd" stroke-width="2"/>
+      <text x="360" y="40" text-anchor="middle" font-size="14" font-weight="700" fill="#56d4dd">协调节点 Coordinator</text>
+      <text x="360" y="56" text-anchor="middle" font-size="11.5" fill="#94a3b8">解析 SQL → 生成分布式计划</text>
+
+      <line x1="310" y1="66" x2="150" y2="108" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <line x1="360" y1="66" x2="360" y2="108" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <line x1="410" y1="66" x2="570" y2="108" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah2)"/>
+
+      <!-- workers -->
+      <g>
+        <rect x="60" y="112" width="180" height="80" rx="10" fill="#171b26" stroke="#2b3142"/>
+        <text x="150" y="136" text-anchor="middle" font-size="13" font-weight="700" fill="#e2e8f0">Worker 1</text>
+        <text x="150" y="156" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地 SSD · 分片 1、4、7</text>
+        <text x="150" y="176" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地扫描 + 局部聚合</text>
+      </g>
+      <g>
+        <rect x="270" y="112" width="180" height="80" rx="10" fill="#171b26" stroke="#2b3142"/>
+        <text x="360" y="136" text-anchor="middle" font-size="13" font-weight="700" fill="#e2e8f0">Worker 2</text>
+        <text x="360" y="156" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地 SSD · 分片 2、5、8</text>
+        <text x="360" y="176" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地扫描 + 局部聚合</text>
+      </g>
+      <g>
+        <rect x="480" y="112" width="180" height="80" rx="10" fill="#171b26" stroke="#2b3142"/>
+        <text x="570" y="136" text-anchor="middle" font-size="13" font-weight="700" fill="#e2e8f0">Worker 3</text>
+        <text x="570" y="156" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地 SSD · 分片 3、6、9</text>
+        <text x="570" y="176" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地扫描 + 局部聚合</text>
+      </g>
+
+      <!-- merge -->
+      <line x1="150" y1="194" x2="330" y2="226" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <line x1="360" y1="194" x2="360" y2="226" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah2)"/>
+      <line x1="570" y1="194" x2="390" y2="226" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah2)"/>
+
+      <rect x="270" y="230" width="180" height="42" rx="10" fill="#1b3a2a" stroke="#7ee787"/>
+      <text x="360" y="250" text-anchor="middle" font-size="13" font-weight="700" fill="#7ee787">汇总最终结果</text>
+      <text x="360" y="265" text-anchor="middle" font-size="11.5" fill="#94a3b8">shuffle 后二次聚合 → 返回</text>
+    </svg>
+    <div class="cap">图 3：MPP 架构——每个 Worker 只扫自己本地的数据分片，结果再汇总</div>
+  </div>
+
+  <h3>MPP 的两类 JOIN 策略</h3>
+  <table>
+    <tr><th>策略</th><th>做法</th><th>适用场景</th></tr>
+    <tr><td><b>广播 JOIN</b></td><td>把小表全量发到所有 Worker，本地 JOIN</td><td>事实表 ⋈ 维表（维表很小）</td></tr>
+    <tr><td><b>Shuffle JOIN</b></td><td>两边都按 JOIN KEY 哈希重分布，相同 key 落同一节点</td><td>大表 ⋈ 大表</td></tr>
+    <tr><td><b>Colocate JOIN</b></td><td>预先按相同 key 分 shard，本地 JOIN 不需网络</td><td>Doris/StarRocks 的分桶表</td></tr>
+  </table>
+  <p>面试常问的优化点：<b>大表 JOIN 时务必让数据先按 key 分布好</b>，把 shuffle 的网络开销降到零。</p>
+</section>
+
+<section id="model">
+  <h2><span class="n">05</span>OLAP 侧的数据模型</h2>
+  <p>ROLAP（关系型）里最常见的两种建模方式：</p>
+  <div class="grid">
+    <div class="card">
+      <h4>⭐ 星型模型 Star Schema</h4>
+      <p>一个<b>事实表</b>（订单、点击流）+ 多个<b>维表</b>（用户、商品、时间）。
+      维表只连一层，JOIN 简单直观，绝大多数场景首选。</p>
+    </div>
+    <div class="card">
+      <h4>❄️ 雪花模型 Snowflake</h4>
+      <p>维表再往下规范化拆分（商品 → 品类 → 大类）。
+      省存储但 JOIN 层级变多。列存时代存储不值钱，<b>通常倾向反规范化回星型</b>。</p>
+    </div>
+    <div class="card">
+      <h4>📦 宽表 Denormalized</h4>
+      <p>把维表字段全部打平到一张大宽表里，查询时零 JOIN。
+      ClickHouse / Doris 常见做法，用写入期的冗余换查询期的极速。</p>
+    </div>
+    <div class="card">
+      <h4>🧊 Cube 预聚合</h4>
+      <p>按维度组合预先算好所有聚合结果（Kylin 为代表）。
+      查询不用扫明细，直接查 cube。代价是维度爆炸与数据膨胀。</p>
+    </div>
+  </div>
+  <div class="lead warn">
+    <b>实践趋势：</b>宽表 + 物化视图正在取代传统 Cube。OLAP 引擎本身够快，
+    与其维护昂贵的预聚合，不如让引擎实时算，运维复杂度低得多。
+  </div>
+</section>
+
+<section id="choose">
+  <h2><span class="n">06</span>如何选型</h2>
+  <table>
+    <tr><th>诉求</th><th>推荐方向</th><th>说明</th></tr>
+    <tr><td>业务库 MySQL 上跑不动报表</td><td>先把分析流量切走</td><td>CDC 同步到只读从库 → 再进 OLAP 引擎</td></tr>
+    <tr><td>单表几十亿行、明细 adhoc 查询</td><td>ClickHouse</td><td>单表扫描性能怪兽，详情见下一篇</td></tr>
+    <tr><td>需要多表 JOIN、标准 BI 语义</td><td>Doris / StarRocks</td><td>对 MySQL 协议兼容好，JOIN 与并发更友好</td></tr>
+    <tr><td>固定维度、极致低延迟</td><td>物化视图 / Cube</td><td>用空间换时间</td></tr>
+    <tr><td>离线批处理、不要求时效</td><td>Hive / Spark</td><td>吞吐优先，分钟～小时级</td></tr>
+  </table>
+
+  <div class="qa">
+    <b>Q：能不能一个数据库同时扛 OLTP 和 OLAP？</b><br>
+    A：HTAP（混合事务分析处理）正是这个目标，TiDB、PolarDB 都在做，常见做法是
+    <b>用两套引擎 + 日志实时同步</b>（行存主副本 + 列存只读副本）而不是一套引擎硬扛。
+    实践中<b>资源隔离</b>是关键——否则一个大查询就能把交易链路拖慢。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP 分析型数据库 ·
+  <a href="../../index.html">返回 OLAP 目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

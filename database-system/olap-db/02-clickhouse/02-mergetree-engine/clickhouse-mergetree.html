@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClickHouse MergeTree 引擎详解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>ClickHouse MergeTree 引擎详解</h1>
+  <p>Part 目录、granule、mark 文件与后台合并——ClickHouse 性能的地基</p>
+  <span class="tag">MergeTree</span><span class="tag">Part</span><span class="tag">granule</span><span class="tag">mark</span><span class="tag">后台合并</span>
+</header>
+<nav>
+  <a href="#file">① 磁盘结构</a>
+  <a href="#granule">② granule 与 mark</a>
+  <a href="#merge">③ 合并机制</a>
+  <a href="#variant">④ 引擎变体</a>
+  <a href="#ops">⑤ 运维要点</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>MergeTree 的本质是「<b>写入 = 追加一个有序的不可变小目录（Part）</b>，
+  <b>后台不断把小 Part 合并成大 Part</b>」。理解了 Part 与 granule，就理解了 ClickHouse 为什么快、以及它所有的限制。
+</div>
+
+<section id="file">
+  <h2><span class="n">01</span>Part 在磁盘上长什么样</h2>
+  <p>每次 INSERT 都生成一个 <b>Part 目录</b>，命名类似 <code>202401_1_5_2</code>（分区_最小块_最大块_合并层级）。
+  目录内部<b>每一列一个文件</b>：</p>
+
+  <div class="fig">
+    <svg width="720" height="300" viewBox="0 0 720 300">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#6ea8fe">一个 Part 目录的内部结构</text>
+      <!-- directory tree -->
+      <g font-family="monospace" font-size="12">
+        <text x="50" y="52" fill="#d2a8ff">202401_1_5_2/</text>
+        <rect x="50" y="62" width="620" height="216" rx="8" fill="#171b26" stroke="#2b3142"/>
+
+        <text x="70" y="88" fill="#e2e8f0">primary.idx</text>
+        <text x="330" y="88" fill="#94a3b8">稀疏主键索引（常驻内存）</text>
+
+        <text x="70" y="114" fill="#e2e8f0">id.bin</text>
+        <text x="330" y="114" fill="#94a3b8">id 列数据（压缩）</text>
+        <text x="70" y="136" fill="#e2e8f0">id.mrk2</text>
+        <text x="330" y="136" fill="#94a3b8">id 列的 mark：granule → (offset_in_bin, rows)</text>
+
+        <text x="70" y="162" fill="#e2e8f0">amount.bin</text>
+        <text x="330" y="162" fill="#94a3b8">amount 列数据（压缩）</text>
+        <text x="70" y="184" fill="#e2e8f0">amount.mrk2</text>
+        <text x="330" y="184" fill="#94a3b8">amount 列的 mark 文件</text>
+
+        <text x="70" y="210" fill="#e2e8f0">city.bin / city.mrk2</text>
+        <text x="330" y="210" fill="#94a3b8">city 列数据 + mark</text>
+
+        <text x="70" y="240" fill="#e2e8f0">checksums.txt</text>
+        <text x="330" y="240" fill="#94a3b8">各文件校验和</text>
+        <text x="70" y="262" fill="#e2e8f0">count.txt</text>
+        <text x="330" y="262" fill="#94a3b8">该 Part 总行数</text>
+      </g>
+      <text x="360" y="292" text-anchor="middle" font-size="12" fill="#7ee787">每列独立 bin + mrk → 只读查询用到的列</text>
+    </svg>
+    <div class="cap">图 1：Part 目录按列切分文件，这是「只读需要的列」的物理基础</div>
+  </div>
+
+  <div class="lead ok">
+    <b>关键洞察：</b><code>.bin</code> 是压缩后的列数据，<code>.mrk2</code> 是「第 n 个 granule 在 bin 里的压缩块偏移 + 解压后行偏移」。
+    查询时先用 <code>primary.idx</code> 定位 granule 范围，再用 <code>.mrk2</code> 直接 <code>seek</code> 到对应位置——
+    <b>不需要解压整个文件</b>。
+  </div>
+</section>
+
+<section id="granule">
+  <h2><span class="n">02</span>granule：最小的不可分割读取单位</h2>
+  <p><b>granule（粒度）</b>是 ClickHouse 里最小的读取单位，默认 <code>index_granularity = 8192</code> 行。
+  稀疏索引里的一条记录叫一个 <b>mark</b>，指向一个 granule 的起点。</p>
+
+  <div class="fig">
+    <svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">primary.idx 与 granule 的对应关系</text>
+      <!-- granules -->
+      <g font-family="monospace" font-size="10.5">
+        <rect x="40" y="44" width="155" height="46" rx="4" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="66" fill="#94a3b8">granule 0</text>
+        <text x="52" y="82" fill="#94a3b8">行 0 .. 8191</text>
+        <rect x="199" y="44" width="155" height="46" rx="4" fill="#1f2433" stroke="#2b3142"/>
+        <text x="211" y="66" fill="#94a3b8">granule 1</text>
+        <text x="211" y="82" fill="#94a3b8">行 8192 .. 16383</text>
+        <rect x="358" y="44" width="155" height="46" rx="4" fill="#1f2433" stroke="#2b3142"/>
+        <text x="370" y="66" fill="#94a3b8">granule 2</text>
+        <text x="370" y="82" fill="#94a3b8">行 16384 .. 24575</text>
+        <rect x="517" y="44" width="155" height="46" rx="4" fill="#1f2433" stroke="#2b3142"/>
+        <text x="529" y="66" fill="#94a3b8">granule 3</text>
+        <text x="529" y="82" fill="#94a3b8">行 24576 .. 32767</text>
+      </g>
+      <!-- marks -->
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="108" width="155" height="28" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="52" y="127" fill="#7ee787">mark0: id=1</text>
+        <rect x="199" y="108" width="155" height="28" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="211" y="127" fill="#7ee787">mark1: id=8193</text>
+        <rect x="358" y="108" width="155" height="28" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="370" y="127" fill="#7ee787">mark2: id=16385</text>
+        <rect x="517" y="108" width="155" height="28" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="529" y="127" fill="#7ee787">mark3: id=24577</text>
+      </g>
+      <!-- query example -->
+      <text x="360" y="170" text-anchor="middle" font-size="12.5" fill="#f0a868">WHERE id = 20000</text>
+      <text x="360" y="192" text-anchor="middle" font-size="12" fill="#94a3b8">二分查找 primary.idx → 落在 mark2 区间 → 只解压 granule 2（8192 行）</text>
+      <text x="360" y="210" text-anchor="middle" font-size="11.5" fill="#94a3b8">代价固定为 1 个 granule，与表总行数无关</text>
+    </svg>
+    <div class="cap">图 2：granule 是读取的最小粒度——这就是 ClickHouse 不适合点查的原因</div>
+  </div>
+
+  <div class="lead warn">
+    <b>为什么不能点查：</b>哪怕只找 1 行，ClickHouse 也至少读 1 个 granule（8192 行）。
+    单个查询不算慢，但<b>高并发下每个查询都吃掉 8192 行的解码成本</b>，CPU 迅速打满。
+    这就是官方建议「QPS 控制在 100 以内」的原因——它是<b>吞吐型</b>引擎，不是<b>并发型</b>引擎。
+  </div>
+</section>
+
+<section id="merge">
+  <h2><span class="n">03</span>后台合并机制</h2>
+  <p>同分区的 Part 会被后台线程持续合并。合并是<b>归并排序</b>（Part 内已有序），
+  产出更大的有序 Part，旧的 Part 标记 inactive 后异步删除。</p>
+
+  <h3>合并的三条触发规则</h3>
+  <ul>
+    <li><b>Part 数量超阈值</b>：分区内 Part 数过多时优先合并小 Part。</li>
+    <li><b>Part 总大小超阈值</b>：避免单个分区里堆积过多数据。</li>
+    <li><b>TTL 到期</b>：按 TTL 规则删除或迁移过期数据。</li>
+  </ul>
+
+  <div class="fig">
+    <svg width="720" height="190" viewBox="0 0 720 190">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#7ee787">后台合并过程（归并排序）</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="42" width="130" height="26" fill="#2a2340" stroke="#d2a8ff"/><text x="50" y="60" fill="#d2a8ff">P1 [1,5,9]</text>
+        <rect x="176" y="42" width="130" height="26" fill="#2a2340" stroke="#d2a8ff"/><text x="186" y="60" fill="#d2a8ff">P2 [2,6,10]</text>
+        <rect x="312" y="42" width="130" height="26" fill="#2a2340" stroke="#d2a8ff"/><text x="322" y="60" fill="#d2a8ff">P3 [3,7,11]</text>
+        <rect x="448" y="42" width="130" height="26" fill="#2a2340" stroke="#d2a8ff"/><text x="458" y="60" fill="#d2a8ff">P4 [4,8,12]</text>
+      </g>
+      <text x="290" y="92" font-size="20" fill="#7ee787">▼ merge ▼</text>
+      <rect x="150" y="108" width="420" height="34" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+      <text x="360" y="131" text-anchor="middle" font-family="monospace" font-size="12" fill="#7ee787">P_merged [1,2,3,4,5,6,7,8,9,10,11,12]</text>
+      <text x="360" y="166" text-anchor="middle" font-size="11.5" fill="#94a3b8">旧 Part 标记 inactive → 后台清理；查询始终看到一致快照</text>
+    </svg>
+    <div class="cap">图 3：合并本质是 Part 间的归并排序，产出全局有序的大 Part</div>
+  </div>
+
+  <h3>合并的代价</h3>
+  <div class="grid">
+    <div class="card">
+      <h4>⚠️ 写放大</h4>
+      <p>同一份数据可能被反复读写合并多次。写入速率很高时，合并线程可能跟不上，产生 <b>Too many parts</b>。</p>
+    </div>
+    <div class="card">
+      <h4>⚠️ 去重不实时</h4>
+      <p><code>ReplacingMergeTree</code> 的去重<b>只在合并时发生</b>，未合并前会读到重复行。必须用 <code>FINAL</code> 或 <code>argMax</code> 兜底。</p>
+    </div>
+    <div class="card">
+      <h4>✅ 幂等安全</h4>
+      <p>合并是幂等的，中断后可重做。查询用 Part 快照，合并过程<b>不阻塞读写</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section id="variant">
+  <h2><span class="n">04</span>引擎变体怎么选</h2>
+  <table>
+    <tr><th>引擎</th><th>合并时的特殊行为</th><th>注意点</th></tr>
+    <tr><td><b>MergeTree</b></td><td>无，仅排序合并</td><td>基础款，日志明细首选</td></tr>
+    <tr><td><b>ReplacingMergeTree</b></td><td>同排序键保留<b>版本最大 / 最后写入</b>的行</td><td>去重异步；查询需 <code>FINAL</code> 或 <code>argMax()</code></td></tr>
+    <tr><td><b>AggregatingMergeTree</b></td><td>把多行聚合函数<b>状态</b>合并</td><td>需配合 <code>AggregateFunction</code> 类型 + 物化视图</td></tr>
+    <tr><td><b>SummingMergeTree</b></td><td>数值列直接 <b>SUM</b>，非数值列取一行</td><td>比 Aggregating 简单但只支持求和</td></tr>
+    <tr><td><b>CollapsingMergeTree</b></td><td>按 <code>sign</code> 列（+1/-1）抵消</td><td>写入顺序敏感，乱序会导致结果错误</td></tr>
+    <tr><td><b>VersionedCollapsingMergeTree</b></td><td>sign + version，可容忍乱序</td><td>解决了 Collapsing 的乱序问题</td></tr>
+    <tr><td><b>ReplicatedMergeTree</b></td><td>多副本通过 Keeper 同步</td><td>生产必备；与上面任意变体可叠加</td></tr>
+  </table>
+
+  <div class="lead">
+    <b>实践建议：</b>多数场景用 <code>ReplicatedReplacingMergeTree</code> + 业务侧保证幂等写入，
+    查询用 <code>argMax(col, version)</code> 取最新值，比依赖 <code>FINAL</code> 的性能更可控。
+    纯追加的日志流用基础 <code>MergeTree</code> 即可，最简单也最快。
+  </div>
+</section>
+
+<section id="ops">
+  <h2><span class="n">05</span>运维要点</h2>
+  <h3>建表示例</h3>
+  <pre><code>CREATE TABLE events (
+    event_date  Date,
+    user_id     UInt64,
+    event_type  LowCardinality(String),   -- 低基数用 LowCardinality，字典编码
+    amount      Decimal(18, 2),
+    created_at  DateTime
+) ENGINE = ReplicatedReplacingMergeTree(created_at)
+PARTITION BY toYYYYMM(event_date)          -- 按月分区，便于 TTL 与剪枝
+ORDER BY (event_type, user_id, created_at) -- 主键=排序键，低基数在前
+TTL event_date + INTERVAL 90 DAY           -- 自动过期
+SETTINGS index_granularity = 8192;</code></pre>
+
+  <h3>排查清单</h3>
+  <table>
+    <tr><th>现象</th><th>原因</th><th>处理</th></tr>
+    <tr><td>Too many parts</td><td>写入批次太小 / 太频繁</td><td>客户端攒批到 ≥1000 行；调大 <code>parts_to_throw_insert</code></td></tr>
+    <tr><td>查询扫了全表</td><td>过滤条件不在主键前缀 / 无分区条件</td><td>把高频过滤维度放进 ORDER BY 前缀；加 minmax 跳数索引</td></tr>
+    <tr><td>内存爆掉</td><td>大表 JOIN 或 GROUP BY 高基数列</td><td>宽表化避免 JOIN；设 <code>max_memory_usage</code>；用 <code>group_by_two_level_threshold</code></td></tr>
+    <tr><td>磁盘增长过快</td><td>未设 TTL / 旧 Part 未清理</td><td>配 TTL；检查 <code>merge</code> 线程是否积压</td></tr>
+    <tr><td>COUNT(*) 结果偏大</td><td>ReplacingMergeTree 未合并完</td><td>用 <code>FINAL</code> 或聚合去重，接受最终一致</td></tr>
+  </table>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP / ClickHouse · MergeTree ·
+  <a href="../../index.html">返回 ClickHouse 目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

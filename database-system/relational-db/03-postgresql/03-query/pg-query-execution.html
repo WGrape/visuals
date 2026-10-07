@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>查询执行流程与 EXPLAIN</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2333; --border: #30363d;
+    --text: #e6edf3; --text2: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --purple: #bc8cff; --orange: #ffa657; --cyan: #39c5cf; --pg: #6f9fe0;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    line-height: 1.75; min-height: 100vh; overflow-x: hidden;
+  }
+  .hero {
+    text-align: center; padding: 54px 20px 30px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0d1117 0%, #142033 100%);
+  }
+  .hero .kicker { color: var(--pg); font-size: .85rem; letter-spacing: 2px; text-transform: uppercase; }
+  .hero h1 {
+    font-size: 2.1rem; margin: 10px 0 8px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .hero p { color: var(--text2); max-width: 760px; margin: 0 auto; font-size: .98rem; }
+  .layout { display: flex; max-width: 1180px; margin: 0 auto; gap: 0; }
+  .toc {
+    position: sticky; top: 0; align-self: flex-start; width: 230px; flex-shrink: 0;
+    padding: 26px 16px; height: 100vh; overflow-y: auto;
+    border-right: 1px solid var(--border); font-size: .86rem;
+  }
+  .toc a { display: block; color: var(--text2); text-decoration: none; padding: 6px 10px; border-radius: 8px; border-left: 2px solid transparent; }
+  .toc a:hover, .toc a.active { color: var(--blue); border-left-color: var(--blue); background: rgba(88,166,255,.08); }
+  .content { flex: 1; padding: 30px 40px 80px; min-width: 0; }
+  @media (max-width: 900px) { .toc { display: none; } .content { padding: 24px 18px 60px; } }
+  section { margin-bottom: 40px; scroll-margin-top: 16px; }
+  h2 { font-size: 1.45rem; margin: 8px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--text); }
+  h3 { font-size: 1.1rem; margin: 22px 0 10px; color: var(--blue); }
+  p { color: var(--text2); margin-bottom: 14px; }
+  ul, ol { color: var(--text2); margin: 0 0 14px 22px; }
+  li { margin-bottom: 7px; }
+  strong { color: var(--text); }
+  code { background: var(--surface2); padding: 2px 6px; border-radius: 5px; font-size: .86em; color: var(--orange); font-family: 'SF Mono', Consolas, monospace; }
+  pre { background: #0b0f16; border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; overflow-x: auto; margin: 0 0 18px; }
+  pre code { background: none; padding: 0; color: #c9d1d9; font-size: .84rem; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: .88rem; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: var(--surface2); color: var(--text); }
+  td { color: var(--text2); }
+  .fig { margin: 0 0 22px; }
+  .fig svg { width: 100%; height: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  figcaption { color: var(--text2); font-size: .82rem; text-align: center; margin-top: 8px; }
+  .callout { border-radius: 10px; padding: 14px 18px; margin: 0 0 18px; border: 1px solid; font-size: .9rem; }
+  .callout.note { background: rgba(88,166,255,.08); border-color: rgba(88,166,255,.3); }
+  .callout.warn { background: rgba(248,81,73,.08); border-color: rgba(248,81,73,.3); }
+  .callout.tip  { background: rgba(63,185,80,.08); border-color: rgba(63,185,80,.3); }
+  .callout b { color: var(--text); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+  .card2 { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .card2 h4 { color: var(--green); margin-bottom: 8px; }
+  footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
+  footer a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="hero">
+  <div class="kicker">PostgreSQL / SQLite · 关系型数据库</div>
+  <h1>查询执行流程与 EXPLAIN</h1>
+  <p>从 SQL 文本到元组的四阶段，以及如何用 EXPLAIN 读懂执行计划。</p>
+</div>
+<div class="layout">
+  <nav class="toc"><a href="#q1">四阶段</a><a href="#q2">执行计划节点</a><a href="#q3">EXPLAIN 实战</a><a href="#q4">常见扫描/连接</a></nav>
+  <main class="01-content">
+<section id="q1"><h2>① 查询处理四阶段</h2>
+<figure class="fig"><svg viewBox="0 0 720 120">
+  <rect x="20" y="40" width="130" height="44" rx="8" fill="#1c2333" stroke="#58a6ff" stroke-width="1.5"/><text x="85" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">SQL 文本</text><rect x="190" y="40" width="120" height="44" rx="8" fill="#1c2333" stroke="#3fb950" stroke-width="1.5"/><text x="250" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">Parser</text><rect x="350" y="40" width="130" height="44" rx="8" fill="#1c2333" stroke="#3fb950" stroke-width="1.5"/><text x="415" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">Rewriter</text><rect x="520" y="40" width="90" height="44" rx="8" fill="#1c2333" stroke="#ffa657" stroke-width="1.5"/><text x="565" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">Planner</text><rect x="640" y="40" width="60" height="44" rx="8" fill="#1c2333" stroke="#bc8cff" stroke-width="1.5"/><text x="670" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">Exec</text><line x1="150" y1="62" x2="184" y2="62" stroke="#8b949e" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="188,62 179,57 179,67" fill="#8b949e"/><line x1="310" y1="62" x2="344" y2="62" stroke="#8b949e" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="348,62 339,57 339,67" fill="#8b949e"/><line x1="480" y1="62" x2="514" y2="62" stroke="#8b949e" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="518,62 509,57 509,67" fill="#8b949e"/><line x1="610" y1="62" x2="636" y2="62" stroke="#bc8cff" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="640,62 631,57 631,67" fill="#bc8cff"/>
+</svg><figcaption>图：Parser → Rewriter → Planner → Executor</figcaption></figure>
+<ul>
+  <li><strong>Parser</strong>：词法/语法分析，生成解析树。</li>
+  <li><strong>Rewriter</strong>：应用规则与视图展开（含视图、规则）。</li>
+  <li><strong>Planner（优化器）</strong>：基于成本的 CBO，枚举计划估算代价，选最优。</li>
+  <li><strong>Executor</strong>：按计划树逐层拉取（火山模型）产出元组。</li>
+</ul>
+</section>
+<section id="q2"><h2>② 执行计划节点</h2>
+<p>计划是一棵树，叶子是扫描节点，上层是连接/聚合/排序。每个节点向父节点 <strong>按需拉取</strong> 元组（迭代器模型）。</p>
+</section>
+<section id="q3"><h2>③ EXPLAIN 实战</h2>
+<pre><code>EXPLAIN ANALYZE
+SELECT * FROM orders WHERE user_id = 42 ORDER BY created_at DESC LIMIT 10;</code></pre>
+<p>输出解读要点：</p>
+<ul>
+  <li><code>(cost=0.29..8.31 rows=10)</code>：启动代价..总代价，优化器估计行数。</li>
+  <li><code>actual time=... rows=...</code>：真实耗时与行数（加 <code>ANALYZE</code> 才有）。</li>
+  <li>若 <code>actual rows</code> 远大于 <code>estimated rows</code>，说明统计信息过期 → 跑 <code>ANALYZE</code>。</li>
+</ul>
+</section>
+<section id="q4"><h2>④ 常见扫描与连接</h2>
+<table>
+  <tr><th>节点</th><th>含义</th><th>何时出现</th></tr>
+  <tr><td>Seq Scan</td><td>全表扫描</td><td>无合适索引 / 大比例数据</td></tr>
+  <tr><td>Index Scan</td><td>索引定位 + 回表</td><td>命中索引且需列多</td></tr>
+  <tr><td>Index Only Scan</td><td>仅索引</td><td>覆盖索引</td></tr>
+  <tr><td>Bitmap Scan</td><td>位图合并</td><td>多条件 + 索引</td></tr>
+  <tr><td>Nested Loop / Hash / Merge Join</td><td>三种连接</td><td>小表驱动 / 哈希 / 已排序</td></tr>
+</table>
+<div class="callout tip"><b>排错顺序：</b>先看是否走了预期索引；再看 <code>rows</code> 估计是否失准（统计信息）；最后看是否有多余的排序/物化。</div>
+</section>
+</main>
+</div>
+<footer>
+  <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../index.html#subjects">返回知识地图</a></p>
+</footer>
+<script>
+  const links = document.querySelectorAll('.toc a');
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const a = document.querySelector('.toc a[href="#' + e.target.id + '"]');
+        if (a) a.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -75% 0px' });
+  document.querySelectorAll('section[id]').forEach(s => obs.observe(s));
+</script>
+</body>
+</html>

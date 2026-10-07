@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InfluxDB 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>InfluxDB 原理图解</h1>
+  <p>Measurement / Tag / Field 数据模型、TSM 存储引擎与 Line Protocol</p>
+  <span class="tag">InfluxDB</span><span class="tag">Line Protocol</span><span class="tag">TSM</span><span class="tag">Retention Policy</span><span class="tag">Flux</span>
+</header>
+<nav>
+  <a href="#model">① 数据模型</a>
+  <a href="#write">② 写入协议</a>
+  <a href="#tsm">③ TSM 存储引擎</a>
+  <a href="#query">④ 查询语言</a>
+  <a href="#rp">⑤ 保留策略与降采样</a>
+  <a href="#vs">⑥ 对比 Prometheus</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>InfluxDB 是最流行的<b>推模式（push）通用时序数据库</b>。
+  它的三件套是：<b>Line Protocol</b> 行协议写入、
+  <b>TSM（Time-Structured Merge Tree）</b> 存储引擎、
+  <b>Retention Policy + Continuous Query</b> 做数据生命周期管理。
+</div>
+
+<section id="model">
+  <h2><span class="n">01</span>数据模型：measurement / tag / field</h2>
+  <p>这是理解 InfluxDB 的第一步，也常与 Prometheus 的 metric/label 混淆。</p>
+
+  <div class="fig">
+    <svg width="720" height="235" viewBox="0 0 720 235">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">一条 InfluxDB 数据点的构成</text>
+      <rect x="40" y="34" width="640" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="360" y="54" text-anchor="middle" font-family="monospace" font-size="12" fill="#e2e8f0">measurement,tag_k=tag_v field_k=field_v timestamp</text>
+
+      <g font-size="11.5">
+        <rect x="40" y="78" width="150" height="30" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="115" y="98" text-anchor="middle" fill="#7ee787">measurement</text>
+        <text x="115" y="122" text-anchor="middle" font-size="10.5" fill="#94a3b8">= 表名（指标类别）</text>
+
+        <rect x="200" y="78" width="150" height="30" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="275" y="98" text-anchor="middle" fill="#d2a8ff">tags（索引）</text>
+        <text x="275" y="122" text-anchor="middle" font-size="10.5" fill="#94a3b8">字符串 · 有索引 · 低基数</text>
+
+        <rect x="360" y="78" width="150" height="30" rx="6" fill="#14303a" stroke="#56d4dd"/>
+        <text x="435" y="98" text-anchor="middle" fill="#56d4dd">fields（值）</text>
+        <text x="435" y="122" text-anchor="middle" font-size="10.5" fill="#94a3b8">数值/字符串/布尔 · 无索引</text>
+
+        <rect x="520" y="78" width="160" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="600" y="98" text-anchor="middle" fill="#e2e8f0">timestamp</text>
+        <text x="600" y="122" text-anchor="middle" font-size="10.5" fill="#94a3b8">纳秒精度（可选）</text>
+      </g>
+
+      <rect x="40" y="142" width="640" height="30" rx="6" fill="#171b26" stroke="#2b3142"/>
+      <text x="360" y="162" text-anchor="middle" font-size="11.5" fill="#94a3b8">series = measurement + tag set（field 不算）</text>
+
+      <text x="360" y="196" text-anchor="middle" font-size="12" fill="#f0a868">⚠️ tag 有索引可快速过滤，但会增加 series 数量；field 无索引但可存任意多</text>
+      <text x="360" y="216" text-anchor="middle" font-size="11.5" fill="#94a3b8">判据：会用在 WHERE / GROUP BY 里的低基数维度 → tag；纯粹被聚合的值 → field</text>
+    </svg>
+    <div class="cap">图 1：measurement + tags 唯一确定一条 series，fields 是这条 series 上的采样值</div>
+  </div>
+
+  <table>
+    <tr><th>概念</th><th>InfluxDB</th><th>对应的关系型数据库概念</th></tr>
+    <tr><td>measurement</td><td>cpu, http_requests</td><td>表（table）</td></tr>
+    <tr><td>tag key/value</td><td>host="web1", region="us"</td><td><b>带索引的列</b>（只存字符串）</td></tr>
+    <tr><td>field key/value</td><td>usage=0.64, count=42</td><td><b>不带索引的列</b>（数值/字符串/布尔）</td></tr>
+    <tr><td>point</td><td>一行完整数据</td><td>行（row）</td></tr>
+    <tr><td>series</td><td>measurement + tag set</td><td>无直接对应</td></tr>
+    <tr><td>retention policy</td><td>数据保留多久</td><td>无（相当于自动 TTL）</td></tr>
+  </table>
+</section>
+
+<section id="write">
+  <h2><span class="n">02</span>Line Protocol 写入协议</h2>
+  <p>纯文本行协议，简单到可以直接用 <code>curl</code> 或 <code>nc</code> 写入：</p>
+  <pre><code># 语法：measurement,tag_set field_set timestamp
+cpu,host=web1,region=us-west usage_user=23.4,usage_sys=5.6 1700000000000000000
+
+# 一次写多个 point（换行分隔，批量写入效率高）
+cpu,host=web1 usage=23.4 1700000000000000000
+cpu,host=web2 usage=45.1 1700000000000000001
+mem,host=web1 used_percent=67.2 1700000000000000000</code></pre>
+
+  <pre><code># HTTP API 写入
+curl -i -XPOST 'http://localhost:8086/write?db=mydb' \
+  --data-binary 'cpu,host=web1 usage=23.4'</code></pre>
+
+  <div class="lead ok">
+    <b>为什么用行协议？</b>时序数据的写入量极大，JSON 的解析开销不可接受。
+    行协议是<b>最简文本格式</b>：一次批量写几千行，服务端顺序解析，
+    配合 TSM 的顺序写，吞吐可达每秒数十万点。
+  </div>
+  <div class="lead warn">
+    <b>注意：</b>行协议里 tag 与 field 的<b>顺序会影响解析</b>（必须 tag 在前、field 在后），
+    且<b>类型一旦确定不能改</b>（同一 field 先写整数再写浮点会报错）。
+    这是生产中最常见的写入失败原因。
+  </div>
+</section>
+
+<section id="tsm">
+  <h2><span class="n">03</span>TSM 存储引擎</h2>
+  <p>TSM（Time-Structured Merge Tree）是 InfluxDB 自研的列式存储引擎，
+  针对时序做了专门优化，与通用的 LSM-Tree（如 RocksDB）有显著区别。</p>
+
+  <div class="fig">
+    <svg width="720" height="270" viewBox="0 0 720 270">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#56d4dd"/>
+        </marker>
+      </defs>
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">TSM 写入与合并流程</text>
+
+      <!-- write -->
+      <rect x="40" y="34" width="130" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="105" y="56" text-anchor="middle" font-size="11.5" fill="#e2e8f0">写入请求</text>
+      <line x1="174" y1="51" x2="206" y2="51" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah)"/>
+
+      <rect x="210" y="34" width="150" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="285" y="56" text-anchor="middle" font-size="11.5" fill="#e2e8f0">WAL（预写日志）</text>
+      <text x="285" y="82" text-anchor="middle" font-size="10.5" fill="#f0a868">崩溃恢复用</text>
+
+      <line x1="364" y1="51" x2="396" y2="51" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah)"/>
+      <rect x="400" y="34" width="150" height="34" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+      <text x="475" y="56" text-anchor="middle" font-size="11.5" fill="#7ee787">Cache（内存）</text>
+
+      <line x1="475" y1="70" x2="475" y2="100" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah)"/>
+      <text x="520" y="90" font-size="10.5" fill="#94a3b8">达到阈值快照</text>
+
+      <rect x="330" y="104" width="290" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+      <text x="475" y="126" text-anchor="middle" font-size="11.5" fill="#d2a8ff">TSM File（磁盘，列式 + 压缩）</text>
+
+      <line x1="475" y1="140" x2="475" y2="168" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#ah)"/>
+      <text x="540" y="160" font-size="10.5" fill="#94a3b8">后台合并</text>
+
+      <rect x="330" y="172" width="290" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+      <text x="475" y="194" text-anchor="middle" font-size="11.5" fill="#d2a8ff">更大的 TSM File（Level 1/2/3）</text>
+
+      <!-- TSM internals -->
+      <rect x="40" y="104" width="270" height="102" rx="8" fill="#171b26" stroke="#2b3142"/>
+      <text x="175" y="126" text-anchor="middle" font-size="12" font-weight="700" fill="#d2a8ff">TSM File 内部</text>
+      <text x="175" y="148" text-anchor="middle" font-size="10.5" fill="#94a3b8">按 series key 组织，每 key 一段</text>
+      <text x="175" y="168" text-anchor="middle" font-size="10.5" fill="#94a3b8">时间戳列：Delta-of-Delta 压缩</text>
+      <text x="175" y="188" text-anchor="middle" font-size="10.5" fill="#94a3b8">值列：按类型专用压缩（float XOR / int / bool 位图）</text>
+
+      <rect x="40" y="220" width="640" height="34" rx="6" fill="#171b26" stroke="#7ee787"/>
+      <text x="360" y="242" text-anchor="middle" font-size="11.5" fill="#7ee787">整体删除：一个 shard（时间分片）就是一个目录，过期直接删目录 —— 无碎片、无 undo</text>
+    </svg>
+    <div class="cap">图 2：TSM 引擎——WAL + Cache → TSM File → 后台合并；过期按 shard 整体删除</div>
+  </div>
+
+  <h3>Shard：按时间切分的存储单元</h3>
+  <p>InfluxDB 按 Retention Policy 里的 <b>shard group duration</b>（默认 7 天或 1 天）
+  把数据切成一个个 <b>shard</b>。查询带时间范围时能直接跳过无关 shard；
+  过期时<b>整个 shard 目录删掉</b>——这是它比 MySQL 的 <code>DELETE</code> 高效得多的原因。</p>
+</section>
+
+<section id="query">
+  <h2><span class="n">04</span>查询语言：InfluxQL 与 Flux</h2>
+  <table>
+    <tr><th>语言</th><th>风格</th><th>状态</th><th>示例</th></tr>
+    <tr>
+      <td><b>InfluxQL</b></td><td>类 SQL，易上手</td><td>1.x 主力，2.x 仍支持</td>
+      <td><code>SELECT mean(usage) FROM cpu WHERE host='web1' AND time &gt; now()-1h GROUP BY time(1m)</code></td>
+    </tr>
+    <tr>
+      <td><b>Flux</b></td><td>函数式管道，能力强</td><td>2.x 主推</td>
+      <td><code>from(bucket:"m") |&gt; range(start:-1h) |&gt; filter(fn:(r)=&gt;r.host=="web1") |&gt; aggregateWindow(every:1m, fn:mean)</code></td>
+    </tr>
+  </table>
+  <p class="muted">Flux 更强大（支持跨 measurement JOIN、多数据源、复杂变换），
+  但学习曲线陡；InfluxQL 简单直观但能力有限。2.x 时代两者共存。</p>
+
+  <pre><code>-- InfluxQL 常用模式
+-- 1. 时间窗口聚合（降采样的核心）
+SELECT mean("usage_user") FROM "cpu"
+WHERE time &gt; now() - 6h
+GROUP BY time(5m), "host"          -- 按 5 分钟窗口、按 host 分组
+
+-- 2. 填充缺失值（避免图表断点）
+GROUP BY time(1m) fill(previous)
+
+-- 3. 保留策略查询
+SELECT * FROM "autogen"."cpu"       -- 指定 RP
+</code></pre>
+</section>
+
+<section id="rp">
+  <h2><span class="n">05</span>保留策略与连续查询</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>⏳ Retention Policy（RP）</h4>
+      <p>定义数据在库里保留多久。到期后<b>整个 shard 删除</b>，
+      代价极低。可设多个 RP（如 7 天高精度 + 1 年降采样）。</p>
+    </div>
+    <div class="card">
+      <h4>🔄 Continuous Query（CQ）</h4>
+      <p>后台自动、增量执行的聚合查询，把高精度数据降采样写入另一个
+      measurement/RP，实现分层存储。</p>
+    </div>
+  </div>
+
+  <pre><code>-- 创建 30 天保留策略
+CREATE RETENTION POLICY "30d" ON "mydb"
+  DURATION 30d REPLICATION 1 DEFAULT
+
+-- 创建连续查询：每 5 分钟把 cpu 聚合成 5 分钟精度，写入 cpu_5m
+CREATE CONTINUOUS QUERY "cq_cpu_5m" ON "mydb"
+BEGIN
+  SELECT mean("usage_user") AS "usage_user"
+  INTO "30d"."cpu_5m"
+  FROM "autogen"."cpu"
+  GROUP BY time(5m), "host"
+END</code></pre>
+
+  <div class="lead ok">
+    <b>这套机制的价值：</b>原始秒级数据只留 7 天（可排查故障），
+    降采样后的分钟级数据留 1 年（可看趋势），
+    <b>总存储量可能只有全量保留的 1%</b>——这是时序系统能长期运行的关键。
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>InfluxDB vs Prometheus</h2>
+  <table>
+    <tr><th>维度</th><th>InfluxDB</th><th>Prometheus</th></tr>
+    <tr><td>写入模式</td><td><b>推（push）</b>：客户端主动上报</td><td><b>拉（pull）</b>：服务端定时抓取 /metrics</td></tr>
+    <tr><td>核心场景</td><td>通用时序（IoT、业务指标、APM）</td><td><b>K8s / 云原生监控告警</b></td></tr>
+    <tr><td>数据模型</td><td>measurement + tag + field</td><td>metric + label（无 field 区分）</td></tr>
+    <tr><td>查询语言</td><td>InfluxQL / Flux</td><td><b>PromQL</b>（监控领域事实标准）</td></tr>
+    <tr><td>告警</td><td>需额外组件（Kapacitor）</td><td><b>内置 Alertmanager</b></td></tr>
+    <tr><td>集群</td><td>开源版单机，集群是商业版</td><td>单机为主，靠 <b>Thanos / VictoriaMetrics</b> 扩展</td></tr>
+    <tr><td>生态</td><td>TICK Stack（Telegraf 采集）</td><td><b>CNCF 毕业项目，生态最广</b></td></tr>
+  </table>
+
+  <div class="qa">
+    <b>Q：什么时候选 InfluxDB 而不是 Prometheus？</b><br>
+    A：① <b>客户端无法被拉取</b>（如 IoT 设备在 NAT 后、边缘设备）→ 必须推模式；
+    ② 需要<b>存储非数值数据</b>（字符串 field、布尔）或需要 field 概念；
+    ③ 已有 Telegraf 采集生态。
+    <b>反之，如果是 K8s/微服务监控 + 告警，Prometheus 生态更成熟，优先选它。</b>
+  </div>
+  <div class="qa">
+    <b>Q：InfluxDB 的高可用怎么做？</b><br>
+    A：开源版（2.x）仍是<b>单机</b>，高可用要靠<b>双写 + 反向代理</b>或定期备份；
+    生产级集群需要<b>InfluxDB Enterprise / Cloud</b> 商业版。
+    这也是很多公司在大规模场景下转向 VictoriaMetrics、TDengine 或 ClickHouse 的原因之一。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 / InfluxDB ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

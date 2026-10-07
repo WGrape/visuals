@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQLite 事务与锁</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2333; --border: #30363d;
+    --text: #e6edf3; --text2: #8b949e;
+    --blue: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --purple: #bc8cff; --orange: #ffa657; --cyan: #39c5cf; --pg: #6f9fe0;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    line-height: 1.75; min-height: 100vh; overflow-x: hidden;
+  }
+  .hero {
+    text-align: center; padding: 54px 20px 30px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0d1117 0%, #142033 100%);
+  }
+  .hero .kicker { color: var(--pg); font-size: .85rem; letter-spacing: 2px; text-transform: uppercase; }
+  .hero h1 {
+    font-size: 2.1rem; margin: 10px 0 8px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .hero p { color: var(--text2); max-width: 760px; margin: 0 auto; font-size: .98rem; }
+  .layout { display: flex; max-width: 1180px; margin: 0 auto; gap: 0; }
+  .toc {
+    position: sticky; top: 0; align-self: flex-start; width: 230px; flex-shrink: 0;
+    padding: 26px 16px; height: 100vh; overflow-y: auto;
+    border-right: 1px solid var(--border); font-size: .86rem;
+  }
+  .toc a { display: block; color: var(--text2); text-decoration: none; padding: 6px 10px; border-radius: 8px; border-left: 2px solid transparent; }
+  .toc a:hover, .toc a.active { color: var(--blue); border-left-color: var(--blue); background: rgba(88,166,255,.08); }
+  .content { flex: 1; padding: 30px 40px 80px; min-width: 0; }
+  @media (max-width: 900px) { .toc { display: none; } .content { padding: 24px 18px 60px; } }
+  section { margin-bottom: 40px; scroll-margin-top: 16px; }
+  h2 { font-size: 1.45rem; margin: 8px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--text); }
+  h3 { font-size: 1.1rem; margin: 22px 0 10px; color: var(--blue); }
+  p { color: var(--text2); margin-bottom: 14px; }
+  ul, ol { color: var(--text2); margin: 0 0 14px 22px; }
+  li { margin-bottom: 7px; }
+  strong { color: var(--text); }
+  code { background: var(--surface2); padding: 2px 6px; border-radius: 5px; font-size: .86em; color: var(--orange); font-family: 'SF Mono', Consolas, monospace; }
+  pre { background: #0b0f16; border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; overflow-x: auto; margin: 0 0 18px; }
+  pre code { background: none; padding: 0; color: #c9d1d9; font-size: .84rem; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: .88rem; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; }
+  th { background: var(--surface2); color: var(--text); }
+  td { color: var(--text2); }
+  .fig { margin: 0 0 22px; }
+  .fig svg { width: 100%; height: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  figcaption { color: var(--text2); font-size: .82rem; text-align: center; margin-top: 8px; }
+  .callout { border-radius: 10px; padding: 14px 18px; margin: 0 0 18px; border: 1px solid; font-size: .9rem; }
+  .callout.note { background: rgba(88,166,255,.08); border-color: rgba(88,166,255,.3); }
+  .callout.warn { background: rgba(248,81,73,.08); border-color: rgba(248,81,73,.3); }
+  .callout.tip  { background: rgba(63,185,80,.08); border-color: rgba(63,185,80,.3); }
+  .callout b { color: var(--text); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+  .card2 { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .card2 h4 { color: var(--green); margin-bottom: 8px; }
+  footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
+  footer a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="hero">
+  <div class="kicker">PostgreSQL / SQLite · 关系型数据库</div>
+  <h1>SQLite 事务与锁</h1>
+  <p>autocommit、五级锁状态、WAL 模式下的读写并发，以及写热点瓶颈。</p>
+</div>
+<div class="layout">
+  <nav class="toc"><a href="#t1">事务模型</a><a href="#t2">五级锁</a><a href="#t3">WAL 模式</a><a href="#t4">写瓶颈</a></nav>
+  <main class="01-content">
+<section id="t1"><h2>① 事务与 autocommit</h2>
+<p>SQLite 默认 <strong>autocommit</strong>：每条语句当作一个事务立即提交。显式 <code>BEGIN</code> 开启事务，<code>COMMIT/ROLLBACK</code> 结束。与 client-server 数据库不同，SQLite 的“事务”主要指 <strong>文件级锁的持有区间</strong>。</p>
+<pre><code>BEGIN;
+UPDATE accounts SET balance=balance-10 WHERE id=1;
+UPDATE accounts SET balance=balance+10 WHERE id=2;
+COMMIT;</code></pre>
+</section>
+<section id="t2"><h2>② 五级锁状态</h2>
+<p>SQLite 用 <strong>整个数据库文件</strong> 的锁（不是行锁），按强度递进：</p>
+<table>
+  <tr><th>状态</th><th>含义</th></tr>
+  <tr><td>UNLOCKED</td><td>无锁</td></tr>
+  <tr><td>SHARED</td><td>读（可多人）</td></tr>
+  <tr><td>RESERVED</td><td>准备写（唯一个，还未改数据）</td></tr>
+  <tr><td>PENDING</td><td>等待现有读释放，准备独占</td></tr>
+  <tr><td>EXCLUSIVE</td><td>独占写（别人不能读）</td></tr>
+</table>
+<div class="callout note"><b>没有行锁：</b>写操作会锁住整个库文件，这正是 SQLite 不适合高并发写的原因。</div>
+</section>
+<section id="t3"><h2>③ WAL 模式</h2>
+<p>默认 rollback journal 模式下一个写者会阻塞所有读者。开启 <strong>WAL</strong> 后，写追加到 <code>-wal</code> 文件，<strong>读不阻塞写、写不阻塞读</strong>（读者读旧页，写者写新页），并发大幅提升。</p>
+<pre><code>PRAGMA journal_mode=WAL;
+PRAGMA wal_checkpoint;   -- 合并回主库</code></pre>
+</section>
+<section id="t4"><h2>④ 写入热点瓶颈</h2>
+<p>即使 WAL，<strong>同一时刻仍只允许一个写者</strong>。高并发写（如计数器）会互相排队。应对：批量合并写、用 <code>WAL</code> + 更大 <code>busy_timeout</code>、或干脆把写放到单线程/队列。</p>
+<pre><code>PRAGMA busy_timeout=5000;  -- 锁等待而非立即报错</code></pre>
+</section>
+</main>
+</div>
+<footer>
+  <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../index.html#subjects">返回知识地图</a></p>
+</footer>
+<script>
+  const links = document.querySelectorAll('.toc a');
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const a = document.querySelector('.toc a[href="#' + e.target.id + '"]');
+        if (a) a.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -75% 0px' });
+  document.querySelectorAll('section[id]').forEach(s => obs.observe(s));
+</script>
+</body>
+</html>

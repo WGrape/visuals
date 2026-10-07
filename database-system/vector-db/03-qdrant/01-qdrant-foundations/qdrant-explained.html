@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qdrant 向量数据库原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Qdrant 向量数据库原理</h1>
+  <p>Rust 编写的向量搜索引擎：HNSW 索引、量化压缩与强大的结构化过滤</p>
+  <span class="tag">Qdrant</span><span class="tag">HNSW</span><span class="tag">标量量化</span><span class="tag">Payload 过滤</span><span class="tag">Rust</span>
+</header>
+<nav>
+  <a href="#pos">① 定位</a>
+  <a href="#arch">② 架构与数据模型</a>
+  <a href="#index">③ 索引与量化</a>
+  <a href="#filter">④ 过滤检索</a>
+  <a href="#use">⑤ 上手示例</a>
+  <a href="#vs">⑥ 与 Milvus 对比</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>Qdrant 是用 Rust 编写的开源向量数据库，
+  最大特色是<b>把向量检索与结构化过滤（payload filter）深度结合</b>——
+  它能在带过滤条件的场景下依然保持高性能，这是很多向量库做不到的。
+  同时提供标量量化（压缩向量、省内存）与简洁的 REST/gRPC API，部署轻量。
+</div>
+
+<section id="pos">
+  <h2><span class="n">01</span>定位与特点</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>🦀 Rust 实现</h4>
+      <p>内存安全、无 GC 停顿，单机性能与资源占用表现优秀。
+      编译后是单个二进制，<b>部署极简</b>（Docker 一条命令）。</p>
+    </div>
+    <div class="card">
+      <h4>🎯 过滤能力最强</h4>
+      <p>原生支持任意 payload 字段的过滤与组合，
+      并针对"带过滤的 ANN"做了专门优化（可用 payload 索引预筛）。</p>
+    </div>
+    <div class="card">
+      <h4>💾 量化省内存</h4>
+      <p>支持<b>标量量化（int8）</b>把向量压到 1/4，
+      大库场景下内存成本大幅下降，精度损失可控。</p>
+    </div>
+    <div class="card">
+      <h4>🔌 API 友好</h4>
+      <p>REST + gRPC 双接口，官方多语言客户端齐全，
+      本地模式（in-memory / on-disk）便于开发与测试。</p>
+    </div>
+  </div>
+  <p class="muted">适合：RAG 应用、推荐、语义搜索，尤其是<b>需要带业务条件过滤</b>的检索场景。</p>
+</section>
+
+<section id="arch">
+  <h2><span class="n">02</span>数据模型与存储结构</h2>
+  <div class="fig">
+    <svg width="720" height="235" viewBox="0 0 720 235">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">Collection → Points</text>
+      <rect x="40" y="34" width="640" height="46" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+      <text x="360" y="56" text-anchor="middle" font-size="13" font-weight="700" fill="#56d4dd">Collection（类似"表"）</text>
+      <text x="360" y="74" text-anchor="middle" font-size="11.5" fill="#94a3b8">定义向量维度、距离度量（Cosine / Euclid / Dot）与索引参数</text>
+
+      <line x1="200" y1="82" x2="150" y2="112" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="360" y1="82" x2="360" y2="112" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="520" y1="82" x2="570" y2="112" stroke="#7ee787" stroke-width="1.5"/>
+
+      <g font-size="11.5">
+        <rect x="40" y="116" width="190" height="88" rx="8" fill="#171b26" stroke="#7ee787"/>
+        <text x="135" y="138" text-anchor="middle" font-size="12.5" fill="#7ee787">Point（一条记录）</text>
+        <text x="135" y="158" text-anchor="middle" fill="#94a3b8">id：唯一标识</text>
+        <text x="135" y="178" text-anchor="middle" fill="#94a3b8">vector：向量</text>
+        <text x="135" y="196" text-anchor="middle" fill="#94a3b8">payload：JSON 元数据</text>
+
+        <rect x="265" y="116" width="190" height="88" rx="8" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="360" y="138" text-anchor="middle" font-size="12.5" fill="#d2a8ff">向量存储</text>
+        <text x="360" y="158" text-anchor="middle" fill="#94a3b8">HNSW 图索引</text>
+        <text x="360" y="178" text-anchor="middle" fill="#94a3b8">可开启标量量化</text>
+        <text x="360" y="196" text-anchor="middle" fill="#94a3b8">memmap 落盘</text>
+
+        <rect x="490" y="116" width="190" height="88" rx="8" fill="#14303a" stroke="#56d4dd"/>
+        <text x="585" y="138" text-anchor="middle" font-size="12.5" fill="#56d4dd">Payload 索引</text>
+        <text x="585" y="158" text-anchor="middle" fill="#94a3b8">keyword / int / float</text>
+        <text x="585" y="178" text-anchor="middle" fill="#94a3b8">geo / datetime / text</text>
+        <text x="585" y="196" text-anchor="middle" fill="#94a3b8">用于高效过滤</text>
+      </g>
+      <text x="360" y="224" text-anchor="middle" font-size="11.5" fill="#94a3b8">向量与 payload 分开存储，检索时协同工作</text>
+    </svg>
+    <div class="cap">图 1：Qdrant 的 Point = id + vector + payload</div>
+  </div>
+
+  <table>
+    <tr><th>概念</th><th>Qdrant</th><th>关系型数据库类比</th></tr>
+    <tr><td>Collection</td><td>一组同维度向量的集合</td><td>表</td></tr>
+    <tr><td>Point</td><td>单条记录</td><td>行</td></tr>
+    <tr><td>Vector</td><td>向量（可有多个命名向量）</td><td>无直接对应</td></tr>
+    <tr><td>Payload</td><td>任意 JSON 元数据</td><td>普通列</td></tr>
+    <tr><td>Payload Index</td><td>对 payload 字段建的索引</td><td>二级索引</td></tr>
+  </table>
+</section>
+
+<section id="index">
+  <h2><span class="n">03</span>索引机制与量化</h2>
+
+  <h3>HNSW 索引</h3>
+  <p>Qdrant 默认使用 <b>HNSW（分层可导航小世界图）</b>作为向量索引。
+  它构建多层图结构，检索时从最上层"粗图"快速定位区域，再逐层下钻到最底层精搜。</p>
+  <ul>
+    <li><b>m</b>：每个节点连接的邻居数（越大图越密、越准，内存越大）。</li>
+    <li><b>ef_construct</b>：建索引时的候选队列大小（越大索引质量越高、构建越慢）。</li>
+    <li><b>ef（ef_search）</b>：检索时的候选队列大小（越大越准、越慢）——<b>运行时可调，是精度/延迟的主要旋钮</b>。</li>
+  </ul>
+
+  <h3>标量量化 Scalar Quantization</h3>
+  <div class="fig">
+    <svg width="720" height="180" viewBox="0 0 720 180">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">float32 → int8 标量量化</text>
+      <g font-family="monospace" font-size="11.5">
+        <rect x="40" y="34" width="640" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="54" fill="#94a3b8">原始向量：每个维度 4 字节（float32）  →  768 维 = 3072 字节</text>
+
+        <rect x="40" y="72" width="640" height="30" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="52" y="92" fill="#d2a8ff">量化后：每个维度 1 字节（int8）      →  768 维 = 768 字节</text>
+
+        <rect x="40" y="110" width="640" height="30" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="52" y="130" fill="#7ee787">内存降为 1/4，配合重打分（rescore）把精度损失控制在 ~1%</text>
+      </g>
+      <text x="360" y="162" text-anchor="middle" font-size="11.5" fill="#94a3b8">适合千万级以上的大库：内存是向量数据库最主要的成本</text>
+    </svg>
+    <div class="cap">图 2：标量量化用 1/4 内存换取极小的精度损失</div>
+  </div>
+
+  <div class="lead ok">
+    <b>Qdrant 的量化用法要点：</b>开启量化后，
+    检索过程先用量化向量<b>粗排</b>，再对 Top-K 候选<b>用原始向量重打分</b>（rescore / oversampling）。
+    这样既省内存又保住了最终精度——不要只量化不重打分。
+  </div>
+
+  <h3>存储策略</h3>
+  <table>
+    <tr><th>策略</th><th>说明</th><th>适用</th></tr>
+    <tr><td><b>In Memory</b></td><td>向量全放内存</td><td>数据量小、追求极致延迟</td></tr>
+    <tr><td><b>Memmap</b></td><td>用 mmap 映射到磁盘，靠 OS page cache</td><td>数据大于内存但可接受部分抖动</td></tr>
+    <tr><td><b>On-disk（量化）</b></td><td>量化后的向量存盘，原始向量可选保留</td><td>超大规模、成本敏感</td></tr>
+  </table>
+</section>
+
+<section id="filter">
+  <h2><span class="n">04</span>带过滤的检索（核心优势）</h2>
+  <p>真实业务几乎不会"纯向量检索"——总要加条件，比如
+  「找相似商品，但<b>只要上架的、价格 &lt; 500 的、且属于某品类</b>」。</p>
+
+  <div class="fig">
+    <svg width="720" height="200" viewBox="0 0 720 200">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">带过滤的 ANN 检索流程</text>
+      <g>
+        <rect x="40" y="36" width="180" height="52" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+        <text x="130" y="58" text-anchor="middle" font-size="12" fill="#e2e8f0">① Payload 过滤</text>
+        <text x="130" y="78" text-anchor="middle" font-size="10.5" fill="#94a3b8">用 payload 索引筛出候选 id</text>
+
+        <rect x="270" y="36" width="180" height="52" rx="8" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="360" y="58" text-anchor="middle" font-size="12" fill="#d2a8ff">② HNSW 图搜索</text>
+        <text x="360" y="78" text-anchor="middle" font-size="10.5" fill="#94a3b8">在候选集内做 ANN</text>
+
+        <rect x="500" y="36" width="180" height="52" rx="8" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="590" y="58" text-anchor="middle" font-size="12" fill="#7ee787">③ 返回 Top-K</text>
+        <text x="590" y="78" text-anchor="middle" font-size="10.5" fill="#94a3b8">重打分后返回</text>
+      </g>
+      <line x1="224" y1="62" x2="266" y2="62" stroke="#56d4dd" stroke-width="1.6"/>
+      <line x1="454" y1="62" x2="496" y2="62" stroke="#56d4dd" stroke-width="1.6"/>
+      <rect x="40" y="106" width="640" height="46" rx="8" fill="#171b26" stroke="#f0a868"/>
+      <text x="60" y="128" font-size="11.5" fill="#f0a868">⚠️ 过滤过严（候选极少）时，HNSW 的"图导航"会退化 —— 图边指向的邻居大多被过滤掉</text>
+      <text x="60" y="146" font-size="11.5" fill="#94a3b8">对策：为高频过滤字段建 payload 索引；极端场景可退化为暴力扫描（Qdrant 会自动判断）</text>
+      <text x="360" y="176" text-anchor="middle" font-size="11.5" fill="#94a3b8">Qdrant 的优势就在于它对这条链路做了大量工程优化</text>
+    </svg>
+    <div class="cap">图 3：过滤 + ANN 的协同流程</div>
+  </div>
+
+  <pre><code># 带过滤的检索（Python 客户端）
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, Range
+
+client = QdrantClient(host="localhost", port=6333)
+
+hits = client.search(
+    collection_name="products",
+    query_vector=query_emb,
+    query_filter=Filter(
+        must=[                                    # AND
+            FieldCondition(key="in_stock", match={"value": True}),
+            FieldCondition(key="price",   range=Range(lt=500)),
+        ],
+        should=[                                  # OR
+            FieldCondition(key="category", match={"value": "phone"}),
+            FieldCondition(key="category", match={"value": "tablet"}),
+        ]
+    ),
+    limit=10,
+    search_params={"hnsw_ef": 128},   # 运行时调 ef：越大越准越慢
+)</code></pre>
+</section>
+
+<section id="use">
+  <h2><span class="n">05</span>上手示例</h2>
+  <pre><code># 启动（Docker 一行）
+docker run -p 6333:6333 -v ./qdrant_storage:/qdrant/storage qdrant/qdrant
+
+# 建集合
+client.create_collection(
+    collection_name="docs",
+    vectors_config={"size": 768, "distance": "Cosine"},
+    quantization_config=ScalarQuantization(      # 可选：开启标量量化
+        scalar=ScalarQuantizationConfig(type="int8", quantile=0.99, always_ram=True)
+    ),
+)
+
+# 写入
+client.upsert(
+    collection_name="docs",
+    points=[
+        PointStruct(id=1, vector=emb1, payload={"title": "...", "year": 2026}),
+        PointStruct(id=2, vector=emb2, payload={"title": "...", "year": 2025}),
+    ],
+)
+
+# 给过滤字段建 payload 索引（重要！）
+client.create_payload_index("docs", field_name="year", field_schema="integer")</code></pre>
+
+  <div class="lead warn">
+    <b>实践提醒：</b>忘了建 <b>payload 索引</b>是 Qdrant 最常见的性能问题——
+    没有索引时过滤会退化成逐条比对 payload，QPS 断崖式下降。
+    <b>凡是要用于过滤的字段，务必提前建索引。</b>
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>Qdrant vs Milvus</h2>
+  <table>
+    <tr><th>维度</th><th>Qdrant</th><th>Milvus</th></tr>
+    <tr><td>语言</td><td>Rust</td><td>Go + C++</td></tr>
+    <tr><td>部署复杂度</td><td><b>极简</b>（单二进制 / 单容器）</td><td>较重（etcd、MinIO 等多组件）</td></tr>
+    <tr><td>扩展性</td><td>支持分片与副本，集群能力逐步增强</td><td><b>为超大规模设计</b>，组件拆分彻底</td></tr>
+    <tr><td>过滤能力</td><td><b>很强</b>，payload 索引类型丰富</td><td>支持属性过滤，语义略有差异</td></tr>
+    <tr><td>量化</td><td>标量量化成熟</td><td>IVF_PQ / SQ 等多种量化</td></tr>
+    <tr><td>适用规模</td><td>百万～千万级，中小团队首选</td><td>千万～百亿级，大规模生产</td></tr>
+    <tr><td>上手成本</td><td><b>低</b></td><td>较高</td></tr>
+  </table>
+
+  <div class="lead">
+    <b>选型直觉：</b>项目规模中等、希望<b>快速落地 + 过滤条件复杂</b> → Qdrant；
+    数据量达到亿级、需要<b>完善的分片/多租户/运维体系</b> → Milvus。
+    两者都开源，Qdrant 的本地模式（无需服务端）也非常适合原型开发。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 向量数据库 / Qdrant ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

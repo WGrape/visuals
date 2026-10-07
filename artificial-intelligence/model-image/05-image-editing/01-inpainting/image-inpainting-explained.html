@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>局部重绘与图像编辑：掩码、上下文与一致性怎么保证</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:42px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  ul{margin:10px 0 10px 22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">图像编辑</span>
+    <h1>局部重绘与图像编辑：掩码、上下文与一致性怎么保证</h1>
+    <p class="lead">编辑不是「擦除再贴上去」，而是「把指定区域炸掉重新生成」。本文讲清 Inpainting / Outpainting 的原理、掩码与边距处理、保证边缘连贯的技巧，以及超分与风格迁移等其他编辑范式。</p>
+  </div>
+</header>
+
+
+<section id="s1">
+  <div class="wrap">
+    <h2>编辑的本质：带约束的生成</h2>
+
+    <div class="card fade">
+      <p>给模型一张图 + 一个<b>掩码</b>（哪块要改）+ 一个<b>目标描述</b>，模型在保留未掩码区域的前提下，重新生成掩码区域的内容。</p>
+      <p class="muted" style="margin-top:10px">所以编辑质量取决于三件事：<b>掩码准不准、上下文够不够、以及模型能不能尊重约束</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="wrap">
+    <h2>局部重绘 Inpainting</h2>
+
+    <h3>典型流程</h3>
+    <ul>
+      <li>用户提供掩码（或由分割模型/点击自动生成）</li>
+      <li>把原图按掩码留出待生成区域，未掩码区域作为已知条件</li>
+      <li>在 latent 空间反复去噪，但<b>每一步都把未掩码区域用原图覆盖回去</b></li>
+      <li>解码得到结果，必要时做边缘融合（羽化）</li>
+    </ul>
+    <div class="grid2">
+      <div class="kbox"><b>扩大掩码 + 羽化边缘</b><br>掩码边缘留几像素渐变，避免生硬的接缝</div>
+      <div class="kbox"><b>保留更多上下文</b><br>喂给模型的裁剪框要比掩码大一圈，模型才知道周围是什么</div>
+    </div>
+    <div class="warn">典型失败：<b>边缘色差 / 光照不一致 / 生成内容与原图风格冲突</b>。解决方向是提供更多上下文、使用更强的结构约束（如 ControlNet 类条件），或先做局部调色融合。</div>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="wrap">
+    <h2>扩图 Outpainting</h2>
+
+    <p>把画布向外延展，让模型「脑补」画框外的部分。难点是保持<span class="hl">透视、光照、风格</span>与已存在的画面一致。</p>
+    <div class="good">实用技巧：<b>分步外扩</b>（每次扩一小条而非一次扩很大），并在每一步重新对齐原有区域的色调，成功率明显高于一次性大幅外扩。</div>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="wrap">
+    <h2>超分辨率、风格迁移与其他编辑</h2>
+
+    <table>
+      <tr><th>范式</th><th>目标</th><th>关键点</th></tr>
+      <tr><td><b>超分辨率</b></td><td>提升分辨率、补全细节</td><td>容易"脑补"出错误细节（尤其在文字、人脸）；<span class="hl">证据保真</span>与感知质量的权衡</td></tr>
+      <tr><td><b>风格迁移</b></td><td>保留内容、替换风格</td><td>分离内容与风格表征（Gram 矩阵 / AdaIN 等思路）</td></tr>
+      <tr><td><b>结构受控生成</b></td><td>按边缘/深度/姿态精确控制构图</td><td>把结构图作为额外条件注入（ControlNet 类方法）</td></tr>
+      <tr><td><b>图像修复</b></td><td>去划痕、去噪、去水印</td><td>传统方法与生成式方法结合</td></tr>
+    </table>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="wrap">
+    <h2>面试速记卡</h2>
+
+    <div class="card fade">
+      <ul>
+        <li><b>本质</b>：编辑 = 带掩码/条件的重新生成，而非像素涂抹。</li>
+        <li><b>Inpainting</b>：掩码指定区域、每步去噪后回填未掩码部分；边缘羽化 + 保留上下文是关键。</li>
+        <li><b>Outpainting</b>：分步小幅外扩 + 色调对齐，比一次大幅外扩稳。</li>
+        <li><b>超分风险</b>：会"臆造"细节，文字与人脸场景要谨慎。</li>
+        <li><b>强约束手段</b>：边缘/深度/姿态等结构条件，保证构图可控。</li>
+      </ul>
+    </div>
+    <div class="pill">Inpainting</div><div class="pill">Outpainting</div><div class="pill">掩码</div><div class="pill">超分</div><div class="pill">风格迁移</div><div class="pill">ControlNet</div><div class="pill">种子</div>
+  </div>
+</section>
+
+
+<footer><p>Visuals · 图像大模型</p></footer>
+
+<script>
+const sections=[...document.querySelectorAll('section[id]')];
+const toc=document.getElementById('toc');
+const names={s1:'本质', s2:'Inpainting', s3:'Outpainting', s4:'其它范式', s5:'速记'};
+sections.forEach(s=>{
+  const a=document.createElement('a');a.href='#'+s.id;a.title=names[s.id]||s.id;
+  a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:'smooth'})};toc.appendChild(a);
+});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{rootMargin:'0px 0px -10% 0px'});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+</body>
+</html>

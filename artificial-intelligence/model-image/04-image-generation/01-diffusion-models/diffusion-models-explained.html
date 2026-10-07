@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>扩散模型原理：加噪、学去噪、然后一步步把图画出来</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:42px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  ul{margin:10px 0 10px 22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">图像生成</span>
+    <h1>扩散模型原理：加噪、学去噪、然后一步步把图画出来</h1>
+    <p class="lead">扩散模型的想法很朴素：先把图片一步步加噪变成纯噪声（前向过程），再训练一个网络学会「倒着去噪」（反向过程）；生成时从随机噪声出发反复去噪即可。本文讲清它的训练目标、为什么比 GAN 稳、以及推理加速的关键手段。</p>
+  </div>
+</header>
+
+
+<section id="s1">
+  <div class="wrap">
+    <h2>一句话概括扩散模型</h2>
+
+    <div class="card fade">
+      <p><b>前向：</b>把真实图片逐步加高斯噪声，直到完全变成随机噪声（这个过程是固定公式，不需要学）。</p>
+      <p style="margin-top:12px"><b>反向：</b>训练一个神经网络 <code>ε_θ</code>，输入「带噪图片 + 当前步数」，预测这一步<b>加进去的噪声</b>；训练目标就是让预测噪声逼近真实噪声。</p>
+      <p style="margin-top:12px"><b>生成：</b>从纯随机噪声出发，反复「预测噪声 → 减掉一点」，多步后得到清晰图片。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="wrap">
+    <h2>为什么预测噪声而不是预测图片</h2>
+
+    <div class="formula-ish"><code>loss = MSE( ε_真实 , ε_θ(x_t, t) )</code></div>
+    <p>训练时随机采样一个时间步 <code>t</code>，用固定公式把真图 <code>x_0</code> 加噪到 <code>x_t</code>，让网络预测所加噪声。</p>
+    <div class="grid2">
+      <div class="kbox"><b>优点一：目标单一且稳定</b><br>就是个均方误差回归，没有 GAN 那种「生成器和判别器互相拉扯」的不稳定</div>
+      <div class="kbox"><b>优点二：天然覆盖全部难度</b><br>随机 t 让模型同时学重噪轻噪各阶段，<span class="hl2">多样性好、不易模式坍缩</span></div>
+    </div>
+    <div class="good">这正是扩散模型取代 GAN 成为文生图主流的原因：<b>训练稳、覆盖全、质量高</b>，代价是把「一步出图」变成了「几十步迭代」。</div>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="wrap">
+    <h2>怎么让模型按文本作画：条件注入与 CFG</h2>
+
+    <p>纯去噪只会生成"像训练集"的随机图。要按提示词生成，需要把<b>条件（文本语义）注入去噪网络</b>：</p>
+    <ul>
+      <li>用文本编码器（如 CLIP 的文本塔 / T5）把提示词编码成向量</li>
+      <li>通过<b>交叉注意力</b>把该向量注入 UNet 的各层</li>
+      <li><b>Classifier-Free Guidance（CFG）</b>：同时算「有条件」和「无条件」两个预测，再朝条件方向放大差值</li>
+    </ul>
+    <div class="note">CFG 强度是文生图最常用的旋钮：<span class="hl">太小 → 不听话、偏离提示词；太大 → 过饱和、画面崩坏</span>。常见取值在 5~10 区间。</div>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="wrap">
+    <h2>为什么要潜在扩散，以及常见加速手段</h2>
+
+    <div class="grid2">
+      <div class="kbox"><b>像素空间太贵</b><br>1024×1024 逐像素去噪，算力惊人</div>
+      <div class="kbox"><b>潜在扩散 Latent Diffusion <span class="hl2">（主流）</span></b><br>先用 VAE 把图压到低维潜空间再去噪，最后解码回图片，算力大幅下降</div>
+    </div>
+    <p>推理侧加速：</p>
+    <div class="grid3">
+      <div class="kbox"><b>少步采样</b><br>改进采样器（DDIM / DPM-Solver 等），几十步压缩到十几步</div>
+      <div class="kbox"><b>蒸馏</b><br>蒸馏出「少步/单步」学生模型</div>
+      <div class="kbox"><b>工程优化</b><br>半精度、算子融合、批处理</div>
+    </div>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="wrap">
+    <h2>面试速记卡</h2>
+
+    <div class="card fade">
+      <ul>
+        <li><b>核心流程</b>：前向加噪（固定）→ 训练去噪网络预测噪声 → 生成时从噪声迭代去噪。</li>
+        <li><b>训练目标</b>：预测所加噪声的 MSE；稳、不易坍缩，这是胜过 GAN 的关键。</li>
+        <li><b>条件生成</b>：文本编码 + 交叉注意力注入；CFG 控制「听不听话」的强度。</li>
+        <li><b>潜在扩散</b>：VAE 压缩到潛空间再去噪，是算力可行的关键。</li>
+        <li><b>加速</b>：改进采样器、蒸馏少步模型、半精度与算子优化。</li>
+      </ul>
+    </div>
+    <p class="muted" style="margin-top:14px">应用视角（文生图怎么用、提示词怎么写）可参见 <a href="../../../../artificial-intelligence/model-llm/09-multimodal/03-image-generation/text-to-image-diffusion.html" style="color:var(--accent)">《文生图与扩散模型》</a>。</p>
+    <div class="pill">扩散模型</div><div class="pill">DDPM</div><div class="pill">去噪</div><div class="pill">潜在扩散</div><div class="pill">Latent</div><div class="pill">CFG</div><div class="pill">采样加速</div>
+  </div>
+</section>
+
+
+<footer><p>Visuals · 图像大模型</p></footer>
+
+<script>
+const sections=[...document.querySelectorAll('section[id]')];
+const toc=document.getElementById('toc');
+const names={s1:'一句话', s2:'训练目标', s3:'条件控制', s4:'加速', s5:'速记'};
+sections.forEach(s=>{
+  const a=document.createElement('a');a.href='#'+s.id;a.title=names[s.id]||s.id;
+  a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:'smooth'})};toc.appendChild(a);
+});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{rootMargin:'0px 0px -10% 0px'});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+</body>
+</html>

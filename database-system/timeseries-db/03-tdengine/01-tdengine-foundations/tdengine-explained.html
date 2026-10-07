@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TDengine 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>TDengine 原理图解</h1>
+  <p>「一个设备一张表」——国产时序数据库的极致压缩与写入设计</p>
+  <span class="tag">TDengine</span><span class="tag">超级表 STable</span><span class="tag">一个设备一张表</span><span class="tag">列式压缩</span><span class="tag">IoT</span>
+</header>
+<nav>
+  <a href="#idea">① 核心设计思想</a>
+  <a href="#stable">② 超级表模型</a>
+  <a href="#storage">③ 存储与压缩</a>
+  <a href="#cluster">④ 集群架构</a>
+  <a href="#sql">⑤ SQL 与查询</a>
+  <a href="#vs">⑥ 对比与选型</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>TDengine 最有争议也最有效的设计是「<b>一个数据采集点一张表</b>」——
+  每个设备/传感器单独建表。看似疯狂（百万设备就百万张表），
+  但这样同一设备的数据<b>物理上完全连续</b>，压缩比和查询效率都达到极致。
+  配合「超级表 STable」做模板与聚合，解决了管理问题。
+</div>
+
+<section id="idea">
+  <h2><span class="n">01</span>核心思想：一个设备一张表</h2>
+
+  <div class="fig">
+    <svg width="720" height="240" viewBox="0 0 720 240">
+      <text x="180" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#ff7b72">传统做法：一张大表 + device_id 列</text>
+      <text x="540" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#7ee787">TDengine：一个设备一张表</text>
+
+      <!-- traditional -->
+      <rect x="40" y="32" width="280" height="176" rx="8" fill="#171b26" stroke="#2b3142"/>
+      <g font-family="monospace" font-size="10.5">
+        <rect x="52" y="44" width="256" height="20" fill="#1f2433"/><text x="60" y="58" fill="#94a3b8">ts | dev_id | temp | hum</text>
+        <rect x="52" y="66" width="256" height="20" fill="#1f2433"/><text x="60" y="80" fill="#94a3b8">.. | d1     | 23.1 | 60</text>
+        <rect x="52" y="88" width="256" height="20" fill="#1f2433"/><text x="60" y="102" fill="#94a3b8">.. | d2     | 25.4 | 55</text>
+        <rect x="52" y="110" width="256" height="20" fill="#1f2433"/><text x="60" y="124" fill="#94a3b8">.. | d1     | 23.3 | 61</text>
+        <rect x="52" y="132" width="256" height="20" fill="#1f2433"/><text x="60" y="146" fill="#94a3b8">.. | d3     | 22.0 | 58</text>
+        <rect x="52" y="154" width="256" height="20" fill="#1f2433"/><text x="60" y="168" fill="#94a3b8">.. | d2     | 25.1 | 56</text>
+      </g>
+      <text x="180" y="190" text-anchor="middle" font-size="11" fill="#ff7b72">同设备数据被其它设备打断，物理不连续</text>
+      <text x="180" y="206" text-anchor="middle" font-size="11" fill="#94a3b8">每行都要冗余存 device_id</text>
+
+      <!-- TDengine -->
+      <rect x="400" y="32" width="280" height="176" rx="8" fill="#171b26" stroke="#7ee787"/>
+      <g font-family="monospace" font-size="10.5">
+        <rect x="412" y="44" width="256" height="24" fill="#1b3a2a"/><text x="420" y="60" fill="#7ee787">表 d1: ts | temp | hum</text>
+        <rect x="412" y="70" width="256" height="18" fill="#14261a"/><text x="520" y="83" fill="#7ee787">连续存放…</text>
+
+        <rect x="412" y="92" width="256" height="24" fill="#1b3a2a"/><text x="420" y="108" fill="#7ee787">表 d2: ts | temp | hum</text>
+        <rect x="412" y="118" width="256" height="18" fill="#14261a"/><text x="520" y="131" fill="#7ee787">连续存放…</text>
+
+        <rect x="412" y="140" width="256" height="24" fill="#1b3a2a"/><text x="420" y="156" fill="#7ee787">表 d3: ts | temp | hum</text>
+        <rect x="412" y="166" width="256" height="18" fill="#14261a"/><text x="520" y="179" fill="#7ee787">连续存放…</text>
+      </g>
+      <text x="540" y="198" text-anchor="middle" font-size="11" fill="#7ee787">单设备数据完全连续，且 device_id 只在表名里</text>
+      <text x="540" y="214" text-anchor="middle" font-size="11" fill="#94a3b8">省空间 + 压缩友好 + 查询无需过滤 dev_id</text>
+    </svg>
+    <div class="cap">图 1：「一设备一表」带来的三个好处</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h4>💾 省掉冗余列</h4>
+      <p><code>device_id</code> 不需要在每行重复存储，
+      它在<b>表名</b>里。这对海量小点的数据节省非常可观。</p>
+    </div>
+    <div class="card">
+      <h4>🗜️ 压缩比极高</h4>
+      <p>同一设备的数据物理连续、值变化平滑，
+      列式压缩（Delta + 按类型专用编码）效果拉满，官方称可达 <b>1/10 甚至更高</b>。</p>
+    </div>
+    <div class="card">
+      <h4>⚡ 查询更快</h4>
+      <p>查某个设备的时间范围，<b>直接定位到那张表</b>，
+      无需在亿级大表里按 <code>WHERE device_id=?</code> 过滤。</p>
+    </div>
+    <div class="card">
+      <h4>🔒 写入无锁竞争</h4>
+      <p>不同设备写不同的表，<b>天然无冲突</b>，
+      并发写入吞吐随设备数线性扩展。</p>
+    </div>
+  </div>
+</section>
+
+<section id="stable">
+  <h2><span class="n">02</span>超级表 STable：解决"表太多怎么管"</h2>
+  <p>百万张表无法逐个管理。TDengine 引入 <b>超级表（STable）</b>作为模板：
+  <b>定义表结构 + 标签（tags）</b>，子表继承结构并绑定具体标签值。</p>
+
+  <div class="fig">
+    <svg width="720" height="225" viewBox="0 0 720 225">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">超级表 = 表结构模板 + 标签维度</text>
+      <!-- stable -->
+      <rect x="220" y="34" width="280" height="60" rx="10" fill="#2a2340" stroke="#d2a8ff" stroke-width="2"/>
+      <text x="360" y="56" text-anchor="middle" font-size="13" font-weight="700" fill="#d2a8ff">STable: sensors</text>
+      <text x="360" y="76" text-anchor="middle" font-family="monospace" font-size="10.5" fill="#94a3b8">列: ts, temp, hum</text>
+      <text x="360" y="90" text-anchor="middle" font-family="monospace" font-size="10.5" fill="#94a3b8">标签: location, model</text>
+
+      <line x1="290" y1="96" x2="150" y2="128" stroke="#56d4dd" stroke-width="1.5"/>
+      <line x1="360" y1="96" x2="360" y2="128" stroke="#56d4dd" stroke-width="1.5"/>
+      <line x1="430" y1="96" x2="570" y2="128" stroke="#56d4dd" stroke-width="1.5"/>
+
+      <g font-size="10.5">
+        <rect x="40" y="132" width="180" height="52" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="130" y="152" text-anchor="middle" fill="#7ee787">子表 d001</text>
+        <text x="130" y="170" text-anchor="middle" font-family="monospace" fill="#94a3b8">location=bj</text>
+
+        <rect x="270" y="132" width="180" height="52" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="360" y="152" text-anchor="middle" fill="#7ee787">子表 d002</text>
+        <text x="360" y="170" text-anchor="middle" font-family="monospace" fill="#94a3b8">location=sh</text>
+
+        <rect x="500" y="132" width="180" height="52" rx="8" fill="#1f2433" stroke="#7ee787"/>
+        <text x="590" y="152" text-anchor="middle" fill="#7ee787">子表 d003</text>
+        <text x="590" y="170" text-anchor="middle" font-family="monospace" fill="#94a3b8">location=bj</text>
+      </g>
+      <text x="360" y="206" text-anchor="middle" font-size="11.5" fill="#94a3b8">查 sensors 超级表 = 对所有子表统一查询；可用标签过滤/分组</text>
+      <text x="360" y="220" text-anchor="middle" font-size="11.5" fill="#7ee787">SELECT AVG(temp) FROM sensors WHERE location='bj' GROUP BY location</text>
+    </svg>
+    <div class="cap">图 2：超级表统一管理子表的结构与标签</div>
+  </div>
+
+  <pre><code>-- 1. 创建超级表（列 + 标签）
+CREATE STABLE sensors (
+    ts   TIMESTAMP,
+    temp FLOAT,
+    hum  FLOAT
+) TAGS (
+    location NCHAR(20),
+    model    NCHAR(20)
+);
+
+-- 2. 创建子表（可自动创建）
+CREATE TABLE d001 USING sensors TAGS ('beijing', 'model-A');
+CREATE TABLE d002 USING sensors TAGS ('shanghai', 'model-B');
+
+-- 3. 写入（只写子表，或用自动建表语法）
+INSERT INTO d001 VALUES (NOW, 23.1, 60);
+INSERT INTO d002 USING sensors TAGS ('shenzhen','model-A') VALUES (NOW, 26.5, 70);
+
+-- 4. 跨设备聚合查询（查超级表）
+SELECT AVG(temp), MAX(hum) FROM sensors
+WHERE location = 'beijing' AND ts &gt; NOW - 1d
+GROUP BY location;</code></pre>
+</section>
+
+<section id="storage">
+  <h2><span class="n">03</span>存储与压缩</h2>
+  <ul>
+    <li><b>列式存储</b>：每个采集列单独存，同列数据同质 → 压缩友好。</li>
+    <li><b>按时间分块</b>：数据按时间切分成数据块（默认按天），
+    每块内建索引与预聚合信息（min/max/sum/count），可做块级裁剪。</li>
+    <li><b>两级压缩</b>：先用列式专用编码（Delta、RLE、位图等），再用通用压缩（LZ4/ZSTD）。</li>
+    <li><b>乱序数据处理</b>：支持乱序写入，会在后台重整，但乱序比例高会显著影响压缩比与性能。</li>
+  </ul>
+
+  <div class="lead warn">
+    <b>压缩比依赖数据特征。</b>官方宣称的高压缩比（1/10）是针对
+    <b>变化平缓、等间隔上报</b>的典型工业/监控数据。
+    如果数据值剧烈随机抖动、或时间戳严重乱序，压缩比会明显下降。
+    <b>选型时务必用自己的真实数据做 PoC 验证，不要只看宣传数字。</b>
+  </div>
+</section>
+
+<section id="cluster">
+  <h2><span class="n">04</span>集群架构</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>🖥️ taosd 数据节点</h4>
+      <p>核心进程，负责存储与查询。多个 taosd 组成集群，
+      数据按 <b>vnode</b>（虚拟节点）分片存储。</p>
+    </div>
+    <div class="card">
+      <h4>📡 taosAdapter</h4>
+      <p>接入层，提供 REST API、兼容 InfluxDB Line Protocol、
+      OpenTSDB、Prometheus 等多种写入协议。</p>
+    </div>
+    <div class="card">
+      <h4>🧠 mnode（管理节点）</h4>
+      <p>管理元数据（表、STable、vnode 分布、用户），
+      通过 Raft 保证一致，通常部署 3 个。</p>
+    </div>
+    <div class="card">
+      <h4>🛡️ 多副本</h4>
+      <p>每个 vnode 有多个副本（Raft 组），
+      支持机架/机房级容灾，副本数在创建数据库时指定。</p>
+    </div>
+  </div>
+  <pre><code>-- 创建库时指定副本数与保留策略
+CREATE DATABASE iot
+  REPLICA 3            -- 3 副本
+  KEEP 365             -- 数据保留 365 天
+  BLOCKS 6             -- 每个 vnode 的内存块数
+  PRECISION 'ms';      -- 时间精度（ms/us/ns）</code></pre>
+</section>
+
+<section id="sql">
+  <h2><span class="n">05</span>SQL 与特色查询</h2>
+  <p>TDengine 用<b>标准 SQL</b>，且支持很多时序专属语法，学习成本低：</p>
+  <pre><code>-- 降采样（按时间窗口聚合）
+SELECT AVG(temp) FROM sensors
+WHERE ts &gt; NOW - 7d
+INTERVAL(1h);                    -- 按 1 小时窗口
+
+-- 窗口聚合 + 按标签分组
+SELECT AVG(temp) FROM sensors
+INTERVAL(10m) GROUP BY location;
+
+-- 状态窗口（按状态值变化切窗口，工业场景常用）
+SELECT COUNT(*) FROM d001
+STATE_WINDOW(status);            -- status 值变化才切新窗口
+
+-- 插值填充（处理缺失采样点）
+SELECT INTERP(temp) FROM d001
+WHERE ts &gt; NOW-1h EVERY(1s) FILL(linear);
+
+-- 会话窗口（间隔超过阈值就切窗口）
+SELECT COUNT(*) FROM d001 SESSION(ts, 10s);</code></pre>
+  <div class="lead ok">
+    <b>STATE_WINDOW 和 INTERVAL 是 TDengine 的实用特色：</b>
+    工业场景常要统计「设备处于某状态持续了多久」「每次开机运行了多久」，
+    这些用标准 SQL 写很痛苦，TDengine 提供了原生语法。
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>对比与选型</h2>
+  <table>
+    <tr><th>维度</th><th>TDengine</th><th>InfluxDB</th><th>Prometheus</th></tr>
+    <tr><td>数据模型</td><td><b>一设备一表 + 超级表</b></td><td>measurement + tag</td><td>metric + label</td></tr>
+    <tr><td>查询语言</td><td><b>标准 SQL</b></td><td>InfluxQL / Flux</td><td>PromQL</td></tr>
+    <tr><td>压缩比</td><td><b>业界领先</b></td><td>高</td><td>高</td></tr>
+    <tr><td>写入性能</td><td><b>极高</b>（无锁并发）</td><td>高</td><td>高</td></tr>
+    <tr><td>集群开源</td><td><b>开源版支持集群</b></td><td>仅商业版</td><td>需 Thanos/VM 扩展</td></tr>
+    <tr><td>生态/社区</td><td>国内为主</td><td>国际成熟</td><td><b>云原生事实标准</b></td></tr>
+    <tr><td>典型场景</td><td><b>IoT、车联网、工业、电力</b></td><td>通用时序、APM</td><td>K8s/微服务监控</td></tr>
+    <tr><td>关系型 JOIN</td><td>支持（可与业务表关联）</td><td>弱</td><td>弱</td></tr>
+  </table>
+
+  <div class="lead">
+    <b>选型建议：</b><br>
+    · <b>IoT / 工业 / 车联网 / 国产化替代</b>、设备数明确且巨大 → <b>TDengine</b>，
+    SQL 友好、压缩比高、开源就有集群，是国产选型首选。<br>
+    · <b>云原生监控告警</b> → Prometheus 生态不可替代。<br>
+    · <b>已有 Telegraf、需通用时序</b> → InfluxDB。
+  </div>
+
+  <div class="qa">
+    <b>Q："一个设备一张表"在设备数千万级会不会元数据爆炸？</b><br>
+    A：这是最常见的质疑。TDengine 通过<b>表元数据常驻内存 + 压缩存储</b>来应对，
+    官方测试支持千万级表。但要注意：每张表都有固定元数据开销，
+    <b>设备数超过千万、或设备维度频繁变化</b>时仍需谨慎评估。
+    实践中若设备维度不稳定（如每次会话生成新 ID），应改用超级表 + 标签的常规模型。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 / TDengine ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

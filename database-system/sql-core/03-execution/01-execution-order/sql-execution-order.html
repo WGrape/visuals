@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL 执行顺序完全图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>SQL 执行顺序完全图解</h1>
+  <p>书写顺序 ≠ 执行顺序——理解它，才能解释"为什么这个别名用不了"</p>
+  <span class="tag">FROM → WHERE → GROUP BY</span><span class="tag">HAVING → SELECT → ORDER BY</span><span class="tag">LIMIT</span><span class="tag">别名可见性</span>
+</header>
+<nav>
+  <a href="#core">① 核心结论</a>
+  <a href="#flow">② 完整流水线</a>
+  <a href="#alias">③ 别名可见性</a>
+  <a href="#why">④ 为什么这样设计</a>
+  <a href="#qa">⑤ 常见疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>你按 <code>SELECT ... FROM ... WHERE ...</code> 的顺序<b>写</b>，
+  数据库却按 <b><code>FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT</code></b> 的顺序<b>执行</b>。
+  这个错位解释了大量"看起来应该能跑却报错"的现象——最典型的就是
+  <b>WHERE 里用不了 SELECT 的别名</b>。
+</div>
+
+<section id="core">
+  <h2><span class="n">01</span>书写顺序 vs 执行顺序</h2>
+
+  <div class="fig">
+    <svg width="720" height="300" viewBox="0 0 720 300">
+      <!-- writing order -->
+      <text x="180" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">书写顺序（你写的）</text>
+      <g font-family="monospace" font-size="12">
+        <rect x="40" y="30" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="49" fill="#e2e8f0">1. SELECT  col, agg(...)</text>
+        <rect x="40" y="62" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="81" fill="#e2e8f0">2. FROM    table</text>
+        <rect x="40" y="94" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="113" fill="#e2e8f0">3. JOIN    ...</text>
+        <rect x="40" y="126" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="145" fill="#e2e8f0">4. WHERE   cond</text>
+        <rect x="40" y="158" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="177" fill="#e2e8f0">5. GROUP BY col</text>
+        <rect x="40" y="190" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="209" fill="#e2e8f0">6. HAVING  agg_cond</text>
+        <rect x="40" y="222" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="241" fill="#e2e8f0">7. ORDER BY col</text>
+        <rect x="40" y="254" width="280" height="28" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="52" y="273" fill="#e2e8f0">8. LIMIT   n</text>
+      </g>
+
+      <!-- execution order -->
+      <text x="540" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#7ee787">执行顺序（数据库做的）</text>
+      <g font-family="monospace" font-size="12">
+        <rect x="360" y="30" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="49" fill="#7ee787">1. FROM    ← 先定位表</text>
+        <rect x="360" y="62" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="81" fill="#7ee787">2. JOIN    ← 再关联</text>
+        <rect x="360" y="94" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="113" fill="#7ee787">3. WHERE   ← 过滤行（最早！）</text>
+        <rect x="360" y="126" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="145" fill="#7ee787">4. GROUP BY ← 分组</text>
+        <rect x="360" y="158" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="177" fill="#7ee787">5. HAVING  ← 过滤组</text>
+        <rect x="360" y="190" width="320" height="28" rx="6" fill="#171b26" stroke="#f0a868"/><text x="372" y="209" fill="#f0a868">6. SELECT  ← 才计算列与别名！</text>
+        <rect x="360" y="222" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="241" fill="#7ee787">7. ORDER BY ← 排序（可用别名）</text>
+        <rect x="360" y="254" width="320" height="28" rx="6" fill="#1b3a2a" stroke="#7ee787"/><text x="372" y="273" fill="#7ee787">8. LIMIT   ← 最后截断</text>
+      </g>
+      <text x="360" y="296" text-anchor="middle" font-size="11.5" fill="#94a3b8">注意 SELECT 排在第 6 位——这就是 WHERE 里用不了别名的根本原因</text>
+    </svg>
+    <div class="cap">图 1：书写顺序与执行顺序的错位</div>
+  </div>
+</section>
+
+<section id="flow">
+  <h2><span class="n">02</span>完整流水线（含 CTE 与窗口函数）</h2>
+
+  <div class="fig">
+    <svg width="720" height="340" viewBox="0 0 720 340">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#56d4dd"/>
+        </marker>
+      </defs>
+      <text x="360" y="18" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">一条 SQL 在数据库中的完整旅程</text>
+
+      <g>
+        <rect x="40" y="30" width="640" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="60" y="52" font-size="12" fill="#e2e8f0">① <b>FROM / JOIN</b>：确定数据源，做表连接，产出一张"中间虚拟表"</text>
+
+        <rect x="40" y="72" width="640" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="60" y="94" font-size="12" fill="#e2e8f0">② <b>WHERE</b>：逐行过滤，不满足的行直接丢弃（此时还没有分组、没有别名）</text>
+
+        <rect x="40" y="114" width="640" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="60" y="136" font-size="12" fill="#e2e8f0">③ <b>GROUP BY</b>：按分组键归并成组（可能用临时表/排序）</text>
+
+        <rect x="40" y="156" width="640" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="60" y="178" font-size="12" fill="#e2e8f0">④ <b>HAVING</b>：对"组"过滤（此时可用聚合函数）</text>
+
+        <rect x="40" y="198" width="640" height="34" rx="8" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="60" y="220" font-size="12" fill="#d2a8ff">⑤ <b>窗口函数</b>：在保留行的前提下，为每行计算基于窗口的值</text>
+
+        <rect x="40" y="240" width="640" height="34" rx="8" fill="#171b26" stroke="#f0a868" stroke-width="2"/>
+        <text x="60" y="262" font-size="12" fill="#f0a868">⑥ <b>SELECT</b>：计算输出列、聚合结果，定义<b>列别名</b>（别名从这里才存在）</text>
+
+        <rect x="40" y="282" width="310" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="60" y="304" font-size="12" fill="#e2e8f0">⑦ <b>DISTINCT</b>：去重</text>
+
+        <rect x="360" y="282" width="320" height="34" rx="8" fill="#1f2433" stroke="#2b3142"/>
+        <text x="380" y="304" font-size="12" fill="#e2e8f0">⑧ <b>ORDER BY</b>：排序（<b>可用别名</b>）</text>
+      </g>
+      <line x1="360" y1="66" x2="360" y2="70" stroke="#56d4dd" stroke-width="1.4" marker-end="url(#ah)"/>
+      <line x1="360" y1="108" x2="360" y2="112" stroke="#56d4dd" stroke-width="1.4" marker-end="url(#ah)"/>
+      <line x1="360" y1="150" x2="360" y2="154" stroke="#56d4dd" stroke-width="1.4" marker-end="url(#ah)"/>
+      <line x1="360" y1="192" x2="360" y2="196" stroke="#56d4dd" stroke-width="1.4" marker-end="url(#ah)"/>
+      <line x1="360" y1="234" x2="360" y2="238" stroke="#56d4dd" stroke-width="1.4" marker-end="url(#ah)"/>
+      <rect x="40" y="322" width="640" height="14" rx="4" fill="#1b3a2a"/>
+      <text x="360" y="333" text-anchor="middle" font-size="10.5" fill="#7ee787">⑨ LIMIT / OFFSET：最后截断返回结果</text>
+    </svg>
+    <div class="cap">图 2：每一步都产出一张"中间虚拟表"交给下一步</div>
+  </div>
+
+  <h3>CTE（WITH 子句）的位置</h3>
+  <p>CTE 在<b>整个查询开始前</b>先执行，生成一个临时的命名结果集，
+  然后被主查询当作普通表引用：</p>
+  <pre><code>WITH dept_avg AS (                    -- ① CTE 先算好
+    SELECT dept, AVG(salary) avg_sal
+    FROM employees GROUP BY dept
+)
+SELECT e.name, e.salary, d.avg_sal     -- ② 主查询再引用
+FROM employees e
+JOIN dept_avg d ON e.dept = d.dept
+WHERE e.salary &gt; d.avg_sal;            -- 高于部门平均的人
+
+-- MySQL 8.0+ 才支持 CTE；也支持递归 CTE（WITH RECURSIVE）</code></pre>
+</section>
+
+<section id="alias">
+  <h2><span class="n">03</span>别名可见性：一张表说清</h2>
+  <table>
+    <tr><th>子句</th><th>能引用 SELECT 里定义的别名吗</th><th>原因</th></tr>
+    <tr><td><b>WHERE</b></td><td>❌ <b>不能</b>（标准 SQL）</td><td>WHERE 在 SELECT 之前执行，别名还不存在</td></tr>
+    <tr><td><b>GROUP BY</b></td><td>✅ 可以（MySQL 扩展）</td><td>MySQL 允许，但这是<b>非标准</b>扩展；PG 也支持，Oracle 不支持</td></tr>
+    <tr><td><b>HAVING</b></td><td>✅ 可以（MySQL）</td><td>MySQL 扩展。但标准写法是重复聚合表达式</td></tr>
+    <tr><td><b>ORDER BY</b></td><td>✅ <b>可以</b>（标准）</td><td>ORDER BY 在 SELECT 之后执行，别名已存在</td></tr>
+    <tr><td><b>LIMIT</b></td><td>—</td><td>LIMIT 不引用列</td></tr>
+  </table>
+
+  <pre><code>-- ❌ 报错：WHERE 里用 SELECT 定义的别名
+SELECT salary * 12 AS annual FROM employees WHERE annual &gt; 500000;
+
+-- ✅ 方案 1：重复表达式
+SELECT salary * 12 AS annual FROM employees WHERE salary * 12 &gt; 500000;
+
+-- ✅ 方案 2：包一层子查询
+SELECT * FROM (
+  SELECT salary * 12 AS annual FROM employees
+) t WHERE annual &gt; 500000;
+
+-- ✅ 方案 3：用 HAVING（MySQL 支持引用别名，但需配合 GROUP BY 语义）
+-- 最通用清晰的是方案 2
+
+-- ✅ ORDER BY 可以直接用别名（标准行为）
+SELECT salary * 12 AS annual FROM employees ORDER BY annual DESC;</code></pre>
+
+  <div class="lead warn">
+    <b>跨数据库差异：</b>MySQL 允许在 GROUP BY / HAVING 里用别名，
+    但这是<b>它自己的扩展</b>，SQL 标准和 Oracle 都不允许。
+    写可移植的 SQL 时，<b>只在 ORDER BY 里用别名</b>，其它地方重复表达式或包子查询。
+  </div>
+</section>
+
+<section id="why">
+  <h2><span class="n">04</span>为什么设计成这个顺序？</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>🎯 性能：尽早过滤</h4>
+      <p>WHERE 排在最前面，是为了<b>尽可能早地减少数据量</b>。
+      先过滤掉 90% 的行，后面的分组、排序、连接代价都会小一个数量级。
+      这是最重要的优化原则——<b>谓词下推</b>。</p>
+    </div>
+    <div class="card">
+      <h4>🧮 语义：分层计算</h4>
+      <p>必须先有"行"（FROM/WHERE），才能"分组"（GROUP BY）；
+      必须先"分组"，才能算"组内聚合"并过滤（HAVING）；
+      最后才能"挑选输出列"（SELECT）。
+      顺序由数据依赖关系决定，不能颠倒。</p>
+    </div>
+    <div class="card">
+      <h4>🔤 别名：先定义后使用</h4>
+      <p>别名在 SELECT 阶段才"诞生"，
+      所以只有 SELECT 之后的 ORDER BY 能用它。
+      这与大多数编程语言"先声明后使用"的规则一致。</p>
+    </div>
+    <div class="card">
+      <h4>📉 LIMIT 最后</h4>
+      <p>只有全部计算、排序完成后才能安全地截断。
+      如果 LIMIT 提前，排序结果就不对了——
+      这也是为什么"先 LIMIT 再 ORDER BY"是错的。</p>
+    </div>
+  </div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+  <div class="qa">
+    <b>Q：为什么 WHERE 里不能用 COUNT(*)，而 HAVING 里可以？</b><br>
+    A：因为执行到 WHERE 时<b>还没有分组</b>，聚合值无从谈起。
+    HAVING 在分组之后执行，此时每组的聚合结果已经算出来了，自然可以过滤。
+    <b>记住口诀：过滤原始行用 WHERE，过滤聚合结果用 HAVING。</b>
+  </div>
+  <div class="qa">
+    <b>Q：SELECT 里写的表达式会被计算几次？</b><br>
+    A：逻辑上，<b>WHERE 里重复写的表达式会被计算一次用于过滤，
+    SELECT 里的同名表达式再算一次</b>。
+    优化器通常能识别重复子表达式并复用，但不能保证。
+    对复杂/昂贵表达式，用 CTE 或子查询<b>物化一次</b>更稳妥。
+  </div>
+  <div class="qa">
+    <b>Q：ORDER BY 和 GROUP BY 一起用会怎样？</b><br>
+    A：MySQL 5.7 之前，GROUP BY 会<b>隐式按分组列排序</b>，
+    再加 ORDER BY 等于排两次（多余的排序）。
+    可用 <code>ORDER BY NULL</code> 显式禁止隐式排序。<br>
+    MySQL 8.0 起不再隐式排序（除非你显式写 ORDER BY），
+    且 <code>ORDER BY NULL</code> 被废弃——需要排序就明确写出来。
+  </div>
+  <div class="qa">
+    <b>Q：LIMIT 和 ORDER BY 谁先执行？</b><br>
+    A：<b>ORDER BY 先，LIMIT 后。</b>
+    先排好序，再取前 N 条。所以
+    <code>SELECT ... ORDER BY id LIMIT 10</code> 得到的是"最小的 10 个 id"，
+    而不是"先随便取 10 条再排序"。
+    深分页（<code>LIMIT 100000, 10</code>）慢正是因为要先排/扫完前 10 万行。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / 执行顺序 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

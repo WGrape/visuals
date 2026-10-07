@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>时序数据库 TSDB 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>时序数据库 TSDB 原理</h1>
+  <p>为什么监控数据不能用 MySQL 存——时序数据的特点、压缩与降采样</p>
+  <span class="tag">TSDB</span><span class="tag">时序数据</span><span class="tag">Delta 编码</span><span class="tag">降采样</span><span class="tag">时间线</span>
+</header>
+<nav>
+  <a href="#why">① 时序数据特点</a>
+  <a href="#model">② 数据模型</a>
+  <a href="#compress">③ 压缩算法</a>
+  <a href="#downsample">④ 降采样与保留</a>
+  <a href="#compare">⑤ 产品对比</a>
+  <a href="#qa">⑥ 常见疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>时序数据的特征是「<b>写入量巨大、几乎不更新、不删单条、查询总带时间范围、旧数据价值递减</b>」。
+  通用数据库为「随机读写 + 事务」优化，正好与这些特征错位。
+  TSDB 围绕这些特征重新设计，压缩比可达 10～20 倍，聚合查询快一个数量级。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>时序数据的六个特征</h2>
+  <div class="fig">
+    <svg width="720" height="230" viewBox="0 0 720 230">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">时序数据 vs 业务数据</text>
+      <!-- timeline of writes -->
+      <text x="40" y="48" font-size="11.5" fill="#94a3b8">写入模式（横轴为时间）：</text>
+      <line x1="40" y1="70" x2="680" y2="70" stroke="#2b3142" stroke-width="1.5"/>
+      <g font-size="10.5" fill="#94a3b8">
+        <text x="40" y="86">t1</text><text x="150" y="86">t2</text><text x="260" y="86">t3</text>
+        <text x="370" y="86">t4</text><text x="480" y="86">t5</text><text x="590" y="86">t6</text>
+      </g>
+      <!-- write arrows all pointing right (append) -->
+      <g>
+        <rect x="40" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="80" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+        <rect x="150" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="190" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+        <rect x="260" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="300" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+        <rect x="370" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="410" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+        <rect x="480" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="520" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+        <rect x="590" y="96" width="80" height="24" rx="4" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="630" y="112" text-anchor="middle" font-size="10.5" fill="#7ee787">append</text>
+      </g>
+      <text x="360" y="140" text-anchor="middle" font-size="11.5" fill="#7ee787">几乎 100% 是「按时间追加」，极少 UPDATE 单条</text>
+
+      <!-- contrast -->
+      <rect x="40" y="156" width="310" height="56" rx="8" fill="#171b26" stroke="#2b3142"/>
+      <text x="195" y="178" text-anchor="middle" font-size="12" fill="#ff7b72">业务数据：随机读写 + 事务</text>
+      <text x="195" y="198" text-anchor="middle" font-size="11" fill="#94a3b8">UPDATE/DELETE 频繁，需索引定位单行</text>
+
+      <rect x="370" y="156" width="310" height="56" rx="8" fill="#171b26" stroke="#7ee787"/>
+      <text x="525" y="178" text-anchor="middle" font-size="12" fill="#7ee787">时序数据：追加写 + 范围聚合</text>
+      <text x="525" y="198" text-anchor="middle" font-size="11" fill="#94a3b8">几乎只 INSERT，查询必带时间范围</text>
+    </svg>
+    <div class="cap">图 1：读写模式的根本差异</div>
+  </div>
+
+  <table>
+    <tr><th>特征</th><th>说明</th><th>对数据库设计的要求</th></tr>
+    <tr><td><b>写多读少</b></td><td>写入吞吐常达百万点/秒</td><td>写入路径必须极简（LSM 而非 B+ 树）</td></tr>
+    <tr><td><b>只追加</b></td><td>数据按时间到达，几乎不更新</td><td>不需要事务、不需要单行索引</td></tr>
+    <tr><td><b>带时间范围</b></td><td>查询几乎总是「最近 N 小时」</td><td>按时间分区，旧分区可整体裁剪/删除</td></tr>
+    <tr><td><b>价值递减</b></td><td>1 年前的秒级数据没人看</td><td><b>降采样（Rollup）+ 自动过期（TTL）</b></td></tr>
+    <tr><td><b>高冗余</b></td><td>相邻时间的值变化很小</td><td><b>Delta / XOR 压缩</b>，压缩比极高</td></tr>
+    <tr><td><b>高基数风险</b></td><td>标签组合可能爆炸</td><td>需控制 tag 基数，否则索引膨胀</td></tr>
+  </table>
+</section>
+
+<section id="model">
+  <h2><span class="n">02</span>数据模型：时间线 Series</h2>
+  <p>TSDB 的核心抽象是 <b>时间线（Time Series）</b>：
+  由<b>指标名 + 一组标签（tags/labels）唯一确定</b>，对应一串「时间戳 → 值」的点。</p>
+
+  <div class="fig">
+    <svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">Series = metric + tags</text>
+      <!-- metric name + tags -->
+      <rect x="40" y="34" width="640" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="56" y="56" font-family="monospace" font-size="12" fill="#e2e8f0">http_requests_total</text>
+      <text x="240" y="56" font-family="monospace" font-size="12" fill="#d2a8ff">{method="GET", status="200", instance="10.0.0.1:8080"}</text>
+      <text x="620" y="56" font-family="monospace" font-size="12" fill="#7ee787">= 一条时间线</text>
+
+      <!-- series id -->
+      <rect x="40" y="76" width="640" height="30" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+      <text x="360" y="96" text-anchor="middle" font-size="11.5" fill="#d2a8ff">TSDB 会把它映射成一个内部 SeriesID（如 12345），实际存储只存 ID</text>
+
+      <!-- points -->
+      <text x="40" y="128" font-size="11.5" fill="#94a3b8">该时间线上的数据点：</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="50" y="154" fill="#94a3b8">t=1000  v=42</text>
+        <rect x="196" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="206" y="154" fill="#94a3b8">t=1010  v=44</text>
+        <rect x="352" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="362" y="154" fill="#94a3b8">t=1020  v=45</text>
+        <rect x="508" y="136" width="160" height="26" fill="#1f2433" stroke="#2b3142"/><text x="518" y="154" fill="#94a3b8">t=1030  v=47</text>
+      </g>
+      <text x="360" y="184" text-anchor="middle" font-size="11.5" fill="#7ee787">同一 Series 的点物理上连续存放 → 时间戳差值固定(10)、值变化小 → 极易压缩</text>
+      <text x="360" y="204" text-anchor="middle" font-size="11" fill="#f0a868">⚠️ 每多一种 tag 取值组合就多一条时间线，tag 基数失控 = 时间线爆炸</text>
+    </svg>
+    <div class="cap">图 2：Series 是 TSDB 的基本存储单元</div>
+  </div>
+
+  <div class="lead warn">
+    <b>高基数（High Cardinality）是 TSDB 的头号杀手。</b>
+    假设有 3 个标签，取值分别是 1000、50、20 种，理论时间线就有 <b>100 万条</b>。
+    把 <code>user_id</code>、<code>request_id</code> 这类无限取值字段当 tag，
+    会瞬间打爆内存索引。<b>规则：tag 只能放有限枚举的维度，连续值放 field。</b>
+  </div>
+</section>
+
+<section id="compress">
+  <h2><span class="n">03</span>压缩：时序数据的杀手锏</h2>
+
+  <h3>时间戳压缩：Delta-of-Delta</h3>
+  <p>监控数据通常<b>等间隔</b>上报（每 10 秒一次）。因此：</p>
+  <div class="fig">
+    <svg width="720" height="185" viewBox="0 0 720 185">
+      <g font-family="monospace" font-size="11.5">
+        <rect x="40" y="30" width="640" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="48" fill="#94a3b8">原始时间戳：  1000   1010   1020   1030   1040</text>
+        <rect x="40" y="60" width="640" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="52" y="78" fill="#56d4dd">Delta（一阶）：  -     10     10     10     10</text>
+        <rect x="40" y="90" width="640" height="26" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="52" y="108" fill="#7ee787">Delta²（二阶）：  -      -      0      0      0</text>
+      </g>
+      <text x="360" y="140" text-anchor="middle" font-size="12" fill="#7ee787">二阶差分全是 0 → 一个 bit 就能表示「间隔不变」</text>
+      <text x="360" y="162" text-anchor="middle" font-size="11.5" fill="#94a3b8">Facebook Gorilla 论文：时间戳从 8 字节压到平均 ~1 bit</text>
+      <text x="360" y="180" text-anchor="middle" font-size="11.5" fill="#f0a868">间隔抖动时也只需存差值的小偏移，仍远小于 8 字节</text>
+    </svg>
+    <div class="cap">图 3：Delta-of-Delta 编码（Facebook Gorilla / Prometheus 采用）</div>
+  </div>
+
+  <h3>数值压缩：XOR</h3>
+  <p>相邻浮点值通常只有低位比特不同。Gorilla 的做法是
+  <b>与前一个值做异或（XOR）</b>，大部分 bit 变成 0，然后只存「前导零个数 + 有效位长度 + 有效位」。</p>
+  <pre><code>prev = 42.0        → 0x4045000000000000
+cur  = 42.5        → 0x4045400000000000
+XOR  =             → 0x0000400000000000   ← 只有中间少数几位非零
+
+存储：leading_zeros=30, meaningful_bits=4, value=0x4
+→ 从 8 字节压到 ~10 bit</code></pre>
+
+  <div class="grid">
+    <div class="card">
+      <h4>📉 实际压缩比</h4>
+      <p>Prometheus 官方数据：每个采样点平均约 <b>1.7 字节</b>（时间戳 ~1 bit + 值 ~13 bit）。
+      相比原始 16 字节（8 字节时间 + 8 字节值），压缩比接近 <b>10 倍</b>。</p>
+    </div>
+    <div class="card">
+      <h4>🔢 整数型值</h4>
+      <p>计数器（counter）类指标可用 <b>Delta + 变长编码（ZigZag/Varint）</b>，
+      单调递增的小增量效果极佳。</p>
+    </div>
+    <div class="card">
+      <h4>⚠️ 压缩前提</h4>
+      <p>压缩依赖「同一 Series 的点相邻存放 + 值变化平滑」。
+      <b>随机乱序写入、值剧烈抖动</b>会大幅降低压缩比。</p>
+    </div>
+  </div>
+</section>
+
+<section id="downsample">
+  <h2><span class="n">04</span>降采样与数据保留</h2>
+  <p>这是 TSDB 与通用数据库最不同的运维特性：<b>数据会随时间自动"降级"和"消失"</b>。</p>
+
+  <div class="fig">
+    <svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">分层保留策略（Retention Policy）</text>
+      <!-- layers -->
+      <g font-size="11.5">
+        <rect x="40" y="36" width="640" height="34" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="58" y="58" fill="#7ee787">原始精度（秒级）</text>
+        <text x="230" y="58" fill="#94a3b8">保留 7 天</text>
+        <text x="360" y="58" fill="#94a3b8">→ 用于排障、细粒度分析</text>
+
+        <rect x="40" y="76" width="640" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="58" y="98" fill="#d2a8ff">降采样（1 分钟聚合）</text>
+        <text x="230" y="98" fill="#94a3b8">保留 30 天</text>
+        <text x="360" y="98" fill="#94a3b8">→ 用于日常看板</text>
+
+        <rect x="40" y="116" width="640" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="58" y="138" fill="#d2a8ff">降采样（1 小时聚合）</text>
+        <text x="230" y="138" fill="#94a3b8">保留 1 年</text>
+        <text x="360" y="138" fill="#94a3b8">→ 用于趋势、容量规划</text>
+      </g>
+      <text x="360" y="172" text-anchor="middle" font-size="11.5" fill="#7ee787">数据量随精度降低呈数量级下降：秒级 → 分钟级省 60 倍 → 小时级再省 60 倍</text>
+      <text x="360" y="194" text-anchor="middle" font-size="11.5" fill="#94a3b8">这样既保住了近期可排查性，又让长期存储成本可控</text>
+    </svg>
+    <div class="cap">图 4：分层降采样——用精度换时间跨度</div>
+  </div>
+
+  <h3>连续查询 Continuous Query</h3>
+  <p>降采样通常由后台任务<b>自动、增量</b>完成，而不是事后批量重算：</p>
+  <pre><code>-- InfluxDB 风格的连续查询示例
+CREATE CONTINUOUS QUERY cq_1m ON monitor
+BEGIN
+  SELECT mean(value) AS value
+  INTO monitor_downsampled.cpu_1m
+  FROM cpu
+  GROUP BY time(1m), host
+END</code></pre>
+  <p>Prometheus 的做法是 <b>Recording Rules</b>：预计算常用聚合表达式，存成新的时间序列，
+  查询时直接命中预计算结果。</p>
+</section>
+
+<section id="compare">
+  <h2><span class="n">05</span>主流产品对比</h2>
+  <table>
+    <tr><th>产品</th><th>定位</th><th>数据模型</th><th>特点</th></tr>
+    <tr>
+      <td><b>Prometheus</b></td><td>监控告警事实标准</td><td>metric + labels</td>
+      <td>拉模式（pull）、PromQL 强大、单机为主；长存储需接 Thanos/VictoriaMetrics</td>
+    </tr>
+    <tr>
+      <td><b>InfluxDB</b></td><td>通用时序数据库</td><td>measurement + tags + fields</td>
+      <td>推模式、Flux/InfluxQL、开源版集群能力受限（商业版才有）</td>
+    </tr>
+    <tr>
+      <td><b>TDengine</b></td><td>国产，IoT/工业场景</td><td>超级表（STable）+ 子表</td>
+      <td><b>一个设备一张表</b>的设计，压缩比极高，写入性能强；国产化替代常见选择</td>
+    </tr>
+    <tr>
+      <td><b>VictoriaMetrics</b></td><td>Prometheus 的长期存储</td><td>兼容 Prometheus</td>
+      <td>内存占用低、性能高，Prometheus 生态的增强替代</td>
+    </tr>
+    <tr>
+      <td><b>TimescaleDB</b></td><td>基于 PostgreSQL 的时序扩展</td><td>关系表 + hypertable</td>
+      <td><b>完整 SQL</b>、可 JOIN 业务表；适合不想引入新技术的团队</td>
+    </tr>
+    <tr>
+      <td><b>ClickHouse</b></td><td>通用 OLAP（也能存时序）</td><td>宽表</td>
+      <td>数据量极大时的选择；但缺少时序专属语义（如降采样、TTL 策略）</td>
+    </tr>
+  </table>
+
+  <div class="lead">
+    <b>选型直觉：</b><br>
+    · <b>云原生监控告警</b> → Prometheus（+ VictoriaMetrics 做长期存储）<br>
+    · <b>IoT / 设备上报 / 国产化</b> → TDengine<br>
+    · <b>想用 SQL 且数据量中等</b> → TimescaleDB<br>
+    · <b>已有 ClickHouse 且量大</b> → 直接用，配合物化视图做降采样
+  </div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+  <div class="qa">
+    <b>Q：监控数据为什么不能直接用 MySQL 存？</b><br>
+    A：三个硬伤：① <b>写不动</b>——每秒几十万点，B+ 树随机写扛不住，索引维护成瓶颈；
+    ② <b>存不起</b>——每点 16 字节 × 几十万点 × 86400 秒，一天就几十 GB，MySQL 无时序压缩；
+    ③ <b>删不掉</b>——过期数据要按时间批量删，MySQL 的 <code>DELETE</code> 会产生大量 undo 与碎片。
+    而 TSDB 的追加写 + 高压缩 + 按时间块整体删除，正好对症。
+  </div>
+  <div class="qa">
+    <b>Q：什么是"时间线爆炸"，怎么避免？</b><br>
+    A：把 <b>高基数字段当 tag</b>（如 user_id、trace_id、URL 全路径）会导致
+    时间线数量 = 各 tag 取值数的<b>笛卡尔积</b>，内存索引瞬间撑爆。<br>
+    <b>规避：</b>① tag 只放低基数枚举维度；② 高基数维度放进 field 或日志系统；
+    ③ 用 <code>relabel_config</code> 丢弃不必要的 label；④ 监控 time series 数量并设置告警。
+  </div>
+  <div class="qa">
+    <b>Q：Prometheus 为什么是"拉模式"？有什么优劣？</b><br>
+    A：Pull 的好处是<b>服务端无状态、目标发现简单、便于本地调试</b>（直接 curl 目标 /metrics）。
+    代价是需要服务发现、不適合短生命周期任务（用 Pushgateway 补）、跨网络边界受限。
+    这是 Prometheus 与 InfluxDB（推模式）最核心的设计哲学差异。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

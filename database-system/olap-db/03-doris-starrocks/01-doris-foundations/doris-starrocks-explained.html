@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Doris / StarRocks 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Doris / StarRocks 原理图解</h1>
+  <p>MPP 架构下的现代 OLAP：为什么它们比 ClickHouse 更适合 BI 与多表关联</p>
+  <span class="tag">MPP</span><span class="tag">FE / BE</span><span class="tag">Colocate Join</span><span class="tag">物化视图</span><span class="tag">MySQL 协议</span>
+</header>
+<nav>
+  <a href="#what">① 定位</a>
+  <a href="#arch">② FE / BE 架构</a>
+  <a href="#data">③ 数据分布</a>
+  <a href="#join">④ JOIN 策略</a>
+  <a href="#mv">⑤ 物化视图</a>
+  <a href="#vs">⑥ 对比 ClickHouse</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>Doris 与 StarRocks 是同源的国产 MPP OLAP 引擎，
+  设计目标是「<b>比 ClickHouse 更通用</b>」——补齐了多表 JOIN、高并发、MySQL 协议兼容与标准 BI 语义，
+  代价是单表扫描的极致性能略逊于 ClickHouse。
+</div>
+
+<section id="what">
+  <h2><span class="n">01</span>定位：从 ClickHouse 的短板出发</h2>
+  <table>
+    <tr><th>ClickHouse 的痛点</th><th>Doris / StarRocks 的解法</th></tr>
+    <tr><td>多表 JOIN 弱，大表 JOIN 易 OOM</td><td><b>MPP 分布式 JOIN 优化器</b>：Broadcast / Shuffle / Colocate 三种策略自动选择</td></tr>
+    <tr><td>高并发点查扛不住</td><td>分区分桶裁剪更彻底 + 更强的并发调度，支持数百 QPS</td></tr>
+    <tr><td>协议不兼容，BI 工具接入麻烦</td><td><b>原生兼容 MySQL 协议</b>，Tableau / 帆软 / Superset 直接连</td></tr>
+    <tr><td>UPDATE 是异步 mutation，语义别扭</td><td>支持 <b>Unique Key 模型</b>做真正的 upsert，写入即可见</td></tr>
+    <tr><td>运维需自己管分片路由</td><td>内置 <b>自动副本均衡、故障恢复</b>，运维负担更小</td></tr>
+  </table>
+  <p class="muted">一句话区分：<b>ClickHouse = 单表扫描怪兽；Doris/StarRocks = 通用分析数据库。</b></p>
+</section>
+
+<section id="arch">
+  <h2><span class="n">02</span>FE / BE 架构</h2>
+  <div class="fig">
+    <svg width="720" height="300" viewBox="0 0 720 300">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+        </marker>
+      </defs>
+      <!-- client -->
+      <rect x="270" y="10" width="180" height="36" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+      <text x="360" y="33" text-anchor="middle" font-size="13" fill="#56d4dd">MySQL 客户端 / BI 工具</text>
+      <line x1="360" y1="48" x2="360" y2="72" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#ah)"/>
+
+      <!-- FE -->
+      <rect x="120" y="76" width="480" height="78" rx="10" fill="#171b26" stroke="#6ea8fe"/>
+      <text x="360" y="100" text-anchor="middle" font-size="14" font-weight="700" fill="#6ea8fe">FE（Frontend）· 多个，主备通过选举</text>
+      <text x="360" y="122" text-anchor="middle" font-size="12" fill="#94a3b8">元数据管理 · SQL 解析 · 查询优化 · 分布式计划生成 · 集群管理</text>
+      <text x="360" y="142" text-anchor="middle" font-size="12" fill="#94a3b8">元数据存内存 + 类 Raft 日志复制；无状态程度高，可水平扩展读</text>
+
+      <line x1="230" y1="156" x2="140" y2="190" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah)"/>
+      <line x1="360" y1="156" x2="360" y2="190" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah)"/>
+      <line x1="490" y1="156" x2="580" y2="190" stroke="#7ee787" stroke-width="1.6" marker-end="url(#ah)"/>
+
+      <!-- BE -->
+      <g>
+        <rect x="40" y="194" width="200" height="76" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+        <text x="140" y="218" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">BE 1</text>
+        <text x="140" y="240" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地列存 · Tablet 副本</text>
+        <text x="140" y="259" text-anchor="middle" font-size="11.5" fill="#94a3b8">执行扫描 / 聚合 / JOIN</text>
+      </g>
+      <g>
+        <rect x="260" y="194" width="200" height="76" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+        <text x="360" y="218" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">BE 2</text>
+        <text x="360" y="240" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地列存 · Tablet 副本</text>
+        <text x="360" y="259" text-anchor="middle" font-size="11.5" fill="#94a3b8">执行扫描 / 聚合 / JOIN</text>
+      </g>
+      <g>
+        <rect x="480" y="194" width="200" height="76" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+        <text x="580" y="218" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">BE 3</text>
+        <text x="580" y="240" text-anchor="middle" font-size="11.5" fill="#94a3b8">本地列存 · Tablet 副本</text>
+        <text x="580" y="259" text-anchor="middle" font-size="11.5" fill="#94a3b8">执行扫描 / 聚合 / JOIN</text>
+      </g>
+      <text x="360" y="288" text-anchor="middle" font-size="11.5" fill="#7ee787">BE 之间可互相 shuffle 数据；FE 只下发计划、汇总结果</text>
+    </svg>
+    <div class="cap">图 1：FE 负责"想"（优化），BE 负责"做"（执行）——职责分离清晰</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h4>🧠 FE（Frontend）</h4>
+      <p>Java 实现。管理库表元数据、接收 SQL、做<b>基于代价的优化（CBO）</b>、
+      生成分布式执行计划并下发给 BE。多个 FE 通过类 Raft 协议选主，元数据强一致。</p>
+    </div>
+    <div class="card">
+      <h4>💪 BE（Backend）</h4>
+      <p>C++ 实现。负责<b>数据存储</b>（列存）与<b>查询执行</b>（向量化）。
+      Tablet 的多副本分布在不同 BE 上，BE 故障时 FE 自动调度副本补齐。</p>
+    </div>
+  </div>
+</section>
+
+<section id="data">
+  <h2><span class="n">03</span>数据分布：分区 + 分桶</h2>
+  <p>两层分布是 Doris/StarRocks 的核心设计，也是 JOIN 优化的基础。</p>
+
+  <div class="fig">
+    <svg width="720" height="240" viewBox="0 0 720 240">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#6ea8fe">两层数据分布</text>
+      <!-- partition -->
+      <text x="40" y="54" font-size="12.5" fill="#94a3b8">第一层：分区 PARTITION BY（通常是时间）</text>
+      <g font-family="monospace" font-size="11.5">
+        <rect x="40" y="62" width="200" height="30" fill="#1f2433" stroke="#2b3142"/><text x="52" y="82" fill="#e2e8f0">p202401</text>
+        <rect x="252" y="62" width="200" height="30" fill="#1f2433" stroke="#2b3142"/><text x="264" y="82" fill="#e2e8f0">p202402</text>
+        <rect x="464" y="62" width="200" height="30" fill="#1f2433" stroke="#2b3142"/><text x="476" y="82" fill="#e2e8f0">p202403</text>
+      </g>
+      <text x="360" y="112" text-anchor="middle" font-size="11.5" fill="#94a3b8">查询带时间条件 → 直接裁剪掉整个分区目录</text>
+
+      <!-- bucket -->
+      <text x="40" y="146" font-size="12.5" fill="#94a3b8">第二层：分桶 DISTRIBUTED BY HASH(user_id) BUCKETS 8</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="50" y="172" fill="#d2a8ff">bucket 0</text>
+        <rect x="124" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="134" y="172" fill="#d2a8ff">bucket 1</text>
+        <rect x="208" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="218" y="172" fill="#d2a8ff">bucket 2</text>
+        <rect x="292" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="302" y="172" fill="#d2a8ff">bucket 3</text>
+        <rect x="376" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="386" y="172" fill="#d2a8ff">bucket 4</text>
+        <rect x="460" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="470" y="172" fill="#d2a8ff">bucket 5</text>
+        <rect x="544" y="154" width="78" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="554" y="172" fill="#d2a8ff">bucket 6</text>
+        <rect x="628" y="154" width="62" height="28" fill="#2a2340" stroke="#d2a8ff"/><text x="638" y="172" fill="#d2a8ff">bucket 7</text>
+      </g>
+      <text x="360" y="204" text-anchor="middle" font-size="11.5" fill="#d2a8ff">每个 bucket = 一个 Tablet，多副本散布在 BE 上</text>
+      <text x="360" y="226" text-anchor="middle" font-size="11.5" fill="#7ee787">相同 user_id 必然落在同一 bucket → Colocate Join 的基础</text>
+    </svg>
+    <div class="cap">图 2：分区裁剪 + 分桶定位，两层剪枝把扫描量压到最小</div>
+  </div>
+
+  <h3>三种数据模型（建表时指定）</h3>
+  <table>
+    <tr><th>模型</th><th>KEY 语义</th><th>适用场景</th></tr>
+    <tr><td><b>Duplicate Key</b></td><td>KEY 仅用于排序，<b>不去重</b>，全行保留</td><td>日志、明细事实表（最快）</td></tr>
+    <tr><td><b>Aggregate Key</b></td><td>KEY 相同行的 value 列<b>按聚合函数合并</b>（SUM/REPLACE/MAX）</td><td>指标预聚合，报表直接查</td></tr>
+    <tr><td><b>Unique Key</b></td><td>KEY 相同行<b>保留最新</b>，实现真 upsert</td><td>维表、需要更新的状态表</td></tr>
+    <tr><td><b>Primary Key</b>（StarRocks）</td><td>Unique 的增强版，支持主键索引 + 部分列更新</td><td>需要高频更新的场景</td></tr>
+  </table>
+  <div class="lead ok">
+    <b>Unique Key 是 Doris 相对 ClickHouse 的一大优势：</b>写入即可见的 upsert，
+    不需要像 <code>ReplacingMergeTree</code> 那样担心异步合并和 <code>FINAL</code> 的性能问题。
+  </div>
+</section>
+
+<section id="join">
+  <h2><span class="n">04</span>三种 JOIN 策略</h2>
+  <div class="fig">
+    <svg width="720" height="260" viewBox="0 0 720 260">
+      <text x="120" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#56d4dd">Broadcast Join</text>
+      <text x="360" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#7ee787">Colocate Join</text>
+      <text x="600" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#f0a868">Shuffle Join</text>
+
+      <!-- broadcast -->
+      <g>
+        <rect x="30" y="34" width="180" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="120" y="56" text-anchor="middle" font-size="11.5" fill="#94a3b8">小表（全量复制）</text>
+        <line x1="70" y1="70" x2="50" y2="98" stroke="#56d4dd" stroke-width="1.4"/>
+        <line x1="120" y1="70" x2="120" y2="98" stroke="#56d4dd" stroke-width="1.4"/>
+        <line x1="170" y1="70" x2="190" y2="98" stroke="#56d4dd" stroke-width="1.4"/>
+        <rect x="30" y="100" width="180" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="120" y="120" text-anchor="middle" font-size="11.5" fill="#94a3b8">BE1 大表分片</text>
+        <rect x="30" y="134" width="180" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="120" y="154" text-anchor="middle" font-size="11.5" fill="#94a3b8">BE2 大表分片</text>
+        <rect x="30" y="168" width="180" height="30" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="120" y="188" text-anchor="middle" font-size="11.5" fill="#94a3b8">BE3 大表分片</text>
+        <text x="120" y="220" text-anchor="middle" font-size="11" fill="#56d4dd">小表广播到所有 BE</text>
+        <text x="120" y="238" text-anchor="middle" font-size="11" fill="#94a3b8">网络 = N × 小表</text>
+      </g>
+
+      <!-- colocate -->
+      <g>
+        <rect x="270" y="34" width="180" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="360" y="56" text-anchor="middle" font-size="11.5" fill="#94a3b8">表 A（按 user_id 分桶）</text>
+        <rect x="270" y="100" width="180" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="360" y="122" text-anchor="middle" font-size="11.5" fill="#94a3b8">表 B（同 user_id 分桶）</text>
+        <rect x="270" y="152" width="180" height="46" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="360" y="172" text-anchor="middle" font-size="11.5" fill="#7ee787">同 bucket 在同一 BE</text>
+        <text x="360" y="190" text-anchor="middle" font-size="11.5" fill="#7ee787">本地 JOIN，零网络</text>
+        <text x="360" y="220" text-anchor="middle" font-size="11" fill="#7ee787">最快，需预先规划分桶</text>
+        <text x="360" y="238" text-anchor="middle" font-size="11" fill="#94a3b8">网络 = 0</text>
+      </g>
+
+      <!-- shuffle -->
+      <g>
+        <rect x="510" y="34" width="180" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="600" y="56" text-anchor="middle" font-size="11.5" fill="#94a3b8">大表 A</text>
+        <rect x="510" y="100" width="180" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="600" y="122" text-anchor="middle" font-size="11.5" fill="#94a3b8">大表 B</text>
+        <text x="600" y="160" text-anchor="middle" font-size="18" fill="#f0a868">⇅ hash 重分布</text>
+        <rect x="510" y="172" width="180" height="26" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="600" y="190" text-anchor="middle" font-size="11.5" fill="#94a3b8">各 BE 本地 JOIN</text>
+        <text x="600" y="220" text-anchor="middle" font-size="11" fill="#f0a868">兜底方案，大表 ⋈ 大表</text>
+        <text x="600" y="238" text-anchor="middle" font-size="11" fill="#94a3b8">网络 = A + B 全量</text>
+      </g>
+    </svg>
+    <div class="cap">图 3：三种 JOIN 策略的网络代价对比</div>
+  </div>
+
+  <div class="lead warn">
+    <b>面试高频：</b>大表 JOIN 慢，第一件事就是看执行计划（<code>EXPLAIN</code>）里用的是哪种 JOIN。
+    如果两个大表都按 JOIN KEY 分桶且桶数一致，<b>把它们放进同一个 Colocation Group</b>，
+    就能把 Shuffle Join 变成 Colocate Join，性能往往是数量级的提升。
+  </div>
+</section>
+
+<section id="mv">
+  <h2><span class="n">05</span>物化视图：自动的预聚合</h2>
+  <p>Doris/StarRocks 的<b>异步物化视图</b>能自动改写查询：用户写 SQL 查明细表，
+  优化器发现能用物化视图回答问题，就<b>透明地改写</b>去查预聚合结果。</p>
+  <pre><code>-- 建一张按天 + 城市预聚合的物化视图
+CREATE MATERIALIZED VIEW mv_daily_city
+BUILD IMMEDIATE REFRESH ASYNC EVERY (INTERVAL 1 HOUR)
+AS SELECT
+    event_date,
+    city,
+    COUNT(*)         AS cnt,
+    SUM(amount)      AS total_amount
+FROM events
+GROUP BY event_date, city;
+
+-- 用户仍写原 SQL，优化器自动改写命中视图
+SELECT city, SUM(amount) FROM events GROUP BY event_date, city;</code></pre>
+  <div class="grid">
+    <div class="card">
+      <h4>✅ 优势</h4>
+      <p>对应用<b>完全透明</b>，不改 SQL 就能加速；增量刷新，成本低；
+      支持多表 JOIN 结果的物化（StarRocks 更强）。</p>
+    </div>
+    <div class="card">
+      <h4>⚠️ 注意</h4>
+      <p>刷新有延迟（近实时非实时）；维度过多会导致视图膨胀；
+      需关注 <code>EXPLAIN</code> 确认是否真的命中。</p>
+    </div>
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>与 ClickHouse 怎么选</h2>
+  <table>
+    <tr><th>维度</th><th>ClickHouse</th><th>Doris / StarRocks</th></tr>
+    <tr><td>单表明细扫描</td><td><b>更强</b>，压缩与向量化极致</td><td>也很强，略逊</td></tr>
+    <tr><td>多表 JOIN</td><td>较弱，建议宽表化</td><td><b>更强</b>，CBO + 三种 JOIN 策略</td></tr>
+    <tr><td>高并发查询</td><td>较弱（建议 &lt;100 QPS）</td><td><b>更好</b>，数百 QPS 常见</td></tr>
+    <tr><td>Upsert / 更新</td><td>异步 mutation，语义别扭</td><td><b>Unique/Primary Key，写入即可见</b></td></tr>
+    <tr><td>协议与生态</td><td>自有 HTTP/TCP 协议</td><td><b>兼容 MySQL 协议</b>，BI 接入零成本</td></tr>
+    <tr><td>运维复杂度</td><td>分片路由、副本需自行管理</td><td>FE/BE 内置均衡与恢复，更省心</td></tr>
+    <tr><td>典型场景</td><td>日志/埋点明细、用户行为分析</td><td>企业数仓、BI 报表、多维分析</td></tr>
+  </table>
+
+  <div class="qa">
+    <b>Q：能不能两个一起用？</b><br>
+    A：不少公司正是这么做的——<b>ClickHouse 扛明细日志的 adhoc 探索</b>（几万亿行、单表扫描），
+    <b>Doris/StarRocks 扛对外 BI 报表</b>（多表关联、高并发、语义层）。
+    上游共用一套 Kafka + Flink 同步链路，按场景分流。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP / Doris-StarRocks ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weaviate 向量数据库原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Weaviate 向量数据库原理</h1>
+  <p>GraphQL 风格 Schema + 内置向量化模块：开箱即用的语义搜索数据库</p>
+  <span class="tag">Weaviate</span><span class="tag">Schema/Class</span><span class="tag">GraphQL</span><span class="tag">内置 Embedding</span><span class="tag">混合检索</span>
+</header>
+<nav>
+  <a href="#pos">① 定位</a>
+  <a href="#model">② Schema 数据模型</a>
+  <a href="#module">③ 向量化模块</a>
+  <a href="#search">④ 检索方式</a>
+  <a href="#use">⑤ 上手示例</a>
+  <a href="#vs">⑥ 三者对比</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>Weaviate 的最大特色是 <b>Schema-first + 内置向量化</b>——
+  你只需定义数据结构（Class）并指定用哪个模型，
+  <b>存原始文本进去，向量化由 Weaviate 自动完成</b>（支持 OpenAI、Cohere、HuggingFace 等）。
+  再加上原生 GraphQL 查询与混合检索（向量 + BM25），对应用开发者非常友好。
+</div>
+
+<section id="pos">
+  <h2><span class="n">01</span>定位与特点</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>🧩 内置向量化模块</h4>
+      <p>支持 OpenAI、Cohere、HuggingFace、本地模型等。
+      <b>写入文本即自动转向量</b>，无需在应用层调用 embedding API。</p>
+    </div>
+    <div class="card">
+      <h4>📐 Schema-first</h4>
+      <p>先定义 Class（类）与属性类型，数据强结构化。
+      类似 ORM / 图数据库的对象建模思维。</p>
+    </div>
+    <div class="card">
+      <h4>🔀 混合检索原生</h4>
+      <p>内置 <b>BM25 关键词检索 + 向量检索</b>的融合（hybrid search），
+      无需自己拼两套系统再融合。</p>
+    </div>
+    <div class="card">
+      <h4>🔗 交叉引用</h4>
+      <p>对象之间可用 cross-reference 建立关联，
+      天然表达"文章→作者"这类关系，可跨对象检索。</p>
+    </div>
+  </div>
+  <p class="muted">适合：想<b>快速搭建 RAG/语义搜索</b>、不想自己管 embedding 流水线、偏好 GraphQL 的团队。</p>
+</section>
+
+<section id="model">
+  <h2><span class="n">02</span>Schema 数据模型</h2>
+  <p>Weaviate 用「<b>Class（类）→ 对象（Object）</b>」组织数据，
+  每个 Class 有属性（property），并指定向量化器。</p>
+
+  <div class="fig">
+    <svg width="720" height="235" viewBox="0 0 720 235">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">Class Article 的结构</text>
+      <rect x="40" y="34" width="640" height="54" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+      <text x="360" y="56" text-anchor="middle" font-size="13" font-weight="700" fill="#56d4dd">Class: Article</text>
+      <text x="360" y="76" text-anchor="middle" font-size="11.5" fill="#94a3b8">vectorizer: text2vec-openai ｜ vectorIndexType: hnsw</text>
+
+      <line x1="200" y1="90" x2="150" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="360" y1="90" x2="360" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="520" y1="90" x2="570" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+
+      <g font-size="11">
+        <rect x="40" y="122" width="190" height="90" rx="8" fill="#171b26" stroke="#7ee787"/>
+        <text x="135" y="144" text-anchor="middle" font-size="12" fill="#7ee787">属性 Properties</text>
+        <text x="135" y="164" text-anchor="middle" fill="#94a3b8">title: text</text>
+        <text x="135" y="184" text-anchor="middle" fill="#94a3b8">content: text</text>
+        <text x="135" y="204" text-anchor="middle" fill="#94a3b8">publishedAt: date</text>
+
+        <rect x="265" y="122" width="190" height="90" rx="8" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="360" y="144" text-anchor="middle" font-size="12" fill="#d2a8ff">向量 Vector</text>
+        <text x="360" y="164" text-anchor="middle" fill="#94a3b8">由 vectorizer 自动生成</text>
+        <text x="360" y="184" text-anchor="middle" fill="#94a3b8">或外部提供（BYOV）</text>
+        <text x="360" y="204" text-anchor="middle" fill="#94a3b8">HNSW 索引</text>
+
+        <rect x="490" y="122" width="190" height="90" rx="8" fill="#14303a" stroke="#56d4dd"/>
+        <text x="585" y="144" text-anchor="middle" font-size="12" fill="#56d4dd">交叉引用</text>
+        <text x="585" y="164" text-anchor="middle" fill="#94a3b8">author → Author 类</text>
+        <text x="585" y="184" text-anchor="middle" fill="#94a3b8">category → Category</text>
+        <text x="585" y="204" text-anchor="middle" fill="#94a3b8">可跨对象联合检索</text>
+      </g>
+      <text x="360" y="228" text-anchor="middle" font-size="11" fill="#94a3b8">每个对象 = 属性 + 自动生成的向量 + 引用关系</text>
+    </svg>
+    <div class="cap">图 1：Weaviate 的对象模型</div>
+  </div>
+
+  <table>
+    <tr><th>概念</th><th>Weaviate</th><th>关系型类比</th></tr>
+    <tr><td>Class</td><td>数据类（如 Article、Author）</td><td>表</td></tr>
+    <tr><td>Object</td><td>类的一个实例</td><td>行</td></tr>
+    <tr><td>Property</td><td>对象属性（text/int/date/geo...）</td><td>列</td></tr>
+    <tr><td>Cross-reference</td><td>指向其它对象的引用</td><td>外键</td></tr>
+    <tr><td>Vectorizer</td><td>自动把属性内容转成向量的模块</td><td>无对应</td></tr>
+  </table>
+</section>
+
+<section id="module">
+  <h2><span class="n">03</span>向量化模块（核心特色）</h2>
+  <p>传统做法：应用层调 embedding API → 拿向量 → 存库。
+  Weaviate 把这一步<b>内置到数据库里</b>：</p>
+
+  <div class="fig">
+    <svg width="720" height="190" viewBox="0 0 720 190">
+      <defs>
+        <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+          <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+        </marker>
+      </defs>
+      <!-- traditional -->
+      <text x="180" y="20" text-anchor="middle" font-size="12.5" font-weight="700" fill="#ff7b72">传统流程：应用层负责向量化</text>
+      <g font-size="11">
+        <rect x="40" y="30" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="100" y="51" text-anchor="middle" fill="#94a3b8">应用</text>
+        <rect x="175" y="30" width="120" height="34" rx="6" fill="#171b26" stroke="#ff7b72"/>
+        <text x="235" y="51" text-anchor="middle" fill="#ff7b72">调 OpenAI API</text>
+        <rect x="310" y="30" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="370" y="51" text-anchor="middle" fill="#94a3b8">存向量库</text>
+      </g>
+      <line x1="162" y1="47" x2="171" y2="47" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="297" y1="47" x2="306" y2="47" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="235" y="82" text-anchor="middle" font-size="10.5" fill="#ff7b72">应用要自己管：批处理、重试、限流、成本</text>
+
+      <!-- weaviate -->
+      <text x="540" y="20" text-anchor="middle" font-size="12.5" font-weight="700" fill="#7ee787">Weaviate：库内自动向量化</text>
+      <g font-size="11">
+        <rect x="430" y="30" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+        <text x="490" y="51" text-anchor="middle" fill="#94a3b8">应用（存文本）</text>
+        <rect x="565" y="30" width="120" height="34" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="625" y="51" text-anchor="middle" fill="#7ee787">Weaviate 自动转</text>
+      </g>
+      <line x1="552" y1="47" x2="561" y2="47" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="550" y="82" text-anchor="middle" font-size="10.5" fill="#7ee787">应用只管存文本，查询也用文本</text>
+
+      <rect x="40" y="100" width="640" height="70" rx="8" fill="#171b26" stroke="#2b3142"/>
+      <text x="60" y="122" font-size="11.5" fill="#94a3b8">支持的模块：text2vec-openai / text2vec-cohere / text2vec-huggingface /</text>
+      <text x="60" y="142" font-size="11.5" fill="#94a3b8">text2vec-transformers（本地）/ multi2vec（图文多模态）/ img2vec</text>
+      <text x="60" y="162" font-size="11.5" fill="#f0a868">⚠️ 代价：数据库要出网访问模型 API，需考虑延迟、成本与数据出境合规</text>
+    </svg>
+    <div class="cap">图 2：内置向量化简化了应用，但引入了外部依赖</div>
+  </div>
+</section>
+
+<section id="search">
+  <h2><span class="n">04</span>三种检索方式</h2>
+  <table>
+    <tr><th>方式</th><th>原理</th><th>适用</th></tr>
+    <tr>
+      <td><b>向量检索</b><br>nearText / nearVector</td>
+      <td>HNSW 近似最近邻，按语义相似度</td>
+      <td>语义模糊匹配、同义表达</td>
+    </tr>
+    <tr>
+      <td><b>关键词检索</b><br>bm25</td>
+      <td>BM25 经典词频-逆文档频率打分</td>
+      <td>精确术语、专有名词、型号</td>
+    </tr>
+    <tr>
+      <td><b>混合检索</b><br>hybrid ⭐</td>
+      <td>融合两者分数（可配 alpha 权重）</td>
+      <td><b>生产推荐</b>：兼顾语义与精确匹配</td>
+    </tr>
+  </table>
+
+  <div class="lead ok">
+    <b>为什么混合检索重要？</b>纯向量检索对<b>精确词</b>（如错误码 "ERR_2049"、产品型号、人名）
+    表现很差——语义相似但字面不同就会漏掉。
+    纯 BM25 又无法处理同义词与语义泛化。
+    <b>两者融合（hybrid）才是生产环境的标准答案</b>，Weaviate 把它做成了原生能力。
+  </div>
+
+  <pre><code># GraphQL 混合检索示例
+{
+  Get {
+    Article(
+      hybrid: {
+        query: "向量数据库 选型"
+        alpha: 0.5          # 0=纯关键词, 1=纯向量, 0.5=各半
+      }
+      limit: 10
+      where: {              # 结构化过滤
+        path: ["publishedAt"]
+        operator: GreaterThan
+        valueDate: "2025-01-01T00:00:00Z"
+      }
+    ) {
+      title
+      content
+      _additional { score }
+    }
+  }
+}</code></pre>
+
+  <h3>过滤与检索的执行顺序</h3>
+  <p>Weaviate 支持 <code>where</code> 过滤。它会在向量检索<b>之前或之中</b>应用过滤
+  （取决于过滤选择性），并对高选择性过滤做了专门优化。
+  与 Qdrant 类似，<b>过滤过严会降低 ANN 效率</b>，需要关注召回率。</p>
+</section>
+
+<section id="use">
+  <h2><span class="n">05</span>上手示例</h2>
+  <pre><code>// 1. 定义 Schema（REST）
+POST /v1/schema
+{
+  "class": "Article",
+  "vectorizer": "text2vec-openai",
+  "moduleConfig": {
+    "text2vec-openai": { "model": "text-embedding-3-small" }
+  },
+  "properties": [
+    { "name": "title",   "dataType": ["text"] },
+    { "name": "01-content", "dataType": ["text"] },
+    { "name": "publishedAt", "dataType": ["date"] }
+  ]
+}
+
+# 2. 写入（只需文本，向量自动生成）
+import weaviate
+client = weaviate.connect_to_local()
+articles = client.collections.get("Article")
+articles.data.insert({
+    "title": "向量数据库选型指南",
+    "01-content": "...",
+    "publishedAt": "2026-01-15T00:00:00Z"
+})
+
+# 3. 查询（用文本查，也自动生成查询向量）
+res = articles.query.hybrid(query="向量数据库", alpha=0.5, limit=10)</code></pre>
+
+  <div class="lead warn">
+    <b>实践注意：</b>① 换 embedding 模型必须<b>重建全部向量</b>（维度/语义空间变了）；
+    ② 内置向量化会为每个写入产生一次 API 调用，<b>批量导入前先评估成本</b>；
+    ③ 生产环境建议评估"数据是否允许出境"——合规敏感场景应改用本地模型或自带向量（BYOV）。
+  </div>
+</section>
+
+<section id="vs">
+  <h2><span class="n">06</span>Milvus / Qdrant / Weaviate 对比</h2>
+  <table>
+    <tr><th>维度</th><th>Milvus</th><th>Qdrant</th><th>Weaviate</th></tr>
+    <tr><td>语言</td><td>Go + C++</td><td>Rust</td><td>Go</td></tr>
+    <tr><td>核心特色</td><td><b>超大规模、架构完备</b></td><td><b>过滤强、部署轻</b></td><td><b>内置向量化、混合检索</b></td></tr>
+    <tr><td>数据模型</td><td>Collection + 字段</td><td>Collection + payload</td><td><b>Class + property（Schema-first）</b></td></tr>
+    <tr><td>查询接口</td><td>SDK / REST</td><td>REST / gRPC</td><td><b>GraphQL</b> + REST</td></tr>
+    <tr><td>自动向量化</td><td>❌（需外部）</td><td>❌（新版本有 FastEmbed）</td><td><b>✅ 原生模块丰富</b></td></tr>
+    <tr><td>混合检索</td><td>支持（需自行融合）</td><td>支持（稀疏+稠密）</td><td><b>✅ 原生 hybrid + alpha</b></td></tr>
+    <tr><td>部署复杂度</td><td>较重</td><td><b>极简</b></td><td>中等</td></tr>
+    <tr><td>适用规模</td><td>亿级以上</td><td>百万～千万</td><td>百万～千万</td></tr>
+  </table>
+
+  <div class="lead">
+    <b>一句话选型：</b><br>
+    · 想<b>最快搭好 RAG</b>、不想管 embedding 流水线 → <b>Weaviate</b><br>
+    · <b>过滤条件复杂</b>、追求轻量部署 → <b>Qdrant</b><br>
+    · 数据<b>量级极大</b>、需要完备分布式架构 → <b>Milvus</b>
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 向量数据库 / Weaviate ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>存储引擎 - Visuals</title>
+<style>
+  :root {
+    --bg:#f6f8fb; --card:#fff; --text:#1f2933; --muted:#66707a;
+    --accent:#2563eb; --accent2:#0ea5e9; --accent3:#059669; --warn:#c2710d; --danger:#dc2626;
+    --border:#e3e8ef; --radius:14px; --shadow:0 4px 20px rgba(15,23,42,.06);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); line-height:1.78; }
+  header.topbar { position:sticky; top:0; z-index:50; background:rgba(255,255,255,.9); backdrop-filter:blur(10px); border-bottom:1px solid var(--border); padding:12px 24px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  header.topbar a { color:var(--accent); text-decoration:none; font-weight:600; font-size:14px; }
+  .wrap { max-width:1000px; margin:0 auto; padding:30px 24px 80px; }
+  .hero { padding:14px 0 6px; }
+  .hero h1 { font-size:29px; margin:0 0 8px; }
+  .hero p { color:var(--muted); font-size:16px; margin:0; }
+  h2 { font-size:21px; margin:36px 0 12px; border-left:4px solid var(--accent); padding-left:12px; }
+  h3 { font-size:16.5px; margin:18px 0 6px; color:var(--text); }
+  p { margin:10px 0; }
+  .card-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(225px,1fr)); gap:15px; margin:16px 0; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow); }
+  .card p { color:var(--muted); font-size:14px; margin:6px 0 0; }
+  .card .ico { font-size:22px; }
+  .card h3 { margin:0 0 2px; }
+  table { width:100%; border-collapse:collapse; margin:14px 0; font-size:14px; }
+  th,td { border:1px solid var(--border); padding:9px 11px; text-align:left; vertical-align:top; }
+  th { background:#eef2f7; }
+  tr:hover td { background:#fafbfc; }
+  svg { width:100%; height:auto; max-width:780px; display:block; margin:20px auto; }
+  code { background:#eef2f7; padding:2px 6px; border-radius:6px; font-size:13px; color:#be123c; }
+  pre { background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:10px; overflow:auto; font-size:13px; line-height:1.55; margin:12px 0; }
+  pre code { background:none; color:inherit; padding:0; }
+  .note { background:#eef6ff; border:1px solid #cfe3ff; border-radius:12px; padding:13px 16px; margin:16px 0; color:#1e40af; font-size:14px; }
+  .note.warn { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
+  .note.green { background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
+  ul.tight { margin:10px 0; padding-left:22px; } ul.tight li { margin:6px 0; }
+  footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a href="../../index.html">← 返回分类</a>
+  <a href="../../../../../index.html#subjects">知识地图</a>
+</header>
+<div class="wrap">
+  <div class="hero"><h1>💾 存储引擎</h1><p>LSM、WAL、MemStore、HFile 与 Compaction</p></div>
+  
+<h2>LSM 树思想</h2>
+<p>HBase 的写性能来自 <strong>LSM-Tree（日志结构合并树）</strong>：写操作先进内存、顺序批量落盘，再用后台合并来消除随机写。这把昂贵的「随机写磁盘」变成了廉价的「顺序追加写」。</p>
+
+<h2>三层存储结构</h2>
+<table>
+<tr><th>组件</th><th>位置</th><th>作用</th></tr>
+<tr><td>WAL / HLog</td><td>磁盘（HDFS）</td><td>写前日志：数据进 MemStore 之前先顺序追加到 WAL，用于崩溃恢复，防止内存数据丢失</td></tr>
+<tr><td>MemStore</td><td>内存</td><td>写缓存：按 rowkey 排序的内存结构，写满后刷盘成 HFile</td></tr>
+<tr><td>HFile / StoreFile</td><td>磁盘（HDFS）</td><td>只读的有序文件，真正持久化的数据；每个列族一个 Store 对应一组 HFile</td></tr>
+</table>
+
+<h2>写入（存储视角）</h2>
+<ol class="tight">
+  <li>Client 写请求到 RS → 先<strong>顺序追加 WAL</strong>（HDFS 多副本，保证不丢）。</li>
+  <li>再写入<strong>MemStore</strong>（内存，按 key 排序）。</li>
+  <li>MemStore 达到阈值（默认 128MB 或全局比例）→ <strong>flush</strong> 成 HFile 落盘。</li>
+  <li>WAL 也可被回收（已落盘的 HFile 对应的日志即可清理）。</li>
+</ol>
+
+<h2>Compaction：合并与清理</h2>
+<div class="card-grid">
+  <div class="card"><div class="ico">🧩</div><h3>Minor Compaction</h3><p>把若干小的相邻 HFile 合并成较大的 HFile（不处理已删除/过期的「墓碑」标记），轻量、频繁。</p></div>
+  <div class="card"><div class="ico">🧹</div><h3>Major Compaction</h3><p>把一个 Store 下<strong>所有</strong> HFile 合并成一个，并真正清除被删除、过 TTL、超版本的数据；重、IO 大，通常定时（如周末）执行。</p></div>
+</div>
+
+<h2>读取与缓存</h2>
+<ul class="tight">
+  <li><strong>BlockCache</strong>：读缓存（默认 LRU），把经常读的 HFile 数据块放内存，加速重复读。</li>
+  <li><strong>Bloom Filter</strong>：每个 HFile 带布隆过滤器，快速判断「某 rowkey 是否可能在本文件」，避免无效 IO。</li>
+  <li>读路径：先查 MemStore，再并行查相关 HFile（借助 Bloom 跳过无关文件），合并多版本后返回最新可见值。</li>
+</ul>
+
+<h2>HFile 结构（简述）</h2>
+<p>一个 HFile 大致是：<strong>Trailer（文件索引根）→ 多个 Data Block（数据）→ 多级 Index → Bloom Block → Meta</strong>。读时先读 Trailer 拿到索引，再二分定位目标 block，避免全文件扫描。</p>
+<svg viewBox="0 0 760 170" role="img" aria-label="写入与 Compaction">
+  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#64748b"/></marker></defs><rect x="40" y="30" width="120" height="44" rx="9" fill="#dbeafe" stroke="#93c5fd"/><text x="100" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">WAL(顺序写)</text><rect x="190" y="30" width="120" height="44" rx="9" fill="#dcfce7" stroke="#86efac"/><text x="250" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">MemStore</text><rect x="340" y="30" width="110" height="44" rx="9" fill="#fef9c3" stroke="#fde047"/><text x="395" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">flush</text><rect x="470" y="30" width="110" height="44" rx="9" fill="#eef2f7" stroke="#94a3b8"/><text x="525" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">小 HFile×N</text><rect x="610" y="30" width="110" height="44" rx="9" fill="#e0e7ff" stroke="#a5b4fc"/><text x="665" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">Major合并</text><line x1="160" y1="52" x2="188" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><line x1="310" y1="52" x2="338" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><line x1="450" y1="52" x2="468" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><text x="459" y="47" text-anchor="middle" fill="#64748b" font-size="11">minor</text><line x1="580" y1="52" x2="608" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><text x="594" y="47" text-anchor="middle" fill="#64748b" font-size="11">major</text><rect x="190" y="110" width="380" height="40" rx="9" fill="#dbeafe" stroke="#93c5fd"/><text x="380" y="134" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">HDFS（DataNode 多副本持久化）</text><line x1="525" y1="74" x2="380" y2="108" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/>
+</svg>
+<div class="note warn">⚠️ <strong>小文件风暴</strong>：写入过猛或 Region 过多，会刷出海量小 HFile，Compaction 追不上，读放大严重。对策：合理预分区、控制写入速率、调大 MemStore、监控 Compaction 队列。</div>
+
+</div>
+<footer>© 2026 Visuals · 列族数据库 / HBase / 存储</footer>
+</body>
+</html>

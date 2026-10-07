@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>列式存储与向量化执行 · 原理图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>列式存储与向量化执行</h1>
+  <p>压缩编码、SIMD、批量处理——OLAP 引擎"快一个数量级"的三块基石</p>
+  <span class="tag">列存</span><span class="tag">字典编码</span><span class="tag">RLE</span><span class="tag">向量化</span><span class="tag">SIMD</span>
+</header>
+<nav>
+  <a href="#why">① 为什么快</a>
+  <a href="#codec">② 压缩编码</a>
+  <a href="#vector">③ 向量化执行</a>
+  <a href="#simd">④ SIMD</a>
+  <a href="#late">⑤ 延迟物化</a>
+  <a href="#qa">⑥ 常见疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>列存解决「读得少」，压缩解决「读得快」，向量化解决「算得快」。
+  三者叠加，才让 ClickHouse / Doris 这类引擎能在单机上秒级扫描几十亿行。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>三层加速，各解决一个问题</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>🎯 列存：读得少</h4>
+      <p>只读取查询真正用到的列。20 列的宽表只查 3 列，
+      磁盘 IO 直接降到 1/6 左右，且是<b>连续 IO</b> 而非随机 IO。</p>
+    </div>
+    <div class="card">
+      <h4>🗜️ 压缩：传得快</h4>
+      <p>同列数据同质性强，压缩比常达 5～10 倍。
+      更关键的是<b>很多聚合可以在压缩态直接做</b>，连解压都省了。</p>
+    </div>
+    <div class="card">
+      <h4>⚡ 向量化：算得快</h4>
+      <p>一次处理一批（Block）而非一行，消除逐行函数调用与分支开销，
+      提高 CPU cache 命中，并能启用 SIMD 单指令多数据。</p>
+    </div>
+  </div>
+
+  <div class="fig">
+    <svg width="720" height="230" viewBox="0 0 720 230">
+      <!-- naive row by row -->
+      <text x="180" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="#ff7b72">逐行火山模型（Row-at-a-time）</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="60" y="40" width="240" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="70" y="59" fill="#94a3b8">next() → row1 → 解析 → 计算</text>
+        <rect x="60" y="74" width="240" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="70" y="93" fill="#94a3b8">next() → row2 → 解析 → 计算</text>
+        <rect x="60" y="108" width="240" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="70" y="127" fill="#94a3b8">next() → row3 → 解析 → 计算</text>
+        <rect x="60" y="142" width="240" height="30" fill="#1f2433" stroke="#2b3142"/>
+        <text x="70" y="161" fill="#94a3b8">next() → row4 → 解析 → 计算</text>
+      </g>
+      <text x="180" y="192" text-anchor="middle" font-size="12" fill="#ff7b72">每行一次虚函数调用 + 类型判断</text>
+      <text x="180" y="212" text-anchor="middle" font-size="12.5" fill="#94a3b8">CPU 大量时间在「解释」而非「计算」</text>
+
+      <!-- vectorized -->
+      <text x="540" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="#7ee787">向量化批量（Block-at-a-time）</text>
+      <rect x="420" y="40" width="240" height="132" fill="#1b3a2a" stroke="#7ee787"/>
+      <g font-family="monospace" font-size="11">
+        <text x="432" y="62" fill="#7ee787">block: [100,350,80,220,...]</text>
+        <text x="432" y="82" fill="#94a3b8">   8192 行一块</text>
+        <text x="432" y="108" fill="#7ee787">for i in block: sum += v[i]</text>
+        <text x="432" y="130" fill="#94a3b8">  无分支 · 类型已知 · cache 友好</text>
+        <text x="432" y="156" fill="#7ee787">SIMD: 一次指令算 8 个 int32</text>
+      </g>
+      <text x="540" y="192" text-anchor="middle" font-size="12" fill="#7ee787">一次调用处理 8192 行</text>
+      <text x="540" y="212" text-anchor="middle" font-size="12.5" fill="#94a3b8">CPU 时间几乎全在实际计算上</text>
+    </svg>
+    <div class="cap">图 1：逐行解释执行 vs 批量向量化——开销相差可达 10 倍以上</div>
+  </div>
+</section>
+
+<section id="codec">
+  <h2><span class="n">02</span>主流列存压缩编码</h2>
+  <p>列存把同字段值放一起，才让下面这些编码有了用武之地。选型通常靠<b>自动探测</b>：引擎先采样几万行试各种编码，选压缩比最高的那个。</p>
+
+  <table>
+    <tr><th>编码</th><th>原理</th><th>最适数据</th><th>典型压缩比</th></tr>
+    <tr>
+      <td><b>字典编码</b><br>Dictionary</td>
+      <td>把去重后的值建成字典，原列存成整数下标</td>
+      <td>低基数字符串：城市、状态、品类、日志级别</td>
+      <td>10～100×</td>
+    </tr>
+    <tr>
+      <td><b>RLE 游程</b><br>Run-Length</td>
+      <td>连续相同值存成「值 + 重复次数」</td>
+      <td>已排序的列、稀疏的枚举列</td>
+      <td>极高（看重复度）</td>
+    </tr>
+    <tr>
+      <td><b>Delta 差分</b></td>
+      <td>存相邻值的差而非原值</td>
+      <td>单调递增时间戳、自增 ID</td>
+      <td>5～20×</td>
+    </tr>
+    <tr>
+      <td><b>位图 Bitmap</b></td>
+      <td>每个取值一个 bitmap，标记哪些行命中</td>
+      <td>极低基数 + 过滤条件（WHERE city='BJ'）</td>
+      <td>随基数变化</td>
+    </tr>
+    <tr>
+      <td><b>LZ4 / ZSTD</b></td>
+      <td>通用块压缩，压在编码之后</td>
+      <td>兜底通用场景</td>
+      <td>2～4×</td>
+    </tr>
+  </table>
+
+  <div class="fig">
+    <svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">字典编码示例：city 列</text>
+      <!-- original -->
+      <text x="60" y="58" font-size="12.5" fill="#94a3b8">原始列（5 行 × ~3 字节）≈ 15 字节：</text>
+      <g font-family="monospace" font-size="12">
+        <rect x="60" y="68" width="64" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="76" y="86" fill="#94a3b8">BJ</text>
+        <rect x="126" y="68" width="64" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="142" y="86" fill="#94a3b8">SH</text>
+        <rect x="192" y="68" width="64" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="208" y="86" fill="#94a3b8">BJ</text>
+        <rect x="258" y="68" width="64" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="274" y="86" fill="#94a3b8">BJ</text>
+        <rect x="324" y="68" width="64" height="26" fill="#1f2433" stroke="#2b3142"/>
+        <text x="340" y="86" fill="#94a3b8">GZ</text>
+      </g>
+      <!-- arrow -->
+      <text x="420" y="86" font-size="20" fill="#d2a8ff">→</text>
+      <!-- dict -->
+      <text x="470" y="58" font-size="12.5" fill="#d2a8ff">字典：</text>
+      <g font-family="monospace" font-size="12">
+        <rect x="470" y="66" width="130" height="20" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="478" y="81" fill="#d2a8ff">0=BJ  1=SH  2=GZ</text>
+        <text x="470" y="106" font-size="12.5" fill="#d2a8ff">下标列（5 × 1 字节）：</text>
+        <rect x="470" y="112" width="130" height="24" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="480" y="129" fill="#d2a8ff">0 1 0 0 2</text>
+      </g>
+      <text x="360" y="168" text-anchor="middle" font-size="12.5" fill="#7ee787">15 字节 → 5 字节 + 极小字典，行数越多省得越多</text>
+      <text x="360" y="192" text-anchor="middle" font-size="12" fill="#94a3b8">且过滤 WHERE city='BJ' 可直接比整数 0，无需字符串比较</text>
+    </svg>
+    <div class="cap">图 2：字典编码同时省空间、加速过滤与聚合</div>
+  </div>
+
+  <div class="lead ok">
+    <b>压缩态直接计算：</b>很多引擎（如 ClickHouse）能在字典编码上直接做 <code>GROUP BY city</code>——
+    只在整数下标上分组，最后才回字典还原字符串。RLE 上做 COUNT/SUM 也只需「值 × 次数」，不用展开。
+  </div>
+</section>
+
+<section id="vector">
+  <h2><span class="n">03</span>向量化执行模型</h2>
+  <p>经典的做法是 <b>Volcano / Iterator 模型</b>：每个算子实现 <code>next()</code>，父算子递归调用子算子取一行。
+  它灵活但每行都要走一次虚函数、一次类型判断，<b>解释开销常常超过真正计算的开销</b>。</p>
+
+  <p>向量化模型改成：<b>每个算子一次处理一整块（Block / Batch，典型 8192 行）</b>，
+  块内数据是<b>按列组织的连续数组</b>。</p>
+
+  <pre><code>// 逐行：每行 1 次函数调用 + 类型分支
+for (row = 0; row &lt; N; row++) {
+    val = get_value(row);        // 虚函数
+    if (val &gt; threshold) sum += val;   // 每次都分支判断
+}
+
+// 向量化：一批一次调用，循环体极简
+for (i = 0; i &lt; block_size; i++) {
+    sum += values[i];            // 连续内存，无分支
+}</code></pre>
+
+  <h3>为什么快这么多</h3>
+  <ul>
+    <li><b>摊销解释开销</b>：一次调用处理 8192 行，虚函数调用成本除以 8192。</li>
+    <li><b>CPU Cache 友好</b>：同列数据在内存连续，预取命中率高；逐行模型每行要跳到不同列的偏移。</li>
+    <li><b>分支预测友好</b>：循环体内没有 if，CPU 流水线不会被打断。</li>
+    <li><b>编译期特化</b>：块的类型在进入循环前已确定，可对 Int32/Float64 分别生成专用代码。</li>
+    <li><b>可向量化</b>：编译器更容易自动向量化，或直接手写 SIMD intrinsic。</li>
+  </ul>
+</section>
+
+<section id="simd">
+  <h2><span class="n">04</span>SIMD：一条指令算多个数据</h2>
+  <p>SIMD（Single Instruction Multiple Data，单指令多数据）是 CPU 提供的并行能力：
+  一个 256 位寄存器能同时装 8 个 int32 或 4 个 int64，一条加法指令<b>同时完成 8 次加法</b>。</p>
+
+  <div class="fig">
+    <svg width="720" height="190" viewBox="0 0 720 190">
+      <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#56d4dd">标量 vs SIMD：一次加法</text>
+      <!-- scalar -->
+      <text x="150" y="52" text-anchor="middle" font-size="13" fill="#94a3b8">标量（SISD）：4 条指令</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="60" width="220" height="24" fill="#1f2433" stroke="#2b3142"/><text x="50" y="76" fill="#94a3b8">a0 + b0</text>
+        <rect x="40" y="88" width="220" height="24" fill="#1f2433" stroke="#2b3142"/><text x="50" y="104" fill="#94a3b8">a1 + b1</text>
+        <rect x="40" y="116" width="220" height="24" fill="#1f2433" stroke="#2b3142"/><text x="50" y="132" fill="#94a3b8">a2 + b2</text>
+        <rect x="40" y="144" width="220" height="24" fill="#1f2433" stroke="#2b3142"/><text x="50" y="160" fill="#94a3b8">a3 + b3</text>
+      </g>
+      <!-- simd -->
+      <text x="530" y="52" text-anchor="middle" font-size="13" fill="#56d4dd">SIMD：1 条指令</text>
+      <rect x="420" y="60" width="260" height="108" fill="#14303a" stroke="#56d4dd" stroke-width="2"/>
+      <g font-family="monospace" font-size="11">
+        <text x="436" y="86" fill="#56d4dd">[a0 a1 a2 a3]  (128-bit reg)</text>
+        <text x="436" y="106" fill="#94a3b8">      +</text>
+        <text x="436" y="126" fill="#56d4dd">[b0 b1 b2 b3]  (128-bit reg)</text>
+        <text x="436" y="150" fill="#7ee787">= [r0 r1 r2 r3]  一次算完</text>
+      </g>
+    </svg>
+    <div class="cap">图 3：SIMD 用更宽的寄存器把 4～8 个数据的同一运算合并成一条指令</div>
+  </div>
+
+  <p>现代引擎大量使用 SIMD：<b>过滤（生成掩码）、聚合求和、字符串比较、哈希计算</b>都有 SIMD 实现。
+  这也是 ClickHouse 名字的由来之一——快到"点击即出结果"。</p>
+
+  <div class="lead warn">
+    <b>SIMD 的前提是数据连续。</b>如果数据是按行存放（a0 b0 c0 a1 b1 c1…），
+    就没有连续的同列数组可喂给 SIMD 寄存器。<b>这从硬件层面再次说明了为什么分析场景必须列存。</b>
+  </div>
+</section>
+
+<section id="late">
+  <h2><span class="n">05</span>延迟物化 Late Materialization</h2>
+  <p>列存里一行数据分散在多个列文件中。查询 <code>SELECT name FROM t WHERE amount &gt; 100</code>
+  有两种执行顺序：</p>
+  <table>
+    <tr><th>策略</th><th>做法</th><th>代价</th></tr>
+    <tr>
+      <td><b>提前物化</b><br>Early</td>
+      <td>先把所有条件列 + 输出列拼成完整行，再过滤</td>
+      <td>拼了大量最终会被过滤掉的行</td>
+    </tr>
+    <tr>
+      <td><b>延迟物化</b><br>Late ✅</td>
+      <td>只扫描 <code>amount</code> 列，得到命中的<b>行号集合</b>，再用行号去 <code>name</code> 列取少量值</td>
+      <td>只读取真正需要的那些行的其余列</td>
+    </tr>
+  </table>
+  <p>选择性越高（命中的行越少），延迟物化省下的 IO 越多。这是列存引擎优化器的标准武器。</p>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+  <div class="qa">
+    <b>Q：列存这么好，为什么 OLTP 数据库不用？</b><br>
+    A：列存的写入是致命短板——插入一行要<b>拆成 N 次写</b>（每列一次），
+    而 OLTP 的 <code>INSERT</code>/<code>UPDATE</code> 需要一次 IO 落整行。
+    另外点查单行时，列存要去 N 个列文件各取一点，反而比行存慢。
+    <b>列存本质是用写入性能换读取性能</b>，这个交易只在分析场景划算。
+  </div>
+  <div class="qa">
+    <b>Q：压缩不会拖慢查询吗？</b><br>
+    A：看似要"先解压再算"，实际上磁盘 IO 的节省远大于解压的 CPU 开销——
+    而分析的瓶颈通常在 IO。更进一步，字典/RLE 编码支持<b>压缩态直接计算</b>，连解压都省了。
+  </div>
+  <div class="qa">
+    <b>Q：Parquet/ORC 也是列存，和 ClickHouse 的列存一样吗？</b><br>
+    A：编码思想相通（都支持字典、RLE、Delta），但定位不同：
+    <b>Parquet/ORC 是文件格式</b>，面向 HDFS/对象存储的离线批处理，不可变、append-only；
+    <b>ClickHouse/Doris 的存储引擎</b>面向在线查询，有主键索引、分区、后台合并（LSM 风格），支持持续写入与实时查询。
+  </div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP 分析型数据库 ·
+  <a href="../../index.html">返回 OLAP 目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

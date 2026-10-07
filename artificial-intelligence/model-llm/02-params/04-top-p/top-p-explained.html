@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Top-P 核采样：按概率质量动态截断</title>
+<style>
+  :root{--bg:#0d1117;--bg2:#161b22;--bg3:#1c2230;--line:#2a3340;--txt:#e6edf3;--sub:#9aa7b4;
+    --accent:#58a6ff;--accent2:#bc8cff;--green:#3fb950;--orange:#f0883e;--pink:#ff7b72;--yellow:#e3b341;--cyan:#39c5cf;}
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;line-height:1.75;}
+  a{color:var(--accent);text-decoration:none;}
+  .nav{position:sticky;top:0;background:rgba(13,17,23,.92);border-bottom:1px solid var(--line);z-index:50;padding:12px 20px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;backdrop-filter:blur(6px);}
+  .nav a{font-size:12.5px;color:var(--sub);padding:5px 12px;border-radius:8px;}
+  .nav a:hover{background:var(--bg3);color:var(--accent);}
+  .hero{padding:52px 20px 40px;text-align:center;border-bottom:1px solid var(--line);}
+  .hero h1{font-size:28px;font-weight:600;margin-bottom:10px;}
+  .hero p{font-size:14px;color:var(--sub);max-width:720px;margin:0 auto;}
+  .wrap{max-width:880px;margin:0 auto;padding:0 20px 40px;}
+  .sec{margin-top:44px;}
+  .tag{display:inline-block;font-size:11.5px;color:var(--accent);background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);padding:2px 10px;border-radius:20px;margin-bottom:10px;}
+  h2{font-size:21px;font-weight:600;margin-bottom:8px;}
+  h3{font-size:15.5px;font-weight:600;margin:20px 0 8px;color:var(--accent2);}
+  .sub{font-size:13.5px;color:var(--sub);margin-bottom:16px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px;}
+  .card2{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .card2 .t{font-size:13.5px;font-weight:600;margin-bottom:4px;}
+  .card2 .d{font-size:12.5px;color:var(--sub);line-height:1.65;}
+  .box{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:14px 0;font-size:13.5px;}
+  .box p{line-height:1.85;}
+  pre{background:var(--bg3);border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-size:12.5px;line-height:1.7;overflow-x:auto;margin:12px 0;}
+  code{font-family:'SF Mono',Consolas,Menlo,monospace;}
+  .inl{background:var(--bg3);border:1px solid var(--line);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--accent);}
+  table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12.5px;}
+  th{background:var(--bg2);color:var(--txt);text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);font-weight:600;}
+  td{padding:9px 12px;border-bottom:1px solid var(--line);color:var(--sub);vertical-align:top;}
+  .note{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.3);border-radius:10px;padding:12px 14px;margin:14px 0;font-size:13px;color:var(--green);}
+  .warn{background:rgba(255,123,114,.08);border:1px solid rgba(255,123,114,.3);border-radius:10px;padding:12px 14px;margin:14px 0;font-size:13px;color:var(--pink);}
+  .dia{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0;}
+  .qa{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:10px;}
+  .qa .q{color:var(--accent);font-weight:600;font-size:13.5px;margin-bottom:6px;}
+  .qa .a{font-size:13px;color:var(--sub);line-height:1.8;}
+  .ft{margin-top:56px;padding:24px 20px;border-top:1px solid var(--line);text-align:center;font-size:12px;color:var(--sub);}
+</style>
+</head>
+<body>
+<div class="nav"><a href="#what">它做什么</a><a href="#adapt">为什么自适应</a><a href="#value">取值建议</a><a href="#minp">与 min-p</a><a href="#qa">面试问答</a></div>
+<div class="hero"><h1>Top-P 核采样：按概率质量动态截断</h1><p>也叫 Nucleus Sampling——不数候选个数，而是把累计概率凑够 P 为止。</p></div>
+<div class="wrap">
+
+<div class="sec" id="what">
+  <span class="tag">定位</span>
+  <h2>累计概率凑够 P 就收手</h2>
+  <div class="box"><p>把候选按概率<b>从高到低排序</b>，从最高者开始累加概率，累计达到 P（如 0.9）时停止，只在这些候选里采样并重新归一化。这就是核采样（Nucleus Sampling）。</p></div>
+  <pre><code># 伪代码
+probs = softmax(logits).sort(desc=True)
+cum = cumsum(probs)
+keep = cum - probs &lt; P          # 保留累计概率未达 P 的
+subset = normalize(probs[keep])
+next_token = sample(subset)</code></pre>
+</div>
+<div class="sec" id="adapt">
+  <span class="tag">核心优势</span>
+  <h2>候选数量随分布自动伸缩</h2>
+  <div class="dia"><svg viewBox="0 0 680 210" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="system-ui">
+    <text x="180" y="24" font-size="12" fill="#9aa7b4" text-anchor="middle">分布很尖的步骤（P=0.9）</text>
+    <rect x="70" y="50" width="60" height="90" fill="#58a6ff"/><text x="100" y="160" font-size="11" fill="#9aa7b4" text-anchor="middle">词A</text>
+    <rect x="140" y="110" width="60" height="30" fill="#bc8cff"/><text x="170" y="160" font-size="11" fill="#9aa7b4" text-anchor="middle">词B</text>
+    <rect x="210" y="126" width="60" height="14" fill="#3fb950"/><text x="240" y="160" font-size="11" fill="#9aa7b4" text-anchor="middle">词C</text>
+    <rect x="280" y="132" width="60" height="8" fill="#444"/><text x="310" y="160" font-size="11" fill="#9aa7b4" text-anchor="middle">词D+</text>
+    <text x="180" y="190" font-size="11.5" fill="#3fb950" text-anchor="middle">只留 2~3 个候选，垃圾进不来</text>
+    <text x="500" y="24" font-size="12" fill="#9aa7b4" text-anchor="middle">分布很平的步骤（P=0.9）</text>
+    <rect x="390" y="70" width="40" height="70" fill="#58a6ff"/><rect x="436" y="74" width="40" height="66" fill="#58a6ff" opacity=".85"/>
+    <rect x="482" y="78" width="40" height="62" fill="#58a6ff" opacity=".7"/><rect x="528" y="84" width="40" height="56" fill="#58a6ff" opacity=".55"/>
+    <rect x="574" y="90" width="40" height="50" fill="#58a6ff" opacity=".4"/>
+    <text x="500" y="160" font-size="11" fill="#9aa7b4" text-anchor="middle">十几个候选势均力敌</text>
+    <text x="500" y="190" font-size="11.5" fill="#3fb950" text-anchor="middle">自动放宽到十几个，多样性保得住</text>
+  </svg></div>
+  <div class="note"><b>对比 Top-K：</b>尖分布下 Top-K 仍会保留 K 个长尾垃圾；平分布下 Top-K 又把合理候选砍掉。Top-P 以"概率质量"为界，两种情况都处理得刚刚好。</div>
+</div>
+<div class="sec" id="value">
+  <span class="tag">实践</span>
+  <h2>取值建议</h2>
+  <table>
+    <tr><th>P</th><th>行为</th><th>适用</th></tr>
+    <tr><td>0.9 ~ 0.95</td><td>多数场景的甜点区</td><td>通用对话、写作的默认值</td></tr>
+    <tr><td>0.5 ~ 0.8</td><td>偏保守</td><td>事实问答、代码、RAG</td></tr>
+    <tr><td>1.0</td><td>不截断</td><td>只靠温度控制时</td></tr>
+  </table>
+  <div class="warn"><b>官方建议：</b>OpenAI 文档明确提示不要同时大幅调整 temperature 和 top_p——两者都在改"随机性"，同时调会让行为难以归因。常见做法是固定一个，调另一个。</div>
+</div>
+<div class="sec" id="minp">
+  <span class="tag">延伸</span>
+  <h2>min-p：相对门槛的第三种截断</h2>
+  <div class="box"><p>Top-P 在<b>高温</b>下会失效：温度把分布拉平后，累计 0.9 可能包含几十个长尾垃圾。min-p 换了个思路：<b>只保留概率 ≥ top1 概率 × min_p 的候选</b>（如 top1 的 5%）。它随分布自适应且不怕高温，在高温度 + 高多样性场景（角色扮演、创意写作）近两年逐渐流行。</p></div>
+</div>
+<div class="sec" id="qa">
+  <span class="tag">面试问答</span>
+  <h2>高频问题</h2>
+  <div class="qa"><div class="q">Q1：Top-P 和 Top-K 的本质区别？</div><div class="a">Top-K 按候选数量截断，Top-P 按累计概率质量截断。Top-P 能随每一步分布的尖锐程度自适应调整候选数，而 Top-K 不能。</div></div>
+  <div class="qa"><div class="q">Q2：为什么 Top-P 叫核采样（Nucleus）？</div><div class="a">被保留的那一小撮候选构成分布的"核"（nucleus）——绝大部分概率质量都集中在这个核里，采样只在核内进行。</div></div>
+  <div class="qa"><div class="q">Q3：top_p=0.1 会怎样？</div><div class="a">只允许累计概率 10% 以内的候选（往往就是最高的一两个词），输出高度确定、呆板，接近贪心解码。</div></div>
+  <div class="qa"><div class="q">Q4：温度和 top_p 同时调有什么问题？</div><div class="a">两者都改变输出随机性且相互纠缠（温度改变分布形状影响累计速度，截断又改变采样范围），同时调难以定位是哪个参数导致行为变化。建议一次只动一个。</div></div>
+  <div class="qa"><div class="q">Q5：高温场景下 Top-P 有什么坑？</div><div class="a">高温把分布拉平，长尾概率普遍抬升，凑够 0.9 可能要纳入几十个低质量候选，截断形同虚设。此时 min-p（相对 top1 的比例门槛）更稳。</div></div>
+</div>
+
+  <div class="ft">© 2026 Visuals · <a href="../../index.html">返回大语言模型</a> · <a href="../../../../index.html#subjects">返回知识地图</a></div>
+</div>
+</body>
+</html>
