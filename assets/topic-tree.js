@@ -106,6 +106,7 @@
         pseudo.path = label;
         pseudo.groups = root.groups;
         pseudo.count = root.count;
+        root.groups = [];
         root.children.push(pseudo);
     }
 

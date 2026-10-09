@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="用有界队列、并发闸门、按 Key 速率限制、超时和有界重试保护上游 API 客户端。">
+  <title>客户端接纳控制</title>
+  <style>
+    /* An operations runbook: a five-stage path leads from backlog to retry policy. */
+    :root {
+      --bg: #f3f7f8; --surface: #ffffff; --raised: #e8f0f2; --ink: #16323c;
+      --muted: #4b6972; --line: #bdd1d5; --accent: #086b7a; --accent-soft: #d9f0ef;
+      --caution: #80501b; --caution-soft: #fff0d9;
+      --display: "Songti SC", "Noto Serif CJK SC", ui-serif, serif;
+      --body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #101e27; --surface: #172b34; --raised: #203a44; --ink: #e7f2f3;
+        --muted: #b4cdd0; --line: #45616a; --accent: #7fdbd4; --accent-soft: #214546;
+        --caution: #f5ca8d; --caution-soft: #493926; color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #101e27; --surface: #172b34; --raised: #203a44; --ink: #e7f2f3;
+      --muted: #b4cdd0; --line: #45616a; --accent: #7fdbd4; --accent-soft: #214546;
+      --caution: #f5ca8d; --caution-soft: #493926; color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; padding-inline: 16px; padding-block: 28px 70px; background: var(--bg); color: var(--ink); font: 16px/1.75 var(--body); }
+    .page { width: min(100%, 1020px); margin-inline: auto; }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    a:focus-visible, .codebox:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: .88rem; }
+    nav a { text-decoration: none; border-bottom: 1px solid var(--line); }
+    header { max-width: 780px; padding-block: 42px 28px; }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font: 700 .79rem/1.4 var(--body); letter-spacing: .1em; }
+    h1, h2, h3 { text-wrap: balance; }
+    h1 { font: 700 clamp(2.1rem, 5vw, 3.6rem)/1.22 var(--display); margin: 0 0 16px; letter-spacing: -.025em; }
+    h2 { font: 700 clamp(1.5rem, 3vw, 2rem)/1.35 var(--display); margin: 0 0 16px; }
+    h3 { font-size: 1.08rem; line-height: 1.45; margin: 0 0 8px; }
+    p { margin: 0; }
+    .lead { max-width: 66ch; font-size: 1.12rem; color: var(--muted); }
+    .thesis { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 19px 22px; max-width: 780px; font-weight: 600; }
+    main { display: grid; gap: 46px; margin-top: 42px; }
+    section { min-width: 0; }
+    .intro { max-width: 760px; color: var(--muted); margin-bottom: 19px; }
+    .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+    .stage { min-width: 0; background: var(--surface); padding: 17px 14px; border-top: 3px solid var(--accent); }
+    .stage .number { display: block; color: var(--accent); font: 700 .8rem/1.4 var(--mono); margin-bottom: 8px; }
+    .stage strong { display: block; line-height: 1.45; margin-bottom: 8px; }
+    .stage p { color: var(--muted); font-size: .88rem; line-height: 1.6; overflow-wrap: anywhere; }
+    .contrast { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .contrast article { min-width: 0; padding: 21px; border: 1px solid var(--line); background: var(--surface); }
+    .contrast p + p { margin-top: 10px; }
+    .note { background: var(--raised); border: 1px solid var(--line); padding: 16px 20px; margin-top: 17px; max-width: 780px; }
+    .note strong { color: var(--accent); }
+    .reading { max-width: 780px; }
+    .reading p + p { margin-top: 13px; }
+    .reading ul { padding-left: 1.4em; margin: 8px 0 0; }
+    .reading li { padding-left: .25em; margin-bottom: 10px; }
+    .codebox { background: var(--surface); border: 1px solid var(--line); overflow-x: auto; max-width: 100%; }
+    .codebox pre { margin: 0; padding: 21px; min-width: max-content; color: var(--ink); font: .82rem/1.65 var(--mono); tab-size: 4; }
+    .code-caption { max-width: 780px; margin-top: 14px; color: var(--muted); font-size: .91rem; }
+    code { font: .9em/1.5 var(--mono); background: var(--raised); padding: .1em .35em; border-radius: 3px; overflow-wrap: anywhere; }
+    .caution { background: var(--caution-soft); border-left: 4px solid var(--caution); padding: 16px 20px; max-width: 780px; }
+    .caution strong { color: var(--caution); }
+    .checklist { max-width: 780px; padding-left: 1.45em; margin: 0; }
+    .checklist li { padding-left: .25em; margin-bottom: 11px; }
+    footer { margin-top: 54px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: .91rem; }
+    footer p { margin-bottom: 9px; }
+    @media (max-width: 760px) { .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 550px) { body { padding-block-start: 18px; } header { padding-block: 30px 22px; } main { gap: 38px; } .stages, .contrast { grid-template-columns: 1fr; } .stage { padding: 15px; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <nav aria-label="课程导航"><a href="../../index.html">← 专题目录</a><a href="../08-http-connections/connections-and-concurrent-requests.html">上一课：连接与请求</a></nav>
+    <header>
+      <p class="eyebrow">客户端 / 上游保护</p>
+      <h1>上游 API 的客户端控制</h1>
+      <p class="lead">批量处理网页时，先决定本地最多等多少、同时发多少、每个 Key 多快发，再规定失败后是否重试。它们是不同的闸门。</p>
+    </header>
+    <div class="thesis">“创建了 10,000 个异步任务”只说明本地有很多待完成任务；其中多少已发送、多少在上游处理，必须分别观察。</div>
+    <main>
+      <section aria-labelledby="stages-title">
+        <h2 id="stages-title">请求进入上游前的五道边界</h2>
+        <p class="intro">顺序是示意，关键是每层明确预算并留下可观测的状态。</p>
+        <div class="stages">
+          <div class="stage"><span class="number">01 / 存放</span><strong>有界待发队列</strong><p>满了阻塞生产者或明确拒绝，避免把全部输入变成大量驻留内存的任务。</p></div>
+          <div class="stage"><span class="number">02 / 启动</span><strong>固定数量的 worker</strong><p>有限个消费者从队列取工作；已取出、等待闸门的任务仍未必已发送。</p></div>
+          <div class="stage"><span class="number">03 / 速率</span><strong>按 Key 的 RPM 闸门</strong><p>控制每个凭证的发送次数；每次重试也需重新计入预算。</p></div>
+          <div class="stage"><span class="number">04 / 同时</span><strong>并发 semaphore</strong><p>限制本地同时执行的单次发送；等待令牌或退避时不占用它。</p></div>
+          <div class="stage"><span class="number">05 / 退出</span><strong>超时与有界重试</strong><p>限制每次尝试及整体期限；失败后按规则等待，不无限重放。</p></div>
+        </div>
+        <p class="note"><strong>示意配置：</strong>队列最多 100 个待取任务，16 个 worker，发送闸门 8 个槽位。队列满时 <code>put</code> 等待，因而不会一次性创建 10,000 个等待中的协程；16 个 worker 中最多 8 个可同时执行发送，剩余可能等速率或闸门。以上数值都不是服务商限额。</p>
+      </section>
+
+      <section aria-labelledby="distinguish-title">
+        <h2 id="distinguish-title">并发、RPM 和服务能力不是同一个数字</h2>
+        <div class="contrast">
+          <article><h3>本地并发上限</h3><p>例如 8 表示本客户端同一时刻最多执行 8 次发送。慢请求会占槽更久；它不限定一分钟内发送多少次。</p><p>连接池和 HTTP 协议还可能更早地排队。<a href="../08-http-connections/connections-and-concurrent-requests.html">先看连接与流的区别</a>。</p></article>
+          <article><h3>每个 Key 的发送预算</h3><p>例如假设自己配置 400 RPM，意思是该凭证在选定限流策略下控制发送频率，并非可同时处理 400 个请求。</p><p>若多个进程共用 Key，单进程计数器无法汇总总量；需要共享限流器或保守拆分预算。</p></article>
+        </div>
+        <p class="caution"><strong>不要把供应商的并发描述当个人配额。</strong> Jina Reader 文档中的约 4,000 个并发请求是服务能力的近似表述，不能据此认定你的 Key 有 4,000 个独占槽位，或推断内部队列、锁和 429 的触发路径。Reader 的实际 RPM、套餐与响应行为请以当时官方文档及账户信息为准。</p>
+      </section>
+
+      <section aria-labelledby="pseudo-title">
+        <h2 id="pseudo-title">把约束落成控制流程</h2>
+        <p class="intro">下面是<strong>无网络请求的说明性伪代码</strong>。<code>send_once</code>、限流器和队列均为抽象接口，不是可直接运行的 SDK 示例。</p>
+        <div class="codebox" role="region" aria-label="客户端接纳控制伪代码，可横向滚动" tabindex="0"><pre>queue = BoundedQueue(capacity=100)
+slots = Semaphore(8)
+gate = PerKeyLimiter(configured_budget_by_key)  # 示例预算，非供应商配额
+start_fixed_workers(count=16, run=worker)
+for job in lazy_source():
+    await queue.put(job)                     # 满时背压；不要预建海量任务
+await queue.join()
+await stop_fixed_workers()
+
+async def worker():
+    while True:
+        job = await queue.get()
+        try:
+            if job is STOP: return
+            await handle(job)
+        finally:
+            queue.task_done()
+
+async def handle(job):
+    for attempt in range(1, 4):              # 总共最多 3 次尝试
+        if job.deadline_expired(): return fail(job, "整体期限已到")
+        while True:
+            if not await gate.wait_until_eligible(job.key, job.deadline):
+                return fail(job, "整体期限已到")
+            async with slots:
+                if job.deadline_expired(): return fail(job, "整体期限已到")
+                if not gate.try_take_now(job.key):
+                    continue                  # 令牌被其他任务先取走；释放槽后再等
+                try:
+                    reply = await send_once(job, timeout=min(10, job.remaining()))
+                except Timeout:
+                    reply = RetryableFailure("timeout")
+                break                         # 离开 semaphore，再决定重试
+        if reply.ok: return succeed(job, reply)
+        if not job.retry_safe or reply.reason not in (429, 503, "timeout"):
+            return fail(job, reply.reason)
+        if attempt == 3: return fail(job, "尝试次数用尽")
+        delay = max(parse_retry_after(reply), jittered_backoff(attempt))
+        if delay &gt; 30 or delay &gt;= job.remaining():
+            return fail(job, "等待超出重试预算")
+        await sleep(delay)                     # 不占发送槽；下次仍须重新过 RPM 闸门</pre></div>
+        <p class="code-caption">伪代码省略停止信号的投递、取消传播、指标记录及异常分类。<code>try_take_now</code> 必须是对同一 Key 的原子取令牌操作；先等到有资格，再入并发闸门，取不到令牌就释放闸门重等，避免在速率等待时长期占用发送槽。</p>
+      </section>
+
+      <section aria-labelledby="retry-title" class="reading">
+        <h2 id="retry-title">超时与 Retry-After 要有共同预算</h2>
+        <p>分别约束<strong>队列等待时间</strong>、连接/读取等<strong>单次尝试超时</strong>和从入队算起的<strong>整体截止时间</strong>。仅设 socket 超时，排队和退避仍可能无限延长用户等待。</p>
+        <p><code>Retry-After</code> 可能是秒数，也可能是 HTTP 日期。有效时不要早于服务端指定时刻重试；同时使用带抖动的指数退避，避免同批客户端一起再次冲击。若指定等待超过本地最多 30 秒的示意预算，<strong>放弃或延期任务，而不是把等待截短后提前发送</strong>。</p>
+        <p>只对可安全重试的操作重放，例如幂等读取，或有幂等键、去重保障的写入。429 不必然意味着并发超标；503 和超时也不能单凭状态码判断内部瓶颈。响应异常、超时和取消要记录并释放队列与并发资源。</p>
+      </section>
+
+      <section aria-labelledby="observe-title">
+        <h2 id="observe-title">至少观察这几组指标</h2>
+        <ul class="checklist">
+          <li>队列当前长度、入队等待与被拒数：判断输入是否超过本地消化能力。</li>
+          <li>按 Key 的令牌等待、实际发送次数（含重试）、429 数量：判断速率边界。</li>
+          <li>占用中的发送槽、连接池等待、请求耗时与完成 QPS：定位瓶颈属于哪一层。</li>
+          <li>超时、Retry-After、重试次数与最终失败数：检查是否发生重试放大。</li>
+        </ul>
+      </section>
+    </main>
+    <footer><p>案例延伸：<a href="../../01-performance-evaluation-framework/04-capacity-and-limits/jina-reader-concurrency-and-rpm.html">Reader 并发描述与 RPM 限额</a> · <a href="../../01-performance-evaluation-framework/00-overview/traffic-terminology.html">并发、QPS 与响应时间</a></p><p><a href="../../index.html">返回专题目录</a></p></footer>
+  </div>
+</body>
+</html>

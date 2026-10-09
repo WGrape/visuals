@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>wrk 压测指南</title><link rel="stylesheet" href="load-testing.css"></head>
+<body><main>
+<nav aria-label="课程导航"><a href="../../index.html">← 三高专题</a><a href="apachebench-ab.html">ab 参数</a><a href="load-testing-strategy.html">返回通用方案 →</a></nav>
+<header><h1>wrk：多线程、事件驱动的 HTTP 压测工具</h1><p class="lead">wrk 用少量负载端线程配合事件通知管理多条连接；它的 <code>-c</code> 表示<strong>连接数</strong>，不是 ab 的并发请求数，更不是服务端业务处理位数。</p></header>
+<section class="box"><h2>工作方式：线程、连接、请求分开看</h2><p>wrk 将连接分配给多个负载端线程，由事件驱动的 IO 循环发出请求并接收响应。<code>-t</code> 是压测机线程数，<code>-c</code> 是要保持的总连接数，<code>-d</code> 是持续时间。单条连接上的请求次数可以很多；连接数不等于整轮请求总量，也不保证服务端同一时刻处理了同样数量的请求。普通 wrk 用连接上的响应推动后续请求，并非精确的恒定到达率发生器。</p><p>为了可靠测量，要同时看压测机 CPU、端口、文件描述符、网络和目标监听队列；wrk 可能先触及客户端瓶颈。具体安装及默认值以<a href="https://github.com/wg/wrk">官方 README</a>与本机 <code>wrk --help</code> 为准。</p></section>
+<section class="box"><h2>命令：本机低负载教学示例</h2><pre><code># 2 个负载端线程、10 条连接、持续 15 秒，附延迟分布
+wrk -t2 -c10 -d15s --latency http://127.0.0.1:8100/ping
+
+# 添加请求头，并设置请求超时
+wrk -t2 -c10 -d15s --timeout 2s -H 'Accept: application/json' http://127.0.0.1:8100/ping
+
+# 运行单独准备的 Lua 脚本（下一节为 request.lua 内容）
+wrk -t2 -c10 -d15s -s request.lua http://127.0.0.1:8100/</code></pre><p>命令只供已授权的本机示例服务阅读与复现；目录中并未提供或执行 <code>request.lua</code>。</p></section>
+<section class="box"><h2>重要参数速查</h2><div class="scroll"><table><thead><tr><th>参数</th><th>含义</th><th>注意</th></tr></thead><tbody>
+<tr><td><code>-t N</code> / <code>--threads N</code></td><td>压测机使用的线程数</td><td>多开线程不保证更多有效吞吐；别当成服务端线程</td></tr>
+<tr><td><code>-c N</code> / <code>--connections N</code></td><td>总连接数</td><td>与 ab 的请求并发定义不同；核对本机端口/FD 与服务端连接限制</td></tr>
+<tr><td><code>-d 时长</code> / <code>--duration 时长</code></td><td>测试持续时间，如 <code>15s</code>、<code>2m</code></td><td>总请求数是运行结果而非此参数直接指定</td></tr>
+<tr><td><code>--latency</code></td><td>输出详细延迟统计与百分位</td><td>结合错误和超时一起看，勿只挑成功样本</td></tr>
+<tr><td><code>--timeout 时长</code></td><td>响应超时阈值，如 <code>2s</code></td><td>与业务 SLO 的时间边界分开定义</td></tr>
+<tr><td><code>-H '名称: 值'</code> / <code>--header</code></td><td>加入请求头</td><td>需与真实请求的缓存/认证语义一致</td></tr>
+<tr><td><code>-s 文件</code> / <code>--script 文件</code></td><td>载入 LuaJIT 脚本，定制请求或处理结果</td><td>每请求执行脚本逻辑可能限制压测端性能</td></tr>
+</tbody></table></div></section>
+<section class="box"><h2>Lua：让请求符合业务语义</h2><p>例如本机示例接口支持以下路径时，可将这段内容保存为 <code>request.lua</code>，再使用上一节命令；静态设置可减少每请求动态计算的开销。</p><pre><code>wrk.method = "GET"
+wrk.path = "/ping?kind=demo"
+wrk.headers["Accept"] = "application/json"</code></pre><p>wrk 还提供 <code>request()</code>、<code>response(status, headers, body)</code> 等钩子，可构造动态请求或校验响应；启用逐请求处理会影响发生器上限，脚本的业务校验结果也应单独统计。详见 <a href="https://github.com/wg/wrk/blob/master/SCRIPTING">官方脚本接口</a>。</p></section>
+<section class="box"><h2>输出怎么读</h2><ul><li><code>Latency</code> 一行给平均值、标准差及最大值；<code>--latency</code> 增加百分位分布。<code>Req/Sec</code> 的线程统计与最终 <code>Requests/sec</code> 的总体速率不是同一个展示层次。</li><li><code>requests in ...</code> 和 <code>Requests/sec</code> 反映工具完成量和平均速率，<code>Transfer/sec</code> 是传输速率；不能直接等同业务成功吞吐。</li><li><code>Socket errors: connect, read, write, timeout</code>（有错误时）分别反映连接、读取、写入和超时问题；配合状态码与响应体核验业务成功条件。工具未内建你业务的成功规则。</li></ul><p>结果要与<a href="results-and-metrics.html">端到端指标与服务端监控</a>交叉验证，不要用连接数倒推 QPS 或硬件容量。</p></section>
+<footer>来源：<a href="https://github.com/wg/wrk">wg/wrk 官方 README</a> · <a href="https://github.com/wg/wrk/blob/master/SCRIPTING">官方 Lua 文档</a> · 对照 <a href="apachebench-ab.html">ab</a>。</footer>
+</main></body></html>

@@ -1,5 +1,7 @@
 # 优化后目录结构（补齐 NN- 序号，最小改动方案）
 
+> **历史迁移草案（2026-10-08）**：此文件记录当时的规划，括号中的旧目录说明不代表当前仍待迁移。实际目录以仓库文件树为准；本轮核查与剩余的语义归属问题见 [知识结构核查](knowledge-structure-audit.md)。
+
 > 规则：只给**真正不带 `NN-` 前缀**的目录补序号；已带 `00-`/`NN-` 的目录（含 `00-overview` 概览约定）一律保留。
 > L3 序号断档用「后续目录整体下移」消除。括号内 `(原: xxx)` 表示该目录将被改名。
 
@@ -352,15 +354,16 @@
       01-oceanbase-foundations/
     03-cockroachdb/
       01-crdb-foundations/
-  nosql/
+  nosql-db/
     01-kv/
-      00-cache-patterns/
-      01-memcached/   (原: memcached)
+      01-cache-patterns/
+      02-memcached/   (原: memcached)
         01-architecture/
         02-data-model/
         03-distributed/
         04-practice/
-      02-redis/   (原: redis)
+      03-redis/   (原: redis)
+        00-overview/
         01-data-structures/
         02-io/
         03-event-loop/
@@ -601,28 +604,6 @@
       03-glossary/   (原: glossary)
       04-learning-path/   (原: learning-path)
       05-quick-reference/   (原: quick-reference)
-  performance-optimization/   (原 programming-tools，已重构为性能排查与优化)
-    01-cpu-optimization/
-      01-cpu-profiling/
-      02-cpu-tuning/
-    02-memory-optimization/
-      01-memory-model/
-      02-memory-optimization/
-    03-network-io-optimization/
-      01-io-models/
-      02-network-tuning/
-    04-file-io-optimization/
-      01-file-io-models/
-      02-file-tuning/
-    05-troubleshooting/
-      01-methodology/
-      02-cpu-high/
-      03-memory-leak/
-      01-debug-and-profile/
-    05-testing/
-      01-test-fundamentals/
-    06-shell-and-cli/
-      01-shell-basics/
   python/
     01-language-basics-and-syntax/
       01-syntax-and-types/
@@ -755,8 +736,6 @@
       02-ehcache/
       03-handwritten/
     02-distributed-cache/   (原: 03-distributed-cache)
-      01-redis-overview/
-      02-redis-data-structures/
       03-memcached/
       04-consistent-hashing/
     03-eviction/   (原: 04-eviction)
@@ -836,7 +815,14 @@
     08-resilience/
       01-reliability-patterns/
   high-performance-concurrency-availability/
-    01-high-concurrency/
+    01-performance-evaluation-framework/   (原: 03-performance-evaluation-framework)
+      00-overview/
+      01-throughput/
+      02-latency-and-percentiles/
+      03-concurrency-and-queueing/
+      04-capacity-and-limits/
+      05-benchmarking/
+    02-high-concurrency/   (原: 01-high-concurrency)
       01-cache/   (原: cache)
         01-hotspots/   (原: hotspots)
       02-concepts/   (原: concepts)
@@ -846,13 +832,18 @@
       06-overview/   (原: overview)
       07-pools/   (原: pools)
       08-traffic-patterns/   (原: traffic-patterns)
-    02-high-availability/
+      09-http-connections/
+      10-client-admission-control/
+    03-high-availability/   (原: 02-high-availability)
       01-data-replication/   (原: data-replication)
       02-deploy/   (原: deploy)
       03-foundations/   (原: foundations)
       04-general/   (原: general)
       05-geo-redundancy/   (原: geo-redundancy)
       06-traffic-protection/   (原: traffic-protection)
-    03-high-performance/
-      01-performance-foundations/
-
+    04-high-performance/   (原: programming-and-programs/performance-optimization)
+      01-cpu-optimization/
+      02-memory-optimization/
+      03-network-io-optimization/
+      04-file-io-optimization/
+      05-troubleshooting/

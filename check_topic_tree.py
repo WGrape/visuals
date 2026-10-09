@@ -12,6 +12,7 @@
   D  漏挂 / 孤立文件               → 真实目录没被任何 data-path 覆盖，或文件没被任何卡片链接
   E  空课程分组                    → 尚无课程的占位目录不应出现在知识树
   F  重复专题 / 课程卡片            → 一个实体专题与课程页面只能有一个主入口
+  G  重复专题展示名                → 同一学科索引中的不同专题应有可区分的名称
 
 用法： python3 check_topic_tree.py
 说明： 带 data-topic-tree 的子索引页会「自己管自己」，父级页不检查其子树。
@@ -29,7 +30,8 @@ def is_tree_index(path):
     if not os.path.isfile(path):
         return False
     try:
-        return "data-topic-tree" in open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as file:
+            return "data-topic-tree" in file.read()
     except OSError:
         return False
 
@@ -46,19 +48,22 @@ def find_index_files():
 
 
 def extract_groups(page):
-    """返回 ([(data_path, [href, ...]), ...], 生成方式)"""
-    src = open(page, encoding="utf-8").read()
+    """返回 ([(data_path, data_title, [href, ...]), ...], 生成方式)"""
+    with open(page, encoding="utf-8") as file:
+        src = file.read()
     groups = []
     for m in re.finditer(r'<section[^>]*class="topic-group"[^>]*>(.*?)</section>', src, re.S):
         attr = re.search(r'data-path="([^"]*)"', m.group(0))
         if attr:
-            groups.append((attr.group(1), re.findall(r'href="([^"]+)"', m.group(1))))
+            title = re.search(r'data-title="([^"]*)"', m.group(0))
+            groups.append((attr.group(1), title.group(1) if title else "",
+                           re.findall(r'href="([^"]+)"', m.group(1))))
     if groups:
         return groups, "静态HTML"
     js = re.search(r"const\s+groups\s*=\s*\{(.*?)\n?\};", src, re.S)
     if js:
         for m in re.finditer(r"'([^']*)'\s*:\s*\[(.*?)\]", js.group(1), re.S):
-            groups.append((m.group(1), re.findall(r"'([^']+\.html)'", m.group(2))))
+            groups.append((m.group(1), "", re.findall(r"'([^']+\.html)'", m.group(2))))
         return groups, "JS生成"
     return [], "无"
 
@@ -81,6 +86,12 @@ def own_scope_dirs(pagedir):
     return result
 
 
+def valid_data_path(path):
+    """A real topic path stays inside its subject tree and has no pseudo-directory."""
+    return (not os.path.isabs(path) and
+            all(part not in {"", ".", ".."} for part in path.split("/")))
+
+
 def audit():
     report = {}
     for page in find_index_files():
@@ -89,13 +100,19 @@ def audit():
         groups, kind = extract_groups(page)
         if not groups:
             continue
-        A, B, C, D, E, F = [], [], [], [], [], []
+        A, B, C, D, E, F, G = [], [], [], [], [], [], []
         covered, declared, seen_paths, seen_cards = set(), set(), set(), set()
+        seen_titles = {}
 
-        for dp, hrefs in groups:
+        for dp, title, hrefs in groups:
             if dp not in SPECIAL and dp in seen_paths:
                 F.append('重复专题 data-path="%s"（同一目录被拆成多个可见分组）' % dp)
             seen_paths.add(dp)
+            if dp not in SPECIAL and title:
+                if title in seen_titles and seen_titles[title] != dp:
+                    G.append('重复展示名 "%s"：%s 与 %s' % (title, seen_titles[title], dp))
+                else:
+                    seen_titles[title] = dp
             if not hrefs:
                 E.append('空课程分组 data-path="%s"（占位目录不应显示为课程节点）' % dp)
             if dp in SPECIAL:
@@ -104,6 +121,9 @@ def audit():
                 continue
             if dp in PLACEHOLDER:
                 A.append('占位分组 data-path="%s"（磁盘上无此目录）' % dp)
+                continue
+            if not valid_data_path(dp):
+                A.append('data-path="%s" → 不允许跨出当前学科目录' % dp)
                 continue
             target = os.path.normpath(os.path.join(pagedir, dp))
             if os.path.isdir(target):
@@ -115,7 +135,7 @@ def audit():
                 if not hp or hp.startswith(("http", "mailto:", "/", "javascript:")):
                     continue
                 absh = os.path.normpath(os.path.join(pagedir, hp))
-                if hp.endswith(".html"):
+                if os.path.splitext(hp)[1].lower() in {".html", ".md"}:
                     if absh in seen_cards:
                         F.append("重复课程卡片 %s（同一页面应只有一个主入口）" % h)
                     seen_cards.add(absh)
@@ -127,25 +147,28 @@ def audit():
 
         for d in sorted(own_scope_dirs(pagedir)):
             absd = os.path.join(pagedir, d)
-            has_html = any(f.endswith(".html") and f != "index.html" for f in os.listdir(absd))
-            if has_html and not any(x == d or x.startswith(d + "/") for x in declared):
+            has_lesson = any(os.path.splitext(f)[1].lower() in {".html", ".md"}
+                             and f != "index.html" for f in os.listdir(absd))
+            if has_lesson and not any(x == d or x.startswith(d + "/") for x in declared):
                 D.append("真实目录 %s/ 未被任何 data-path 覆盖" % d)
 
-        if A or B or C or D or E or F:
-            report[rel_page] = (kind, A, B, C, D, E, F)
+        if A or B or C or D or E or F or G:
+            report[rel_page] = (kind, A, B, C, D, E, F, G)
 
     labels = [("A", "data-path 不是真实目录 → 左侧树凭空多出节点"),
               ("B", "卡片所在目录与分组 data-path 不一致 → 树的分组和内容对不上"),
               ("C", "卡片断链"),
               ("D", "漏挂 / 孤立文件"),
               ("E", "空课程分组不应出现在知识树"),
-              ("F", "一个专题与课程页面应只有一个主入口")]
-    for page, (kind, A, B, C, D, E, F) in report.items():
+              ("F", "一个专题与课程页面应只有一个主入口"),
+              ("G", "同一学科中的专题展示名应可区分")]
+    for page, (kind, A, B, C, D, E, F, G) in report.items():
         print("\n" + "=" * 72)
         print("### %s   [%s]" % (page, kind))
         for tag, text, items in (("A", labels[0][1], A), ("B", labels[1][1], B),
                                  ("C", labels[2][1], C), ("D", labels[3][1], D),
-                                 ("E", labels[4][1], E), ("F", labels[5][1], F)):
+                                 ("E", labels[4][1], E), ("F", labels[5][1], F),
+                                 ("G", labels[6][1], G)):
             if items:
                 print("  【%s %s】%d" % (tag, text, len(items)))
                 for i in items:

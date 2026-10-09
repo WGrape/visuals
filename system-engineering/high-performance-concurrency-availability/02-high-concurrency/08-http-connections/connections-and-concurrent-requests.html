@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="区分客户端、HTTP 连接、流与在途请求，并比较 HTTP/1.1、HTTP/2 和 HTTP/3 的并发边界。">
+  <title>连接数与并发请求</title>
+  <style>
+    /* A network field guide: narrow reading column, protocol comparison, then concrete traffic examples. */
+    :root {
+      --bg: #f3f7f8; --surface: #ffffff; --raised: #e8f0f2; --ink: #16323c;
+      --muted: #4b6972; --line: #bdd1d5; --accent: #086b7a; --accent-soft: #d9f0ef;
+      --caution: #80501b; --caution-soft: #fff0d9;
+      --display: "Songti SC", "Noto Serif CJK SC", ui-serif, serif;
+      --body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #101e27; --surface: #172b34; --raised: #203a44; --ink: #e7f2f3;
+        --muted: #b4cdd0; --line: #45616a; --accent: #7fdbd4; --accent-soft: #214546;
+        --caution: #f5ca8d; --caution-soft: #493926; color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #101e27; --surface: #172b34; --raised: #203a44; --ink: #e7f2f3;
+      --muted: #b4cdd0; --line: #45616a; --accent: #7fdbd4; --accent-soft: #214546;
+      --caution: #f5ca8d; --caution-soft: #493926; color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; padding-inline: 16px; padding-block: 28px 70px; background: var(--bg); color: var(--ink); font: 16px/1.75 var(--body); }
+    .page { width: min(100%, 1020px); margin-inline: auto; }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: .88rem; }
+    nav a { text-decoration: none; border-bottom: 1px solid var(--line); }
+    header { max-width: 780px; padding-block: 42px 28px; }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font: 700 .79rem/1.4 var(--body); letter-spacing: .1em; }
+    h1, h2, h3 { text-wrap: balance; }
+    h1 { font: 700 clamp(2.1rem, 5vw, 3.6rem)/1.22 var(--display); margin: 0 0 16px; letter-spacing: -.025em; }
+    h2 { font: 700 clamp(1.5rem, 3vw, 2rem)/1.35 var(--display); margin: 0 0 16px; }
+    h3 { font-size: 1.08rem; line-height: 1.45; margin: 0 0 8px; }
+    p { margin: 0; }
+    .lead { max-width: 66ch; font-size: 1.12rem; color: var(--muted); }
+    .thesis { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 19px 22px; max-width: 780px; font-weight: 600; }
+    main { display: grid; gap: 46px; margin-top: 42px; }
+    section { min-width: 0; }
+    .intro { max-width: 760px; color: var(--muted); margin-bottom: 19px; }
+    .layers { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+    .layer { min-width: 0; padding: 18px 14px; border-top: 3px solid var(--accent); background: var(--surface); }
+    .layer strong { display: block; font-size: .98rem; margin-bottom: 8px; }
+    .layer p { color: var(--muted); font-size: .88rem; line-height: 1.6; overflow-wrap: anywhere; }
+    .note { background: var(--raised); padding: 16px 20px; margin-top: 17px; border: 1px solid var(--line); }
+    .note strong { color: var(--accent); }
+    .table-scroll { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+    table { border-collapse: collapse; width: 100%; min-width: 690px; font-size: .94rem; }
+    th, td { text-align: left; vertical-align: top; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    th { background: var(--raised); font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { font-weight: 700; white-space: nowrap; }
+    .scenarios { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .scenario { min-width: 0; border: 1px solid var(--line); background: var(--surface); padding: 22px; }
+    .scenario .label { display: inline-block; margin-bottom: 12px; color: var(--accent); font: 700 .8rem/1.4 var(--mono); }
+    .scenario p + p { margin-top: 10px; }
+    .scenario .result { color: var(--accent); font-weight: 700; }
+    .caution { background: var(--caution-soft); border-left: 4px solid var(--caution); padding: 16px 20px; margin-top: 18px; }
+    .caution strong { color: var(--caution); }
+    .reading { max-width: 760px; }
+    .reading p + p { margin-top: 13px; }
+    .bullets { padding-left: 1.45em; margin: 0; max-width: 760px; }
+    .bullets li { padding-left: .25em; margin-bottom: 11px; }
+    code { font: .9em/1.5 var(--mono); background: var(--raised); padding: .1em .35em; border-radius: 3px; overflow-wrap: anywhere; }
+    footer { margin-top: 54px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: .91rem; }
+    footer p { margin-bottom: 9px; }
+    @media (max-width: 760px) { .layers { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 550px) { body { padding-block-start: 18px; } header { padding-block: 30px 22px; } main { gap: 38px; } .layers, .scenarios { grid-template-columns: 1fr; } .layer { padding: 15px; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <nav aria-label="课程导航"><a href="../../index.html">← 专题目录</a><a href="../09-client-admission-control/reader-client-control.html">下一课：客户端控制</a></nav>
+    <header>
+      <p class="eyebrow">HTTP / 并发边界</p>
+      <h1>连接数、并发请求与 QPS</h1>
+      <p class="lead">“有 100 个用户”不能推导出“有 100 条连接”，也不能推导出“同时处理 100 个请求”。先明确每个数字在哪一层计数。</p>
+    </header>
+    <div class="thesis">一个用户可以发起多个请求；一个客户端实例可以维护一个连接池；一条连接在不同 HTTP 版本下又能承载不同数量的同时进行的请求。</div>
+    <main>
+      <section aria-labelledby="layers-title">
+        <h2 id="layers-title">把五种数量分开</h2>
+        <p class="intro">它们沿请求路径出现，但不存在固定的 1:1 换算。</p>
+        <div class="layers">
+          <div class="layer"><strong>用户 / 调用方</strong><p>人、进程或业务租户等身份；一个用户可开多个页面或客户端。</p></div>
+          <div class="layer"><strong>客户端实例</strong><p>浏览器、Session、HTTP 客户端对象；可能复用池内多条连接。</p></div>
+          <div class="layer"><strong>传输连接</strong><p>H1/H2 通常是 TCP（HTTPS 再加 TLS）；H3 是基于 UDP 的 QUIC 连接。</p></div>
+          <div class="layer"><strong>在途 HTTP 请求</strong><p>已发出但尚未完成的请求；是否已由应用处理需另看服务端边界。</p></div>
+          <div class="layer"><strong>完成 QPS</strong><p>每秒完成多少次请求，是一段时间的速率，不是瞬时在途数量。</p></div>
+        </div>
+        <p class="note"><strong>本地待发 ≠ 已发出。</strong> 排在任务队列或连接池里的请求可能尚未占用连接，更不能直接算作服务端正在处理的请求。</p>
+      </section>
+
+      <section aria-labelledby="protocol-title">
+        <h2 id="protocol-title">同一条连接可同时承载多少请求？</h2>
+        <div class="table-scroll" role="region" aria-label="HTTP 版本与连接并发比较" tabindex="0">
+          <table>
+            <thead><tr><th scope="col">协议</th><th scope="col">传输与复用</th><th scope="col">单连接上的同时进行请求</th><th scope="col">仍会受什么限制</th></tr></thead>
+            <tbody>
+              <tr><td>HTTP/1.1</td><td>TCP；可持久连接，前一个响应结束后可复用。</td><td>通常不使用流水线时，<strong>每条连接仅 1 个活跃请求</strong>；要并行发出更多请求，通常开多条连接。</td><td>连接池上限、服务端资源、排队与限流。历史上的 HTTP/1.1 流水线不是这里的默认假设。</td></tr>
+              <tr><td>HTTP/2</td><td>通常运行在一条 TCP 连接上；多个请求映射为不同的并发流并复用连接。</td><td>可以有多个；受对端协商的 <code>SETTINGS_MAX_CONCURRENT_STREAMS</code> 等约束，<strong>不是无限</strong>。</td><td>流控、客户端/服务端设置与业务处理能力；底层 TCP 丢包仍可能影响同连接上的流。</td></tr>
+              <tr><td>HTTP/3</td><td>基于 UDP 的 QUIC 连接，<strong>不是 TCP 连接</strong>；请求使用 QUIC 流。</td><td>可以有多个；并发流数量仍受对端公布的 QUIC 流上限及其它资源约束。</td><td>流控、服务器接纳与限速；QUIC 消除跨流的传输层队头阻塞，并不保证业务处理无排队。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="caution"><strong>不要把协议能力写成容量保证。</strong> H2/H3 能在一条连接上多路复用，并不代表服务器会同时执行业务逻辑，也不代表每条连接必定只承载某个固定数目的流。</p>
+      </section>
+
+      <section aria-labelledby="example-title">
+        <h2 id="example-title">两个有前提的例子</h2>
+        <div class="scenarios">
+          <div class="scenario"><span class="label">示意 A · 非流水线 H1</span><h3>1 个客户端，6 条连接</h3><p>若连接均可用、各有待发请求，客户端最多能在这些连接上同时发送 <strong>6 个活跃请求</strong>。第 7 个可能等池内连接空闲。</p><p class="result">不是 1 个用户 = 1 个请求。</p></div>
+          <div class="scenario"><span class="label">示意 B · H2 多路复用</span><h3>1 个客户端，1 条连接</h3><p>假设双方设置允许并且对端实际允许 100 个并发流，且没有更早的瓶颈，那么这条连接可同时承载至多 100 个请求流；多余请求需要等待流名额或使用其它符合策略的连接。</p><p class="result">100 是例子的协商值，不是 H2 的通用常数。</p></div>
+        </div>
+        <p class="note">即使在途请求数相同，<strong>完成 QPS</strong>仍依赖请求耗时和实际完成情况。稳态、同一统计边界下，可用 <code>平均在途量 ≈ 完成速率 × 平均驻留时间</code> 分析，而不是简单用连接数计算吞吐。</p>
+      </section>
+
+      <section aria-labelledby="library-title" class="reading">
+        <h2 id="library-title">Python 客户端默认行为不要猜</h2>
+        <p><code>requests</code> 常规使用基于 HTTP/1.1；会话里的连接池负责复用与配置连接数，增加线程或任务并不会自动启用 H2。<code>aiohttp</code> 的常规客户端请求也使用 HTTP/1.1；协程并发不等于单连接多路复用。</p>
+        <p><code>httpx</code> 默认是 HTTP/1.1；需要安装 H2 支持（例如 <code>httpx[http2]</code>）并显式设置 <code>http2=True</code>。这只是允许协商 H2；对端不支持时仍可能使用 H1。是否使用 H3，需另选具备 H3 能力的实现与配置，不能从上述默认值推断。</p>
+      </section>
+
+      <section aria-labelledby="check-title">
+        <h2 id="check-title">排查时先问四个问题</h2>
+        <ul class="bullets">
+          <li>统计的是用户、客户端对象、TCP/QUIC 连接、流，还是某一端的在途请求？</li>
+          <li>连接实际协商了 H1、H2 还是 H3？连接池和对端并发流上限是多少？</li>
+          <li>排队发生在本地任务队列、连接池、网关还是服务内部？不同边界不能合并计数。</li>
+          <li>讨论的是瞬时峰值、时间窗口平均并发，还是完成 QPS？</li>
+        </ul>
+      </section>
+    </main>
+    <footer><p>继续阅读：<a href="../09-client-admission-control/reader-client-control.html">怎样限制客户端待发量与发送速率</a></p><p>相关概念：<a href="../../01-performance-evaluation-framework/00-overview/traffic-terminology.html">QPS、RT 与并发数</a> · <a href="../../01-performance-evaluation-framework/04-capacity-and-limits/jina-reader-concurrency-and-rpm.html">Reader 并发与 RPM 案例</a></p></footer>
+  </div>
+</body>
+</html>
