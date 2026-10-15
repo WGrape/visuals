@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>列式分析中的分区裁剪与数据跳过 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>列式分析中的分区裁剪与数据跳过</h1><p class="lead">能少读多少数据，往往比单核执行速度更影响分析查询。</p></header>
+<section class="panel"><h2>核心机制</h2><p>分区裁剪利用分区键排除整个时间或业务分区。数据跳过还可利用块级最小最大值、索引或排序键排除不可能命中的数据块。列裁剪只读取查询需要的列。</p><p>谓词下推把筛选尽量移到扫描阶段，但并非所有表达式都能下推。对分区列施加不可识别的函数，或者把数据随机散布，可能让裁剪效果变差。</p></section>
+<section class="panel"><h2>用一个例子看过程</h2><pre><code>WHERE event_date &gt;= DATE &#x27;2026-10-01&#x27;
+  AND event_date &lt; DATE &#x27;2026-11-01&#x27;
+  AND region = &#x27;east&#x27;</code></pre>
+<div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 先看分区</button><button type="button" data-step-button aria-pressed="false">2. 再看数据块</button><button type="button" data-step-button aria-pressed="false">3. 最后看列</button></div><div class="step-panel" data-step-panel ><h3>先看分区</h3><p>时间范围能否排除其他月份分区；确认过滤条件与分区键类型一致。</p></div><div class="step-panel" data-step-panel hidden><h3>再看数据块</h3><p>region 若与排序/聚簇相关，块统计可进一步跳过不相关区域。</p></div><div class="step-panel" data-step-panel hidden><h3>最后看列</h3><p>只读取聚合需要的列，并检查解压和向量化执行的剩余成本。</p></div></div></section>
+<section class="panel"><h2>观察、原因与处理</h2><div class="table-wrap"><table><thead><tr><th>观察</th><th>原因或含义</th><th>处理与验证</th></tr></thead><tbody><tr><td>扫描字节高</td><td>时间条件未触发分区裁剪</td><td>查看执行计划与分区命中数</td></tr><tr><td>块跳过率低</td><td>过滤列在各块中分布太散</td><td>评估排序键或聚簇策略</td></tr><tr><td>CPU 仍高</td><td>表达式和聚合开销大</td><td>看向量化、预聚合和列裁剪</td></tr></tbody></table></div></section>
+<section class="panel"><h2>三层“少读数据”</h2><p>分区裁剪首先排除整个时间或业务分区。按月分区的事件表查询十月，若谓词能被引擎识别，其他月份可不进入扫描。块级数据跳过再利用最小最大值、排序键或索引排除不可能命中的块。列裁剪则只读取查询真正使用的列。这三层作用在不同粒度，不能把“有分区”误当成“分区内会读得很少”。</p><p>谓词下推把筛选尽量移到扫描阶段，但是否可下推取决于表达式与引擎能力。若过滤列在每个数据块都随机分布，块的最小最大值范围高度重叠，统计信息也难以跳过。把分区列包进引擎无法识别的复杂函数，可能降低分区裁剪效果。</p></section>
+<section class="panel"><h2>从执行计划读证据</h2><div class="table-wrap"><table><thead><tr><th>证据</th><th>可能含义</th><th>下一步</th></tr></thead><tbody><tr><td>扫描分区数很高</td><td>时间谓词未有效裁剪</td><td>核对分区键类型和过滤条件</td></tr><tr><td>分区少但扫描字节仍高</td><td>块值域重叠或过滤列分布散</td><td>评估排序键与聚簇策略</td></tr><tr><td>扫描字节低但 CPU 高</td><td>表达式或聚合开销大</td><td>查看向量化、预聚合与函数成本</td></tr><tr><td>只读一列仍慢</td><td>容量或排队成为瓶颈</td><td>拆解 I/O、CPU 与队列时间</td></tr></tbody></table></div><p>调优实验要固定数据规模和缓存状态，比较实际扫描行数、字节数与耗时。只看计划的估计值可能被过期统计误导；只看耗时又可能把缓存命中误认为布局改进。</p></section>
+<section class="panel"><h2>练习：让时间条件可裁剪</h2><p>查询按 event_date 分区的表时，用明确的半开区间表达十月：event_date 大于等于十月一日且小于十一月一日。检查计划是否只触达十月分区，再对 region 谓词比较块跳过率。若仍扫描大量块，问题可能在数据布局，而不只是 SQL 写法。</p></section>
+<section class="panel"><h2>边界与误区</h2><p>区块统计只能证明某些块不可能命中，不能保证所有数据布局都有效。不同引擎的索引、统计和下推能力各异，应以执行计划和实际扫描量验证。</p></section>
+<section class="panel"><h2>一个可重复的调优实验</h2><p>选取一条真实慢查询，记录原始数据量、分区数、扫描行数、扫描字节、CPU 时间和端到端耗时。先只改写时间过滤为与分区键同类型的半开区间，确认分区数量是否下降；再保持查询不变，改变数据的排序或聚簇策略，观察块跳过率；最后才比较列裁剪或表达式优化。每次只改一个因素，避免把缓存预热、并发波动和布局变化混在一起。</p><p>最小最大值索引对按时间排序的连续数据通常有效，因为不相关时间段的块范围分离；对随机 UUID 或每块都有所有 region 的数据则可能效果很差。数据重排又有写入放大和维护成本，不能为了单条查询盲目重建全表。评估时使用整体工作负载：既要看被优化查询，也要看写入吞吐、合并任务和其他查询是否退化。</p></section>
+<section class="panel" data-depth-note><h2>让排序键服务主要工作负载</h2><p>按时间排序可帮助时间范围查询跳过无关块，按客户排序则可能改善客户级查询；两者未必能同时达到最优。选排序或聚簇键前，统计真实查询的过滤列、时间范围、扫描字节和频率，再评估写入合并成本。若高频查询总是按日期加地区过滤，可测试两种键顺序并比较块值域；键的前缀顺序常影响跳过效果。数据增长后还要复测，因为初期小表全部可缓存时，任何布局看起来都很快。调优结论应基于稳定的数据规模和代表性并发。</p></section>
+<section class="panel" data-depth-followup><h2>进一步验证</h2><p>在索引或排序优化前，先确认查询真正只需要哪些列。SELECT * 会让列式系统读取、解压许多无关列，掩盖分区和块跳过带来的收益。把返回字段限定为图表所需列，并记录网络传输字节，才能区分“扫描变少”与“结果发送变少”两种改善。</p></section>
+<section class="panel" data-final-case><h2>补充判断</h2><p>如果查询过滤条件高度选择性却仍慢，还要检查结果集是否很大。数据跳过只减少读取，不能消除返回百万行的网络和客户端渲染成本；分页、预聚合或改变产品交互可能比继续加索引更有效。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>为什么给 WHERE 条件加了索引，查询仍可能扫描大量数据？</summary><p>数据块值域可能高度重叠，或谓词无法利用该索引；需要核对布局、计划和实际扫描字节。</p></details></section>
+<footer>继续阅读：<a href="../02-columnar-and-vectorized/columnar-storage.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

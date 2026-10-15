@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TDengine 超级表与标签：设备数据怎样建模 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>TDengine 超级表与标签：设备数据怎样建模</h1><p class="lead">以十万台设备的温度采集为例，设计超级表、子表、标签和查询，并识别高基数陷阱。</p></header>
+<section class="panel"><h2>从业务实体开始建模
+时序记录通常由时间戳、测量值和设备维度组成。假设每台传感器每十秒上报温度、湿度和电池电量，设备还属于某个工厂、车间和型号。TDengine 的超级表定义共同的时间列、数据列和标签列；每台设备可建立对应子表，并在创建时给工厂、型号等标签赋值。这样查询一个设备的连续时间数据或按某种设备分组都能沿同一数据模型表达。</h2><p>先区分频繁变化的测量值与相对稳定的设备属性。温度、电量是每条记录的列，不适合做标签；工厂编号、型号可做标签。若设备所属车间会变更，要说明查询历史数据时应该按当前归属还是采样当时归属。把变化属性只存为子表标签，可能让历史分析误以为过去也属于新车间；需要事件记录或按时点维护维度快照。</p></section>
+<section class="panel"><h2>超级表和子表的关系
+超级表可以理解为同类设备记录的模板，子表存具体设备的数据并绑定标签。设计时先定义单位和类型，例如温度统一摄氏度浮点值、时间统一毫秒精度。不同设备固件若把华氏值写进同一列，SQL 聚合仍能跑，却得到没有意义的平均值。采集网关应校验设备 ID、时间精度、字段范围与缺测约定。</h2><p>子表名可以由稳定设备 ID 映射生成，但不要直接拼接用户输入作为 SQL 标识符。设备更换或合并时需要明确新旧身份是否沿用同一子表。若所有设备都混进单一业务表并把设备 ID 放在普通列，可能丢失按设备管理和过滤的优势；若每个读数建一张新表，则元数据数量会失控。</p></section>
+<section class="panel"><h2>逐步推演</h2><div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 确定实体</button><button type="button" data-step-button aria-pressed="false">2. 定义查询</button><button type="button" data-step-button aria-pressed="false">3. 估算容量</button><button type="button" data-step-button aria-pressed="false">4. 验证边界</button></div><div class="step-panel" data-step-panel ><h3>确定实体</h3><p>区分设备身份、稳定标签与逐点测量值。</p></div><div class="step-panel" data-step-panel hidden><h3>定义查询</h3><p>按设备时间线和跨设备聚合倒推模型。</p></div><div class="step-panel" data-step-panel hidden><h3>估算容量</h3><p>用点数、保留期、副本和实测压缩比计算资源。</p></div><div class="step-panel" data-step-panel hidden><h3>验证边界</h3><p>测试乱序、补传、时间单位和租户隔离。</p></div></div></section>
+<section class="panel"><h2>一次查询如何落地
+业务要看工厂 A 最近一小时每五分钟平均温度。先用工厂标签筛选属于 A 的设备，再限定时间窗口，按时间桶聚合，最后决定空桶是缺失、零还是沿用上一值。平均温度要确认是“所有上报点的平均”还是“先算每设备平均再对设备平均”：离线设备少上报时，两种算法权重不同。报表必须标出数据覆盖率，否则低覆盖率的平均看起来仍很平滑。</h2><p>另一种查询是取某设备最近一次数据。这类查询需检查乱序补传：最大时间戳记录不等于最后到达的记录。若告警按采样时间判定，迟到数据可能回写历史窗口；若按到达时间触发，又可能把旧故障误报为当前故障。查询与告警要使用同一时钟语义。</p></section>
+<section class="panel"><h2>标签选择的成本
+标签应服务常见过滤、分组和权限隔离。把随机请求 ID、每条采样唯一的事件 ID 当标签，会引入极高基数，却很少能复用为设备级筛选。字段太多、命名不稳定也会增加写入校验和查询复杂度。设计前列出前三类查询，估算设备数、每天新增设备量、标签独立值数和查询组合，而不只看单机写入峰值。</h2><p>多租户系统中，租户 ID 必须进入可靠的过滤或隔离路径。不能只靠前端隐藏设备列表；查询接口要把租户范围作为不可省略的条件，并测试错误租户 ID 与越权设备 ID。对于高度敏感业务，仍需结合数据库的账户权限与独立验证，标签本身不是访问控制。</p></section>
+<section class="panel"><h2>写入、保留和容量
+十万台设备每十秒一条，每天约八亿六千万条记录；再乘字段宽度、压缩比例、副本数和索引开销，才能估算磁盘。压缩比取决于采样连续性与数据类型，不能直接套用宣传值。设计保留期时区分原始点、分钟聚合和长期报表。原始记录保存七天、小时聚合保存一年是一种可能组合，但要由审计和回溯要求决定。</h2><p>网络断开时设备可能批量补传。写入端应限制单批大小，监测部分失败和超时后结果未知，避免重试产生重复或漏点。时间戳冲突时数据库和业务如何处理同设备同时间的两条记录，需要明确。持续观察写入延迟、磁盘增长、压缩效果和分片热点，而非只在空库压测。</p></section>
+<section class="panel"><h2>验证和迁移
+先取一周真实设备数据做样本，保留极端温度、缺字段、乱序、跨时区和离线补传。建立超级表后验证按设备、按工厂、按型号的代表性查询，并比较扫描范围、延迟与聚合结果。升级字段类型或标签定义前，检查旧固件是否仍会上报旧格式，安排兼容与回填窗口。</h2><p>迁移完成的标准不是“数据写进来了”，还包括统计总点数、按设备抽样核对、计算报表与旧系统差异、演练回退路径。尤其注意时间单位：秒与毫秒错位会让数据出现在错误年代，却不一定立刻报错。另要核对时区展示和夏令时边界，避免同一个采样时刻在报表中被误认成两个时间点。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>设备当前车间写在标签中，就能正确查询它过去所属的车间吗？</summary><p>不一定。标签变化后历史归属可能被覆盖或按当前值解释；需要按时点保存归属或建立维度历史。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<footer>继续阅读：<a href="../00-overview/tdengine-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>
