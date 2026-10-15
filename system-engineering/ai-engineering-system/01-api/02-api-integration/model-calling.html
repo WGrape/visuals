@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型 API 调用集成流程 - Visuals</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #58a6ff;
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+        .subtitle {
+            text-align: center;
+            color: #8b949e;
+            margin-bottom: 3rem;
+            font-size: 1.1rem;
+        }
+        .section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+        .section-title {
+            color: #58a6ff;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid #30363d;
+            padding-bottom: 0.5rem;
+        }
+        .section-content {
+            color: #8b949e;
+            line-height: 1.8;
+        }
+        .section-content strong { color: #e6edf3; }
+        .section-content ul { padding-left: 1.5rem; }
+        .section-content li { margin: .4rem 0; }
+        .section-content pre {
+            margin: 1rem 0;
+            padding: 1rem;
+            overflow-x: auto;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #e6edf3;
+            line-height: 1.6;
+        }
+        .section-content a { color: #58a6ff; }
+        .back-link {
+            display: inline-block;
+            color: #58a6ff;
+            text-decoration: none;
+            margin-bottom: 2rem;
+            font-weight: 500;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="../../index.html" class="back-link">← 返回 AI 工程</a>
+        <h1>🔌 模型 API 调用集成流程</h1>
+        <p class="subtitle">以“把故障记录总结给值班同事”为例，走完一次调用的准备、发送、验收与失败处理</p>
+
+        <div class="section">
+            <h2 class="section-title">1. 准备输入与调用边界</h2>
+            <div class="section-content">
+                <p>先规定任务：“把一条故障记录总结成现象、影响、措施、待确认四项”。调用方只传本次记录，检查是否含不应发送的敏感字段，并给请求分配内部追踪 ID。密钥从服务端配置或密钥管理服务读取，不能由浏览器提交或写进日志。</p>
+                <p>同时确定<strong>总超时、输出长度上限、并发上限和每次调用的费用预算</strong>。采样参数属于模型行为配置；各厂商字段名与默认值不同，应由适配层转换，而不是在业务代码里到处拼请求体。</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">2. 发送并接收</h2>
+            <div class="section-content">
+                <p>业务层把任务说明和故障记录交给厂商适配层；适配层负责认证、消息格式、输出上限字段与响应解析。下面是<strong>流程伪代码</strong>，不是某家厂商的真实 SDK 接口：</p>
+                <pre>trace_id = new_trace_id()
+input = redact_and_limit(record)
+request = adapter.build(task="故障交接摘要", input=input, output_limit=300)
+response = adapter.call(request, timeout=20, cancel=request_context)
+summary = adapter.extract_text(response)</pre>
+                <p>非流式调用在完整响应后解析；流式调用则逐块拼接内容，并在连接中断时区分“本地已经收到多少”和“服务端是否仍在生成”。浏览器关闭页面时，向上游传播取消信号，避免无用的后台调用。</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="section-title">3. 验收结果并记录成本</h2>
+            <div class="section-content">
+                <ul>
+                    <li>检查 HTTP 状态、响应中的结束原因与输出是否为空；若因长度上限截断，不把半截摘要当成功。</li>
+                    <li>校验四项摘要是否齐全，并把“待确认”与事实区分开。模型文本可能编造根因，仍需与输入记录核对。</li>
+                    <li>记录追踪 ID、模型版本、耗时、输入/输出用量和错误类型；日志保留必要元数据，不记录密钥或原始敏感内容。</li>
+                </ul>
+            </div>
+        </div>
+        <div class="section">
+            <h2 class="section-title">4. 失败时怎么分流</h2>
+            <div class="section-content">
+                <p><strong>401/403</strong> 先检查认证和权限，不靠重试解决；<strong>429</strong> 按服务端提示及本地限额做有界退避；<strong>5xx 或网络超时</strong> 可在调用预算内有限重试，但超时不等于上游完全没处理。若调用触发外部工具或写操作，还要单独设计幂等键和副作用保护。</p>
+                <p>连续失败时向用户说明服务暂不可用，并保留可追踪的错误类型。重试次数、总时长和并发闸门要一起限制，避免把短暂故障放大成重试风暴。</p>
+            </div>
+        </div>
+        <div class="section">
+            <h2 class="section-title">继续学习</h2>
+            <div class="section-content">
+                <p><a href="../01-api-design-and-streaming/llm-api-design.html">LLM API 接口设计</a>讲服务端契约；<a href="openai-anthropic-gemini-api-formats.html">接口协议对比</a>讲厂商字段与流式差异。</p>
+                <p><a href="cancel-model-call-on-close.html">关闭时取消模型调用</a>和<a href="../01-api-design-and-streaming/llm-api-http-connection-management.html">HTTP 连接管理</a>继续拆解取消、超时与重试；<a href="../../../../artificial-intelligence/model-llm/03-params/00-overview/sampling-decoding.html">采样与解码</a>解释参数如何影响输出。</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

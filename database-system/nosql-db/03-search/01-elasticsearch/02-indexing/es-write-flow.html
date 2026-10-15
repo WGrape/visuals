@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>ES 主分片 vs 副本分片职责解析</title>
+<title>ES 主副分片写入职责与确认时序</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -213,8 +213,8 @@
 </head>
 <body>
 
-<h1>🔍 ES 主分片 vs 副本分片：职责解析</h1>
-<p class="subtitle">写入流程中各自到底在干什么？一张图说清楚</p>
+<h1>🔍 ES 主副分片的写入职责与确认时序</h1>
+<p class="subtitle">聚焦一次文档写入；分片布局与故障演示见<a href="../01-architecture/es-shards-replicas.html">分片与副本交互课</a></p>
 
 <!-- ========== 全局流程概览 ========== -->
 <div class="overview">
@@ -248,7 +248,7 @@
       <div class="overview-box ov-replica">
         <span class="icon">🟠</span>
         副本分片
-        <span class="label">接收备份</span>
+        <span class="label">执行副本写入</span>
       </div>
     </div>
   </div>
@@ -265,22 +265,21 @@
         <div class="card-icon">🟢</div>
         <div>
           <div class="card-title">Primary Shard</div>
-          <div class="card-subtitle">主分片 · 写入的"唯一真理源"</div>
+          <div class="card-subtitle">主分片 · 协调这一分片的写入</div>
         </div>
       </div>
       <div class="duty-section">
         <div class="duty-label">核心职责</div>
-        <span class="duty-tag">接收所有写入</span>
-        <span class="duty-tag">写入 Translog</span>
-        <span class="duty-tag">写入 Buffer</span>
-        <span class="duty-tag">决定成功/失败</span>
+        <span class="duty-tag">处理目标分片写入</span>
+        <span class="duty-tag">本地执行并记录</span>
+        <span class="duty-tag">转发副本操作</span>
+        <span class="duty-tag">汇总写入结果</span>
       </div>
       <ul class="duty-list">
         <li><span class="duty-bullet"></span><span>写入数据必须先到主分片，是数据变更的<strong style="color:#86efac">唯一入口</strong></span></li>
-        <li><span class="duty-bullet"></span><span>维护 <span class="mono">Translog</span>，记录每一条变更，用于<strong style="color:#86efac">崩溃恢复</strong></span></li>
-        <li><span class="duty-bullet"></span><span>数据先写 Translog 再写 Buffer，Translog 写成功才算成功</span></li>
-        <li><span class="duty-bullet"></span><span>写入完成后，主动<strong style="color:#86efac">推送数据给副本分片</strong>同步</span></li>
-        <li><span class="duty-bullet"></span><span>主分片挂了？集群自动把某个副本提升为新的主分片</span></li>
+        <li><span class="duty-bullet"></span><span>在本地执行索引操作，并用 <span class="mono">Translog</span> 支持恢复；刷新到可搜索与确认写入是两件事</span></li>
+        <li><span class="duty-bullet"></span><span>向同步副本转发写入操作，汇总副本响应及失败信息</span></li>
+        <li><span class="duty-bullet"></span><span>主分片失效后，集群可从合格副本中选出新的主分片；恢复期间可能有短暂不可用</span></li>
       </ul>
     </div>
 
@@ -295,15 +294,15 @@
       </div>
       <div class="duty-section">
         <div class="duty-label">核心职责</div>
-        <span class="duty-tag">接收主分片推送</span>
+        <span class="duty-tag">执行主分片转发的操作</span>
         <span class="duty-tag">提供读负载均衡</span>
         <span class="duty-tag">高可用容灾</span>
       </div>
       <ul class="duty-list">
-        <li><span class="duty-bullet"></span><span><strong style="color:#fdba74">不</strong>接收客户端直接写入，只被动接收主分片同步过来的数据</span></li>
-        <li><span class="duty-bullet"></span><span>自己<strong style="color:#fdba74">没有 Translog</strong>，数据是主分片的拷贝，不参与崩溃恢复决策</span></li>
+        <li><span class="duty-bullet"></span><span><strong style="color:#fdba74">不</strong>作为客户端写入的直接入口；它执行主分片转发的写入操作</span></li>
+        <li><span class="duty-bullet"></span><span>副本也维护自己的 <span class="mono">Translog</span> 与索引数据，可用于本地恢复</span></li>
         <li><span class="duty-bullet"></span><span>提供<strong style="color:#fdba74">读请求分流</strong>：搜索请求可以打到副本，提升并发读能力</span></li>
-        <li><span class="duty-bullet"></span><span>主分片宕机时，副本自动<strong style="color:#fdba74">晋升为主分片</strong>，保证数据不丢</span></li>
+        <li><span class="duty-bullet"></span><span>主分片宕机时，合格副本可被提升；实际数据安全取决于确认策略、副本状态与故障范围</span></li>
         <li><span class="duty-bullet"></span><span>可配置多个副本（<span class="mono">number_of_replicas = N</span>），副本越多容灾越强，但写入开销越大</span></li>
       </ul>
     </div>
@@ -338,7 +337,7 @@
         <div class="seq-body">
           <div class="seq-bubble" style="top:36px;">
             <div class="seq-num-wrap"><span class="seq-num">2</span><strong>路由计算</strong></div>
-            <span class="mono">hash(id) % 5</span><br>找到目标主分片
+            <span class="mono">_routing → 目标分片</span><br>找到目标主分片
           </div>
           <div class="seq-bubble success-bubble" style="top:165px;">
             <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">5</span><strong>转发响应给 Client</strong></div>
@@ -352,9 +351,9 @@
         <div class="seq-body">
           <div class="seq-bubble accent-primary" style="top:58px;">
             <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">3</span><strong>写入主分片</strong></div>
-            ① 写 Translog ✅<br>
-            ② 写 Buffer<br>
-            <span style="font-size:9px;color:#64748b">两处都成功才算写入成功</span>
+            执行索引操作<br>
+            记录本地 Translog<br>
+            <span style="font-size:9px;color:#64748b">成功响应还需考虑副本结果与持久性配置</span>
           </div>
           <div class="seq-bubble accent-primary" style="top:148px;">
             <div class="seq-num-wrap"><span class="seq-num" style="background:#14532d;color:#86efac">4</span><strong>推送数据给副本</strong></div>
@@ -369,8 +368,8 @@
         <div class="seq-body">
           <div class="seq-bubble accent-replica" style="top:82px;">
             <div class="seq-num-wrap"><span class="seq-num" style="background:#431407;color:#fdba74">4'</span><strong>接收并写入副本</strong></div>
-            写入 Buffer<br>
-            <span style="font-size:9px;color:#64748b">（无 Translog）</span>
+            执行索引操作<br>
+            <span style="font-size:9px;color:#64748b">副本也记录自己的 Translog</span>
           </div>
           <div class="seq-bubble accent-replica" style="top:168px; border-color:#22c55e44; background:#1c191788;">
             <div class="seq-num-wrap"><span class="seq-num" style="background:#431407;color:#fdba74">✓</span><strong>ACK 响应主分片</strong></div>
@@ -385,11 +384,11 @@
 <!-- ========== 底部总结 ========== -->
 <div class="summary">
   <div class="sum-box sum-p">
-    <h3>🟢 主分片的三个"唯一"</h3>
+    <h3>🟢 主分片的写入职责</h3>
     <ul>
       <li>写入的<strong style="color:#86efac">唯一入口</strong>（客户端不能直接写副本）</li>
-      <li>Translog 的<strong style="color:#86efac">唯一持有者</strong>（崩溃恢复的核心）</li>
-      <li>写入成功的<strong style="color:#86efac">唯一决策者</strong>（副本 ACK 才返回客户端）</li>
+      <li>在本地执行操作并维护自己的 <strong style="color:#86efac">Translog</strong></li>
+      <li>向同步副本转发操作，并汇总写入结果；确认语义受副本状态与持久性配置影响</li>
     </ul>
   </div>
   <div class="sum-box sum-r">

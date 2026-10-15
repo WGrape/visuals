@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>时序数据保留与降采样设计 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>时序数据保留与降采样设计</h1><p class="lead">原始数据和长期趋势需要不同时间粒度；聚合规则必须保持指标语义。</p></header>
+<section class="panel"><h2>核心机制</h2><p>保留策略决定每种粒度的数据保存多久。常见做法是短期保留原始点，长期保存分钟或小时聚合；写入、存储成本与可追溯细节随之改变。</p><p>Gauge 可以记录均值、最小、最大与样本数；Counter 应先处理重置并计算区间增量或速率。直接平均累计计数器值会生成误导性趋势。</p></section>
+<section class="panel"><h2>用一个例子看过程</h2><pre><code>原始点：每 10 秒，保留 7 天
+1 分钟汇总：保留 90 天
+1 小时汇总：保留 2 年</code></pre>
+<div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 确定查询窗口</button><button type="button" data-step-button aria-pressed="false">2. 定义聚合值</button><button type="button" data-step-button aria-pressed="false">3. 验证过期边界</button></div><div class="step-panel" data-step-panel ><h3>确定查询窗口</h3><p>从仪表盘、告警和审计要求倒推所需的最细粒度与最长保存期。</p></div><div class="step-panel" data-step-panel hidden><h3>定义聚合值</h3><p>对每种指标规定 sum、count、min、max 或可合并摘要；明确缺测处理。</p></div><div class="step-panel" data-step-panel hidden><h3>验证过期边界</h3><p>确认降采样任务完成后再清理原始点，演练迟到数据与补写。</p></div></div></section>
+<section class="panel"><h2>观察、原因与处理</h2><div class="table-wrap"><table><thead><tr><th>观察</th><th>原因或含义</th><th>处理与验证</th></tr></thead><tbody><tr><td>峰值消失</td><td>只保存平均值</td><td>同时保留最大值或更细粒度</td></tr><tr><td>速率变负</td><td>Counter 重置被当成下降</td><td>按重置语义计算区间增量</td></tr><tr><td>历史不完整</td><td>聚合延迟或迟到数据</td><td>定义重算窗口与补写流程</td></tr></tbody></table></div></section>
+<section class="panel"><h2>按指标语义选摘要</h2><p>Gauge（温度、队列深度）可以保存 sum、count、min、max，再用 sum/count 得到可跨窗口合并的加权平均。Counter（累计请求数）应先识别重置，再计算区间增量或速率；直接平均累计值没有流量含义。延迟分布应保留桶计数或可合并摘要，不能把多个小时 P99 做算术平均。选择摘要前先问：未来查询要看均值、峰值、总量、速率还是尾部？遗漏的统计量在原始点过期后无法补回。</p><div class="table-wrap"><table><thead><tr><th>数据类型</th><th>建议保留</th><th>典型误算</th></tr></thead><tbody><tr><td>Gauge</td><td>sum/count/min/max</td><td>只存平均值导致峰值消失</td></tr><tr><td>Counter</td><td>重置处理后的区间增量</td><td>把重置后的下降算成负流量</td></tr><tr><td>请求延迟</td><td>桶计数或可合并摘要</td><td>平均各窗口 P99</td></tr></tbody></table></div></section>
+<section class="panel"><h2>设计可补算的数据生命周期</h2><ol><li>先从告警、仪表盘和审计要求反推查询窗口：近 7 天可能需要 10 秒原始数据，季度趋势可能只需小时级数据。</li><li>按事件时间划窗，定义空窗口、重复写入和迟到样本的处理。降采样任务完成前不要删原始点。</li><li>核对每个汇总窗口的覆盖率、样本数和关键指标误差；给失败任务留出补算时间。</li><li>演练作业停两小时后能否追算。如果原始数据恰好已经过期，要延长缓冲期或增加可靠的中间存储。</li></ol><p>存储预算还要算索引元数据、副本和保留周期，不能只按“每点字节数 × 天数”估算。降采样节省长期容量和扫描量，但舍弃细节，应由查询需求决定损失范围。</p></section>
+<section class="panel"><h2>算例：多级平均值如何合并</h2><p>窗口 A 有 10 个样本，平均值 100；窗口 B 有 90 个样本，平均值 0。合并均值是 (10×100+90×0)/100=10，而不是两个均值再平均得到的 50。这就是为什么分钟汇总至少保存 sum 和 count。对 Counter 还要特别处理进程重启后的归零；对 P99 则需要完整分布或可合并摘要。</p></section>
+<section class="panel"><h2>边界与误区</h2><p>百分位数通常不能通过“平均各窗口 P99”合并。需要保存可合并分布摘要或重新读取原始样本；算法与精度依产品而定。</p></section>
+<section class="panel"><h2>迟到数据会改变已经算好的窗口</h2><p>设备离线后补传上午十点的样本，可能在中午才到达。若降采样按“写入时间”聚合，它会落进中午窗口，历史曲线被扭曲；按“事件时间”聚合，则需允许历史窗口被更新。设计时要说明迟到容忍时长、去重键和窗口重算策略。原始点过期前应完成最后一次重算，并记录哪些窗口已经封存。</p><p>例如一台设备每 10 秒上报一次温度，停网半小时后补传 180 个点。降采样任务如果只处理最新一分钟，就会漏掉这些点；如果每次重扫两小时窗口，需要评估重复计算成本。可用增量状态、可重算窗口或离线补算机制，取决于产品能力。向用户展示历史趋势时，也要标明近期聚合可能因迟到数据变化。</p><p>保留策略还应与告警追责和审计需求对齐。若故障复盘通常发生在两周后，却只保留一周原始点，事后只能看到平均曲线而无法分析短时尖峰。决定过期周期前，应拿真实故障案例验证“保留下来的信息足够回答什么问题”。</p></section>
+<section class="panel" data-depth-note><h2>保留策略要能回答故障复盘</h2><p>如果故障常在两周后才复盘，原始点只保留七天，届时短暂尖峰和单实例异常就可能无法查证。可以挑选过去真实故障，模拟只拥有降采样数据时还能否定位原因，再决定原始数据保留多久。不同指标不必共用同一周期：高频性能样本可较短，合规审计与计费明细可能要进入独立归档。调整保留期时还要检查备份、副本和冷存储的成本，以及删除是否真正满足数据治理要求。一个清晰的生命周期表应写明粒度、保存期、可重算窗口和责任查询。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>为什么不能把每天 24 个小时 P99 直接取平均作为全天 P99？</summary><p>百分位依赖全部样本的排序分布；小时 P99 的平均值不保留样本数量和分布信息。</p></details></section>
+<footer>继续阅读：<a href="tsdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

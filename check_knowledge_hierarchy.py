@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the physical, numbered four-level hierarchy of the knowledge library."""
 from collections import deque
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -13,11 +14,17 @@ ROOTS = (
     "programming-and-programs", "system-engineering",
 )
 NUMBERED = re.compile(r"^\d{2}-")
+TITLE = re.compile(r"<title\b[^>]*>(.*?)</title>", re.I | re.S)
 LESSONS = {".html", ".md"}
 
 
 def is_lesson(path):
     return path.is_file() and path.suffix.lower() in LESSONS and path.name != "index.html"
+
+
+def lesson_title(source):
+    match = TITLE.search(source)
+    return unescape(re.sub(r"\s+", " ", match.group(1))).strip() if match else ""
 
 
 def check_sibling_numbers(parent, directories, errors):
@@ -61,6 +68,12 @@ def local_page(index, href):
 
 def check_navigation(errors):
     home = ROOT / "index.html"
+    if not home.is_file():
+        errors.append("缺少首页 index.html")
+        return
+    home_links = IndexLinks()
+    home_links.feed(home.read_text(encoding="utf-8"))
+    home_cards = [local_page(home, href) for href in home_links.cards]
     reachable = {home}
     pending = deque([home])
     cards = set()
@@ -79,9 +92,16 @@ def check_navigation(errors):
                 pending.append(target)
 
     for root_name in ROOTS:
-        for subject in (ROOT / root_name).iterdir():
+        root = ROOT / root_name
+        if not root.is_dir():
+            continue
+        for subject in root.iterdir():
             if not subject.is_dir():
                 continue
+            index_page = subject / "index.html"
+            card_count = home_cards.count(index_page)
+            if card_count != 1:
+                errors.append(f"首页分类卡片应恰好指向一次：{index_page.relative_to(ROOT)}（当前 {card_count} 次）")
             for page in subject.rglob("*"):
                 if not page.is_file() or (page.name != "index.html" and not is_lesson(page)):
                     continue
@@ -95,6 +115,7 @@ def audit():
     errors = []
     placeholders = []
     subjects = chapters = articles = 0
+    titles = {}
     for root_name in ROOTS:
         root = ROOT / root_name
         if not root.is_dir():
@@ -121,6 +142,16 @@ def audit():
                 check_overview_name(chapter, errors)
                 contained = [p for p in chapter.rglob("*") if is_lesson(p)]
                 articles += len(contained)
+                for page in contained:
+                    if page.suffix.lower() != ".html":
+                        continue
+                    title = lesson_title(page.read_text(encoding="utf-8"))
+                    if not title:
+                        errors.append(f"课程缺少 HTML title：{page.relative_to(ROOT)}")
+                    elif title in titles:
+                        errors.append(f"课程 title 重复：{titles[title].relative_to(ROOT)} 与 {page.relative_to(ROOT)}（{title}）")
+                    else:
+                        titles[title] = page
                 has_topics = any(p.is_dir() for p in chapter.iterdir())
                 if not NUMBERED.match(chapter.name):
                     errors.append(f"三级目录未编号：{chapter.relative_to(ROOT)}")

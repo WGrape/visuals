@@ -56,13 +56,14 @@
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
     svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
   </style>
+<link rel="stylesheet" href="../../../../assets/pattern-lesson.css">
 </head>
 <body>
 <div class="topbar"><a href="../../index.html" class="logo">☁️ 分布式系统</a><a href="../../index.html" class="back">← 返回分布式系统</a></div>
 <header>
   <div class="header-badge">🔁 弹性治理 · 面试双考点</div>
   <h1>重试与幂等</h1>
-  <p>分布式调用<strong>一定会失败</strong>。重试让系统更健壮，但重试会带来<strong>重复执行</strong>。幂等则保证"重复执行 = 执行一次"。两者必须配套，缺一不可。</p>
+  <p>分布式调用<strong>可能失败或超时</strong>。重试能提高恢复机会，也可能造成<strong>重复执行</strong>；写操作需要幂等约束配合。本页聚焦重试策略与调用链路，幂等键和业务状态的架构取舍见<a href="../../../whole-architecture-system/04-distributed-patterns/03-consistency-and-idempotency/idempotency-design.html">幂等设计</a>。</p>
 </header>
 <nav id="main-nav">
   <a href="#why" class="active">为什么需要</a>
@@ -73,7 +74,55 @@
   <a href="#interview">面试要点</a>
 </nav>
 <main>
-  <section id="why" class="reveal">
+<!-- explicit pattern lesson start -->
+<section class="pattern-lesson" data-pattern-lesson aria-label="模式动态讲解">
+  <span class="pattern-eyebrow">图解 · 交互 · 伪代码</span>
+  <h2>先看一次完整的调用</h2>
+  <p class="pattern-highlight">超时不等于失败：第一次扣款可能已成功，只是回包丢了。重试必须带同一个幂等键。</p>
+  <div class="pattern-roles"><div class="pattern-role" data-pattern-role>调用方</div><div class="pattern-role" data-pattern-role>网络</div><div class="pattern-role" data-pattern-role>支付服务</div><div class="pattern-role" data-pattern-role>幂等记录</div></div>
+  <div class="pattern-controls" role="group" aria-label="过程步骤">
+    <button type="button" data-pattern-step aria-pressed="false" data-title="首次发起" data-detail="调用方生成业务请求唯一键 K。" data-active="0">1. 首次发起</button><button type="button" data-pattern-step aria-pressed="false" data-title="遇到超时" data-detail="网络丢失响应，调用方不知道扣款是否成功。" data-active="1">2. 遇到超时</button><button type="button" data-pattern-step aria-pressed="false" data-title="带键重试" data-detail="调用方复用 K，服务端查幂等记录。" data-active="0,2,3">3. 带键重试</button><button type="button" data-pattern-step aria-pressed="false" data-title="返回结果" data-detail="若 K 已完成，返回首次结果，不再扣款。" data-active="2,3">4. 返回结果</button>
+    <button type="button" class="pattern-play" data-pattern-play aria-pressed="false">▶ 自动播放</button>
+  </div>
+  <div class="pattern-scene" aria-live="polite"><h3 data-scene-title></h3><p data-scene-detail></p></div>
+  <div class="pattern-progress" aria-hidden="true"><span data-pattern-progress></span></div>
+  <h3 style="margin-top:26px">改变条件，看执行路径</h3>
+  <p>同一笔支付尝试三种时序，观察重试和幂等如何配合。</p>
+  <div class="pattern-lab" data-pattern-lab>
+    <div class="pattern-lab-options" role="group" aria-label="选择实验条件"><button type="button" data-lab-option aria-pressed="false" data-route="请求 K&gt;服务端占位 K&gt;扣款&gt;保存结果&gt;返回成功" data-result="执行一次副作用。" data-why="键应绑定业务操作而非每次网络尝试。">首次成功</button><button type="button" data-lab-option aria-pressed="false" data-route="首次扣款成功&gt;响应丢失&gt;重试 K&gt;命中已有结果" data-result="第二次请求返回同一结果，不再次扣款。" data-why="超时后不能简单推断首次失败。">响应丢失</button><button type="button" data-lab-option aria-pressed="false" data-route="重试 K&gt;处理中记录&gt;等待/稍后重试" data-result="不并发执行第二次扣款。" data-why="退避、抖动和重试预算防止雪崩。">服务端忙</button></div>
+    <div class="pattern-lab-stage">
+      <div class="pattern-lab-route" data-lab-route aria-label="执行路径"></div>
+      <div class="pattern-lab-result"><strong>得到的结果</strong><p data-lab-result></p></div>
+      <p class="pattern-lab-why" data-lab-why></p>
+    </div>
+  </div>
+  <div class="pattern-decision">
+    <h3>什么时候适用？</h3>
+    <p class="pattern-decision-signal"><strong>判断信号：</strong>请求或消息可能在已产生副作用后丢失响应，调用方会再次发起同一业务操作。</p>
+    <ul class="pattern-list"><li>支付超时后重试扣款：复用同一业务幂等键，返回首次扣款结果。</li><li>消息队列重复投递积分事件：消费端按事件 ID 记录处理结果，避免重复加分。</li><li>创建订单的客户端网络中断：重试时复用请求键，避免生成两个订单。</li></ul>
+    <h3>和相近模式怎么区分？</h3>
+    <div class="pattern-table-wrap"><table class="pattern-table">
+      <thead><tr><th scope="col">相近方案</th><th scope="col">选择边界</th></tr></thead>
+      <tbody><tr><th scope="row">重试与幂等</th><td>重试处理瞬时故障以提高成功率；幂等约束重复请求的副作用。通常需要一起设计。</td></tr><tr><th scope="row">去重与幂等</th><td>去重只识别重复输入；幂等还需处理处理中状态、保存并返回首次结果，以及崩溃后的恢复。</td></tr></tbody>
+    </table></div>
+  </div>
+  <h3 style="margin-top:26px">核心伪代码</h3>
+  <pre class="pattern-code"><code>function charge(request):
+  key = request.idempotencyKey
+  created, record = store.insertIfAbsent(key, PROCESSING)
+  if not created:
+    if record.done: return record.savedResult
+    return RetryLater
+  result = payment.chargeOnce(request)
+  store.complete(key, result)
+  return result
+
+// 调用方重试始终复用 key，并设置次数/退避上限。</code></pre>
+  <p>幂等记录与真实扣款之间还有崩溃窗口；生产系统要用事务、支付渠道查询、对账与恢复流程闭合这段窗口。</p>
+</section>
+<!-- explicit pattern lesson end -->
+
+<section id="why" class="reveal">
     <h2><span class="icon" style="background:rgba(79,135,255,0.15)">🎯</span>为什么需要重试</h2>
     <p class="section-lead">网络抖动、服务短暂过载、GC 停顿都会导致调用失败。多数失败是<strong>瞬时</strong>的，稍等再试往往就成功了。重试是分布式容错的基本手段。</p>
     <div class="keyline"><strong>但：</strong>重试本身会带来副作用——<strong>重复请求</strong>。如果"扣款"被重试两次，用户就被扣了两笔。所以<strong>有重试就必须有幂等</strong>。</div>
@@ -162,5 +211,6 @@
   const spy = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) { const id = '#' + e.target.id; navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id)); } }); }, { rootMargin: '-60px 0px -70% 0px' });
   sections.forEach(s => s && spy.observe(s));
 </script>
+<script src="../../../../assets/pattern-lesson.js"></script>
 </body>
 </html>

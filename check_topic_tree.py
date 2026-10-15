@@ -13,6 +13,8 @@
   E  空课程分组                    → 尚无课程的占位目录不应出现在知识树
   F  重复专题 / 课程卡片            → 一个实体专题与课程页面只能有一个主入口
   G  重复专题展示名                → 同一学科索引中的不同专题应有可区分的名称
+  H  专题分组属性损坏              → 引号误截断 data-desc 等属性，浏览器无法正确读取简介
+  I  专题分组顺序与编号不符        → 索引展示顺序打乱学习路径
 
 用法： python3 check_topic_tree.py
 说明： 带 data-topic-tree 的子索引页会「自己管自己」，父级页不检查其子树。
@@ -20,10 +22,29 @@
 import os
 import re
 import sys
+from html.parser import HTMLParser
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SPECIAL = {"", "(根目录)", "(跨学科)"}
+SPECIAL = {"", "(根目录)"}
 PLACEHOLDER = {"coming-soon"}
+TOPIC_GROUP_ATTRIBUTES = {"class", "data-path", "data-title", "data-icon", "data-desc"}
+
+
+class TopicGroupAttributeParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.errors = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "section" or "topic-group" not in (dict(attrs).get("class") or "").split():
+            return
+        values = dict(attrs)
+        unexpected = sorted(set(values) - TOPIC_GROUP_ATTRIBUTES)
+        missing = sorted(TOPIC_GROUP_ATTRIBUTES - set(values))
+        valueless = sorted(key for key in TOPIC_GROUP_ATTRIBUTES if key in values and values[key] is None)
+        if unexpected or missing or valueless:
+            self.errors.append("第 %d 行：多余属性 %s，缺少属性 %s，无值属性 %s" %
+                               (self.getpos()[0], unexpected, missing, valueless))
 
 
 def is_tree_index(path):
@@ -101,6 +122,13 @@ def audit():
         if not groups:
             continue
         A, B, C, D, E, F, G = [], [], [], [], [], [], []
+        parser = TopicGroupAttributeParser()
+        with open(page, encoding="utf-8") as file:
+            parser.feed(file.read())
+        H = parser.errors
+        paths = [dp for dp, _, _ in groups if dp not in SPECIAL]
+        I = ["%s 排在 %s 前" % (left, right)
+             for left, right in zip(paths, paths[1:]) if left > right]
         covered, declared, seen_paths, seen_cards = set(), set(), set(), set()
         seen_titles = {}
 
@@ -152,8 +180,8 @@ def audit():
             if has_lesson and not any(x == d or x.startswith(d + "/") for x in declared):
                 D.append("真实目录 %s/ 未被任何 data-path 覆盖" % d)
 
-        if A or B or C or D or E or F or G:
-            report[rel_page] = (kind, A, B, C, D, E, F, G)
+        if A or B or C or D or E or F or G or H or I:
+            report[rel_page] = (kind, A, B, C, D, E, F, G, H, I)
 
     labels = [("A", "data-path 不是真实目录 → 左侧树凭空多出节点"),
               ("B", "卡片所在目录与分组 data-path 不一致 → 树的分组和内容对不上"),
@@ -161,14 +189,17 @@ def audit():
               ("D", "漏挂 / 孤立文件"),
               ("E", "空课程分组不应出现在知识树"),
               ("F", "一个专题与课程页面应只有一个主入口"),
-              ("G", "同一学科中的专题展示名应可区分")]
-    for page, (kind, A, B, C, D, E, F, G) in report.items():
+              ("G", "同一学科中的专题展示名应可区分"),
+              ("H", "专题分组的 HTML 属性应完整"),
+              ("I", "专题分组应按目录编号展示")]
+    for page, (kind, A, B, C, D, E, F, G, H, I) in report.items():
         print("\n" + "=" * 72)
         print("### %s   [%s]" % (page, kind))
         for tag, text, items in (("A", labels[0][1], A), ("B", labels[1][1], B),
                                  ("C", labels[2][1], C), ("D", labels[3][1], D),
                                  ("E", labels[4][1], E), ("F", labels[5][1], F),
-                                 ("G", labels[6][1], G)):
+                                 ("G", labels[6][1], G), ("H", labels[7][1], H),
+                                 ("I", labels[8][1], I)):
             if items:
                 print("  【%s %s】%d" % (tag, text, len(items)))
                 for i in items:

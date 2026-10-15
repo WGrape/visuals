@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>微服务调用契约：超时、重试与幂等 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>微服务调用契约：超时、重试与幂等</h1><p class="lead">沿一次下单调用链，设计延迟预算、失败语义和不会重复扣款的重试方式。</p></header>
+<section class="panel"><h2>先定义接口契约
+微服务拆分后，一次用户请求可能跨网关、订单、库存、支付多个进程。服务契约不只是 URL 与 JSON 字段，还包括调用截止时间、成功与错误码含义、幂等键、版本兼容、数据新鲜度和告警归属。调用方应知道“请求超时”只表示自己没收到结果，不等于下游没有执行。对于创建订单或扣款，必须能查询最终状态，不能把网络超时直接当作业务失败。</h2><p>响应字段新增通常比较容易兼容，删除或改变字段语义可能破坏旧客户端。应给出可执行的兼容策略：旧字段保留的期限、默认值、灰度期间两版本能否共存、谁负责迁移。契约测试需要覆盖成功、参数错误、下游拒绝、超时及重复请求，不只检查一个 happy path。服务发现解决“请求发给谁”，并不解决“请求是否安全地重复”。</p></section>
+<section class="panel"><h2>截止时间与预算
+假设下单接口的 P95 目标为 800 毫秒。网关认证预计 80 毫秒、订单校验 120 毫秒、支付 350 毫秒、网络和排队预留 150 毫秒，其余 100 毫秒留作抖动。上游应向下游传递剩余截止时间，而非每层重新设置 800 毫秒；否则三层串联可能总共等待数秒。排队时间也计入用户体感，不应只统计下游函数执行时间。</h2><p>如果支付服务接到请求时只剩 30 毫秒，而其正常 P95 为 300 毫秒，应快速拒绝或转异步确认，避免执行到一半上游已经放弃。取消信号应尽可能传到下游，但取消到达时动作可能已经提交，因此后续仍需查询或补偿。监控要同时记录客户端超时、服务端完成、队列等待和连接建立耗时。</p></section>
+<section class="panel"><h2>逐步推演</h2><div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 分配预算</button><button type="button" data-step-button aria-pressed="false">2. 识别失败</button><button type="button" data-step-button aria-pressed="false">3. 安全重试</button><button type="button" data-step-button aria-pressed="false">4. 验证恢复</button></div><div class="step-panel" data-step-panel ><h3>分配预算</h3><p>从用户可接受时延向每一跳分配截止时间。</p></div><div class="step-panel" data-step-panel hidden><h3>识别失败</h3><p>区分明确失败、响应丢失与结果未知。</p></div><div class="step-panel" data-step-panel hidden><h3>安全重试</h3><p>用稳定幂等键和总截止时间限制写请求重试。</p></div><div class="step-panel" data-step-panel hidden><h3>验证恢复</h3><p>注入超时与丢包，核对订单、支付和库存最终状态。</p></div></div></section>
+<section class="panel"><h2>重试并不是免费补救
+重试适用于瞬时网络故障或可恢复的 503、限流响应，不适用于明确的参数错误。每次重试都会增加下游负载；故障时若三层服务各重试三次，最深层可能面对放大后的请求数。选择一个责任层重试，并设置最大次数、总截止时间、指数退避与随机抖动。要尊重服务端 Retry-After，避免所有客户端在同一时刻重新冲击依赖。</h2><p>读请求通常容易重试，但要注意读是否消耗额度或触发副作用。写请求应有业务幂等键，例如“用户 ID + 客户端下单请求 ID”，由权威存储在事务中保证同一键只执行一次，并返回首次处理结果。仅在内存中记住最近请求，进程重启后仍可能重复扣款。</p></section>
+<section class="panel"><h2>一次下单的失败时间线
+用户提交订单 A，订单服务向支付服务发送带幂等键 K 的扣款请求。支付完成数据库提交，但响应包在网络中丢失；订单服务看到超时。若立即换一个新键 K2 重试，支付系统可能再次扣款。正确做法是用相同 K 查询或重试，支付服务返回与首次一致的结果。之后订单服务再推进订单状态，必要时通过事件补发或人工对账处理未知结果。</h2><p>即使支付接口幂等，也要考虑库存预留与订单状态之间的事务边界。多个服务不能靠一次 HTTP 调用获得数据库级原子性；可以设计状态机、超时释放、补偿与对账。对用户界面应显示“处理中”并允许查询，而不是在结果未知时同时展示“失败”和继续扣款按钮。</p></section>
+<section class="panel"><h2>限流、熔断与舱壁
+当支付延迟升高时，订单线程池很快被等待占满。并发上限或舱壁把对支付的等待限制在可控范围，拒绝多余请求并尽早反馈。熔断器根据近期失败和慢调用暂时减少请求，并让少量探测请求确认恢复；它不能替代超时和容量规划。限流规则要区分租户和关键交易，避免一个批量任务耗尽所有用户的额度。</h2><p>这些机制需在同一个延迟预算中配合。若熔断器统计的是客户端主动取消，也可能误判下游故障；若重试请求不计入限流，又会放大拥塞。以端到端成功率、P95/P99、重试放大倍数和下游饱和度观察整体效果，而不是分别看每个库的仪表盘。</p></section>
+<section class="panel"><h2>上线与复盘清单
+上线前通过故障注入测试响应丢失、慢响应、连接失败、服务端已提交但客户端超时四种情形。用同一幂等键连续发送请求，检查只产生一次扣款并返回同一业务结果。记录 trace ID、幂等键的安全摘要、各服务截止时间和状态转移，避免日志泄漏支付敏感字段。</h2><p>复盘时把用户看到的结果、订单状态、支付记录和库存记录对齐。若只能从单一服务日志猜测全局结果，说明状态查询或对账能力不足。契约要写进接口文档和自动化校验，并由调用方与提供方共同维护。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>支付接口超时后能直接提示用户扣款失败吗？</summary><p>不能。服务端可能已提交，只是响应丢失；应使用同一幂等键查询最终状态并在未知时显示处理中。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<footer>继续阅读：<a href="microservices.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

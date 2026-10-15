@@ -41,6 +41,7 @@ ul.tight { margin:10px 0; padding-left:22px; }
 ul.tight li { margin:6px 0; }
 footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </style>
+<link rel="stylesheet" href="../../../../assets/pattern-lesson.css">
 </head>
 <body>
 <header class="topbar">
@@ -49,6 +50,53 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </header>
 <div class="wrap">
   <div class="hero"><h1>📥 Cache-Aside 读写时序</h1><p>读时回填、写时删除的并发窗口与最佳实践</p></div>
+<!-- explicit pattern lesson start -->
+<section class="pattern-lesson" data-pattern-lesson aria-label="模式动态讲解">
+  <span class="pattern-eyebrow">图解 · 交互 · 伪代码</span>
+  <h2>先看一次完整的调用</h2>
+  <p class="pattern-highlight">读时“先查缓存，未命中再回源”；写时“先写数据库，再删缓存”。并发时仍可能短暂读到旧值。</p>
+  <div class="pattern-roles"><div class="pattern-role" data-pattern-role>读请求</div><div class="pattern-role" data-pattern-role>缓存</div><div class="pattern-role" data-pattern-role>数据库</div><div class="pattern-role" data-pattern-role>写请求</div></div>
+  <div class="pattern-controls" role="group" aria-label="过程步骤">
+    <button type="button" data-pattern-step aria-pressed="false" data-title="读缓存" data-detail="读请求先尝试 cache.get。" data-active="0,1">1. 读缓存</button><button type="button" data-pattern-step aria-pressed="false" data-title="未命中回源" data-detail="缓存未命中时查询数据库。" data-active="0,2">2. 未命中回源</button><button type="button" data-pattern-step aria-pressed="false" data-title="写入更新" data-detail="写请求先提交数据库，再删除旧缓存。" data-active="3,2,1">3. 写入更新</button><button type="button" data-pattern-step aria-pressed="false" data-title="并发窗口" data-detail="旧读请求可能在删缓存后回填旧值。" data-active="0,1,2,3">4. 并发窗口</button>
+    <button type="button" class="pattern-play" data-pattern-play aria-pressed="false">▶ 自动播放</button>
+  </div>
+  <div class="pattern-scene" aria-live="polite"><h3 data-scene-title></h3><p data-scene-detail></p></div>
+  <div class="pattern-progress" aria-hidden="true"><span data-pattern-progress></span></div>
+  <h3 style="margin-top:26px">改变条件，看执行路径</h3>
+  <p>切换命中、未命中和并发时序。第三种不是“删缓存失败”，而是读写交错。</p>
+  <div class="pattern-lab" data-pattern-lab>
+    <div class="pattern-lab-options" role="group" aria-label="选择实验条件"><button type="button" data-lab-option aria-pressed="false" data-route="读请求&gt;缓存命中&gt;直接返回" data-result="不访问数据库。" data-why="热门数据读延迟低。">缓存命中</button><button type="button" data-lab-option aria-pressed="false" data-route="读请求&gt;缓存未命中&gt;数据库查询&gt;回填缓存&gt;返回" data-result="下次读取可命中。" data-why="要设 TTL 并防止大量请求同时回源。">缓存未命中</button><button type="button" data-lab-option aria-pressed="false" data-route="读 A 查到旧 DB&gt;写 B 更新 DB 并删缓存&gt;读 A 回填旧值" data-result="缓存暂时保存旧数据。" data-why="写后删缓存只能缩小窗口，不能单独保证强一致。">并发脏回填</button></div>
+    <div class="pattern-lab-stage">
+      <div class="pattern-lab-route" data-lab-route aria-label="执行路径"></div>
+      <div class="pattern-lab-result"><strong>得到的结果</strong><p data-lab-result></p></div>
+      <p class="pattern-lab-why" data-lab-why></p>
+    </div>
+  </div>
+  <div class="pattern-decision">
+    <h3>什么时候适用？</h3>
+    <p class="pattern-decision-signal"><strong>判断信号：</strong>应用能控制缓存与数据库两端，并接受写后短暂旧值窗口。</p>
+    <ul class="pattern-list"><li>商品资料大量读取，编辑相对少：未命中时从数据库加载，并设置合理 TTL。</li><li>订单摘要读取频繁：更新数据库后删除对应缓存键，下次读取重新构建。</li><li>已有数据库访问层的服务逐步加缓存：只为被测量证明是热点的查询加回填。</li></ul>
+    <h3>和相近模式怎么区分？</h3>
+    <div class="pattern-table-wrap"><table class="pattern-table">
+      <thead><tr><th scope="col">相近方案</th><th scope="col">选择边界</th></tr></thead>
+      <tbody><tr><th scope="row">Read-Through</th><td>缓存代理负责加载数据库；Cache-Aside 的应用必须写未命中、回填和失效逻辑。</td></tr><tr><th scope="row">Write-Through</th><td>Write-Through 的缓存层同步完成写库；Cache-Aside 的应用先提交数据库，再删旧缓存。</td></tr></tbody>
+    </table></div>
+  </div>
+  <h3 style="margin-top:26px">核心伪代码</h3>
+  <pre class="pattern-code"><code>function read(key):
+  cached = cache.get(key)
+  if cached != MISS: return cached
+  value = db.get(key)
+  cache.set(key, value, ttl)
+  return value
+
+function write(key, value):
+  db.update(key, value)   // 先提交权威数据
+  cache.delete(key)      // 再使旧缓存失效</code></pre>
+  <p>需要更严格新鲜度时，可用版本号、条件回填或串行化关键路径；延迟双删只缓解特定时序，不提供强一致保证。</p>
+</section>
+<!-- explicit pattern lesson end -->
+
 <div class="card-grid"><div class="card"><div class="ico">📖</div><h3>读路径</h3><p>未命中回填</p></div><div class="card"><div class="ico">✏️</div><h3>写路径</h3><p>更新库+删缓存</p></div><div class="card"><div class="ico">⚠️</div><h3>并发窗</h3><p>不一致</p></div><div class="card"><div class="ico">✅</div><h3>最佳实践</h3><p>延迟双删</p></div></div>
 <h2>读时序</h2>
 <p>先查缓存；命中返回；未命中查 DB，写入缓存后返回。注意设置 TTL 兜底。</p>
@@ -83,5 +131,6 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 <div class="qa"><div class="qa-q">Q：为什么写时删缓存而非更新？</div><div class="qa-a">A：避免并发写导致缓存与 DB 不一致，删更稳妥。</div></div><div class="qa"><div class="qa-q">Q：读未命中会引入脏数据吗？</div><div class="qa-a">A：在并发窗可能，靠延迟双删与短 TTL 缓解。</div></div><div class="qa"><div class="qa-q">Q：Cache-Aside 最终一致吗？</div><div class="qa-a">A：是，依赖删除+回填最终收敛。</div></div>
 </div>
 <footer>© 2026 Visuals · 一致性 / Cache-Aside 时序</footer>
+<script src="../../../../assets/pattern-lesson.js"></script>
 </body>
 </html>

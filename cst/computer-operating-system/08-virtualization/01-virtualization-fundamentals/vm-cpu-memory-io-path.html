@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>虚拟机的 CPU、内存与 I/O 路径 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>虚拟机的 CPU、内存与 I/O 路径</h1><p class="lead">从 Guest 发出一次读请求开始，分清 vCPU 调度、二级页表和虚拟设备带来的成本与隔离边界。</p></header>
+<section class="panel"><h2>虚拟机看到的机器
+Guest 操作系统认为自己管理 CPU、页表和磁盘，实际上物理资源由宿主与 Hypervisor 管理。vCPU 是可调度的执行上下文，不等于永久独占的物理核心；Guest 物理地址也还需映射到宿主物理地址；Guest 看到的磁盘设备可能由虚拟设备、宿主文件或块设备实现。虚拟化的核心是保持 Guest 认为接口可信，同时让多个 Guest 安全共享真实机器。</h2><p>不要把“虚拟机开了 4 核”解释为始终占有 4 个物理核。若宿主 CPU 超卖，多个 vCPU 会竞争运行时间；某个 vCPU 持有 Guest 内核锁却被宿主暂停时，其他 vCPU 可能空等。诊断要同时看 Guest 内 CPU 利用率和宿主调度等待，单看 Guest 指标会漏掉竞争。</p></section>
+<section class="panel"><h2>CPU 的一次敏感操作
+普通用户代码可在硬件辅助虚拟化下直接执行大部分指令。Guest 内核执行需要特权的操作时，硬件可能触发 VM exit，切换到 Hypervisor 处理，再 VM entry 返回 Guest。这种切换有固定开销，所以频繁虚拟中断、端口访问或设备寄存器操作可能影响性能。现代硬件会减少不必要的退出，但不能假定所有特权动作零成本。</h2><p>一次 Guest 系统调用首先是 Guest 用户态到 Guest 内核态的切换，不必然每次都退出到 Hypervisor。把系统调用次数直接等同于 VM exit 次数是错误的。实际退出频率取决于硬件扩展、虚拟设备实现和配置；分析性能时应使用 Hypervisor 提供的计数器而非凭概念猜测。</p></section>
+<section class="panel"><h2>逐步推演</h2><div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 建立映射</button><button type="button" data-step-button aria-pressed="false">2. 追踪请求</button><button type="button" data-step-button aria-pressed="false">3. 定位等待</button><button type="button" data-step-button aria-pressed="false">4. 验证配置</button></div><div class="step-panel" data-step-panel ><h3>建立映射</h3><p>列出 vCPU、Guest 内存与虚拟设备各自对应的宿主资源。</p></div><div class="step-panel" data-step-panel hidden><h3>追踪请求</h3><p>沿 Guest 应用、内核、Hypervisor 到物理设备画出路径。</p></div><div class="step-panel" data-step-panel hidden><h3>定位等待</h3><p>同时读取 Guest 与宿主指标，识别调度或设备排队。</p></div><div class="step-panel" data-step-panel hidden><h3>验证配置</h3><p>在实际多租户负载中测吞吐和尾延迟。</p></div></div></section>
+<section class="panel"><h2>两级地址翻译
+Guest 进程用虚拟地址访问内存，Guest 页表将其映射到 Guest 物理地址；二级地址转换再映射到真正机器页。CPU 的 TLB 缓存地址翻译结果，减少每次访存都走多层页表的成本。若工作集很大、频繁切换或缺页，TLB 命中率下降，会放大翻译开销。大页可减少页表层级和 TLB 压力，但可能增加内存碎片与分配约束。</h2><p>宿主内存紧张时可能回收、交换或迁移 Guest 页面。Guest 看到内存有空余，也不代表宿主没有压力；相反，Guest 内缓存增长也可能让宿主误判可回收空间。容量规划应结合宿主可用内存、交换、Guest 缺页与实际工作集。对低延迟服务，内存超卖要比平均吞吐更谨慎。</p></section>
+<section class="panel"><h2>一次磁盘读取路径
+Guest 应用发起 read，Guest 文件系统查缓存，未命中时经虚拟块设备提交 I/O。若采用仿真设备，Hypervisor 需要模拟设备行为；半虚拟化驱动如 virtio 可通过共享队列减少频繁仿真。请求随后进入宿主 I/O 栈、真实存储，再沿相反路径完成。每一层都可能排队，因此应用看到的“磁盘慢”不一定是盘本身慢。</h2><p>Guest 页缓存、宿主页缓存和存储设备缓存可能同时存在，导致重复占用或写入确认语义复杂。直通设备可降低虚拟化开销，但迁移与共享能力可能受限制。选型时要明确目标是吞吐、尾延迟、热迁移还是强隔离，并在真实块大小、读写比例和并发数下测量。</p></section>
+<section class="panel"><h2>容器与虚拟机的边界
+容器共享宿主内核，主要依靠 namespaces、cgroups 与其他安全机制划分进程视图和资源；虚拟机运行独立 Guest 内核，隔离边界不同。容器启动快、资源开销通常小，但内核漏洞可能影响同一宿主上的其他容器。虚拟机也不是绝对安全，仍需补丁、设备隔离和镜像治理。二者可以组合：在虚拟机里运行容器，为租户提供更明确的内核边界。</h2><p>容器中的 CPU 限额与虚拟机的 vCPU 分配都可能出现等待，但观察指标和控制点不同。选择运行方式要看安全域、操作系统需求、部署密度和运维能力，而非仅比较启动秒数。</p></section>
+<section class="panel"><h2>如何定位性能瓶颈
+压测时记录 Guest 内应用 P95/P99、CPU、缺页和 I/O 队列，同时记录宿主 vCPU 等待、VM exit、内存压力、设备队列和存储延迟。逐层排除：如果 Guest 的 CPU 使用不高但宿主调度等待高，先查 CPU 超卖；如果 Guest 缺页与宿主交换同时上升，先查内存；如果存储本身健康而虚拟设备队列积压，检查驱动和并发配置。</h2><p>不要只用一次空闲宿主的 microbenchmark 宣称生产可达性能。多租户竞争、备份与热迁移都会改变尾延迟。每项优化都应在目标工作负载下测前后对照，并保留回退设置。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>Guest 中发起一次系统调用，就必然发生一次 VM exit 吗？</summary><p>不必然。用户态进入 Guest 内核与退出到 Hypervisor 是两种不同切换；具体是否退出取决于特权操作和硬件配置。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<footer>继续阅读：<a href="virtualization-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

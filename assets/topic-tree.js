@@ -44,7 +44,6 @@
     const headerEl = document.querySelector("header");
 
     const ROOT_LABEL = "(根目录)";
-    const CROSS_LABEL = "(跨学科)";
 
     function newDir(name, parent) {
         return {
@@ -72,9 +71,9 @@
         const count = topics ? topics.querySelectorAll(".card").length : 0;
         const item = { rawPath: rawPath, title: title, icon: icon, desc: desc, topics: topics, count: count };
 
-        const isSpecial = rawPath === "" || rawPath === ROOT_LABEL || rawPath === CROSS_LABEL;
+        const isSpecial = rawPath === "" || rawPath === ROOT_LABEL;
         if (isSpecial) {
-            // 「(根目录) / (跨学科)」这类没有真实目录的分组，挂到根节点上，稍后作为顶层节点渲染
+            // 根目录入口单独渲染；知识专题应始终对应真实目录。
             root.groups.push(item);
             root.count += count;
         } else {

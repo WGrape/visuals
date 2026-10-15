@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>InfluxDB 原理图解</title>
+<title>InfluxDB 1.x/2.x 原理图解</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   :root{
@@ -62,8 +62,8 @@
 </head>
 <body>
 <header>
-  <h1>InfluxDB 原理图解</h1>
-  <p>Measurement / Tag / Field 数据模型、TSM 存储引擎与 Line Protocol</p>
+  <h1>InfluxDB 1.x/2.x 原理图解</h1>
+  <p>以 TSM 路线为例：Measurement / Tag / Field、Line Protocol 与版本相关的查询和保留机制</p>
   <span class="tag">InfluxDB</span><span class="tag">Line Protocol</span><span class="tag">TSM</span><span class="tag">Retention Policy</span><span class="tag">Flux</span>
 </header>
 <nav>
@@ -77,10 +77,7 @@
 <main>
 
 <div class="lead">
-  <b>一句话总结：</b>InfluxDB 是最流行的<b>推模式（push）通用时序数据库</b>。
-  它的三件套是：<b>Line Protocol</b> 行协议写入、
-  <b>TSM（Time-Structured Merge Tree）</b> 存储引擎、
-  <b>Retention Policy + Continuous Query</b> 做数据生命周期管理。
+  <b>本页范围：</b>以 InfluxDB 1.x/2.x 的 TSM 存储路线讲解数据模型、Line Protocol 写入与查询。1.x 的 Retention Policy 和 Continuous Query、2.x 的 bucket 和 task 分别说明；InfluxDB 3.x 的存储与查询架构不同，不能照搬本页的 TSM、Flux 或 CQ 细节。生产选型应核对实际版本和部署形态。
 </div>
 
 <section id="model">
@@ -149,7 +146,7 @@ curl -i -XPOST 'http://localhost:8086/write?db=mydb' \
   <div class="lead ok">
     <b>为什么用行协议？</b>时序数据的写入量极大，JSON 的解析开销不可接受。
     行协议是<b>最简文本格式</b>：一次批量写几千行，服务端顺序解析，
-    配合 TSM 的顺序写，吞吐可达每秒数十万点。
+    写入吞吐取决于批量大小、字段数、基数、硬件和集群形态，需用实际负载测试。
   </div>
   <div class="lead warn">
     <b>注意：</b>行协议里 tag 与 field 的<b>顺序会影响解析</b>（必须 tag 在前、field 在后），
@@ -211,7 +208,7 @@ curl -i -XPOST 'http://localhost:8086/write?db=mydb' \
   </div>
 
   <h3>Shard：按时间切分的存储单元</h3>
-  <p>InfluxDB 按 Retention Policy 里的 <b>shard group duration</b>（默认 7 天或 1 天）
+  <p>在本页所讲的 TSM 路线中，InfluxDB 按保留配置与 <b>shard group duration</b>
   把数据切成一个个 <b>shard</b>。查询带时间范围时能直接跳过无关 shard；
   过期时<b>整个 shard 目录删掉</b>——这是它比 MySQL 的 <code>DELETE</code> 高效得多的原因。</p>
 </section>
@@ -229,8 +226,7 @@ curl -i -XPOST 'http://localhost:8086/write?db=mydb' \
       <td><code>from(bucket:"m") |&gt; range(start:-1h) |&gt; filter(fn:(r)=&gt;r.host=="web1") |&gt; aggregateWindow(every:1m, fn:mean)</code></td>
     </tr>
   </table>
-  <p class="muted">Flux 更强大（支持跨 measurement JOIN、多数据源、复杂变换），
-  但学习曲线陡；InfluxQL 简单直观但能力有限。2.x 时代两者共存。</p>
+  <p class="muted">Flux 在 2.x 提供函数式数据处理，InfluxQL 采用类 SQL 风格；可用语法与兼容方式需按实例版本核对。3.x 不应沿用本页的 Flux 查询示例。</p>
 
   <pre><code>-- InfluxQL 常用模式
 -- 1. 时间窗口聚合（降采样的核心）
@@ -248,6 +244,12 @@ SELECT * FROM "autogen"."cpu"       -- 指定 RP
 
 <section id="rp">
   <h2><span class="n">05</span>保留策略与连续查询</h2>
+  <p>下方 RP/CQ 命令以 InfluxDB 1.x 为例。InfluxDB 2.x 用 bucket 管理保留期，并可用 task 组织周期性处理；两套配置不能直接互换。</p>
+  <table>
+    <tr><th>范围</th><th>保留期</th><th>周期性聚合</th></tr>
+    <tr><td>1.x 示例</td><td>Database 下的 Retention Policy</td><td>Continuous Query 写入目标 measurement/RP</td></tr>
+    <tr><td>2.x 示例</td><td>Bucket 的保留配置</td><td>Task 或外部任务写入目标 bucket</td></tr>
+  </table>
   <div class="grid">
     <div class="card">
       <h4>⏳ Retention Policy（RP）</h4>
@@ -288,24 +290,22 @@ END</code></pre>
     <tr><td>写入模式</td><td><b>推（push）</b>：客户端主动上报</td><td><b>拉（pull）</b>：服务端定时抓取 /metrics</td></tr>
     <tr><td>核心场景</td><td>通用时序（IoT、业务指标、APM）</td><td><b>K8s / 云原生监控告警</b></td></tr>
     <tr><td>数据模型</td><td>measurement + tag + field</td><td>metric + label（无 field 区分）</td></tr>
-    <tr><td>查询语言</td><td>InfluxQL / Flux</td><td><b>PromQL</b>（监控领域事实标准）</td></tr>
-    <tr><td>告警</td><td>需额外组件（Kapacitor）</td><td><b>内置 Alertmanager</b></td></tr>
-    <tr><td>集群</td><td>开源版单机，集群是商业版</td><td>单机为主，靠 <b>Thanos / VictoriaMetrics</b> 扩展</td></tr>
+    <tr><td>查询语言</td><td>本页的 1.x/2.x 使用 InfluxQL 或 Flux；3.x 另行核对</td><td><b>PromQL</b>（监控领域常用）</td></tr>
+    <tr><td>告警</td><td>按版本使用 Kapacitor、检查/通知或外部系统</td><td>Prometheus 告警规则配合独立的 Alertmanager</td></tr>
+    <tr><td>集群</td><td>开源、企业和云版能力因版本与方案而异</td><td>本地存储与远程存储/集群方案分别选型</td></tr>
     <tr><td>生态</td><td>TICK Stack（Telegraf 采集）</td><td><b>CNCF 毕业项目，生态最广</b></td></tr>
   </table>
 
   <div class="qa">
     <b>Q：什么时候选 InfluxDB 而不是 Prometheus？</b><br>
-    A：① <b>客户端无法被拉取</b>（如 IoT 设备在 NAT 后、边缘设备）→ 必须推模式；
+    A：① <b>客户端难以直接被拉取</b>（如部分 NAT 后的 IoT 设备）时，主动上报可能更方便；
     ② 需要<b>存储非数值数据</b>（字符串 field、布尔）或需要 field 概念；
     ③ 已有 Telegraf 采集生态。
-    <b>反之，如果是 K8s/微服务监控 + 告警，Prometheus 生态更成熟，优先选它。</b>
+    若主要是 K8s/微服务指标与告警，也应比较 Prometheus 生态。两者都可通过采集代理或集成组件适配不同网络拓扑。
   </div>
   <div class="qa">
     <b>Q：InfluxDB 的高可用怎么做？</b><br>
-    A：开源版（2.x）仍是<b>单机</b>，高可用要靠<b>双写 + 反向代理</b>或定期备份；
-    生产级集群需要<b>InfluxDB Enterprise / Cloud</b> 商业版。
-    这也是很多公司在大规模场景下转向 VictoriaMetrics、TDengine 或 ClickHouse 的原因之一。
+    A：先确认使用的 InfluxDB 版本和发行版，再设计多实例、故障切换与数据恢复。定期备份解决恢复问题，不能代替高可用；双写和代理也需要处理一致性、故障检测与切换。企业版或云版的集群能力应按具体方案核对。
   </div>
 </section>
 

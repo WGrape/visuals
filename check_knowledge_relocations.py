@@ -21,12 +21,20 @@ def audit(root=ROOT, ledger=None):
     data = json.loads(ledger.read_text(encoding="utf-8"))
     errors = []
     counts = {}
-    active_sources = set()
+    active_sources = {}
     for section, kind in ACTIVE.items():
         entries = data[section]
         counts[section] = len(entries)
         for source, destination in entries.items():
-            active_sources.add(source)
+            if source.startswith("/") or ".." in source.split("/") or "\\" in source:
+                errors.append(f"旧路径不是仓库相对路径：{section}: {source}")
+            if source in active_sources:
+                previous_section, previous_destination = active_sources[source]
+                errors.append(
+                    f"旧路径重复映射：{source}: "
+                    f"{previous_section} -> {previous_destination}; {section} -> {destination}")
+            else:
+                active_sources[source] = (section, destination)
             path = (root / destination).resolve()
             if source == destination:
                 errors.append(f"自指映射：{section}: {source}")
@@ -36,6 +44,9 @@ def audit(root=ROOT, ledger=None):
                 errors.append(f"课程/索引目标不存在：{section}: {source} -> {destination}")
             elif kind == "directory" and not path.is_dir():
                 errors.append(f"目录目标不存在：{section}: {source} -> {destination}")
+    for source, (section, destination) in active_sources.items():
+        if destination in active_sources:
+            errors.append(f"映射目标仍是旧路径：{section}: {source} -> {destination}")
     unavailable = data.get("unavailable_legacy_entries", {})
     archived = 0
     for source, entry in unavailable.items():

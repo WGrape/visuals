@@ -24,9 +24,9 @@ while IFS= read -r -d '' html_file; do
         continue
     fi
 
-    # 跳过特定文件
-    if [[ "$html_file" == *".bak" || "$html_file" == *"container.html" ]]; then
-        # 备份文件、在visuals中引入不同HTML页面的一个容器文件
+    # 只跳过仓库根目录的页面容器，不能忽略知识课程中同名后缀的文件。
+    if [[ "$html_file" == *".bak" || "$html_file" == "./container.html" ]]; then
+        # 备份文件、在visuals中引入不同HTML页面的根目录容器文件
         continue
     fi
 

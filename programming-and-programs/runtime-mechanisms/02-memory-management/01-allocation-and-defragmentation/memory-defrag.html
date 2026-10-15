@@ -304,11 +304,12 @@
   <a href="#python">Python</a>
   <a href="#go">Go</a>
   <a href="#php">PHP</a>
-  <a href="#redis">Redis</a>
+  <a href="#02-redis">Redis</a>
   <a href="#compare">对比</a>
 </nav>
 
 <div class="container">
+<p style="margin-top:20px;color:var(--text-secondary)">本页比较应用运行时和 Redis 的分配与整理策略；物理页框层面的伙伴系统与页面规整见<a href="../../../../cst/computer-operating-system/05-memory-management/02-allocation-and-fragmentation/memory-defragmentation.html">操作系统物理内存碎片与规整</a>。</p>
 
 <!-- ========== OVERVIEW ========== -->
 <section class="section" id="overview">
@@ -711,113 +712,11 @@ gc_collect_cycles();
 <section class="section" id="02-redis">
   <div class="section-header">
     <div class="section-icon" style="background:var(--accent-redis);">🔴</div>
-    <h2>Redis — Active Defrag 主动在线碎片整理</h2>
+    <h2>Redis — 对比视角：主动整理</h2>
   </div>
-
   <div class="card">
-    <h4>核心思路：遍历 jemalloc 的 bin，找到碎片页，把数据搬到连续区域</h4>
-    <p>Redis 4.0 之前只能靠重启来整理碎片。4.0 引入 <strong>Active Defrag</strong>：在服务不中断的情况下，逐步扫描、搬迁碎片数据到连续内存页，同时更新引用（类似 Java G1 的 Evacuation，但粒度更细）。</p>
-  </div>
-
-  <div class="flow">
-    <div class="flow-node" style="background:var(--accent-redis);">扫描 jemalloc<br>活跃 bin</div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-node" style="background:#e74c3c;">识别碎片页<br>利用率低</div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-node" style="background:#c0392b;">分配新页<br>搬迁数据</div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-node" style="background:var(--accent-redis);">更新引用<br>（dict/ziplist…）</div>
-    <div class="flow-arrow">→</div>
-    <div class="flow-node" style="background:#27ae60;">释放旧页<br>归还 OS</div>
-  </div>
-
-  <h3>🔹 Active Defrag 实现细节</h3>
-
-  <div class="highlight redis">
-    <h4>Step 1 —— 获取 jemalloc 碎片统计</h4>
-    <p>调用 <code>je_mallctl("stats.arenas.&lt;i&gt;.bins.&lt;j&gt;.slabs", ...)</code> 拿到每个 bin 中各 slab 的已用大小和总大小，计算利用率。利用率低于阈值（默认 10%）的 slab 标记为碎片页。</p>
-  </div>
-
-  <div class="highlight redis">
-    <h4>Step 2 —— 搬迁数据（处理各种数据结构）</h4>
-    <p>对碎片页中的 key-value 根据不同数据类型分别搬迁。搬迁前后数据内容不变，但地址变了——需要更新所有引用指向新地址。</p>
-  </div>
-
-  <div class="info-grid">
-    <div class="info-item">
-      <div class="label">String (SDS)</div>
-      <div class="value">直接 memcpy + 更新 dict entry 指针</div>
-    </div>
-    <div class="info-item">
-      <div class="label">List</div>
-      <div class="value">重建 quicklist / ziplist 节点</div>
-    </div>
-    <div class="info-item">
-      <div class="label">Hash / Set / ZSet</div>
-      <div class="value">小于阈值 → 重建 ziplist / listpack<br>大于阈值 → 重建 dict</div>
-    </div>
-    <div class="info-item">
-      <div class="label">Stream</div>
-      <div class="value">重建 rax 树和 consumer group</div>
-    </div>
-  </div>
-
-  <div class="code-block">
-    <span class="lang-tag">redis.conf</span>
-    <code><span class="comment"># ===== Active Defrag 配置 =====</span>
-
-<span class="comment"># 开启主动碎片整理（默认关闭）</span>
-activedefrag yes
-
-<span class="comment"># 触发条件：碎片率 ≥ 100% + 碎片 ≥ 100MB</span>
-active-defrag-ignore-bytes 100mb
-active-defrag-threshold-lower 10
-
-<span class="comment"># 超过此碎片率时加大整理力度</span>
-active-defrag-threshold-upper 100
-
-<span class="comment"># CPU 占用控制（每次事件循环最小/最大耗时占比）</span>
-active-defrag-cycle-min 5
-active-defrag-cycle-max 75
-
-<span class="comment"># 每次扫描的 jemalloc bin 的最大搬迁量</span>
-active-defrag-max-scan-fields 1000</code>
-  </div>
-
-  <div class="code-block">
-    <span class="lang-tag">redis-cli</span>
-    <code><span class="comment"># 查看当前碎片率</span>
-INFO memory
-<span class="comment"># mem_fragmentation_ratio = used_memory_rss / used_memory</span>
-<span class="comment"># &gt; 1.5 表示碎片严重</span>
-
-<span class="comment"># 查看碎片整理状态</span>
-INFO stats | grep defrag
-
-<span class="comment"># 手动触发一次碎片整理（4.0+）</span>
-MEMORY PURGE
-
-<span class="comment"># 查看内存详细信息</span>
-MEMORY STATS</code>
-  </div>
-
-  <div class="highlight redis">
-    <h4>Active Defrag 的巧妙之处</h4>
-    <p><strong>增量式运行：</strong>不是一次性扫完全堆，而是在每次 <code>serverCron()</code> 事件循环中执行一小段，通过 <code>active-defrag-cycle-min/max</code> 控制 CPU 占比。这样即使用户请求量大，也不会明显增加延迟。</p>
-    <p><strong>引用更新难点：</strong>Redis 内部有很多地方持有指针——dict entry → key/value、rax node → children、quicklist node → 前后节点… 每个搬迁都要找到并更新所有这些引用。这是 Active Defrag 代码最复杂的部分。</p>
-    <p><strong>jemalloc 版本要求：</strong>必须是 jemalloc 4.0+（支持 malloc_size 和详细的 bin 统计 API）。</p>
-  </div>
-
-  <div class="card">
-    <h4>Redis 碎片整理总结</h4>
-    <ul style="padding-left:20px;color:var(--text-secondary);line-height:2;">
-      <li><strong>Active Defrag 是业界标杆：</strong>在线不中断搬迁，唯一生产级方案</li>
-      <li><strong>依赖 jemalloc：</strong>libc malloc 不支持 Active Defrag</li>
-      <li><strong>增量式（非一次性）：</strong>避免卡顿，可调 CPU 占比</li>
-      <li><strong>覆盖全部数据结构：</strong>String / List / Hash / Set / ZSet / Stream / Module</li>
-      <li><strong>MEMORY PURGE：</strong>手动命令，立即触发一次整理</li>
-      <li><strong>碎片率 &gt; 1.5 建议关注，&gt; 2.0 需排查 bigkey 或过期策略</strong></li>
-    </ul>
+    <p>与 Java 等语言运行时的 GC 不同，Redis 主要处理的是分配器空间碎片。Active Defrag 在事件循环中分批尝试重分配对象并更新内部引用，让旧分配块有机会释放；它需要权衡整理 CPU 开销与请求延迟。</p>
+    <p>Redis 的触发条件、配置、监控指标和数据结构细节统一在<a href="../../../../database-system/nosql-db/01-kv/02-redis/06-memory/03-memory-optimization/redis-memory-defrag.html">Redis 内存碎片整理专题</a>讲解；本页只保留跨运行时比较。</p>
   </div>
 </section>
 

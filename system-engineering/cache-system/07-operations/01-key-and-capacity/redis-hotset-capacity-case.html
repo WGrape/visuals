@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2000 万源数据、20 万热点：Redis 缓存容量案例 - Visuals</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1c2a40;--panel2:#243751;--line:#40516b;--text:#ecf2f8;--muted:#b8c7d7;--accent:#78d3e5;--focus:#ffc873}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.7 system-ui,-apple-system,"PingFang SC",sans-serif}a{color:var(--accent)}a:focus-visible,input:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.shell{width:min(1000px,calc(100% - 32px));margin:auto;padding:26px 0 72px}.back{display:inline-block;margin-bottom:24px}h1{font-size:clamp(1.9rem,5vw,2.8rem);line-height:1.22;margin:.2em 0}.lead{font-size:1.1rem;color:var(--muted);max-width:72ch}h2{font-size:1.35rem;margin:0 0 14px}h3{font-size:1.08rem;margin:0 0 8px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:clamp(18px,3vw,28px);margin:18px 0}.panel p:last-child{margin-bottom:0}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:18px 0}.flow span{border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--panel2)}.flow b{color:var(--accent)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.metric{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:15px}.metric strong{display:block;font-size:1.25rem;color:var(--accent)}.metric span{font-size:.86rem;color:var(--muted)}
+.inputs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.inputs label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:.92rem}.inputs input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font:inherit}.note{border-left:4px solid var(--accent);padding:8px 0 8px 16px;color:var(--muted)}.scroll{overflow:auto}table{width:100%;min-width:620px;border-collapse:collapse}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:12px}th{color:var(--accent)}ul,ol{padding-left:1.35em}li{margin:8px 0}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--panel2);padding:2px 5px;border-radius:5px}footer{color:var(--muted);font-size:.87rem;margin-top:28px}@media(max-width:740px){.grid,.inputs{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main class="shell">
+<a class="back" href="../../index.html">← 返回缓存系统</a>
+<header><span aria-hidden="true">🔥</span><h1>2000 万源数据、20 万热点：Redis 缓存容量案例</h1><p class="lead">源库有 2000 万行，预算只允许缓存约 20 万条。先估算热集和内存，再选淘汰策略，最后用命中率与回源压力验证方案。</p></header>
+
+<section class="panel"><h2>先分清三个不同的数量</h2><ul>
+<li><strong>源数据量：</strong>MySQL 有 2000 万行，不代表每行都要进 Redis，也不能直接换算成内存。</li>
+<li><strong>热点条目数：</strong>计划缓存 20 万条，需要按真实访问分布和序列化后的 key/value 大小验证；热点集合会随时间变化。</li>
+<li><strong>命中率：</strong>由请求落在当前缓存条目上的比例决定，不等于 20 万 ÷ 2000 万。1% 的条目可能承载大部分请求，也可能不是。</li>
+</ul><div class="flow" aria-hidden="true"><span>请求</span><b>→</b><span>Redis 命中则返回</span><b>↘</b><span>未命中查 MySQL</span><b>→</b><span>按规则写回缓存</span></div><p>这是旁路缓存（Cache Aside）读路径。缓存失效、回源并发和数据一致性仍要独立设计；淘汰策略只负责容量不足时选择候选键。</p></section>
+
+<section class="panel"><h2>动手估算容量与回源</h2><p>改动下面的假设，观察条目占比、内存预算和普通读请求的回源量。该模型用于规划，不替代实测序列化大小、Redis 对象开销、持久化/复制缓冲与峰值流量。</p>
+<div class="inputs">
+<label>源库总行数<input id="total" type="number" min="1" max="1000000000" value="20000000"></label>
+<label>预期缓存条数<input id="hot" type="number" min="1" max="1000000000" value="200000"></label>
+<label>每条 key + value 的实测字节数<input id="bytes" type="number" min="1" max="10000000" value="2048"></label>
+<label>对象与碎片放大系数<input id="factor" type="number" min="1" max="10" step="0.1" value="1.5"></label>
+<label>保留内存余量（%）<input id="headroom" type="number" min="0" max="80" value="30"></label>
+<label>读请求量（QPS）<input id="qps" type="number" min="0" max="10000000" value="10000"></label>
+<label>实测或目标命中率（%）<input id="hit" type="number" min="0" max="100" value="80"></label>
+</div>
+<div class="grid" aria-live="polite" style="margin-top:18px"><div class="metric"><strong id="share"></strong><span>缓存条目占源数据比例</span></div><div class="metric"><strong id="memory"></strong><span>含放大系数和余量的规划容量</span></div><div class="metric"><strong id="origin"></strong><span>按普通读请求估算的 MySQL QPS</span></div></div>
+<p class="note" id="estimate-note">规划内存还需留出 Redis 进程、复制、持久化和机器其他负载的空间；不要把实例或机器内存全部配给 maxmemory。</p></section>
+
+<section class="panel"><h2>把过期、淘汰与热点治理分开</h2><div class="scroll"><table><thead><tr><th>问题</th><th>对应机制</th><th>为什么单靠淘汰不够</th></tr></thead><tbody>
+<tr><td>数据过旧</td><td>TTL、主动失效和更新后的缓存一致性策略</td><td>LRU/LFU 只看容量与访问特征，不知道业务数据是否新鲜</td></tr>
+<tr><td>内存到上限</td><td><code>maxmemory</code> 与按业务选定的淘汰策略</td><td>策略可能近似采样，不能保证每次恰好保留“最热的 20 万条”</td></tr>
+<tr><td>大量请求集中到一个 key</td><td>本地副本、请求合并、拆分或限流</td><td>单个热 key 的吞吐瓶颈与总容量不是同一个问题</td></tr>
+<tr><td>缓存未命中压垮源库</td><td>回源预算、预热、请求合并和异常场景保护</td><td>即使命中率很高，峰值 QPS 的少量未命中也可能超过 MySQL 承载能力</td></tr>
+</tbody></table></div></section>
+
+<section class="panel"><h2>选择与验证：先看负载，再看策略</h2><ol>
+<li>测量访问分布、每条缓存对象的真实内存占用、峰值 QPS 和 MySQL 可承受的回源量，估算目标热集大小。</li>
+<li>若 Redis 是可丢弃的纯缓存，可比较 <code>allkeys-lru</code> 与 <code>allkeys-lfu</code>：前者偏近期访问，后者利用近似频率和衰减；稳定热点与突发热点的表现不同。若同实例存放不能淘汰的数据，应先隔离实例或重审数据职责，而不是套用纯缓存策略。</li>
+<li>按数据新鲜度设置 TTL；容量上限和 TTL 各解决不同的问题。用灰度或回放验证策略，不把 LFU 或 LRU 写成无条件最优解。</li>
+<li>上线后同时看命中率、<code>used_memory</code>、<code>evicted_keys</code>、<code>expired_keys</code>、回源 QPS 和响应延迟。单看命中率可能掩盖大 key、冷启动或热点突变。</li>
+</ol><p>Redis 各淘汰策略的候选范围与交互行为见 <a href="../../../../database-system/nosql-db/01-kv/02-redis/06-memory/02-eviction/redis-eviction.html">Redis 淘汰交互演示</a>；单个热 key 的治理见 <a href="hotkey-bigkey.html">大 key 与热 key 治理</a>；回源集中导致的击穿见 <a href="../../05-anomalies/02-breakdown/cache-breakdown.html">缓存击穿</a>。</p></section>
+
+<footer>© 2026 Visuals · 案例数字用于调整思路，生产容量和策略以负载测试及实际指标为准。</footer>
+</main><script>
+const inputs=[...document.querySelectorAll('.inputs input')];
+const number=id=>Number(document.getElementById(id).value);
+function update(){
+  const total=number('total'),hot=number('hot'),bytes=number('bytes'),factor=number('factor');
+  const headroom=number('headroom'),qps=number('qps'),hit=number('hit');
+  const valid=total>0&&hot>0&&bytes>0&&factor>=1&&headroom>=0&&headroom<100&&qps>=0&&hit>=0&&hit<=100;
+  if(!valid){for(const id of ['share','memory','origin'])document.getElementById(id).textContent='检查输入';return}
+  const capacity=hot*bytes*factor/(1-headroom/100)/1073741824;
+  document.getElementById('share').textContent=(hot/total*100).toFixed(2)+'%';
+  document.getElementById('memory').textContent=capacity.toFixed(2)+' GiB';
+  document.getElementById('origin').textContent=Math.round(qps*(1-hit/100)).toLocaleString()+' QPS';
+  document.getElementById('estimate-note').textContent=hot>total?'缓存条数超过源库行数：请确认是否存在多种缓存键，或重新检查输入。':'规划内存还需留出 Redis 进程、复制、持久化和机器其他负载的空间；不要把实例或机器内存全部配给 maxmemory。';
+}
+inputs.forEach(input=>input.addEventListener('input',update));update();
+</script></body></html>

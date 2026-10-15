@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>声明式控制器：调谐、幂等与状态漂移 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>声明式控制器：调谐、幂等与状态漂移</h1><p class="lead">用副本控制器的循环说明期望状态如何收敛，以及冲突与外部副作用如何处理。</p></header>
+<section class="panel"><h2>声明只是目标，控制器负责行动
+用户写下“副本数为三”，API Server 保存期望状态；控制器观察当前集群，发现只有两个符合选择器的实例，于是创建一个。稍后若有实例故障，它再次比较并补齐。这个过程不是一次 apply 命令的魔法，而是持续的观察、计算差异、执行动作和复查。控制器通常只负责自己声明的资源边界，不能因为看见一个相似对象就随意接管。</h2><p>调谐函数的输入可能是缓存中的观察结果，事件只是“值得重新检查”的提示；事件可能重复、合并或乱序。正确性应来自读取当前期望与实际状态，而非假设每个事件恰好处理一次。状态更新和外部动作之间也没有天然原子事务，需要让重复调谐安全。</p></section>
+<section class="panel"><h2>一次控制循环的时间线
+第 1 轮看到 desired=3、actual=2，控制器创建新实例。创建 API 超时，客户端不知道服务端是否成功；第 2 轮重新列表，若已经有 3 个，就不再创建。若控制器仅凭上次“超时”再盲目创建一个，可能升到 4 个。给子资源设置稳定名字或 owner reference，配合按身份查找，可以降低重复动作风险。</h2><p>第 3 轮可能遇到节点容量不足，新实例 Pending。此时 actual“对象数量”虽然是 3，可用副本只有 2。控制器应在 status 中区分已创建与可用，并设置条件和原因，供运维判断是容量、镜像拉取还是健康检查失败。只写 spec 不保证环境一定能达到目标。</p></section>
+<section class="panel"><h2>逐步推演</h2><div data-stepper><div class="step-buttons" role="group" aria-label="推演步骤"><button type="button" data-step-button aria-pressed="true">1. 读取状态</button><button type="button" data-step-button aria-pressed="false">2. 计算差异</button><button type="button" data-step-button aria-pressed="false">3. 幂等执行</button><button type="button" data-step-button aria-pressed="false">4. 反馈状态</button></div><div class="step-panel" data-step-panel ><h3>读取状态</h3><p>从权威 API 获取期望与实际对象。</p></div><div class="step-panel" data-step-panel hidden><h3>计算差异</h3><p>区分对象数、可用性和自己拥有的字段。</p></div><div class="step-panel" data-step-panel hidden><h3>幂等执行</h3><p>按稳定身份创建或更新，冲突后重新读取。</p></div><div class="step-panel" data-step-panel hidden><h3>反馈状态</h3><p>写入条件、原因和重试线索，持续检查收敛。</p></div></div></section>
+<section class="panel"><h2>幂等与重试边界
+幂等意味着同样的观察结果重复调谐后，不会产生无上限的额外对象或副作用。常用做法是按稳定资源键 upsert、比较版本再更新，并把成功结果写入状态。对外部支付、发邮件之类不可逆动作，需要独立的幂等标识和明确授权；普通控制器的“重试”并不能自动让这些副作用安全。</h2><p>API 更新常使用资源版本做乐观并发控制。若两个控制器同时改同一对象，一个可能收到冲突，应该重新读取并只修改自己拥有的字段。盲目全量覆盖会抹掉其他控制器或用户的更新。退避和速率限制可防止故障资源形成热循环，但不能掩盖长期不能收敛的错误配置。</p></section>
+<section class="panel"><h2>状态漂移与所有权
+手工修改运行中的资源会造成实际状态与 Git 或声明文件不一致。控制器可能把它改回，也可能因为字段不属于自己而保留修改。团队应先明确“谁拥有哪个字段”和“哪一份声明是权威来源”。例如 HPA 管理 replicas 时，交付流水线再持续强制写 replicas，会形成拉扯；需要调整字段所有权或停止重复声明该字段。</h2><p>漂移检测要区分有意的默认值、服务端填充字段和真正的未授权变更。只做纯文本 YAML diff，可能把字段顺序、默认化和运行时 status 当成漂移。应对标准化后的期望与实际 spec 比较，并记录改动人、控制器和时间。生产修复先判断变更为何发生，再决定回滚、采纳还是更新声明。</p></section>
+<section class="panel"><h2>失败恢复和最终化
+创建容易，删除常涉及外部资源清理。Finalizer 可以在对象删除前阻止最终移除，让控制器删除云负载均衡或存储卷等附属资源，然后移除 finalizer。若清理逻辑永久失败，对象会卡在 Terminating；必须暴露清楚的条件、重试策略和人工修复步骤，而不是无条件忽略错误。</h2><p>控制器重启后不能依赖进程内记录继续工作。它要从 API 中恢复期望与实际关系，处理孤儿对象和重复对象。对长时间 Pending、持续冲突、调谐队列积压分别设告警，并用事件与 status 提供用户可理解的诊断信息。</p></section>
+<section class="panel"><h2>设计和测试
+实现前写下不变量：最多允许多少子资源、每个子资源属于谁、什么状态算 Ready、删除时何时可释放。测试包括重复事件、乱序更新、API 超时、冲突、控制器重启、节点容量不足、删除中断。每个场景都应检查最终状态和中间副作用，不能只断言调谐函数返回 nil。</h2><p>上线后观察收敛耗时分位数、失败重试次数、队列深度、对象状态条件和不期望漂移次数。若用户改了 spec 但长时间不收敛，要能从状态说明原因。这才是声明式接口可信的基础。</p></section>
+<section class="panel"><h2>自检</h2><details><summary>控制器收到两次相同事件，会创建两个新副本吗？</summary><p>正确实现应重新读取当前对象并按稳定身份调谐；事件可重复，不能把事件次数当成所需动作次数。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<footer>继续阅读：<a href="declarative-api-iac.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

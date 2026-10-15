@@ -41,6 +41,7 @@ ul.tight { margin:10px 0; padding-left:22px; }
 ul.tight li { margin:6px 0; }
 footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </style>
+<link rel="stylesheet" href="../../../../assets/pattern-lesson.css">
 </head>
 <body>
 <header class="topbar">
@@ -49,15 +50,64 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </header>
 <div class="wrap">
   <div class="hero"><h1>🔄 Read/Write-Through 与 Write-Behind</h1><p>缓存层代理加载与写入，同步与异步落库的差异</p></div>
+<!-- explicit pattern lesson start -->
+<section class="pattern-lesson" data-pattern-lesson aria-label="模式动态讲解">
+  <span class="pattern-eyebrow">图解 · 交互 · 伪代码</span>
+  <h2>先看一次完整的调用</h2>
+  <p class="pattern-highlight">Read-Through 管“未命中时谁加载”；Write-Through 与 Write-Behind 管“写入何时落库”。这不是同一个维度。</p>
+  <div class="pattern-roles"><div class="pattern-role" data-pattern-role>应用</div><div class="pattern-role" data-pattern-role>缓存代理</div><div class="pattern-role" data-pattern-role>数据库</div><div class="pattern-role" data-pattern-role>异步队列</div></div>
+  <div class="pattern-controls" role="group" aria-label="过程步骤">
+    <button type="button" data-pattern-step aria-pressed="false" data-title="读取数据" data-detail="应用只向缓存代理请求数据。" data-active="0,1">1. 读取数据</button><button type="button" data-pattern-step aria-pressed="false" data-title="缓存未命中" data-detail="Read-Through 代理自己去数据库加载。" data-active="1,2">2. 缓存未命中</button><button type="button" data-pattern-step aria-pressed="false" data-title="同步写入" data-detail="Write-Through 等数据库写成功才确认。" data-active="1,2">3. 同步写入</button><button type="button" data-pattern-step aria-pressed="false" data-title="异步写入" data-detail="Write-Behind 先入持久队列，稍后刷库。" data-active="1,3,2">4. 异步写入</button>
+    <button type="button" class="pattern-play" data-pattern-play aria-pressed="false">▶ 自动播放</button>
+  </div>
+  <div class="pattern-scene" aria-live="polite"><h3 data-scene-title></h3><p data-scene-detail></p></div>
+  <div class="pattern-progress" aria-hidden="true"><span data-pattern-progress></span></div>
+  <h3 style="margin-top:26px">改变条件，看执行路径</h3>
+  <p>比较同步确认和异步确认；尤其注意成功响应究竟意味着数据在哪里。</p>
+  <div class="pattern-lab" data-pattern-lab>
+    <div class="pattern-lab-options" role="group" aria-label="选择实验条件"><button type="button" data-lab-option aria-pressed="false" data-route="应用&gt;缓存代理&gt;数据库加载&gt;回填缓存" data-result="应用不写回源代码。" data-why="读穿透描述的是读路径。">Read-Through 未命中</button><button type="button" data-lab-option aria-pressed="false" data-route="应用写代理&gt;同步写 DB&gt;写缓存&gt;确认成功" data-result="确认通常意味着数据库与缓存层都已按契约更新。" data-why="延迟受数据库写入影响。">Write-Through</button><button type="button" data-lab-option aria-pressed="false" data-route="应用写代理&gt;可靠队列/缓存&gt;先确认&gt;异步刷 DB" data-result="吞吐高，但 DB 仍可能是旧值。" data-why="若未持久化待刷记录，进程崩溃会丢写入。">Write-Behind</button></div>
+    <div class="pattern-lab-stage">
+      <div class="pattern-lab-route" data-lab-route aria-label="执行路径"></div>
+      <div class="pattern-lab-result"><strong>得到的结果</strong><p data-lab-result></p></div>
+      <p class="pattern-lab-why" data-lab-why></p>
+    </div>
+  </div>
+  <div class="pattern-decision">
+    <h3>什么时候适用？</h3>
+    <p class="pattern-decision-signal"><strong>判断信号：</strong>希望应用只面对缓存接口；缓存代理有能力可靠地访问权威数据库。</p>
+    <ul class="pattern-list"><li>多服务访问同一商品数据：Read-Through 代理统一处理未命中加载。</li><li>库存写入需要同步确认权威数据：Write-Through 等数据库提交后才返回成功。</li><li>日志聚合写入量大、允许秒级延后：Write-Behind 先可靠入队，再批量刷库。</li></ul>
+    <h3>和相近模式怎么区分？</h3>
+    <div class="pattern-table-wrap"><table class="pattern-table">
+      <thead><tr><th scope="col">相近方案</th><th scope="col">选择边界</th></tr></thead>
+      <tbody><tr><th scope="row">Read-Through 与 Cache-Aside</th><td>读未命中时，前者由缓存代理查询数据库；后者由业务应用查询并回填。</td></tr><tr><th scope="row">Write-Through 与 Write-Behind</th><td>前者成功通常意味着同步写库已完成；后者成功只代表写入可靠待刷记录，数据库可能仍是旧值。</td></tr></tbody>
+    </table></div>
+  </div>
+  <h3 style="margin-top:26px">核心伪代码</h3>
+  <pre class="pattern-code"><code>function readThrough(key):
+  return cache.getOrLoad(key, loader=db.get)
+
+function writeThrough(key, value):
+  db.update(key, value)
+  cache.set(key, value)
+  return ACK
+
+function writeBehind(key, value):
+  durableQueue.append(key, value)
+  cache.set(key, value)
+  return ACK  // 后台重试刷库，需顺序和去重</code></pre>
+  <p>Read-Through 可与不同写策略组合；Write-Behind 必须设计队列持久化、顺序、重试、回放与故障恢复。</p>
+</section>
+<!-- explicit pattern lesson end -->
+
 <div class="card-grid"><div class="card"><div class="ico">📤</div><h3>Read-Through</h3><p>读穿透</p></div><div class="card"><div class="ico">✍️</div><h3>Write-Through</h3><p>同步写</p></div><div class="card"><div class="ico">📨</div><h3>Write-Behind</h3><p>异步写</p></div><div class="card"><div class="ico">🧱</div><h3>缓存层</h3><p>统一代理</p></div></div>
 <h2>Read-Through</h2>
 <p>应用只和缓存交互；缓存未命中时由缓存层自己加载数据并回填，对应用透明。</p>
 <h2>Write-Through</h2>
-<p>写时缓存层同步写缓存与数据库，返回即两者都成功，一致性好但写延迟略高。</p>
+<p>写请求交给缓存代理，由代理同步写数据库并维护缓存；只有按其契约两步都成功才确认。写延迟包含数据库耗时，两步之间失败仍需要恢复策略。</p>
 <h2>Write-Behind</h2>
-<p>写只落缓存，由缓存层异步批量落库，写延迟极低、吞吐高，但存在丢数据风险，需配合持久化。</p>
+<p>写请求先进入缓存层的待刷队列，后台再批量落库。响应可以更快，但数据库在一段时间内仍是旧值；若待刷记录未持久化，进程崩溃可能丢写入。</p>
 <h2>对比</h2>
-<table><tr><th>模式</th><th>写库时机</th><th>一致性</th><th>复杂度</th></tr><tr><td>Read/Write-Through</td><td>同步</td><td>较高</td><td>中</td></tr><tr><td>Write-Behind</td><td>异步</td><td>最终</td><td>高</td></tr></table>
+<table><tr><th>模式</th><th>负责的路径</th><th>确认语义与风险</th></tr><tr><td>Read-Through</td><td>读未命中回源</td><td>不决定写库时机</td></tr><tr><td>Write-Through</td><td>同步写库</td><td>数据库写成功后确认；要处理部分失败</td></tr><tr><td>Write-Behind</td><td>异步刷库</td><td>先确认、后落库；要持久化待刷记录</td></tr></table>
 <svg viewBox="0 0 520 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Write-Behind：写缓存即返回">
 <defs><marker id="arr" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#64748b"/></marker><marker id="arr2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#f87171"/></marker></defs>
 <text x="260" y="20" text-anchor="middle" font-size="13" fill="#94a3b8">Write-Behind：写缓存即返回</text>
@@ -78,8 +128,9 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 <text x="252" y="211" text-anchor="middle" font-size="9" fill="#fca5a5">可能丢数据</text>
 </svg>
 <h2>🎯 面试问答</h2>
-<div class="qa"><div class="qa-q">Q：Read-Through 与 Cache-Aside 区别？</div><div class="qa-a">A：前者缓存层自己加载，更透明。</div></div><div class="qa"><div class="qa-q">Q：Write-Behind 风险？</div><div class="qa-a">A：进程崩溃可能丢未落库数据。</div></div><div class="qa"><div class="qa-q">Q：何时用 Write-Through？</div><div class="qa-a">A：要求写后即一致且能接受稍高延迟。</div></div>
+<div class="qa"><div class="qa-q">Q：Read-Through 与 Cache-Aside 区别？</div><div class="qa-a">A：未命中时由缓存层回源，应用只调用缓存层；Cache-Aside 则由应用回源并回填。</div></div><div class="qa"><div class="qa-q">Q：Write-Behind 风险？</div><div class="qa-a">A：未刷库的记录若丢失会丢数据，还要处理顺序、重试和故障恢复。</div></div><div class="qa"><div class="qa-q">Q：何时用 Write-Through？</div><div class="qa-a">A：需要同步确认数据库写入，且能接受相应延迟与部分失败处理成本。</div></div>
 </div>
 <footer>© 2026 Visuals · 一致性 / Through 模式</footer>
+<script src="../../../../assets/pattern-lesson.js"></script>
 </body>
 </html>

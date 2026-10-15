@@ -63,7 +63,7 @@
 <body>
 <header>
   <h1>时序数据库 TSDB 原理</h1>
-  <p>为什么监控数据不能用 MySQL 存——时序数据的特点、压缩与降采样</p>
+  <p>什么时候选时序专用存储：从写入、保留、压缩与降采样看取舍</p>
   <span class="tag">TSDB</span><span class="tag">时序数据</span><span class="tag">Delta 编码</span><span class="tag">降采样</span><span class="tag">时间线</span>
 </header>
 <nav>
@@ -77,9 +77,7 @@
 <main>
 
 <div class="lead">
-  <b>一句话总结：</b>时序数据的特征是「<b>写入量巨大、几乎不更新、不删单条、查询总带时间范围、旧数据价值递减</b>」。
-  通用数据库为「随机读写 + 事务」优化，正好与这些特征错位。
-  TSDB 围绕这些特征重新设计，压缩比可达 10～20 倍，聚合查询快一个数量级。
+  <b>一句话总结：</b>监控与设备数据常有持续写入、按时间查询、分层保留和批量过期的需求。关系型数据库可以存这类数据；当写入规模、保留周期和聚合负载增长时，应比较分区表方案与专用 TSDB 的压缩、运维和查询成本。性能与压缩效果取决于数据分布、索引、版本和配置，不能套用固定倍数。
 </div>
 
 <section id="why">
@@ -125,13 +123,14 @@
 
   <table>
     <tr><th>特征</th><th>说明</th><th>对数据库设计的要求</th></tr>
-    <tr><td><b>写多读少</b></td><td>写入吞吐常达百万点/秒</td><td>写入路径必须极简（LSM 而非 B+ 树）</td></tr>
-    <tr><td><b>只追加</b></td><td>数据按时间到达，几乎不更新</td><td>不需要事务、不需要单行索引</td></tr>
-    <tr><td><b>带时间范围</b></td><td>查询几乎总是「最近 N 小时」</td><td>按时间分区，旧分区可整体裁剪/删除</td></tr>
-    <tr><td><b>价值递减</b></td><td>1 年前的秒级数据没人看</td><td><b>降采样（Rollup）+ 自动过期（TTL）</b></td></tr>
-    <tr><td><b>高冗余</b></td><td>相邻时间的值变化很小</td><td><b>Delta / XOR 压缩</b>，压缩比极高</td></tr>
+    <tr><td><b>持续写入</b></td><td>采样频率和设备数量共同决定写入量</td><td>控制写入放大、索引维护与批量写成本</td></tr>
+    <tr><td><b>追加为主</b></td><td>多数监控点写入后较少修改，也可能有迟到或修正数据</td><td>按实际修正需求选择事务与索引能力</td></tr>
+    <tr><td><b>时间范围查询</b></td><td>常查最近一段时间，也可能跨长期历史</td><td>按时间组织数据，减少无关数据扫描</td></tr>
+    <tr><td><b>分层保留</b></td><td>原始明细与长期趋势需要不同保留期</td><td><b>降采样（Rollup）与到期清理</b></td></tr>
+    <tr><td><b>可压缩性</b></td><td>规律采样和相邻值相关时更易压缩</td><td>按数据分布选择 Delta、XOR 等编码并实测效果</td></tr>
     <tr><td><b>高基数风险</b></td><td>标签组合可能爆炸</td><td>需控制 tag 基数，否则索引膨胀</td></tr>
   </table>
+  <p>标签组合如何影响活跃时间线与索引成本，见<a href="series-cardinality.html">Series 基数与标签设计</a>。</p>
 </section>
 
 <section id="model">
@@ -227,7 +226,7 @@ XOR  =             → 0x0000400000000000   ← 只有中间少数几位非零
 
 <section id="downsample">
   <h2><span class="n">04</span>降采样与数据保留</h2>
-  <p>这是 TSDB 与通用数据库最不同的运维特性：<b>数据会随时间自动"降级"和"消失"</b>。</p>
+  <p>分层保留是常见的时序数据治理方案，需要按业务要求配置原始点保留期、降采样任务和到期清理；数据不会天然自动“降级”。</p>
 
   <div class="fig">
     <svg width="720" height="215" viewBox="0 0 720 215">
@@ -249,14 +248,14 @@ XOR  =             → 0x0000400000000000   ← 只有中间少数几位非零
         <text x="230" y="138" fill="#94a3b8">保留 1 年</text>
         <text x="360" y="138" fill="#94a3b8">→ 用于趋势、容量规划</text>
       </g>
-      <text x="360" y="172" text-anchor="middle" font-size="11.5" fill="#7ee787">数据量随精度降低呈数量级下降：秒级 → 分钟级省 60 倍 → 小时级再省 60 倍</text>
+      <text x="360" y="172" text-anchor="middle" font-size="11.5" fill="#7ee787">固定频率采样时，分钟与小时聚合可减少样本点数；存储节省需实测</text>
       <text x="360" y="194" text-anchor="middle" font-size="11.5" fill="#94a3b8">这样既保住了近期可排查性，又让长期存储成本可控</text>
     </svg>
     <div class="cap">图 4：分层降采样——用精度换时间跨度</div>
   </div>
 
-  <h3>连续查询 Continuous Query</h3>
-  <p>降采样通常由后台任务<b>自动、增量</b>完成，而不是事后批量重算：</p>
+  <h3>降采样实现示例</h3>
+  <p>可用持续任务或定时批处理生成聚合数据，迟到样本还可能需要重算。下例是 InfluxDB 1.x 的 Continuous Query 语法：</p>
   <pre><code>-- InfluxDB 风格的连续查询示例
 CREATE CONTINUOUS QUERY cq_1m ON monitor
 BEGIN
@@ -267,6 +266,7 @@ BEGIN
 END</code></pre>
   <p>Prometheus 的做法是 <b>Recording Rules</b>：预计算常用聚合表达式，存成新的时间序列，
   查询时直接命中预计算结果。</p>
+  <p>Gauge、Counter 和百分位数不能套用同一聚合规则；具体设计见<a href="retention-downsampling.html">保留策略与降采样</a>。</p>
 </section>
 
 <section id="compare">
@@ -279,11 +279,11 @@ END</code></pre>
     </tr>
     <tr>
       <td><b>InfluxDB</b></td><td>通用时序数据库</td><td>measurement + tags + fields</td>
-      <td>推模式、Flux/InfluxQL、开源版集群能力受限（商业版才有）</td>
+      <td>客户端写入；1.x/2.x 与 3.x 的引擎、查询语言和部署能力需分别核对</td>
     </tr>
     <tr>
       <td><b>TDengine</b></td><td>国产，IoT/工业场景</td><td>超级表（STable）+ 子表</td>
-      <td><b>一个设备一张表</b>的设计，压缩比极高，写入性能强；国产化替代常见选择</td>
+      <td>以设备子表和超级表组织数据；压缩与写入效果取决于负载和部署</td>
     </tr>
     <tr>
       <td><b>VictoriaMetrics</b></td><td>Prometheus 的长期存储</td><td>兼容 Prometheus</td>
@@ -295,7 +295,7 @@ END</code></pre>
     </tr>
     <tr>
       <td><b>ClickHouse</b></td><td>通用 OLAP（也能存时序）</td><td>宽表</td>
-      <td>数据量极大时的选择；但缺少时序专属语义（如降采样、TTL 策略）</td>
+      <td>可用 TTL、物化视图等能力管理时序数据；需自行设计相应的数据模型与保留方案</td>
     </tr>
   </table>
 
@@ -311,24 +311,19 @@ END</code></pre>
 <section id="qa">
   <h2><span class="n">06</span>常见疑问</h2>
   <div class="qa">
-    <b>Q：监控数据为什么不能直接用 MySQL 存？</b><br>
-    A：三个硬伤：① <b>写不动</b>——每秒几十万点，B+ 树随机写扛不住，索引维护成瓶颈；
-    ② <b>存不起</b>——每点 16 字节 × 几十万点 × 86400 秒，一天就几十 GB，MySQL 无时序压缩；
-    ③ <b>删不掉</b>——过期数据要按时间批量删，MySQL 的 <code>DELETE</code> 会产生大量 undo 与碎片。
-    而 TSDB 的追加写 + 高压缩 + 按时间块整体删除，正好对症。
+    <b>Q：监控数据什么时候需要从 MySQL 转向 TSDB？</b><br>
+    A：MySQL 可以承载一定规模的监控数据，分区表、批量写入和合理索引也能延长适用范围。若持续写入、长时间保留和时间窗口聚合使索引维护、存储或历史清理成本过高，再用真实负载比较专用 TSDB；不能仅凭产品类别断言 MySQL 一定写不动或删不掉。
   </div>
   <div class="qa">
     <b>Q：什么是"时间线爆炸"，怎么避免？</b><br>
     A：把 <b>高基数字段当 tag</b>（如 user_id、trace_id、URL 全路径）会导致
-    时间线数量 = 各 tag 取值数的<b>笛卡尔积</b>，内存索引瞬间撑爆。<br>
+    最坏情况下时间线数量可能接近各 tag 取值数的<b>笛卡尔积</b>，实际数量取决于标签组合，索引压力也因产品而异。<br>
     <b>规避：</b>① tag 只放低基数枚举维度；② 高基数维度放进 field 或日志系统；
     ③ 用 <code>relabel_config</code> 丢弃不必要的 label；④ 监控 time series 数量并设置告警。
   </div>
   <div class="qa">
     <b>Q：Prometheus 为什么是"拉模式"？有什么优劣？</b><br>
-    A：Pull 的好处是<b>服务端无状态、目标发现简单、便于本地调试</b>（直接 curl 目标 /metrics）。
-    代价是需要服务发现、不適合短生命周期任务（用 Pushgateway 补）、跨网络边界受限。
-    这是 Prometheus 与 InfluxDB（推模式）最核心的设计哲学差异。
+    A：Pull 便于由采集端控制频率并直接检查目标 <code>/metrics</code>；Prometheus 服务端仍会保存时序数据，并非无状态。短生命周期批处理任务可按场景使用 Pushgateway，跨网络边界也可用代理或远程写入等方案。具体采集方式取决于网络拓扑和产品能力。
   </div>
 </section>
 
