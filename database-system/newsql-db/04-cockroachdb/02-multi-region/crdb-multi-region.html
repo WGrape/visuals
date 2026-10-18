@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CockroachDB 多区域部署与延迟权衡</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>多区域部署</h1>
+  <p>生存目标决定副本放置、三种表类型的读写取舍、跨地域写入延迟的来源，以及上线前的五项检查</p>
+  <span class="tag">多区域</span><span class="tag">生存目标</span><span class="tag">REGIONAL BY ROW</span><span class="tag">GLOBAL 表</span><span class="tag">跨城延迟</span>
+</header>
+<nav>
+  <a href="#goal">① 生存目标</a>
+  <a href="#table">② 表类型取舍</a>
+  <a href="#latency">③ 延迟来源</a>
+  <a href="#ops">④ 上线检查</a>
+</nav>
+<main>
+<section id="goal">
+<h2><span class="n">①</span>先定生存目标，再定表布局</h2>
+
+  <p>多区域部署的核心问题是：<b>当整个区域挂掉时，你要的是「数据不丢」还是「服务不停」</b>。
+  这个选择决定了副本怎么放，也决定了写入延迟。</p>
+
+  <table>
+    <tr><th>生存目标</th><th>含义</th><th>代价</th></tr>
+    <tr><td>Zone（机房级）存活</td><td>容忍单个可用区故障</td><td>副本跨机房，写延迟 = 同城往返</td></tr>
+    <tr><td>Region（地域级）存活</td><td>容忍整个城市/地域故障</td><td>副本跨城，写延迟 = 跨城往返（几十毫秒级）</td></tr>
+  </table>
+
+  <div class="lead bad"><b>这是无法绕开的物理约束。</b>「跨地域强一致」意味着每次写入都要等跨城的多数派确认，
+  <b>写入延迟不可能低于跨城 RTT</b>。想低延迟就只能放松一致性（异步复制）或放松生存目标。
+  <b>先接受这个权衡，再谈优化。</b></div>
+
+</section>
+<section id="table">
+<h2><span class="n">②</span>三种表类型的取舍</h2>
+
+  <div class="grid">
+    <div class="card"><h4>REGIONAL BY TABLE（默认）</h4>
+      <p>数据整体放在一个主区域，其他区域访问要跨区。
+      <b>写入最快、本地读快、跨区读慢</b>。适合「绝大多数请求来自同一区域」的业务。</p></div>
+    <div class="card"><h4>REGIONAL BY ROW</h4>
+      <p>按行的区域列自动决定该行放在哪个区域。
+      <b>本地读写都快，跨行事务慢</b>。适合「用户数据与其所在地区强绑定」的场景（数据合规、本地化）。</p></div>
+    <div class="card"><h4>GLOBAL</h4>
+      <p>所有区域都有完整可读副本，<b>本地读极快</b>，但写入需要全区域一致，<b>写最慢</b>。
+      适合<b>读多写少的参考数据</b>（配置、字典、价格表）。</p></div>
+  </div>
+
+  <pre><code>-- 按行分区：用 region 列决定行的归属
+ALTER TABLE users SET LOCALITY REGIONAL BY ROW;
+
+-- 全局表：读多写少的字典表
+ALTER TABLE configs SET LOCALITY GLOBAL;
+
+-- 读历史数据用 follower reads，避免跨区访问 leaseholder
+SELECT * FROM orders AS OF SYSTEM TIME INTERVAL '10s';</code></pre>
+
+  <div class="lead warn"><b>各版本语法与可用表类型有差异</b>（例如 GLOBAL 表的引入时间、
+  REGIONAL BY ROW 对主键的要求）。<b>请以所用版本的官方文档为准</b>，不要凭记忆写 DDL。</div>
+
+</section>
+<section id="latency">
+<h2><span class="n">③</span>延迟从哪里来</h2>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="200" fill="#171b26"/>
+    <text x="340" y="22" fill="#94a3b8" font-size="12.5" text-anchor="middle">一次跨地域写入的时间都花在哪</text>
+    <g font-family="monospace" font-size="11.5">
+      <rect x="30" y="44" width="110" height="30" rx="5" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="85" y="64" fill="#e2e8f0" text-anchor="middle">客户端 → 网关</text>
+      <rect x="150" y="44" width="110" height="30" rx="5" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="205" y="64" fill="#e2e8f0" text-anchor="middle">找 Leaseholder</text>
+      <rect x="270" y="44" width="130" height="30" rx="5" fill="#2b1a1a" stroke="#ff7b72"/>
+      <text x="335" y="64" fill="#ff7b72" text-anchor="middle">Raft 多数派确认</text>
+      <rect x="410" y="44" width="110" height="30" rx="5" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="465" y="64" fill="#e2e8f0" text-anchor="middle">提交返回</text>
+      <rect x="530" y="44" width="120" height="30" rx="5" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="590" y="64" fill="#e2e8f0" text-anchor="middle">客户端收到</text>
+      <text x="340" y="98" fill="#94a3b8" text-anchor="middle">只有红色这一段受「副本放多远」影响，其余是常规网络往返</text>
+      <rect x="30" y="120" width="300" height="60" rx="8" fill="#0b0e13" stroke="#7ee787"/>
+      <text x="180" y="144" fill="#7ee787" text-anchor="middle" font-size="12">同城三机房：多数派 ≈ 几 ms</text>
+      <text x="180" y="166" fill="#94a3b8" text-anchor="middle" font-size="11">适合低延迟强一致</text>
+      <rect x="350" y="120" width="300" height="60" rx="8" fill="#0b0e13" stroke="#f0a868"/>
+      <text x="500" y="144" fill="#f0a868" text-anchor="middle" font-size="12">跨城三地域：多数派 ≈ 数十 ms</text>
+      <text x="500" y="166" fill="#94a3b8" text-anchor="middle" font-size="11">换来地域级容灾</text>
+    </g>
+  </svg>
+  <div class="cap">副本放得越远，写入越慢——这是物理规律，不是配置问题</div>
+  </div>
+
+  <div class="lead ok"><b>优化顺序：</b>
+  <b>①</b> 确认副本位置是否符合你真正需要的生存目标（很多时候副本放得比需要更远，白白付延迟）；
+  <b>②</b> 让计算靠近数据（应用部署到主区域，或用 REGIONAL BY ROW）；
+  <b>③</b> 读多写少的场景用 GLOBAL 表 + Follower Reads；
+  <b>④</b> 批量写入合并事务，摊掉每事务的固定 RTT。</div>
+
+</section>
+<section id="ops">
+<h2><span class="n">④</span>上线前要确认的事</h2>
+
+  <ol>
+    <li><b>时钟偏差监控</b>：节点时钟漂移会直接影响 HLC 的正确性边界，必须有告警。</li>
+    <li><b>副本放置可视化</b>：能随时回答「这张表的副本现在在哪几个区域」。</li>
+    <li><b>故障演练</b>：真的拔掉一个 zone / region，验证生存目标是否达成、恢复耗时多久。</li>
+    <li><b>应用层重试</b>：跨区部署下冲突概率更高，重试逻辑必须完整（见「数据分布」篇）。</li>
+    <li><b>跨区流量成本</b>：云厂商的跨地域流量是收费的，副本同步会持续产生费用。</li>
+  </ol>
+
+  <div class="qa"><b>Q：能不能既跨地域容灾又低延迟写入？</b><br>
+  A：不能同时满足。要么接受跨城写入延迟（同步复制 + 强一致），
+  要么用异步复制换低延迟（主区写、备区异步追，故障时可能丢少量数据）。
+  <b>这是一致性、可用性、延迟三者取二的经典权衡</b>，没有银弹。</div>
+
+  <div class="qa"><b>Q：多区域下自增主键还能用吗？</b><br>
+  A：能用但不推荐——它同时带来写热点（尾部 Range）和跨区协调开销。
+  <b>建议用随机/哈希前缀的 UUID 类主键</b>，把写入打散。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / CockroachDB · 多区域 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

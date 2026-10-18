@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL 过滤条件与索引可用性（Sargability）</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>过滤条件与索引可用性</h1>
+  <p>三值逻辑、隐式转换、谓词下推——为什么同样的条件一个走索引一个全表扫</p>
+  <span class="tag">Sargable</span><span class="tag">三值逻辑</span><span class="tag">隐式转换</span><span class="tag">谓词下推</span><span class="tag">ON vs WHERE</span>
+</header>
+<nav>
+  <a href="#sarg">① Sargability</a>
+  <a href="#three">② 三值逻辑</a>
+  <a href="#conv">③ 隐式转换</a>
+  <a href="#pred">④ 谓词下推</a>
+  <a href="#check">⑤ 自检清单</a>
+</nav>
+<main>
+<section id="sarg">
+<h2><span class="n">①</span>Sargability：谓词能不能用上索引</h2>
+
+  <p>Sargable = <b>S</b>earch <b>Arg</b>ument<b>ABLE</b>，指一个谓词能否被优化器转成「索引范围扫描」而不是全表扫描。
+  这是 SQL 性能里<b>投入产出比最高</b>的一个概念：改一个写法，可能从 8 秒降到 8 毫秒。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="200" fill="#171b26"/>
+    <text x="30" y="28" fill="#94a3b8" font-size="13">同一条业务条件，两种写法</text>
+    <rect x="30" y="48" width="290" height="120" rx="10" fill="#0b0e13" stroke="#ff7b72"/>
+    <text x="175" y="70" fill="#ff7b72" font-size="13" text-anchor="middle">✗ 不可 Sargable</text>
+    <text x="175" y="98" fill="#abb2bf" font-size="12" text-anchor="middle" font-family="monospace">WHERE YEAR(created_at)=2026</text>
+    <text x="175" y="124" fill="#94a3b8" font-size="11" text-anchor="middle">列被函数包裹 → 无法定位</text>
+    <text x="175" y="150" fill="#ff7b72" font-size="11" text-anchor="middle">全表扫描 + 逐行计算</text>
+    <rect x="360" y="48" width="290" height="120" rx="10" fill="#0b0e13" stroke="#7ee787"/>
+    <text x="505" y="70" fill="#7ee787" font-size="13" text-anchor="middle">✓ Sargable</text>
+    <text x="505" y="98" fill="#abb2bf" font-size="12" text-anchor="middle" font-family="monospace">created_at &gt;= '2026-01-01'</text>
+    <text x="505" y="124" fill="#abb2bf" font-size="12" text-anchor="middle" font-family="monospace">AND created_at &lt; '2027-01-01'</text>
+    <text x="505" y="152" fill="#7ee787" font-size="11" text-anchor="middle">索引范围扫描，只碰命中的页</text>
+  </svg>
+  <div class="cap">核心原则：让裸列单独出现在比较运算符的一侧，把计算放到常量那一侧</div>
+  </div>
+
+  <table>
+    <tr><th>写法</th><th>Sargable？</th><th>改写</th></tr>
+    <tr><td><code>WHERE YEAR(d)=2026</code></td><td>✗</td><td><code>d &gt;= '2026-01-01' AND d &lt; '2027-01-01'</code></td></tr>
+    <tr><td><code>WHERE amount+0 &gt; 100</code></td><td>✗</td><td><code>amount &gt; 100</code></td></tr>
+    <tr><td><code>WHERE name LIKE '%abc'</code></td><td>✗</td><td>前缀通配符无法走 B+Tree，改用全文索引/倒排</td></tr>
+    <tr><td><code>WHERE name LIKE 'abc%'</code></td><td>✓</td><td>后缀通配可以走范围扫描</td></tr>
+    <tr><td><code>WHERE id = '123'</code>（id 是整型）</td><td>视实现</td><td>隐式转换可能让索引失效，写成 <code>id = 123</code></td></tr>
+    <tr><td><code>WHERE a=1 OR b=2</code></td><td>各列独立有时失效</td><td>拆成 <code>UNION ALL</code> 两个分支各自走索引</td></tr>
+    <tr><td><code>WHERE col IS NULL</code></td><td>✓（多数实现）</td><td>B+Tree 也会存 NULL，通常可用</td></tr>
+    <tr><td><code>WHERE col != 1</code></td><td>△</td><td>选择性差时优化器主动放弃索引</td></tr>
+  </table>
+
+</section>
+<section id="three">
+<h2><span class="n">②</span>三值逻辑与 NULL 过滤</h2>
+
+  <p>SQL 的布尔逻辑是<b>三值</b>的：TRUE / FALSE / <b>UNKNOWN</b>。任何与 NULL 的比较结果都是 UNKNOWN，
+  而 <code>WHERE</code> 只保留 TRUE 的行——UNKNOWN 和 FALSE 一样被丢弃。这是「我明明写了条件怎么查不出来」的头号原因。</p>
+
+  <table>
+    <tr><th>表达式</th><th>结果</th><th>说明</th></tr>
+    <tr><td><code>NULL = NULL</code></td><td>UNKNOWN</td><td>必须用 <code>IS NULL</code> 判断</td></tr>
+    <tr><td><code>NULL &lt;&gt; 1</code></td><td>UNKNOWN</td><td>不会返回「所有不等于 1 的行」</td></tr>
+    <tr><td><code>NULL AND TRUE</code></td><td>UNKNOWN</td><td>AND 遇 FALSE 才 FALSE</td></tr>
+    <tr><td><code>NULL OR TRUE</code></td><td>TRUE</td><td>OR 遇 TRUE 即 TRUE——唯一能「救回」NULL 的地方</td></tr>
+    <tr><td><code>NOT UNKNOWN</code></td><td>UNKNOWN</td><td><code>NOT IN</code> 踩坑根源</td></tr>
+  </table>
+
+  <pre><code>-- 想查「状态不是已完成」的所有单，但 status 可能为 NULL
+SELECT * FROM orders WHERE status &lt;&gt; 'done';        -- ✗ 漏掉 status IS NULL 的行
+SELECT * FROM orders WHERE status &lt;&gt; 'done' OR status IS NULL;  -- ✓
+
+-- 更稳的写法（各库支持度不同）：空值安全等值比较
+SELECT * FROM orders WHERE NOT (status &lt;=&gt; 'done');   -- MySQL 的 NULL 安全等于
+SELECT * FROM orders WHERE status IS DISTINCT FROM 'done';  -- PostgreSQL / SQL 标准</code></pre>
+
+  <div class="lead warn"><b>聚合函数普遍忽略 NULL</b>（<code>COUNT(col)</code> 不数 NULL，<code>SUM/AVG</code> 跳过），
+  但 <code>COUNT(*)</code> 数的是行、不看列值。所以 <code>COUNT(*)</code> 与 <code>COUNT(col)</code> 不相等，
+  恰恰可以用来探测 NULL 数量：<code>COUNT(*) - COUNT(col)</code>。</div>
+
+</section>
+<section id="conv">
+<h2><span class="n">③</span>隐式类型转换</h2>
+
+  <p>比较的两边类型不同时，数据库要做隐式转换。<b>转换方向决定索引生死</b>：如果被转换的是<b>列</b>，
+  等价于给列套了一层函数，索引失效；如果被转换的是<b>常量</b>，索引照常可用。</p>
+
+  <table>
+    <tr><th>场景</th><th>谁被转换</th><th>索引</th></tr>
+    <tr><td>整型列 vs 字符串常量 <code>id = '123'</code></td><td>多数库把字符串转成数字（转常量）</td><td>通常可用</td></tr>
+    <tr><td>字符串列 vs 数字常量 <code>phone = 13800138000</code></td><td><b>列被转数字</b></td><td><b>失效</b></td></tr>
+    <tr><td>字符集/排序规则不一致的两列 JOIN</td><td>列被转换</td><td><b>失效</b></td></tr>
+    <tr><td><code>VARCHAR</code> 列存日期再与 <code>DATE</code> 比较</td><td>列被转换</td><td><b>失效</b></td></tr>
+  </table>
+
+  <div class="lead bad"><b>最隐蔽的一条：JOIN 两列字符集不同。</b>看起来两列都有索引、类型都是 varchar，
+  但一个 <code>utf8mb4_general_ci</code> 一个 <code>utf8mb4_0900_ai_ci</code>，或一个是 utf8 一个是 utf8mb4，
+  就会导致被驱动表那侧无法走索引，退化成全表扫描。<b>建库时统一字符集与排序规则是最省事的预防。</b></div>
+
+</section>
+<section id="pred">
+<h2><span class="n">④</span>谓词下推与条件位置</h2>
+
+  <p>标准 SQL 的执行顺序里 <code>WHERE</code> 在 <code>JOIN</code> 之后、聚合之前，但优化器会做
+  <strong>谓词下推</strong>：把能提前的过滤条件挪到更早的算子，减少后续处理的数据量。理解它能解释很多「写法不同但计划相同」。</p>
+
+  <div class="grid">
+    <div class="card"><h4>ON 里加条件 vs WHERE 里加条件</h4>
+      <p><b>INNER JOIN 两者等价</b>（优化器会重排）；<b>OUTER JOIN 不等价</b>——
+      <code>ON</code> 里的条件在生成 NULL 行之前生效，<code>WHERE</code> 里的条件在之后生效。
+      把 <code>LEFT JOIN</code> 的右表条件写进 <code>WHERE</code>，效果等同 INNER JOIN。</p></div>
+    <div class="card"><h4>WHERE vs HAVING</h4>
+      <p><code>WHERE</code> 在聚合<b>前</b>过滤行（减少聚合输入，更高效）；
+      <code>HAVING</code> 在聚合<b>后</b>过滤分组。<b>能放 WHERE 就不要放 HAVING</b>。</p></div>
+    <div class="card"><h4>能下推不代表一定下推</h4>
+      <p>含 <code>OR</code>、子查询、不确定性函数、<code>LIMIT</code> 的视图，优化器可能无法下推。
+      看执行计划里过滤算子出现在哪一层，而不是凭 SQL 结构猜。</p></div>
+  </div>
+
+  <pre><code>-- ❌ 常见错误：想把「已取消的订单排除」，却写成了 INNER JOIN
+SELECT * FROM orders o
+LEFT JOIN payments p ON p.order_id = o.id
+WHERE p.status = 'paid';          -- 未支付的行 p.status 是 NULL，被 WHERE 干掉了
+
+-- ✓ 条件放进 ON，保留所有订单
+SELECT * FROM orders o
+LEFT JOIN payments p ON p.order_id = o.id AND p.status = 'paid';</code></pre>
+
+</section>
+<section id="check">
+<h2><span class="n">⑤</span>过滤条件的自检清单</h2>
+
+  <ol>
+    <li>比较运算符的一侧是不是<b>裸列</b>？列上有没有包函数、算术、隐式转换？</li>
+    <li>条件涉及 NULL 吗？用 <code>IS NULL</code> / <code>IS DISTINCT FROM</code> 而不是 <code>= NULL</code> 或 <code>&lt;&gt;</code>。</li>
+    <li>字符串常量有没有写错类型（给数字列传了带引号的值、给字符串列传了数字）？</li>
+    <li>是 <code>OR</code> 吗？拆成 <code>UNION ALL</code> 会不会各自都能走索引？</li>
+    <li>外连接的右表条件是不是误写进了 <code>WHERE</code>？</li>
+    <li>能在 <code>WHERE</code> 过滤的，有没有跑到 <code>HAVING</code> 里去？</li>
+    <li>执行计划里这个过滤算子出现在<b>第几层</b>？实际扫描行数与预估差多少倍？</li>
+  </ol>
+
+  <div class="qa"><b>Q：<code>WHERE 1=1</code> 会影响性能吗？</b><br>
+  A：不会，常量折叠在优化阶段就消掉了。它是动态拼 SQL 时为了方便加 <code>AND</code> 的写法，可以放心用。</div>
+
+  <div class="qa"><b>Q：为什么我加了索引还是全表扫描？</b><br>
+  A：三种常见原因：<b>①</b> 谓词不可 Sargable（本节 ①）；<b>②</b> 选择率太高——优化器估算要回表 30% 以上行数时，
+  随机 IO 比顺序扫更贵，会主动放弃索引；<b>③</b> 统计信息过期，估算失真。先确认是哪种，再决定改写法还是更新统计信息。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / 过滤条件 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

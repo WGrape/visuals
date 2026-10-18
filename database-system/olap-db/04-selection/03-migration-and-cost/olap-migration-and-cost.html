@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OLAP 迁移与成本：从建模改造到双跑验证</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>OLAP 迁移路径与成本估算</h1>
+  <p>双写双跑、建模改造、结果比对、成本构成与上线风险——迁移里真正决定成败的几件事。</p>
+  <span class="tag">迁移</span><span class="tag">双跑验证</span><span class="tag">建模改造</span><span class="tag">成本</span>
+</header>
+<nav>
+  <a href="#src">四条常见迁移来源</a>
+  <a href="#path">迁移路径与灰度</a>
+  <a href="#model">数据模型改造</a>
+  <a href="#verify">如何验证一致</a>
+  <a href="#cost">成本怎么估</a>
+  <a href="#risk">风险清单</a>
+</nav>
+<main>
+<section id="src">
+<h2><span class="n">01</span>四条最常见的迁移来源</h2>
+
+<table>
+<tr><th>从哪来</th><th>迁移动机</th><th>主要难点</th></tr>
+<tr><td><b>MySQL / PostgreSQL</b></td><td>分析查询拖垮线上库</td><td> schema 需要重新建模；增量同步的延迟与一致性</td></tr>
+<tr><td><b>Elasticsearch</b></td><td>聚合能力弱、存储成本高</td><td>查询语义不同（DSL → SQL）；嵌套结构扁平化</td></tr>
+<tr><td><b>Hive / Spark 离线</b></td><td>查询太慢，想要交互式</td><td>分区与文件格式要重做；UDF 需要替换</td></tr>
+<tr><td><b>自建 ClickHouse / Doris</b></td><td>换引擎或上云托管</td><td>SQL 方言差异；物化视图与索引要重建</td></tr>
+</table>
+<div class="lead"><b>先想清楚"为什么迁"</b>：如果是为了<b>降本</b>，重点在存储与压缩；如果是为了<b>提速</b>，重点在数据模型与索引；如果是为了<b>实时</b>，重点在导入链路。三个目标的最优解不同。</div>
+
+</section>
+<section id="path">
+<h2><span class="n">02</span>迁移路径：双写、灰度与回滚</h2>
+
+<div class="grid">
+<div class="card"><b>① 全量回溯 + 增量追平</b>。先把历史数据灌进去，再启动增量同步追平，最后在一个时间点切流。</div>
+<div class="card"><b>② 双写双跑</b>。新旧两套同时写入，查询也同时发两边，<b>比对结果</b>。这是唯一能在切换前发现语义差异的方法。</div>
+<div class="card"><b>③ 灰度切读</b>。先切 1% 的只读流量，观察延迟与错误率，逐步放大。<b>永远保留快速切回的能力。</b></div>
+<div class="card"><b>④ 观察一个完整周期</b>。至少覆盖一次月结/大促/周报高峰，因为长尾问题常在负载峰值才暴露。</div>
+<div class="card"><b>⑤ 下线旧链路</b>。确认无流量后再停双写，避免"旧库还在写但没人知道"。</div>
+</div>
+<div class="lead bad"><b>不要做"一次性大切换"</b>。分析系统的错误往往不报错、只是<b>结果不对</b>，等到业务发现时已经影响决策很久了。<b>双跑比对是必须的，不是可选的。</b></div>
+
+</section>
+<section id="model">
+<h2><span class="n">03</span>数据模型改造：迁移中最容易低估的部分</h2>
+
+<p>从行存/文档型迁到列存分析引擎，最痛苦的不是搬数据，而是<b>重新建模</b>。三处最常出问题：</p>
+<table>
+<tr><th>问题</th><th>为什么</th><th>怎么做</th></tr>
+<tr><td><b>宽表 vs 星型</b></td><td>行存里习惯范式化，分析引擎偏好宽表或星型</td><td>按查询频率决定冗余程度，高频维度下沉到事实表</td></tr>
+<tr><td><b>分区键选择</b></td><td>选错会导致全表扫描或分区数爆炸</td><td>按<b>最常用的时间过滤字段</b>分区，按<b>高频 JOIN/过滤字段</b>分桶</td></tr>
+<tr><td><b>高基数字段</b></td><td>用户 ID 这类字段做维度会导致聚合极慢</td><td>考虑预聚合，或用近似去重（HLL）替代精确 COUNT DISTINCT</td></tr>
+</table>
+<div class="lead warn"><b>不要把 OLTP 的表结构原样搬过来</b>。原样迁移是最省事的做法，也几乎必然导致性能不达标。<b>建模改造才是迁移收益的主要来源。</b></div>
+
+</section>
+<section id="verify">
+<h2><span class="n">04</span>怎么验证迁移后结果一致</h2>
+
+<div class="grid">
+<div class="card"><b>① 行数与汇总值比对</b>。先比对总量、求和、去重计数，<b>这一步能抓住 80% 的导入问题</b>。</div>
+<div class="card"><b>② 分维度下钻比对</b>。按日期、按主要维度分组比对，暴露分区与编码问题。</div>
+<div class="card"><b>③ 抽样明细比对</b>。随机抽若干主键，逐字段比对，暴露类型转换与时区问题。</div>
+<div class="card"><b>④ 慢查询比对</b>。把旧系统的 Top 慢查询拿过来跑，确认延迟真的改善了。</div>
+</div>
+<div class="lead"><b>特别关注四类差异</b>：<b>时区</b>（UTC vs 本地）、<b>浮点精度</b>、<b>NULL 与空串</b>、<b>去重语义</b>。这四项不报错，但会让数字悄悄对不上。</div>
+
+</section>
+<section id="cost">
+<h2><span class="n">05</span>成本怎么估：存储、计算与人力</h2>
+
+<table>
+<tr><th>成本项</th><th>怎么估</th><th>容易漏掉的</th></tr>
+<tr><td><b>存储</b></td><td>原始量 × 压缩比（列存常见 3–10 倍，视数据与编码而定）</td><td><b>副本倍数</b>、索引与物化视图的额外占用、临时空间</td></tr>
+<tr><td><b>计算</b></td><td>按峰值并发 × 单查询资源占用估算</td><td><b>导入与 compaction 也吃资源</b>，常与查询争抢</td></tr>
+<tr><td><b>数据同步</b></td><td>全量回溯 + 常驻增量链路的资源</td><td>同步任务的失败重试与监控成本</td></tr>
+<tr><td><b>人力</b></td><td>建模改造 + 查询改写 + 双跑验证</td><td><b>这一项常被完全忽略，实际往往超过硬件成本</b></td></tr>
+</table>
+<div class="lead"><b>压缩比的具体倍数取决于数据特征与编码方式，差异很大</b>——请用你自己的数据实际导入一次来测，不要按经验值做预算。</div>
+<div class="qa"><b>Q：迁移一定能降本吗？</b><br>A：不一定。<b>如果查询形态没变、建模没改，只是换个引擎，降本幅度通常有限</b>。真正的降本来自：压缩更优、预聚合减少扫描、冷热分层、以及下线旧系统。</div>
+
+</section>
+<section id="risk">
+<h2><span class="n">06</span>上线前风险清单</h2>
+
+<div class="qa"><b>Q：最该担心什么？</b><br>A：<b>结果不一致但不报错。</b>这是分析系统独有的风险，必须靠双跑比对来防。</div>
+<div class="qa"><b>Q：实时导入需要特别准备什么？</b><br>A：导入的<b>幂等与乱序处理</b>。上游重发、延迟到达都会造成重复或丢数，需要主键去重与时间窗口兜底。</div>
+<div class="qa"><b>Q：权限怎么做？</b><br>A：迁移期两套系统并存，权限容易漏配。<b>提前梳理角色与行级/列级权限需求</b>，不要上线后补。</div>
+<div class="qa"><b>Q：要不要保留旧系统？</b><br>A：<b>至少保留一个可回滚窗口</b>（通常 2–4 周）。分析系统的正确性验证需要时间，过早下线会失去退路。</div>
+<div class="qa"><b>Q：什么时候该放弃迁移？</b><br>A：如果<b>查询形态高度固定且量小</b>，现有系统已经够用，迁移的收益可能覆盖不了建模改造与双跑验证的成本。<b>不是所有分析场景都需要列存引擎。</b></div>
+<div class="lead"><b>一句话收尾</b>：迁移的成败<b>不在引擎选型，在建模改造与结果验证</b>。这两项做扎实，换哪个引擎都不会太差。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP / 选型指南 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>如何读懂 SQL 执行计划</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>读懂执行计划</h1>
+  <p>跨库通用的读法、算子对照、行数估算失真的四种来源、拿到计划后的行动顺序</p>
+  <span class="tag">EXPLAIN</span><span class="tag">EXPLAIN ANALYZE</span><span class="tag">filesort</span><span class="tag">统计信息</span><span class="tag">覆盖索引</span>
+</header>
+<nav>
+  <a href="#read">① 通用读法</a>
+  <a href="#ops">② 算子对照</a>
+  <a href="#est">③ 估算为何错</a>
+  <a href="#act">④ 行动顺序</a>
+</nav>
+<main>
+<section id="read">
+<h2><span class="n">①</span>读执行计划的通用方法</h2>
+
+  <p>各库的 <code>EXPLAIN</code> 输出格式不同，但<b>读法相通</b>。掌握这套方法，换数据库也能上手。</p>
+
+  <ol>
+    <li><b>从最内层/最缩进的算子往外读</b>，数据是从叶子流向上层的；缩进最深的那一步最先执行。</li>
+    <li><b>关注每个算子的三件事</b>：访问方式（全扫/索引/范围）、<b>预估行数</b>、<b>实际行数</b>。</li>
+    <li><b>预估 vs 实际差一个数量级</b> = 统计信息失真或谓词估算失败，这是绝大多数慢查询的根因。</li>
+    <li><b>顺着行数放大/收缩的方向找瓶颈</b>：哪一层输出行数突然暴涨（笛卡尔积、JOIN 放大），
+    或哪一层从 100 万骤降到 10 行但扫了 100 万（过滤太晚）。</li>
+    <li><b>看附加信息</b>：<code>Using filesort</code>、<code>Using temporary</code>、
+    <code>Using index</code>（覆盖索引，好事）、<code>Using where</code>、<code>Using join buffer</code>。</li>
+  </ol>
+
+  <div class="lead ok"><b>最重要的一条：</b>只看预估行数容易被误导，
+  <b>一定要拿到实际行数</b>——MySQL 8.0.18+ 用 <code>EXPLAIN ANALYZE</code>，
+  PostgreSQL 用 <code>EXPLAIN (ANALYZE, BUFFERS)</code>，SQL Server 看实际执行计划。
+  它会真的执行一遍 SQL，<b>不要在生产的写语句上直接跑</b>。</div>
+
+</section>
+<section id="ops">
+<h2><span class="n">②</span>常见算子对照</h2>
+
+  <table>
+    <tr><th>算子 / 关键字</th><th>MySQL</th><th>PostgreSQL</th><th>含义与判断</th></tr>
+    <tr><td>全表扫描</td><td><code>ALL</code></td><td><code>Seq Scan</code></td><td>小表正常，大表危险</td></tr>
+    <tr><td>索引等值/范围</td><td><code>ref</code> / <code>range</code></td><td><code>Index Scan</code></td><td>需回表，行数多时可能不如全扫</td></tr>
+    <tr><td>覆盖索引</td><td><code>Using index</code></td><td><code>Index Only Scan</code></td><td>不回表，最优</td></tr>
+    <tr><td>索引全扫</td><td><code>index</code></td><td><code>Index Scan</code></td><td>扫整个索引但不回表，常用于 COUNT</td></tr>
+    <tr><td>排序</td><td><code>Using filesort</code></td><td><code>Sort</code></td><td>注意是否落盘（<code>external merge</code>）</td></tr>
+    <tr><td>临时表</td><td><code>Using temporary</code></td><td><code>HashAggregate</code> / <code>GroupAggregate</code></td><td>分组/去重不可避免时的开销</td></tr>
+    <tr><td>JOIN 缓冲</td><td><code>Using join buffer</code></td><td><code>Hash Join</code></td><td>被驱动表无索引时的兜底</td></tr>
+  </table>
+
+  <div class="lead warn"><b>"filesort" 不等于"用文件排序"。</b>它只是表示「发生了一次排序操作」，
+  数据量小于排序缓冲区时完全在内存完成。真正需要警惕的是落盘排序
+  （PG 的 <code>external merge Disk: xxx kB</code>、MySQL 的 <code>Sort_merge_passes</code> 状态值）。</div>
+
+</section>
+<section id="est">
+<h2><span class="n">③</span>行数估算为什么会错</h2>
+
+  <p>优化器是<b>基于代价</b>的：它先估算每个算子的输出行数与代价，再选总代价最小的计划。
+  估算错了，计划就会选错。常见失真来源：</p>
+
+  <div class="grid">
+    <div class="card"><h4>统计信息过期</h4>
+      <p>大批量导入/删除后没更新统计信息。MySQL InnoDB 的采样页数、
+      PostgreSQL 的 <code>default_statistics_target</code> 都会影响精度。
+      解法：<code>ANALYZE TABLE</code> / <code>ANALYZE</code>。</p></div>
+    <div class="card"><h4>列间相关性</h4>
+      <p>优化器默认假设各列<b>独立</b>。<code>city='杭州' AND age&lt;18</code>
+      若实际强相关，估算会严重偏离。解法：多列统计/扩展统计（PG <code>CREATE STATISTICS</code>）。</p></div>
+    <div class="card"><h4>数据倾斜</h4>
+      <p>平均值掩盖了热点值。<code>status='done'</code> 占 90% 而 <code>'init'</code> 占 1%，
+      用同一个选择率估算必然出错。解法：直方图（MySQL 8 自动、PG <code>ALTER TABLE SET STATISTICS</code>）。</p></div>
+    <div class="card"><h4>无法估算的表达式</h4>
+      <p>函数包裹、<code>LIKE '%x%'</code>、跨表条件、<code>OR</code> 组合，
+      优化器只能用默认选择率（往往是个拍脑袋的常数）。解法：改写成可估算的形式。</p></div>
+  </div>
+
+  <div class="lead bad"><b>实际行数 / 预估行数 是最有价值的单个指标。</b>
+  比值 &gt; 10 或 &lt; 0.1 时，别急着改 SQL 加索引——先解决估算问题，
+  否则优化器换了数据分布还会选错。</div>
+
+</section>
+<section id="act">
+<h2><span class="n">④</span>拿到计划后的行动顺序</h2>
+
+  <ol>
+    <li><b>确认扫描方式</b>：大表是否走了全扫？谓词是否可 Sargable？（见「过滤条件与索引可用性」）</li>
+    <li><b>看 JOIN 顺序与驱动表</b>：小表是否作为驱动表？被驱动表的关联列有没有索引？</li>
+    <li><b>检查覆盖</b>：能否通过加宽索引让 <code>Using index</code> 生效，消掉回表？</li>
+    <li><b>消掉排序</b>：<code>ORDER BY / GROUP BY</code> 能否与索引顺序对齐？</li>
+    <li><b>处理估算失真</b>：更新统计信息、补直方图、改写法让谓词可估算。</li>
+    <li><b>最后是改写业务 SQL</b>：拆 OR、改 EXISTS、加汇总表、换分页方式。</li>
+  </ol>
+
+  <div class="qa"><b>Q：加了索引优化器不用怎么办？</b><br>
+  A：先确认不是估算问题（更新统计信息后重试）。若确认索引更优而优化器仍选全扫，
+  再考虑 hint（<code>FORCE INDEX</code> / <code>STRAIGHT_JOIN</code>）——
+  但 hint 是把决策写死，数据分布变化后会变成负担，<b>作为最后手段并留下注释说明原因</b>。</div>
+
+  <div class="qa"><b>Q：<code>EXPLAIN</code> 和 <code>EXPLAIN ANALYZE</code> 差在哪？</b><br>
+  A：前者只做优化、不执行，输出的是<b>预估</b>；后者真的执行，输出<b>实际行数与耗时</b>。
+  前者安全可随时跑，后者会在写语句上产生副作用，只能在只读语句或测试环境用。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / 执行计划 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

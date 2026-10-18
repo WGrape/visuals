@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DDL 与在线表结构变更</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>DDL 与表结构变更</h1>
+  <p>哪些 ALTER 只改元数据、哪些必须重写全表、在线变更三种流派与五个高风险点</p>
+  <span class="tag">ALTER TABLE</span><span class="tag">Online DDL</span><span class="tag">MDL 锁</span><span class="tag">gh-ost</span><span class="tag">主从延迟</span>
+</header>
+<nav>
+  <a href="#kinds">① 三类操作</a>
+  <a href="#online">② 在线变更</a>
+  <a href="#risk">③ 高风险点</a>
+  <a href="#naming">④ 建表定型决策</a>
+</nav>
+<main>
+<section id="kinds">
+<h2><span class="n">①</span>DDL 的三类操作与代价量级</h2>
+
+  <p>DDL 操作数据<b>字典</b>而非数据本身，但「要不要动已有行」决定了它的代价量级。
+  理解这个分界，才能预判一次 <code>ALTER</code> 是毫秒级还是小时级。</p>
+
+  <table>
+    <tr><th>类型</th><th>例子</th><th>是否重写表</th><th>典型代价</th></tr>
+    <tr><td>仅改元数据（instant）</td><td>改默认值、改名、改注释、加枚举末尾值</td><td>否</td><td>毫秒~秒，只锁字典</td></tr>
+    <tr><td>需重建索引但不改行</td><td>加/删二级索引（部分实现支持 online）</td><td>否（行不变）</td><td>与表大小成正比，可在线</td></tr>
+    <tr><td>必须重写全表</td><td>改列类型、改字符集、加列（老版本）、改主键</td><td><b>是</b></td><td>小时级 + 双倍空间 + 长时间锁</td></tr>
+  </table>
+
+  <div class="lead warn"><b>各版本差异极大，不要凭记忆操作。</b>MySQL 8.0 引入了 instant ADD COLUMN（只改元数据），
+  但只支持加在末尾等有限场景；PostgreSQL 11+ 加带默认值的列是即时的（默认值存字典），
+  老版本会重写全表。<b>执行前先确认你那个版本的官方行为表，并在从库/测试库实测。</b></div>
+
+  <pre><code>-- 加列：确认是 instant 还是 rebuild（MySQL 8.0）
+ALTER TABLE t ADD COLUMN c INT DEFAULT 0, ALGORITHM=INSTANT;   -- 成功=元数据操作
+ALTER TABLE t ADD COLUMN c INT DEFAULT 0, ALGORITHM=INPLACE, LOCK=NONE;
+
+-- PostgreSQL 11+：带默认值的加列是即时的，不需要重写
+ALTER TABLE t ADD COLUMN c INT DEFAULT 0;   -- 已有行的值从字典取，不写盘</code></pre>
+
+</section>
+<section id="online">
+<h2><span class="n">②</span>在线变更：三种流派</h2>
+
+  <div class="grid">
+    <div class="card"><h4>原生 Online DDL</h4>
+      <p>数据库自带的 <code>ALGORITHM=INPLACE, LOCK=NONE</code> / <code>CONCURRENTLY</code>。
+      优点是不引入外部依赖；缺点是支持的操作有限、大表仍会产生大量 IO 和复制延迟，
+      且<b>失败回滚代价高</b>。</p></div>
+    <div class="card"><h4>外部工具（影子表）</h4>
+      <p>pt-online-schema-change、gh-ost：建影子表 → 拷贝数据 → 用触发器或 binlog 追增量 → 重命名切换。
+      <b>几乎不锁表、可控流</b>，是生产大表的首选。缺点是需要额外磁盘空间、有切换瞬间的短暂锁。</p></div>
+    <div class="card"><h4>停机变更</h4>
+      <p>维护窗口内直接执行。最简单、最可控，适合能接受停机的中小系统，
+      或有从库可先切流量再改的场景。</p></div>
+  </div>
+
+  <div class="lead ok"><b>选型口径：</b>小表（几十万行内）直接 <code>ALTER</code>；
+  大表且操作被原生 online 支持 → 先试原生；<b>大表 + 需要改列类型/字符集</b> → 上 gh-ost/pt-osc；
+  无论哪种，<b>先在从库或影子环境演练并计时</b>。</div>
+
+</section>
+<section id="risk">
+<h2><span class="n">③</span>五个高风险点</h2>
+
+  <ol>
+    <li><b>主从延迟</b>：大表 DDL 在从库单线程回放时会造成显著延迟，读写分离架构下用户会读到旧数据。</li>
+    <li><b>空间翻倍</b>：重建表需要额外的表大小空间 + binlog/undo，磁盘不足会在中途失败。</li>
+    <li><b>元数据锁（MDL）</b>：DDL 要等所有对该表的事务结束；反过来它开跑后会<b>阻塞后续所有查询</b>。
+    一个忘记提交的长事务就能把整个表的访问堵死。</li>
+    <li><b>外键与触发器</b>：带外键的表做 DDL 常被迫退化成 COPY 方式，且会级联检查。</li>
+    <li><b>应用兼容性</b>：删列/改名后，还没发版的老代码会报错。正确顺序是
+    <b>先让代码不再依赖该列 → 发版 → 观察 → 再删列</b>（扩缩容式变更）。</li>
+  </ol>
+
+  <div class="lead bad"><b>最实用的一条检查：</b>执行 DDL 前先查有没有长事务——
+  MySQL 看 <code>information_schema.innodb_trx</code>，PostgreSQL 看
+  <code>pg_stat_activity</code> 里 <code>state &lt;&gt; 'idle'</code> 且持续时间长的会话。
+  有长事务时开 DDL，等于主动制造一次全表阻塞。</div>
+
+</section>
+<section id="naming">
+<h2><span class="n">④</span>建表即定型的决策</h2>
+
+  <table>
+    <tr><th>决策项</th><th>为什么后期难改</th><th>建议</th></tr>
+    <tr><td>字符集与排序规则</td><td>改它要重写全表；不一致会导致 JOIN 时索引失效</td><td>统一 <code>utf8mb4</code> + 一致的 collation，建库时就定</td></tr>
+    <tr><td>主键类型</td><td>聚簇索引按主键组织，换主键=全表重建</td><td>见「约束」篇的主键选型</td></tr>
+    <tr><td>时间类型精度</td><td><code>DATETIME(0)</code> 改 <code>(6)</code> 要重写</td><td>一开始就用带精度的类型</td></tr>
+    <tr><td>金额字段类型</td><td>浮点误差一旦产生无法追溯</td><td>用 <code>DECIMAL</code> 或整数存最小单位</td></tr>
+    <tr><td>是否允许 NULL</td><td>改成 <code>NOT NULL</code> 要重写并校验存量数据</td><td>见「NULL 语义」篇的设计取舍</td></tr>
+  </table>
+
+  <div class="qa"><b>Q：为什么大表加个索引也要小心？</b><br>
+  A：建索引要扫描全表并排序，期间持有锁（版本相关）、产生大量 redo/undo 与 binlog，
+  在从库回放会造成延迟，还可能触发主从切换后的长时间恢复。用
+  <code>CREATE INDEX CONCURRENTLY</code>（PG）或 <code>ALGORITHM=INPLACE, LOCK=NONE</code>（MySQL）能减轻，
+  但仍有 IO 与复制延迟代价。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / DDL 与变更 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

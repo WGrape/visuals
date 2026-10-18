@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Milvus 检索与查询 · search / query / hybrid_search 完全图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Milvus 检索与查询</h1>
+  <p>三种读操作的分工、一次 search 的执行链路、过滤表达式、score 方向与分页</p>
+  <div>
+    <span class="tag">search</span>
+    <span class="tag">query</span>
+    <span class="tag">hybrid_search</span>
+    <span class="tag">过滤表达式</span>
+    <span class="tag">分页</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#three">① 三种读操作</a>
+  <a href="#flow">② 一次 search 在做什么</a>
+  <a href="#expr">③ 过滤表达式</a>
+  <a href="#score">④ score 方向与阈值</a>
+  <a href="#paging">⑤ 分页与 iterator</a>
+  <a href="#advanced">⑥ 进阶检索形态</a>
+  <a href="#output">⑦ output_fields 与性能</a>
+  <a href="#code">⑧ 完整示例</a>
+  <a href="#perf">⑨ 性能自检清单</a>
+</nav>
+
+<main>
+
+
+<section id="three">
+  <h2><span class="n">①</span>三种读操作：search、query、hybrid_search</h2>
+  <div class="lead">Milvus 的“读”不是一种操作，而是三种：<b>search</b> 按向量相似度取 top-K、<b>query</b> 按标量条件取全量、<b>hybrid_search</b> 对多个向量字段多路召回再融合。它们走的执行路径不同，性能特征也不同。</div>
+  <table>
+    <tr><th>操作</th><th>输入</th><th>输出</th><th>典型场景</th></tr>
+    <tr><td><code>search()</code></td><td>查询向量 + <code>limit</code> + 可选 filter</td><td>按相似度排序的 top-K（含 distance/score）</td><td>语义检索、以图搜图、RAG 召回</td></tr>
+    <tr><td><code>query()</code></td><td>纯过滤表达式</td><td>满足条件的所有实体（<b>不保证顺序</b>）</td><td>按 ID 批量取、按条件导出、<code>count(*)</code> 计数</td></tr>
+    <tr><td><code>hybrid_search()</code></td><td>多个向量字段的查询 + rerank 策略</td><td>融合排序后的 top-K</td><td>稠密 + 稀疏（BM25）混合、图文跨模态</td></tr>
+  </table>
+  <div class="note">只有 <code>search</code>/<code>hybrid_search</code> 会用到 ANN 索引；<code>query</code> 完全靠标量索引过滤，<b>没有相似度概念</b>。想“按条件取最新的 10 条”，Milvus 的 <code>query</code> 不保证顺序，需要自己排序或用 <code>search</code> + 过滤。</div>
+</section>
+
+<section id="flow">
+  <h2><span class="n">②</span>一次 search 在做什么</h2>
+  <svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="240" y="12" width="200" height="50" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="340" y="34" fill="#9ec5ff" font-size="13" text-anchor="middle" font-weight="bold">Proxy</text>
+    <text x="340" y="52" fill="#cdd6f4" font-size="10.5" text-anchor="middle">校验、分配 GuaranteeTs、路由</text>
+
+    <rect x="30" y="92" width="180" height="56" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="120" y="116" fill="#a6f0ab" font-size="12.5" text-anchor="middle" font-weight="bold">QueryNode-1</text>
+    <text x="120" y="136" fill="#cdd6f4" font-size="10.5" text-anchor="middle">段内 ANN + 过滤 → 局部 top-K</text>
+    <rect x="250" y="92" width="180" height="56" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="340" y="116" fill="#a6f0ab" font-size="12.5" text-anchor="middle" font-weight="bold">QueryNode-2</text>
+    <text x="340" y="136" fill="#cdd6f4" font-size="10.5" text-anchor="middle">段内 ANN + 过滤 → 局部 top-K</text>
+    <rect x="470" y="92" width="180" height="56" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="560" y="116" fill="#a6f0ab" font-size="12.5" text-anchor="middle" font-weight="bold">QueryNode-3</text>
+    <text x="560" y="136" fill="#cdd6f4" font-size="10.5" text-anchor="middle">段内 ANN + 过滤 → 局部 top-K</text>
+
+    <rect x="190" y="178" width="300" height="56" rx="10" fill="#1f2433" stroke="#d2a8ff"/>
+    <text x="340" y="202" fill="#e0c0ff" font-size="12.5" text-anchor="middle" font-weight="bold">Proxy 归并 Reduce</text>
+    <text x="340" y="222" fill="#cdd6f4" font-size="10.5" text-anchor="middle">按 score 全局排序，截断到 limit</text>
+
+    <rect x="190" y="264" width="300" height="56" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="340" y="288" fill="#7fe3ea" font-size="12.5" text-anchor="middle" font-weight="bold">回表 output_fields</text>
+    <text x="340" y="308" fill="#cdd6f4" font-size="10.5" text-anchor="middle">从对象存储 / 缓存取标量字段与 $meta</text>
+
+    <line x1="340" y1="62" x2="120" y2="90" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="340" y1="62" x2="340" y2="90" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="340" y1="62" x2="560" y2="90" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="120" y1="148" x2="300" y2="176" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="340" y1="148" x2="340" y2="176" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="560" y1="148" x2="380" y2="176" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+    <line x1="340" y1="234" x2="340" y2="262" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar3)"/>
+  </svg>
+  <p>这解释了两个现象：<b>①</b> 每个 QueryNode 都要算出自己的局部 top-K，所以 <code>limit</code> 太小不会影响召回（但 <code>ef</code>/<code>nprobe</code> 会）；<b>②</b> 真正耗时的可能是最后一步<b>回表</b>——如果 <code>output_fields</code> 拉了整段正文，网络与对象存储 IO 会成为瓶颈。</p>
+</section>
+
+<section id="expr">
+  <h2><span class="n">③</span>过滤表达式：把业务条件带进向量检索</h2>
+  <pre><code><span class="cmt"># 基础组合</span>
+filter = <span class="str">'tenant == "acme" and publish_ts &gt; 1700000000'</span>
+
+<span class="cmt"># 集合与数组</span>
+filter = <span class="str">'category in ["tech", "finance"]'</span>
+filter = <span class="str">'array_contains(tags, "milvus")'</span>
+
+<span class="cmt"># JSON / 动态字段</span>
+filter = <span class="str">'$meta["lang"] == "zh"'</span>
+
+<span class="cmt"># 字符串匹配</span>
+filter = <span class="str">'title like "Milvus%"'</span></code></pre>
+  <div class="grid2">
+    <div class="card">
+      <h4>先过滤还是先检索（pre-filter vs post-filter）</h4>
+      <p>老版本是<b>先 ANN 再过滤</b>，条件很严时会“召回不足”——筛完可能只剩几条。新版本支持<b>先算 bitset 再指导 ANN 遍历</b>（迭代式过滤），命中率低的场景明显更好。</p>
+    </div>
+    <div class="card">
+      <h4>过滤字段必须建索引</h4>
+      <p>没建 <code>INVERTED</code> 的过滤条件会退化成<b>逐条比对</b>，向量索引再好也救不了。所有出现在 <code>filter</code> 里的高频字段都该建标量索引。</p>
+    </div>
+  </div>
+  <div class="warn">过滤条件的选择率直接决定性能：<b>千分之一级别的强过滤</b>会让 ANN 索引几乎失效（大半个库都在 mask 外）。这类场景优先考虑按 <code>tenant</code> 建 Partition，或把强过滤字段做成 Partition Key。</div>
+</section>
+
+<section id="score">
+  <h2><span class="n">④</span>score 方向与阈值：最容易写反的一行代码</h2>
+  <table>
+    <tr><th>metric_type</th><th>返回字段含义</th><th>越…越相似</th><th>阈值判断</th></tr>
+    <tr><td><code>L2</code></td><td>欧氏距离（≥0）</td><td>越小</td><td><code>score &lt; threshold</code></td></tr>
+    <tr><td><code>IP</code></td><td>内积（未归一化时可正可负）</td><td>越大</td><td><code>score &gt; threshold</code></td></tr>
+    <tr><td><code>COSINE</code></td><td>余弦相似度（-1~1，归一化向量下 0~1）</td><td>越大</td><td><code>score &gt; threshold</code></td></tr>
+  </table>
+  <div class="danger">把 <code>COSINE</code> 的分数当成“距离”去做 <code>score &lt; 0.8</code> 的过滤，结果是<b>把最相似的全滤掉</b>。做阈值截断前一定先确认 metric 方向。</div>
+  <p>另一个常见误解：语义相似度没有绝对阈值。0.82 分在短句匹配里可能很好，在长文档里可能很差。<b>要设阈值，就先在自己的数据分布上看分数直方图</b>，而不是照抄别人的经验值。</p>
+</section>
+
+<section id="paging">
+  <h2><span class="n">⑤</span>分页与 iterator</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4><code>offset</code> + <code>limit</code></h4>
+      <p>传统深分页。<code>offset</code> 越大越慢（要算出并丢弃前面所有结果），且 <code>offset + limit</code> 有上限。<b>只适合浅分页（前几页）</b>。</p>
+    </div>
+    <div class="card">
+      <h4><code>search_iterator</code> / <code>query_iterator</code></h4>
+      <p>服务端游标式分批返回，不受深分页上限约束，适合<b>全量导出、批量重建索引、离线评估</b>。</p>
+    </div>
+  </div>
+  <pre><code><span class="cmt"># 深分页 / 全量遍历用 iterator，别用 offset</span>
+it = client.query_iterator(collection_name=<span class="str">"docs"</span>,
+                           filter=<span class="str">'tenant == "acme"'</span>,
+                           output_fields=[<span class="str">"doc_id"</span>, <span class="str">"text"</span>],
+                           batch_size=<span class="num">1000</span>)
+<span class="kw">for</span> batch <span class="kw">in</span> it:
+    handle(batch)</code></pre>
+</section>
+
+<section id="advanced">
+  <h2><span class="n">⑥</span>进阶检索形态</h2>
+  <div class="grid">
+    <div class="card"><h4>Range Search</h4><p>不取 top-K，而是取<b>相似度落在某个半径内</b>的全部结果（<code>radius</code> + <code>range_filter</code>）。适合去重、聚类、“找出所有足够相似的”。</p></div>
+    <div class="card"><h4>Grouping Search</h4><p>按某个标量字段分组，每组只返回最优的一条（<code>group_by_field</code>）。适合“同一文档只出最相关的一个 chunk”。</p></div>
+    <div class="card"><h4>Hybrid Search</h4><p>多个向量字段（如 <code>embedding</code> 稠密 + <code>sparse</code> BM25）各自召回，再用 <code>RRFRanker</code>（倒数排名融合）或 <code>WeightedRanker</code> 合并。</p></div>
+    <div class="card"><h4>Multi-Vector</h4><p>一个 Collection 可有多个向量字段，各自建独立索引；单次 <code>search</code> 只针对一个字段，多路要走 <code>hybrid_search</code>。</p></div>
+  </div>
+  <pre><code><span class="cmt"># 稠密 + 稀疏混合检索</span>
+req_dense  = AnnSearchRequest([dense_vec],  <span class="str">"embedding"</span>, {<span class="str">"metric_type"</span>: <span class="str">"COSINE"</span>, <span class="str">"params"</span>: {<span class="str">"ef"</span>: <span class="num">128</span>}}, limit=<span class="num">50</span>)
+req_sparse = AnnSearchRequest([sparse_vec], <span class="str">"sparse"</span>,    {<span class="str">"metric_type"</span>: <span class="str">"IP"</span>}, limit=<span class="num">50</span>)
+
+res = client.hybrid_search(collection_name=<span class="str">"docs"</span>,
+                           reqs=[req_dense, req_sparse],
+                           ranker=RRFRanker(),
+                           limit=<span class="num">10</span>,
+                           output_fields=[<span class="str">"doc_id"</span>, <span class="str">"text"</span>])</code></pre>
+  <div class="note">混合检索的价值不在“更高级”，而在<b>补向量的短板</b>：专有名词、型号、人名这类词 BM25 明显强于 Embedding。通用原理见<a href="../../01-foundations/01-index-and-retrieval/03-hybrid-retrieval/hybrid-search.html">混合检索</a>。</div>
+</section>
+
+<section id="output">
+  <h2><span class="n">⑦</span>output_fields 与性能</h2>
+  <ul>
+    <li><b>只取需要的字段</b>：<code>output_fields</code> 里放整篇正文会让网络传输成为瓶颈，尤其是 top-K 较大时。</li>
+    <li><b>大字段分开存</b>：正文这类大文本放在关系库/对象存储，Milvus 只存 ID 和必要元数据，检索后回查。</li>
+    <li><b>动态字段回表更贵</b>：<code>$meta</code> 是 JSON，反序列化开销高于定长字段，高频字段尽量提升为显式字段。</li>
+    <li><b>向量字段默认不返回</b>：除非显式指定，避免把几百维向量传回来。</li>
+  </ul>
+</section>
+
+<section id="code">
+  <h2><span class="n">⑧</span>完整示例：带过滤的语义检索</h2>
+  <pre><code>res = client.search(
+    collection_name=<span class="str">"docs"</span>,
+    data=[query_vec],                          <span class="cmt"># 支持批量：传多条一次查完</span>
+    filter=<span class="str">'tenant == "acme" and publish_ts &gt; 1700000000'</span>,
+    limit=<span class="num">10</span>,
+    output_fields=[<span class="str">"doc_id"</span>, <span class="str">"title"</span>],            <span class="cmt"># 不要拉整篇正文</span>
+    search_params={<span class="str">"metric_type"</span>: <span class="str">"COSINE"</span>, <span class="str">"params"</span>: {<span class="str">"ef"</span>: <span class="num">128</span>}},
+    consistency_level=<span class="str">"Bounded"</span>,
+    partition_names=[<span class="str">"2026_q4"</span>],                  <span class="cmt"># 可选：分区裁剪</span>
+)
+
+<span class="kw">for</span> hits <span class="kw">in</span> res:
+    <span class="kw">for</span> h <span class="kw">in</span> hits:
+        <span class="fn">print</span>(h[<span class="str">"id"</span>], h[<span class="str">"distance"</span>], h[<span class="str">"entity"</span>][<span class="str">"title"</span>])</code></pre>
+  <div class="note">批量查询（<code>data</code> 传多条）比循环单条快得多——它把多次网络往返和多次段扫描合并成一次，是服务端最容易拿到的性能红利。</div>
+</section>
+
+<section id="perf">
+  <h2><span class="n">⑨</span>性能自检清单</h2>
+  <table>
+    <tr><th>症状</th><th>先查什么</th></tr>
+    <tr><td>QPS 上不去</td><td>replica 数、QueryNode 数量、是否批量查询、是否单条循环</td></tr>
+    <tr><td>P99 抖动大</td><td>growing 段占比（暴力扫描）、是否刚好在建索引/compaction</td></tr>
+    <tr><td>带过滤就慢</td><td>过滤字段有没有 <code>INVERTED</code> 索引、选择率是不是过低</td></tr>
+    <tr><td>召回不达标</td><td><code>ef</code>/<code>nprobe</code> 是否偏小、<code>ef</code> 是否小于 <code>top_k</code>，见<a href="../03-indexes/milvus-index-params-tuning.html">索引参数调优</a></td></tr>
+    <tr><td>带宽打满</td><td><code>output_fields</code> 是否过大、是否返回了向量字段</td></tr>
+    <tr><td>刚写入查不到</td><td>一致性级别，见<a href="../05-consistency/milvus-consistency.html">一致性</a></td></tr>
+  </table>
+  <div class="warn">本页涉及的默认值与语法支持范围随版本演进，落地前请用你部署版本的官方文档核对。</div>
+</section>
+
+
+</main>
+
+<footer>
+  
+  把 Milvus 用好，一半功夫在 <code>search</code> 之外：过滤字段有没有索引、<code>output_fields</code> 有没有克制、批量有没有用上、一致性级别是否匹配业务。这四件事往往比换索引更能决定线上表现。<br>
+  延伸阅读：<a href="../05-consistency/milvus-consistency.html">一致性</a> · <a href="../03-indexes/milvus-index-params-tuning.html">索引参数调优</a>。
+
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Doris / StarRocks 数据模型：key 模型、分区分桶与物化视图</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>数据模型与建模</h1>
+  <p>三种 key 模型的语义差别与不可更改性、分区分桶列的选择、物化视图的上卷匹配规则与预聚合设计原则</p>
+  <span class="tag">Duplicate</span><span class="tag">Aggregate</span><span class="tag">Unique Key</span><span class="tag">分区分桶</span><span class="tag">物化视图</span>
+</header>
+<nav>
+  <a href="#keys">① 三种 key 模型</a>
+  <a href="#part">② 分区与分桶</a>
+  <a href="#mv">③ 物化视图</a>
+  <a href="#check">④ 建表自检</a>
+</nav>
+<main>
+<section id="keys">
+<h2><span class="n">①</span>三种 key 模型决定能表达什么</h2>
+
+  <p>Doris / StarRocks 建表时必须选一种 key 模型，它决定了<b>主键相同的两行怎么处理</b>。
+  这是与 MySQL 最大的思维差异：<b>这里的表更像「按 key 组织的物化结果」，不是逐行记录</b>。</p>
+
+  <table>
+    <tr><th>模型</th><th>重复 key 的处理</th><th>适用</th><th>注意</th></tr>
+    <tr><td><b>Duplicate（明细）</b></td><td>都保留</td><td>日志、流水、需要保留每条原始记录</td><td>最贴近传统表，存储最大</td></tr>
+    <tr><td><b>Aggregate（聚合）</b></td><td>按<b>指标列的聚合函数</b>合并（SUM / REPLACE / MAX / MIN 等）</td><td>本来就是统计结果的宽表</td><td>查询时自动聚合，但<b>导入阶段就已合并，原始明细不可恢复</b></td></tr>
+    <tr><td><b>Unique（主键）</b></td><td>保留最新一条（按导入顺序）</td><td>需要 Upsert 语义的维表、状态表</td><td>本质是 REPLACE 聚合的特化；写入有去重开销</td></tr>
+  </table>
+
+  <pre><code>-- Aggregate 模型：key 列 + 带聚合类型的指标列
+CREATE TABLE daily_sales (
+  dt        DATE,
+  shop_id   BIGINT,
+  amount    DECIMAL(18,2) SUM,        -- 同 key 的行累加
+  order_cnt BIGINT        SUM,
+  status    VARCHAR(20)   REPLACE     -- 同 key 的行取最后一次
+) AGGREGATE KEY(dt, shop_id)
+DISTRIBUTED BY HASH(shop_id) BUCKETS 8;
+
+-- Unique 模型：按主键保留最新
+CREATE TABLE user_dim (
+  user_id  BIGINT,
+  name     VARCHAR(50),
+  city     VARCHAR(50)
+) UNIQUE KEY(user_id)
+DISTRIBUTED BY HASH(user_id) BUCKETS 8;</code></pre>
+
+  <div class="lead warn"><b>选错的代价很高：建表后 key 模型不能改</b>，只能新建表再导数据。
+  判断口径：<b>需要原始明细 → Duplicate；查询永远是聚合结果 → Aggregate；需要更新覆盖 → Unique</b>。
+  拿不准时先用 Duplicate，存储比返工便宜。</div>
+
+</section>
+<section id="part">
+<h2><span class="n">②</span>分区与分桶</h2>
+
+  <div class="grid">
+    <div class="card"><h4>分区（Partition）</h4>
+      <p>通常按<b>时间</b>做范围分区。作用：<b>①</b> 查询按时间裁剪直接跳过整个分区；
+      <b>②</b> 历史数据可整体删除/替换；<b>③</b> 冷热分层存储的基础。</p></div>
+    <div class="card"><h4>分桶（Bucket / Tablet）</h4>
+      <p>分区内再按<b>哈希</b>分桶，决定数据在各节点间的分布与并行度。
+      <b>桶数太少 → 并行度不够；太多 → 元数据膨胀、小文件多</b>。</p></div>
+    <div class="card"><h4>分桶列怎么选</h4>
+      <p>选<b>高基数且常用于 JOIN / 聚合分组</b>的列（如 user_id、shop_id）。
+      直接决定能否用上 Colocate Join 与本地聚合。</p></div>
+    <div class="card"><h4>桶数的经验值</h4>
+      <p>通常按「单桶压缩后几百 MB ~ 1GB 量级」估，且不超过集群磁盘数的若干倍。
+      <b>具体建议请以所用版本官方文档为准</b>——不同版本对 tablet 数量的容忍度不同。</p></div>
+  </div>
+
+  <div class="lead bad"><b>最容易犯的错：分桶列基数太低。</b>用 <code>status</code>（只有几个取值）做分桶列，
+  数据会严重倾斜到少数几个桶里，<b>查询并行度退化成 1，还造成热点</b>。
+  另一个常见错是分桶列与 JOIN 键不一致，导致每次 JOIN 都要跨节点重分布数据。</div>
+
+</section>
+<section id="mv">
+<h2><span class="n">③</span>物化视图与 Rollup：预聚合的正确用法</h2>
+
+  <p>物化视图把「按某组维度预聚合的结果」物理存下来，查询时自动命中，不必重扫明细。
+  关键限制是<b>聚合必须与物化视图的定义匹配</b>，否则不会命中。</p>
+
+  <table>
+    <tr><th>查询</th><th>物化视图定义</th><th>能否命中</th></tr>
+    <tr><td><code>SELECT dt, SUM(amount) GROUP BY dt</code></td><td><code>GROUP BY dt</code></td><td>✓</td></tr>
+    <tr><td><code>SELECT dt, shop_id, SUM(amount) GROUP BY dt, shop_id</code></td><td><code>GROUP BY dt</code></td><td>✗ 维度更细，无法从粗结果还原</td></tr>
+    <tr><td><code>SELECT dt, SUM(amount) GROUP BY dt</code></td><td><code>GROUP BY dt, shop_id</code></td><td>✓ 可从细结果再聚合（<b>上卷</b>，多数实现支持）</td></tr>
+    <tr><td><code>SELECT dt, COUNT(DISTINCT uid)</code></td><td><code>SUM(amount) GROUP BY dt</code></td><td>✗ 聚合函数不匹配</td></tr>
+  </table>
+
+  <div class="lead ok"><b>设计原则：物化视图按「最细的常用维度」建</b>，让更粗的查询能上卷复用。
+  不要为每种查询组合各建一个——<b>每多一个物化视图，就多一份写入放大和存储</b>。
+  一般先按实际的慢查询 Top N 建 2~5 个，再看效果。</div>
+
+  <div class="lead warn"><b>COUNT(DISTINCT) 是预聚合的难点。</b>去重视图无法直接上卷
+  （两个分组的基数不能相加）。解决方案通常是用<b>位图（bitmap）类型</b>存中间状态，
+  查询时再求并集计数。<b>具体支持的函数与类型请以所用版本文档为准。</b></div>
+
+</section>
+<section id="check">
+<h2><span class="n">④</span>建表自检清单</h2>
+
+  <ol>
+    <li><b>key 模型</b>：需要明细吗？需要更新吗？选错不可改。</li>
+    <li><b>分区键</b>：查询是否总带时间条件？没有时间过滤的查询会扫全部分区。</li>
+    <li><b>分桶列</b>：基数够高吗？与高频 JOIN / GROUP BY 的列一致吗？</li>
+    <li><b>字段类型</b>：能用定长/小类型就不要用大类型；字符串维度考虑用低基数优化。
+    <b>改列类型的代价与 MySQL 一样大。</b></li>
+    <li><b>索引</b>：列存的点查依赖<b>稀疏索引 + zonemap/min-max 跳过</b>，
+    等值高频维度放前面。详见本学科「数据跳过」章节。</li>
+    <li><b>导入方式</b>：实时流（Routine Load）还是批量（Broker Load / INSERT INTO SELECT）？见下一篇。</li>
+  </ol>
+
+  <div class="qa"><b>Q：Doris 和 StarRocks 差别大吗？</b><br>
+  A：同源（StarRocks 从 Doris 分叉），<b>核心概念、key 模型、SQL 语法高度相似</b>，
+  本页讲的模型与建表思路两边通用。差异在执行引擎细节、优化器能力、生态集成与版本节奏上，
+  且在持续变化。<b>选型请以当前版本的官方能力与 POC 实测为准。</b></div>
+
+  <div class="qa"><b>Q：Unique 模型能当 OLTP 库用吗？</b><br>
+  A：不能。它是<b>批量导入 + 覆盖合并</b>的语义，不是逐行事务。
+  单行高频更新、需要事务隔离、需要低延迟点查 → 那是 OLTP 库的职责。
+  <b>把 OLAP 当 OLTP 用是常见的架构错配。</b></div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / Doris / StarRocks · 数据模型 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

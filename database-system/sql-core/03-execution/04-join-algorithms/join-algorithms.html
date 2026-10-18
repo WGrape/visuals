@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JOIN 物理算法：Nested Loop / Hash / Merge</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>JOIN 物理算法</h1>
+  <p>语义与算法的区别、驱动表选择、Hash Join 的内存代价、半连接与笛卡尔积</p>
+  <span class="tag">Nested Loop</span><span class="tag">Hash Join</span><span class="tag">Merge Join</span><span class="tag">驱动表</span><span class="tag">半连接</span>
+</header>
+<nav>
+  <a href="#three">① 三种算法</a>
+  <a href="#nl">② Nested Loop</a>
+  <a href="#hash">③ Hash Join</a>
+  <a href="#merge">④ Merge 与其他</a>
+</nav>
+<main>
+<section id="three">
+<h2><span class="n">①</span>三种物理 JOIN 算法</h2>
+
+  <p>SQL 里的 <code>INNER/LEFT/RIGHT/OUTER</code> 说的是<b>语义</b>（结果集包含哪些行），
+  执行计划里的 Nested Loop / Hash / Merge 说的是<b>算法</b>（怎么把两张表的行配对）。
+  两者正交：同一个 LEFT JOIN，优化器可能用三种算法中的任何一种。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="230" fill="#171b26"/>
+    <g font-family="monospace" font-size="11.5">
+      <rect x="20" y="30" width="200" height="86" rx="8" fill="#0b0e13" stroke="#6ea8fe"/>
+      <text x="120" y="50" fill="#6ea8fe" text-anchor="middle">Nested Loop</text>
+      <text x="120" y="72" fill="#94a3b8" text-anchor="middle">外表每行 → 内表查找</text>
+      <text x="120" y="92" fill="#94a3b8" text-anchor="middle">内表有索引 = 极快</text>
+      <text x="120" y="110" fill="#ff7b72" text-anchor="middle">无索引 = O(N×M) 灾难</text>
+      <rect x="240" y="30" width="200" height="86" rx="8" fill="#0b0e13" stroke="#f0a868"/>
+      <text x="340" y="50" fill="#f0a868" text-anchor="middle">Hash Join</text>
+      <text x="340" y="72" fill="#94a3b8" text-anchor="middle">小表建哈希 → 大表探测</text>
+      <text x="340" y="92" fill="#94a3b8" text-anchor="middle">只做等值，不需索引</text>
+      <text x="340" y="110" fill="#7ee787" text-anchor="middle">大表关联首选</text>
+      <rect x="460" y="30" width="200" height="86" rx="8" fill="#0b0e13" stroke="#d2a8ff"/>
+      <text x="560" y="50" fill="#d2a8ff" text-anchor="middle">Merge Join</text>
+      <text x="560" y="72" fill="#94a3b8" text-anchor="middle">两侧排序 → 归并</text>
+      <text x="560" y="92" fill="#94a3b8" text-anchor="middle">输入已有序则免费</text>
+      <text x="560" y="110" fill="#94a3b8" text-anchor="middle">支持等值/部分范围</text>
+      <text x="340" y="146" fill="#94a3b8" text-anchor="middle">选择依据：输入规模、是否有索引、是否等值、是否已有序</text>
+      <rect x="20" y="164" width="640" height="50" rx="8" fill="#0b0e13" stroke="#2b3142"/>
+      <text x="340" y="186" fill="#7ee787" text-anchor="middle" font-size="11.5">经验：小结果集 + 内表有索引 → NL；大表等值关联 → Hash；两侧已有序或非等值 → Merge</text>
+      <text x="340" y="206" fill="#94a3b8" text-anchor="middle" font-size="11">具体实现与支持版本以各库文档为准（MySQL 8.0.18+ 才有 Hash Join）</text>
+    </g>
+  </svg>
+  <div class="cap">三种物理 JOIN 算法的适用边界</div>
+  </div>
+
+</section>
+<section id="nl">
+<h2><span class="n">②</span>Nested Loop：驱动表决定一切</h2>
+
+  <p>Nested Loop 的思想最简单：外层取一行，拿关联键去内层查匹配的行。
+  它的代价 = <b>外层行数 × 单次内层查找代价</b>。所以关键变量有两个：</p>
+
+  <ul>
+    <li><b>外层（驱动表）要小</b>——过滤后剩多少行，决定内层被查找多少次。这就是「小表驱动大表」说法的来源，
+    更准确的说法是「<b>过滤后结果小的表作驱动表</b>」。</li>
+    <li><b>内层的关联列必须有索引</b>——有索引时单次查找是 O(log n)，无索引就是全表扫，
+    整体退化成 O(N×M)。MySQL 里后者表现为 <code>Using join buffer (Block Nested Loop)</code>，是危险信号。</li>
+  </ul>
+
+  <pre><code>-- 假设 orders 过滤后 100 行，users 100 万行且 id 是主键
+SELECT u.name, o.amount
+FROM orders o
+JOIN users u ON u.id = o.user_id     -- 驱动表 = orders(100 行)，内层走主键
+WHERE o.created_at &gt;= '2026-01-01';  -- 100 次主键查找，毫秒级
+
+-- 反过来若优化器选错驱动表，变成 100 万次查找，就是秒级到分钟级</code></pre>
+
+  <div class="lead warn"><b>「小表驱动大表」不是让你改 SQL 里 JOIN 的书写顺序。</b>
+  优化器会自己重排（除了用 <code>STRAIGHT_JOIN</code> 固定时）。
+  真正要做的是：<b>①</b> 让驱动表上的过滤条件能用索引，把结果集压小；
+  <b>②</b> 保证被驱动表的关联列有索引。</div>
+
+</section>
+<section id="hash">
+<h2><span class="n">③</span>Hash Join：大表等值的默认答案</h2>
+
+  <p>分两个阶段：<b>build</b>——把较小的一侧读进内存建哈希表；<b>probe</b>——流式读较大的一侧，
+  对每行算哈希去表里找匹配。复杂度约 O(N+M)。</p>
+
+  <table>
+    <tr><th>维度</th><th>说明</th></tr>
+    <tr><td>适用条件</td><td><b>只支持等值条件</b>（<code>=</code>）。<code>&gt;</code>、<code>LIKE</code>、非等值无法用。</td></tr>
+    <tr><td>内存</td><td>哈希表要能放下 build 侧。放不下会分片落盘（PG 的 <code>Batches: N</code>），性能下降。</td></tr>
+    <tr><td>不需要索引</td><td>这是它相对 Nested Loop 最大的优势——临时关联、ETL 场景无需建索引。</td></tr>
+    <tr><td>首次输出延迟</td><td>必须<b>先读完整个 build 侧</b>才能输出第一行，所以不适合需要快速返回首屏的场景。</td></tr>
+    <tr><td>外连接支持</td><td>各版本支持程度不同（MySQL 对 LEFT JOIN 的 Hash 支持是逐步补齐的）。</td></tr>
+  </table>
+
+  <div class="lead ok"><b>什么时候你会看到它：</b>大表 JOIN 大表、被驱动表关联列没索引、
+  或优化器判断「建哈希比百万次索引回表更便宜」时。<b>它不是「坏事」</b>——
+  在没有合适索引的前提下，Hash Join 往往是最优解。</div>
+
+</section>
+<section id="merge">
+<h2><span class="n">④</span>Merge Join 与其他形态</h2>
+
+  <p>Merge Join 要求两侧输入<b>按关联键有序</b>，然后像归并两个有序数组一样推进游标。
+  若输入已有序（索引扫描、或上游刚排序过），它就是 O(N+M) 且几乎不占额外内存。</p>
+
+  <ul>
+    <li>若输入无序，优化器要先排序，代价可能超过收益——这时不如 Hash Join。</li>
+    <li>支持非等值条件（如 <code>&gt;=</code>、范围重叠），这是它相对 Hash Join 的独有能力。</li>
+    <li><b>半连接 / 反连接（Semi / Anti Join）</b>：<code>EXISTS</code>、<code>IN</code>、
+    <code>NOT EXISTS</code> 会被优化成这类算子，找到第一个匹配就停止，比完整 JOIN 更省。</li>
+    <li><b>笛卡尔积</b>：忘了写关联条件，或条件写错导致两表无条件配对，输出 N×M 行。
+    这是最危险的执行计划形态，看到 rows 相乘要立刻停。</li>
+  </ul>
+
+  <div class="qa"><b>Q：<code>IN</code> 和 <code>EXISTS</code> 到底哪个快？</b><br>
+  A：现代优化器对<b>非相关</b>的 <code>IN (subquery)</code> 大多会改写成半连接，两者计划相同。
+  差别出现在 <code>NOT IN</code>（NULL 语义陷阱，见「过滤条件」那篇）和相关子查询能否去关联化上。
+  <b>不要背结论，看执行计划。</b></div>
+
+  <div class="qa"><b>Q：JOIN 顺序优化器会自己排吗？</b><br>
+  A：会，但表多时会用贪心或遗传算法做近似搜索，可能选到次优。
+  MySQL 的 <code>join_buffer_size</code>、PG 的 <code>join_collapse_limit</code> 都会影响搜索范围。
+  超过 10 张表的复杂 JOIN 建议拆成几步 + 临时表，降低优化器出错概率。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / JOIN 算法 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

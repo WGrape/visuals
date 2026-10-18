@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL HAVING、ORDER BY 与分页排序稳定性</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>HAVING 与排序</h1>
+  <p>聚合前后过滤的分界、NULL 排序的跨库差异、深翻页与排序不稳定问题</p>
+  <span class="tag">HAVING</span><span class="tag">ORDER BY</span><span class="tag">NULLS LAST</span><span class="tag">深翻页</span><span class="tag">排序稳定性</span>
+</header>
+<nav>
+  <a href="#having">① WHERE vs HAVING</a>
+  <a href="#order">② ORDER BY 细节</a>
+  <a href="#limit">③ LIMIT 与窗口函数</a>
+  <a href="#pit">④ 高频问题</a>
+</nav>
+<main>
+<section id="having">
+<h2><span class="n">①</span>WHERE 与 HAVING 的分界线</h2>
+
+  <p>两者的分界是<b>聚合发生的位置</b>：<code>WHERE</code> 在分组聚合<b>之前</b>过滤<b>行</b>，
+  <code>HAVING</code> 在<b>之后</b>过滤<b>分组</b>。这决定了两点性能与一点语义。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="150" fill="#171b26"/>
+    <g>
+      <rect x="24" y="56" width="96" height="42" rx="8" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="72" y="82" fill="#e2e8f0" font-size="13" text-anchor="middle">FROM</text>
+      <path d="M124 77 L 148 77" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#a)"/>
+      <rect x="152" y="56" width="96" height="42" rx="8" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="200" y="82" fill="#e2e8f0" font-size="13" text-anchor="middle">WHERE</text>
+      <text x="200" y="112" fill="#7ee787" font-size="11" text-anchor="middle">过滤行 · 早</text>
+      <path d="M252 77 L 276 77" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#a)"/>
+      <rect x="280" y="56" width="110" height="42" rx="8" fill="#1f2433" stroke="#f0a868"/>
+      <text x="335" y="82" fill="#e2e8f0" font-size="13" text-anchor="middle">GROUP BY</text>
+      <path d="M394 77 L 418 77" stroke="#f0a868" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="422" y="56" width="110" height="42" rx="8" fill="#1f2433" stroke="#f0a868"/>
+      <text x="477" y="82" fill="#e2e8f0" font-size="13" text-anchor="middle">HAVING</text>
+      <text x="477" y="112" fill="#f0a868" font-size="11" text-anchor="middle">过滤分组 · 晚</text>
+      <path d="M536 77 L 560 77" stroke="#f0a868" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="564" y="56" width="92" height="42" rx="8" fill="#1f2433" stroke="#d2a8ff"/>
+      <text x="610" y="82" fill="#e2e8f0" font-size="13" text-anchor="middle">ORDER BY</text>
+    </g>
+    <text x="340" y="32" fill="#94a3b8" font-size="12.5" text-anchor="middle">SQL 逻辑执行顺序中 WHERE 与 HAVING 的站位</text>
+    <defs>
+      <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#6ea8fe"/></marker>
+      <marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#f0a868"/></marker>
+    </defs>
+  </svg>
+  <div class="cap">能提到 WHERE 的条件尽量提前——聚合的输入越小，排序/哈希的开销越小</div>
+  </div>
+
+  <pre><code>-- ❌ 100 万行全部分组，再丢掉 99% 的组
+SELECT dept, COUNT(*) c FROM emp
+GROUP BY dept
+HAVING dept IN ('R&D', 'Sales');
+
+-- ✓ 先过滤到 2 万行再分组
+SELECT dept, COUNT(*) c FROM emp
+WHERE dept IN ('R&D', 'Sales')
+GROUP BY dept;
+
+-- 只能放 HAVING 的情况：条件依赖聚合结果
+SELECT dept, COUNT(*) c FROM emp
+GROUP BY dept
+HAVING COUNT(*) &gt; 50;</code></pre>
+
+  <div class="lead warn"><b>HAVING 里能引用 SELECT 别名吗？</b>MySQL 允许（<code>HAVING c &gt; 50</code>），
+  这是它对标准的扩展；PostgreSQL、SQL Server <b>不允许</b>在 HAVING 里引用 SELECT 列表别名，必须重写聚合表达式。
+  写跨库 SQL 时一律写完整表达式最安全。</div>
+
+</section>
+<section id="order">
+<h2><span class="n">②</span>ORDER BY 的三个细节</h2>
+
+  <h3>1. 排序的是「结果集」，不是表</h3>
+  <p>表在关系模型里是<b>无序集合</b>。没有 <code>ORDER BY</code> 就不存在任何顺序保证——
+  「看起来是按主键返回」只是某种执行计划的副产品，换索引、换版本、加并发就可能变。</p>
+
+  <h3>2. NULL 排在哪里由实现决定</h3>
+  <table>
+    <tr><th>数据库</th><th>ASC 时 NULL</th><th>DESC 时 NULL</th><th>显式控制</th></tr>
+    <tr><td>MySQL / SQL Server</td><td>最前</td><td>最后</td><td>用 <code>ORDER BY (col IS NULL), col</code></td></tr>
+    <tr><td>PostgreSQL / Oracle</td><td>最后</td><td>最前</td><td><code>NULLS FIRST</code> / <code>NULLS LAST</code></td></tr>
+  </table>
+  <div class="lead bad">当一个库要迁到另一个库，或同一份 SQL 跑在不同库上时，NULL 顺序差异常常导致分页结果「看起来错乱」。
+  <b>永远显式指定。</b></div>
+
+  <h3>3. 排序稳定性与分页</h3>
+  <p>排序键不唯一时，相同键的行之间顺序<b>不确定</b>。<code>LIMIT 10 OFFSET 10</code> 这种分页在键不唯一时
+  会出现「同一行出现在两页」或「某行永远不出现」。解法是在 <code>ORDER BY</code> <b>末尾追加唯一键</b>：</p>
+  <pre><code>SELECT * FROM orders
+WHERE status = 'paid'
+ORDER BY created_at DESC, id DESC    -- id 保证全序
+LIMIT 20 OFFSET 40;</code></pre>
+
+</section>
+<section id="limit">
+<h2><span class="n">③</span>LIMIT / OFFSET 与窗口函数配合</h2>
+
+  <div class="grid">
+    <div class="card"><h4>每组 TopN</h4>
+      <p>先 <code>ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) rn</code>，
+      外层 <code>WHERE rn &lt;= 3</code>。不能在 <code>WHERE</code> 里直接用窗口函数——它计算于 WHERE 之后。</p></div>
+    <div class="card"><h4>深翻页</h4>
+      <p><code>OFFSET 100000</code> 要先生成并丢弃 10 万行。改用<b>键集分页</b>：
+      <code>WHERE (created_at, id) &lt; (?, ?) ORDER BY created_at DESC, id DESC LIMIT 20</code>。</p></div>
+    <div class="card"><h4>LIMIT 与 DML</h4>
+      <p>标准 SQL 的 <code>UPDATE/DELETE</code> 不支持 <code>LIMIT</code>（MySQL 扩展支持）。
+      大批量删除务必分批 + 限制条数，否则长事务会锁住大片行并撑爆 undo / WAL。</p></div>
+    <div class="card"><h4>排序内存</h4>
+      <p>排序超过 <code>sort_buffer_size</code> / <code>work_mem</code> 会落盘，性能断崖。
+      大结果集排序要尽量让索引提供顺序（<code>ORDER BY</code> 字段与索引一致），避免额外排序。</p></div>
+  </div>
+
+</section>
+<section id="pit">
+<h2><span class="n">④</span>高频问题</h2>
+
+  <div class="qa"><b>Q：<code>ORDER BY</code> 的字段上有索引，为什么还有 Using filesort？</b><br>
+  A：三种常见原因：<b>①</b> 混合了升幂降幂（<code>a ASC, b DESC</code>）而索引方向不一致；
+  <b>②</b> 排序字段跨表；<b>③</b> 过滤后的数据仍需回表取其他列，优化器判断「回表随机 IO」比「直接排序」更贵。
+  覆盖索引（把 SELECT 的列都放进索引）往往能解决第三类。</div>
+
+  <div class="qa"><b>Q：<code>GROUP BY</code> 的结果为什么过去是有序的、现在乱了？</b><br>
+  A：MySQL 5.7 及之前 <code>GROUP BY</code> 会隐式按分组列排序，8.0 移除了这一行为（符合标准）。
+  依赖隐式排序的老 SQL 升级后会「乱序」，显式加 <code>ORDER BY</code> 即可。</div>
+
+  <div class="qa"><b>Q：<code>SELECT DISTINCT a ORDER BY b</code> 报错怎么办？</b><br>
+  A：因为去重后一个 a 可能对应多个 b，排序依据不明确。要么把 b 加进 <code>DISTINCT</code>，
+  要么改成 <code>GROUP BY a</code> 配 <code>MAX(b)</code> 之类的聚合来定序。</div>
+
+  <div class="qa"><b>Q：<code>HAVING</code> 里能用别名以外的优化吗？</b><br>
+  A：把不依赖聚合的条件全部挪到 <code>WHERE</code>，这是最有效的。
+  另外 <code>HAVING COUNT(*) &gt; N</code> 这类「分组后按数量过滤」无法提前，
+  若数据量大且模式固定，考虑预聚合到汇总表。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / HAVING 与排序 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

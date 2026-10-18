@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV Cache 与推理显存：容量估算与四条压缩路线</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:42px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  ul{margin:10px 0 10px 22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  pre{background:#0b1f33;border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13.5px;line-height:1.7;margin:14px 0}
+  pre code{background:none;color:#9fe8ef;padding:0}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  .bad{font-size:14px;color:var(--sub);border-left:3px solid var(--red);
+    padding:6px 14px;margin:10px 0;background:rgba(255,107,107,.08);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  footer a{color:var(--accent);text-decoration:none}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">推理显存</span>
+    <h1>KV Cache 与推理显存</h1>
+    <p class="lead">把显存账算清楚：KV Cache 的精确估算公式、MHA/GQA/MQA 的差异、前缀共享与分页管理如何消灭碎片，以及容量不够时按收益排序的三个杠杆。</p>
+  </div>
+</header>
+<section id="s1">
+  <div class="wrap">
+
+    <h2>KV Cache 到底占多少显存</h2>
+    <p>Decode 阶段每生成一个 token，都要把历史上所有 token 的 Key / Value 重新参与注意力计算。
+    缓存下来就不用重算，代价是显存随 <span class="hl">batch × 序列长度 × 层数 × KV 头数 × head_dim</span> 线性增长。</p>
+    <pre><code># 每个 token 的 KV 显存（bytes）
+per_token = 2(K 和 V) × n_layers × n_kv_heads × head_dim × dtype_size
+
+# 例：32 层、GQA 8 个 KV 头、head_dim=128、fp16(2 bytes)
+per_token = 2 × 32 × 8 × 128 × 2 = 131072 bytes ≈ 128 KB / token
+
+# 一条 8K 上下文的请求：8192 × 128KB ≈ 1 GB
+# 并发 32 条：≈ 32 GB —— 已经超过一张 A100 80G 的一半</code></pre>
+    <div class="warn">这是大模型服务<b>显存墙</b>的根源：并发数和上下文长度不能同时要。
+    很多"OOM"事故不是模型太大，而是<b>KV Cache 吃掉了剩下的显存</b>。</div>
+    <div class="grid3">
+      <div class="kbox"><b>MHA</b><br>每个 Q 头配一个 K 头一个 V 头，KV 最大</div>
+      <div class="kbox"><b>GQA</b><br>一组 Q 头共享一个 KV 头，压缩 4~8 倍，质量几乎不掉</div>
+      <div class="kbox"><b>MQA</b><br>所有 Q 头共享 1 个 KV 头，压缩最大，长文质量略降</div>
+    </div>
+
+  </div>
+</section>
+
+<section id="s2">
+  <div class="wrap">
+
+    <h2>四条压缩路线</h2>
+    <div class="svgbox fade">
+      <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+        <text x="30" y="24" fill="#9aa7b4" font-size="13">KV Cache 的四条优化路线（可叠加）</text>
+        <g font-size="13">
+          <rect x="30" y="44" width="190" height="80" rx="10" fill="#1c2230" stroke="#58a6ff"/>
+          <text x="125" y="72" fill="#58a6ff" text-anchor="middle" font-weight="600">① 减少头数</text>
+          <text x="125" y="96" fill="#9aa7b4" text-anchor="middle" font-size="12">MHA → GQA → MQA</text>
+          <text x="125" y="114" fill="#3fb950" text-anchor="middle" font-size="12">训练期决定，改不了权重</text>
+          <rect x="240" y="44" width="190" height="80" rx="10" fill="#1c2230" stroke="#bc8cff"/>
+          <text x="335" y="72" fill="#bc8cff" text-anchor="middle" font-weight="600">② 低精度存储</text>
+          <text x="335" y="96" fill="#9aa7b4" text-anchor="middle" font-size="12">fp16 → fp8 / int8</text>
+          <text x="335" y="114" fill="#3fb950" text-anchor="middle" font-size="12">部署期可开，几乎免费</text>
+          <rect x="450" y="44" width="190" height="80" rx="10" fill="#1c2230" stroke="#e3b341"/>
+          <text x="545" y="72" fill="#e3b341" text-anchor="middle" font-weight="600">③ 前缀共享</text>
+          <text x="545" y="96" fill="#9aa7b4" text-anchor="middle" font-size="12">相同 system prompt 复用</text>
+          <text x="545" y="114" fill="#3fb950" text-anchor="middle" font-size="12">多轮/多租户效果显著</text>
+          <rect x="660" y="44" width="170" height="80" rx="10" fill="#1c2230" stroke="#f0883e"/>
+          <text x="745" y="72" fill="#f0883e" text-anchor="middle" font-weight="600">④ 分页管理</text>
+          <text x="745" y="96" fill="#9aa7b4" text-anchor="middle" font-size="12">按需分配物理块</text>
+          <text x="745" y="114" fill="#3fb950" text-anchor="middle" font-size="12">消灭碎片，见下节</text>
+        </g>
+        <rect x="30" y="146" width="800" height="70" rx="10" fill="#161b22" stroke="#2a3340"/>
+        <text x="430" y="176" fill="#e6edf3" text-anchor="middle" font-size="13">还有一条兜底路线：把 KV 卸载到 CPU 内存 / NVMe（分层缓存）</text>
+        <text x="430" y="202" fill="#9aa7b4" text-anchor="middle" font-size="12">代价是 PCIe 带宽远低于 HBM，只在显存真的不够、且能接受延迟抖动时使用</text>
+      </svg>
+    </div>
+    <div class="note"><b>前缀共享（Prefix Caching / Automatic Prefix Cache）</b>在两类场景收益最大：
+    ① 所有请求共享一段很长的 system prompt；② 多轮对话的历史部分不变，只追加新一轮。
+    命中时该段 prefill 直接跳过，TTFT 明显下降。</div>
+
+  </div>
+</section>
+
+<section id="s3">
+  <div class="wrap">
+
+    <h2>碎片：为什么"还剩 30% 显存"却分配失败</h2>
+    <p>朴素做法是为每条请求<b>预留一块最大长度的连续显存</b>（比如 max_seq_len=8192 全预留）。
+    实际用多少不确定，于是产生两类浪费：</p>
+    <div class="grid2">
+      <div class="kbox"><b>内部碎片</b><br>请求只用了 800 token，却占着 8192 的坑，剩下的谁也用不了</div>
+      <div class="kbox"><b>外部碎片</b><br>不同请求反复申请释放后，空闲显存被切成小块，凑不出一整段连续的</div>
+    </div>
+    <div class="svgbox fade">
+      <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+        <text x="30" y="24" fill="#9aa7b4" font-size="13">连续预留 vs 分页管理</text>
+        <text x="30" y="60" fill="#9aa7b4" font-size="12">连续预留</text>
+        <rect x="130" y="46" width="700" height="28" rx="4" fill="#161b22" stroke="#2a3340"/>
+        <rect x="132" y="48" width="220" height="24" fill="#3d2b2b"/>
+        <text x="242" y="65" fill="#ff7b72" font-size="11" text-anchor="middle">A 预留 8192 / 实占 800（浪费）</text>
+        <rect x="354" y="48" width="220" height="24" fill="#3d2b2b"/>
+        <text x="464" y="65" fill="#ff7b72" font-size="11" text-anchor="middle">B 预留 8192 / 实占 6000</text>
+        <rect x="576" y="48" width="252" height="24" fill="#1c2230"/>
+        <text x="702" y="65" fill="#9aa7b4" font-size="11" text-anchor="middle">剩余不连续，新请求分配失败</text>
+        <text x="30" y="120" fill="#9aa7b4" font-size="12">分页管理</text>
+        <rect x="130" y="106" width="700" height="28" rx="4" fill="#161b22" stroke="#2a3340"/>
+        <rect x="132" y="108" width="70" height="24" fill="#1f4d2e"/><text x="167" y="125" fill="#3fb950" font-size="11" text-anchor="middle">A1</text>
+        <rect x="204" y="108" width="70" height="24" fill="#1f4d2e"/><text x="239" y="125" fill="#3fb950" font-size="11" text-anchor="middle">A2</text>
+        <rect x="276" y="108" width="70" height="24" fill="#5a3d1f"/><text x="311" y="125" fill="#f0883e" font-size="11" text-anchor="middle">B1</text>
+        <rect x="348" y="108" width="70" height="24" fill="#5a3d1f"/><text x="383" y="125" fill="#f0883e" font-size="11" text-anchor="middle">B2</text>
+        <rect x="420" y="108" width="70" height="24" fill="#5a3d1f"/><text x="455" y="125" fill="#f0883e" font-size="11" text-anchor="middle">B3</text>
+        <rect x="492" y="108" width="70" height="24" fill="#5a3d1f"/><text x="527" y="125" fill="#f0883e" font-size="11" text-anchor="middle">B4</text>
+        <rect x="564" y="108" width="70" height="24" fill="#1f4d2e"/><text x="599" y="125" fill="#3fb950" font-size="11" text-anchor="middle">A3</text>
+        <rect x="636" y="108" width="70" height="24" fill="#1f4d2e"/><text x="671" y="125" fill="#3fb950" font-size="11" text-anchor="middle">A4</text>
+        <rect x="708" y="108" width="120" height="24" fill="#1c2230"/><text x="768" y="125" fill="#9aa7b4" font-size="11" text-anchor="middle">空闲块可用</text>
+        <text x="430" y="170" fill="#3fb950" font-size="12.5" text-anchor="middle">逻辑上连续（A1→A2→A3→A4），物理上可以散落 —— 这就是 PagedAttention 的核心思想</text>
+        <text x="430" y="194" fill="#9aa7b4" font-size="12" text-anchor="middle">块表（block table）记录逻辑块 → 物理块的映射；copy-on-write 让共享前缀零拷贝</text>
+      </svg>
+    </div>
+
+  </div>
+</section>
+
+<section id="s4">
+  <div class="wrap">
+
+    <h2>容量估算：一问就能算出要几张卡</h2>
+    <pre><code>显存总需求 ≈ 模型权重 + KV Cache + 激活值 + 框架开销
+
+1) 权重：    参数量 × dtype 字节
+             7B × fp16(2B) = 14 GB
+             7B × int4(0.5B) ≈ 3.5 GB
+
+2) KV Cache：并发数 × 平均上下文 × per_token
+             32 × 4096 × 128KB ≈ 16 GB
+
+3) 激活与框架：经验值 1~3 GB（与 batch、实现相关）
+
+7B + fp16 + 32 并发 4K 上下文 ≈ 14 + 16 + 2 ≈ 32 GB  → 单卡 A100 40G 够，L4 24G 不够</code></pre>
+    <div class="good"><b>调容量时的三个杠杆（按收益排序）：</b>
+    ① <b>降 KV 单 token 成本</b>——开 fp8 KV、用 GQA 模型；
+    ② <b>降并发或上下文</b>——限流、截断历史、开启前缀共享；
+    ③ <b>降权重</b>——量化（见本学科「模型量化」章节）。
+    先量出来到底是哪一项占大头，再动对应的杠杆。</div>
+    <div class="warn">上面的公式是<b>量级估算</b>，不是精确值。不同框架的实现（是否用 PagedAttention、
+    是否共享前缀、激活是否重算）会差出 20%~40%。<b>上线前用真实流量压测，以实测为准。</b></div>
+
+  </div>
+</section>
+
+<footer>
+  <p>Visuals · 人工智能 / 模型训练与部署 / KV Cache ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+
+<script>
+const toc=document.getElementById('toc');
+const sections=[...document.querySelectorAll('section[id]')];
+sections.forEach(s=>{const a=document.createElement('a');a.href='#'+s.id;toc.appendChild(a);});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{rootMargin:'0px 0px -10% 0px'});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+
+</body>
+</html>

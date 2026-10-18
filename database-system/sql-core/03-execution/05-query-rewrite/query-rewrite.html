@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL 查询改写与调优套路</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>查询改写与调优</h1>
+  <p>延迟关联、拆 OR、去相关、键集分页、批量化——六种高频手法与一份「没用改写」反向清单</p>
+  <span class="tag">延迟关联</span><span class="tag">键集分页</span><span class="tag">批量写入</span><span class="tag">覆盖索引</span><span class="tag">调优流程</span>
+</header>
+<nav>
+  <a href="#idea">① 三条主线</a>
+  <a href="#patterns">② 六种手法</a>
+  <a href="#anti">③ 无效改写</a>
+  <a href="#flow">④ 调优流程</a>
+</nav>
+<main>
+<section id="idea">
+<h2><span class="n">①</span>改写的三条主线</h2>
+
+  <p>SQL 是<b>声明式</b>语言：你只说要什么，不说怎么拿。这带来一个问题——
+  同一语义有多种写法，优化器不一定能把「坏写法」都救回来。改写的目的就是把查询变回
+  <b>优化器能看懂、能估算、能用索引</b>的形态。</p>
+
+  <div class="grid">
+    <div class="card"><h4>① 减少数据量</h4>
+      <p>更早地过滤、更精确地投影（别 <code>SELECT *</code>）、
+      只查需要的分区。这是收益最高的一条——参与运算的行越少，后面所有算子都变快。</p></div>
+    <div class="card"><h4>② 让谓词可 Sargable</h4>
+      <p>裸列单独一侧、避免函数包裹、消除隐式转换、拆 <code>OR</code> 为 <code>UNION ALL</code>。
+      详见「过滤条件与索引可用性」。</p></div>
+    <div class="card"><h4>③ 减少随机 IO 与排序</h4>
+      <p>覆盖索引消回表、索引顺序对齐 <code>ORDER BY/GROUP BY</code>、延迟关联只回表少量行。</p></div>
+  </div>
+
+</section>
+<section id="patterns">
+<h2><span class="n">②</span>六种高频改写手法</h2>
+
+  <h3>1. 延迟关联（Deferred Join）</h3>
+  <p>深翻页时先只在索引上找出主键，再回表取完整行，把回表行数从 OFFSET+N 降到 N。</p>
+  <pre><code>-- ❌ 先回表 100020 行再丢弃
+SELECT * FROM orders WHERE status='paid' ORDER BY created_at DESC LIMIT 20 OFFSET 100000;
+
+-- ✓ 覆盖索引里先定位 20 个 id
+SELECT o.* FROM orders o
+JOIN (SELECT id FROM orders WHERE status='paid'
+      ORDER BY created_at DESC LIMIT 20 OFFSET 100000) t ON t.id = o.id;</code></pre>
+
+  <h3>2. OR 拆 UNION ALL</h3>
+  <pre><code>-- ❌ 跨列 OR，两个索引都用不上
+SELECT * FROM t WHERE a = 1 OR b = 2;
+-- ✓ 各走各的索引（注意补互斥条件或用主键去重）
+SELECT * FROM t WHERE a = 1
+UNION ALL
+SELECT * FROM t WHERE b = 2 AND a &lt;&gt; 1;</code></pre>
+
+  <h3>3. 相关子查询 → JOIN / 窗口函数</h3>
+  <pre><code>-- ❌ orders 每行跑一次
+SELECT o.id, (SELECT MAX(created_at) FROM logs l WHERE l.order_id=o.id) FROM orders o;
+-- ✓ 先聚合再关联
+SELECT o.id, l.last_at FROM orders o
+LEFT JOIN (SELECT order_id, MAX(created_at) last_at FROM logs GROUP BY order_id) l
+       ON l.order_id = o.id;</code></pre>
+
+  <h3>4. 分页：OFFSET → 键集</h3>
+  <pre><code>-- ❌ 越翻越慢
+SELECT * FROM t ORDER BY id LIMIT 20 OFFSET 100000;
+-- ✓ 记住上一页的游标位置
+SELECT * FROM t WHERE id &gt; ?last_id ORDER BY id LIMIT 20;</code></pre>
+
+  <h3>5. COUNT 优化：大表精确计数走汇总表</h3>
+  <pre><code>-- 维护计数表，写入侧 +1/-1，读取侧 O(1)
+UPDATE daily_stat SET cnt = cnt + 1 WHERE dt = CURDATE() AND biz = 'order';
+SELECT cnt FROM daily_stat WHERE dt = ? AND biz = 'order';</code></pre>
+
+  <h3>6. 批量代替循环</h3>
+  <pre><code>-- ❌ 应用层循环 1000 次单条插入（1000 次网络往返 + 1000 次事务）
+-- ✓ 一次多行插入 / 批量接口
+INSERT INTO t (a,b) VALUES (1,2),(3,4),(5,6), ...;
+-- 更新多条不同值：用 CASE 或 JOIN 临时表，不要 1000 条 UPDATE</code></pre>
+
+</section>
+<section id="anti">
+<h2><span class="n">③</span>反向清单：这些改写往往没用</h2>
+
+  <table>
+    <tr><th>流传的说法</th><th>实际情况</th></tr>
+    <tr><td><code>COUNT(1)</code> 比 <code>COUNT(*)</code> 快</td><td>无差别，优化器等价处理</td></tr>
+    <tr><td><code>SELECT *</code> 一定慢</td><td>影响在<b>网络传输与覆盖索引</b>上。列不多、都要用时无差别；
+    但会让覆盖索引失效、表结构变更时结果不稳，<b>仍建议显式列</b></td></tr>
+    <tr><td>子查询一定比 JOIN 慢</td><td>现代优化器会去关联化，多数情况计划相同</td></tr>
+    <tr><td><code>IN</code> 比 <code>EXISTS</code> 慢</td><td>同上，看计划而非写法</td></tr>
+    <tr><td>大写关键字更快</td><td>无依据，纯风格问题</td></tr>
+    <tr><td><code>ORDER BY</code> 用主键更快</td><td>取决于能否用索引避开排序，与「主键」本身无关</td></tr>
+    <tr><td>加索引总能变快</td><td>索引有写放大与空间成本，且优化器可能因选择率放弃它</td></tr>
+  </table>
+
+  <div class="lead bad"><b>改写的唯一验证标准是执行计划 + 实际耗时，不是写法好不好看。</b>
+  每次改写前后都测一遍，并且用<b>真实数据分布</b>的数据量测——
+  在 1000 行的测试库上跑出来的结论，到 1000 万行的生产上经常反过来。</div>
+
+</section>
+<section id="flow">
+<h2><span class="n">④</span>一套可重复的调优流程</h2>
+
+  <ol>
+    <li><b>拿到慢 SQL 与实际参数</b>（参数不同可能走完全不同的计划，这就是参数嗅探问题）。</li>
+    <li><b>跑 <code>EXPLAIN ANALYZE</code></b>，记录每个算子的预估/实际行数与耗时。</li>
+    <li><b>找最大耗时算子</b>，先解决它——优化要抓主要矛盾，不要一上来就调参数。</li>
+    <li><b>判断属于哪一类问题</b>：扫描方式 / JOIN 顺序 / 排序落盘 / 估算失真 / 回表过多。</li>
+    <li><b>按前面章节的手法改写或补索引</b>，一次只改一处。</li>
+    <li><b>复测</b>，确认实际耗时下降且没有引入新问题（如写放大、锁范围变大）。</li>
+    <li><b>回归验证边界</b>：空结果、极大结果、并发下的表现。</li>
+  </ol>
+
+  <div class="qa"><b>Q：什么时候该放弃优化 SQL，改架构？</b><br>
+  A：当单条 SQL 已经是最优计划，但<b>数据量本身决定了它必然慢</b>——
+  比如亿级表上按多个维度自由组合聚合。这时方向是：预聚合（汇总表/物化视图）、
+  列存（ClickHouse/Doris 类）、读写分离、或把这类查询迁到分析型系统。
+  <b>认清「这是 OLAP 需求」比继续调 OLTP 库的 SQL 更有效。</b></div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / 查询改写 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

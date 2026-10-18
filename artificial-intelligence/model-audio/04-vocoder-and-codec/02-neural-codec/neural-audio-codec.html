@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>神经音频编解码器：EnCodec、SoundStream 与 RVQ 残差向量量化 - Visuals</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1c2a40;--panel2:#243751;--line:#40516b;--text:#ecf2f8;--muted:#b8c7d7;--accent:#78d3e5;--focus:#ffc873;--ok:#7ee787;--warn:#f0a868;--bad:#ff7b72}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.75 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--accent)}a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.shell{width:min(1000px,calc(100% - 32px));margin:auto;padding:26px 0 72px}.back{display:inline-block;margin-bottom:24px}
+h1{font-size:clamp(1.9rem,5vw,2.8rem);line-height:1.22;margin:.2em 0}.lead{font-size:1.12rem;color:var(--muted);max-width:72ch}
+h2{font-size:1.35rem;margin:0 0 14px}h3{font-size:1.08rem;margin:22px 0 6px;color:var(--accent)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:clamp(18px,3vw,28px);margin:18px 0}
+.panel p:last-child{margin-bottom:0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:16px 0}
+@media(max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+.box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.box b{color:var(--accent)}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:20px 0}
+.flow span{border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--panel2);font-size:14px}
+.flow b{color:var(--accent)}
+.scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}
+th,td{border-bottom:1px solid var(--line);padding:12px;vertical-align:top;text-align:left}
+th{color:var(--accent)}ul,ol{padding-left:1.35em}li{margin:8px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--panel2);padding:2px 6px;border-radius:5px;font-size:14px}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow:auto;font-size:13.5px;line-height:1.7;margin:14px 0}
+pre code{background:none;padding:0;color:#cfe6ef}
+.svgbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin:18px 0;overflow-x:auto}
+svg{display:block;width:100%;height:auto}
+details{margin:12px 0;background:var(--panel2);border-radius:9px;padding:12px 16px}summary{cursor:pointer;font-weight:700}
+.note{border-left:3px solid var(--accent);padding:8px 14px;margin:12px 0;background:rgba(120,211,229,.08);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.warn{border-left:3px solid var(--warn);padding:8px 14px;margin:12px 0;background:rgba(240,168,104,.09);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.good{border-left:3px solid var(--ok);padding:8px 14px;margin:12px 0;background:rgba(126,231,135,.08);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.bad{border-left:3px solid var(--bad);padding:8px 14px;margin:12px 0;background:rgba(255,123,114,.09);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.toc{position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:30;display:flex;flex-direction:column;gap:7px}
+.toc a{width:10px;height:10px;border-radius:50%;background:var(--line);transition:.2s}
+.toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.3)}
+@media(max-width:900px){.toc{display:none}}
+footer{color:var(--muted);font-size:.87rem;margin-top:28px}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body><nav class="toc" id="toc"></nav><main class="shell">
+<a class="back" href="../../index.html">← 返回语音与音频模型</a>
+<header><span aria-hidden="true">🧬</span><h1>神经音频编解码器：把波形压成离散 token 的可微压缩器</h1><p class="lead">传统 codec 靠心理声学模型丢掉「听不见」的信息，神经 codec 靠训练出来的编码器把波形压成一段<strong>离散 token 序列</strong>。它同时是「更省的传输格式」和「大模型能直接建模的表示」——这正是它取代声码器成为新一代语音系统底座的原因。</p></header>
+<section class="panel" id="s1"><h3>为什么语音系统需要另一个 codec</h3>
+<p>在神经 codec 之前，语音链路里有两套完全不同的东西：<b>声码器</b>（mel → 波形，只管合成，不管压缩）和<b>通信 codec</b>（Opus/AAC，只管压缩，不管语义）。两套东西互不相通，于是「压缩传输」和「模型生成」永远是两条路。</p>
+<p>神经 codec 把二者合成了一个：编码器输出的是<b>离散的整数 token</b>，解码器把 token 还原成波形。离散意味着——它既能像 Opus 一样按码率传输，又能像文本 token 一样被语言模型自回归地预测。</p>
+<div class="flow">
+  <span>波形 24 kHz</span><b>→</b><span>编码器 CNN</span><b>→</b><span>连续向量</span><b>→</b><span><b>RVQ 量化</b></span><b>→</b><span>离散 token</span><b>→</b><span>解码器</span><b>→</b><span>波形</span>
+</div>
+<div class="note">一句话定位：<b>声码器解决「怎么把特征变成声音」，神经 codec 解决「怎么把声音变成可被模型读写的序列」</b>。后者是前者的超集，所以新系统普遍直接上 codec。</div></section>
+
+<section class="panel" id="s2"><h3>RVQ：为什么是「残差」向量量化</h3>
+<p>单个码本要把连续向量量化成离散下标，想要高保真就得要极大的码本（比如 1024 个向量完全不够，2^16 才勉强）。码本一大，训练就崩——大部分码字永远不被选中（码本坍缩）。</p>
+<p>RVQ（Residual Vector Quantization）的解法是<b>串多个小码本</b>：第一层量化原始向量，算出残差；第二层量化这个残差；第三层再量化剩下的残差……最后把各层的下标叠起来。</p>
+<div class="svgbox">
+<svg viewBox="0 0 700 250" role="img" aria-label="RVQ 残差向量量化：多层小码本逐级量化残差，下标叠加成 token">
+  <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#78d3e5"/></marker></defs>
+  <text x="14" y="30" fill="#ecf2f8" font-size="14">输入向量 x</text>
+  <rect x="110" y="16" width="110" height="34" rx="8" fill="#243751" stroke="#40516b"/>
+  <text x="165" y="38" fill="#78d3e5" font-size="13" text-anchor="middle">码本 1</text>
+  <rect x="270" y="16" width="110" height="34" rx="8" fill="#243751" stroke="#40516b"/>
+  <text x="325" y="38" fill="#78d3e5" font-size="13" text-anchor="middle">码本 2</text>
+  <rect x="430" y="16" width="110" height="34" rx="8" fill="#243751" stroke="#40516b"/>
+  <text x="485" y="38" fill="#78d3e5" font-size="13" text-anchor="middle">码本 3</text>
+  <rect x="560" y="16" width="120" height="34" rx="8" fill="#243751" stroke="#40516b"/>
+  <text x="620" y="38" fill="#ffc873" font-size="13" text-anchor="middle">码本 8 …</text>
+  <path d="M100,33 L108,33" stroke="#78d3e5" marker-end="url(#ar)"/>
+  <path d="M222,33 L268,33" stroke="#78d3e5" marker-end="url(#ar)"/>
+  <path d="M382,33 L428,33" stroke="#78d3e5" marker-end="url(#ar)"/>
+  <path d="M542,33 L558,33" stroke="#78d3e5" marker-end="url(#ar)"/>
+  <text x="150" y="78" fill="#b8c7d7" font-size="12.5">r₁ = x − q₁</text>
+  <text x="310" y="78" fill="#b8c7d7" font-size="12.5">r₂ = r₁ − q₂</text>
+  <text x="470" y="78" fill="#b8c7d7" font-size="12.5">r₃ = r₂ − q₃</text>
+  <rect x="110" y="100" width="570" height="56" rx="10" fill="#1c2a40" stroke="#78d3e5"/>
+  <text x="395" y="124" fill="#ecf2f8" font-size="13.5" text-anchor="middle">每个码本只管「上一层没压干净的残差」，下标 (k₁,k₂,…,k₈) 叠加</text>
+  <text x="395" y="146" fill="#b8c7d7" font-size="12.5" text-anchor="middle">8 层 × 1024 码字 = 有效分辨率 ≈ 1024⁸，但训练难度只等于 8 个小码本</text>
+  <rect x="110" y="180" width="270" height="50" rx="10" fill="#243751" stroke="#40516b"/>
+  <text x="245" y="203" fill="#7ee787" font-size="13" text-anchor="middle">层 1–2：语义 / 韵律骨架</text>
+  <text x="245" y="222" fill="#b8c7d7" font-size="12" text-anchor="middle">丢掉仍有可懂度，音质变差</text>
+  <rect x="410" y="180" width="270" height="50" rx="10" fill="#243751" stroke="#40516b"/>
+  <text x="545" y="203" fill="#f0a868" font-size="13" text-anchor="middle">层 3–8：细节 / 音色纹理</text>
+  <text x="545" y="222" fill="#b8c7d7" font-size="12" text-anchor="middle">只影响保真度，不影响内容</text>
+</svg>
+</div>
+<div class="good"><b>层级分工是 RVQ 最有用的性质</b>：低层 token 承载「说了什么」，高层 token 承载「像谁的声音」。语音克隆只需换高层、内容编辑只需动低层——这是传统 codec 给不了的粒度。</div>
+<div class="warn"><b>别把层数等同于质量</b>。层数越多码率越高，但每层都要额外的解码计算；实时链路里 8 层常在 6 kbps 附近，再往上人耳收益递减很快。</div></section>
+
+<section class="panel" id="s3"><h3>三个主流神经 codec 的分歧点</h3>
+<div class="scroll"><table>
+<tr><th></th><th>SoundStream</th><th>EnCodec</th><th>DAC (Descript)</th></tr>
+<tr><td>提出方</td><td>Google</td><td>Meta</td><td>Descript</td></tr>
+<tr><td>量化</td><td>RVQ，训练时随机选层数（<b>结构 dropout</b>）</td><td>RVQ + 训练期层数可变，支持单模型多码率</td><td>RVQ + <b>改进码本学习</b>，缓解码本坍缩</td></tr>
+<tr><td>对抗训练</td><td>多尺度 STFT + 波形判别器</td><td>多尺度 STFT 判别器 + 更好的损失组合</td><td>引入周期性先验 / 更强判别器，高码率更稳</td></tr>
+<tr><td>典型码率</td><td>3–18 kbps</td><td>1.5–24 kbps（24 kHz 与 48 kHz 两版）</td><td>高码率段保真更好，常用于音乐/克隆</td></tr>
+<tr><td>常见用途</td><td>作为 codec 基线被大量引用</td><td><b>事实标准</b>：AudioLM / VALL-E / MusicGen 都以它为 tokenizer</td><td>音色克隆、歌声合成、高保真场景</td></tr>
+</table></div>
+<div class="note">选型经验：做<b>语音大模型</b>优先 EnCodec（生态最好、别人的权重可直接复用）；做<b>音色克隆/歌声</b>试 DAC；写论文做 baseline 才需要自己训 SoundStream。具体码率与层数请以你所用版本官方仓库为准。</div></section>
+
+<section class="panel" id="s4"><h3>码率、帧率与延迟：三个会互相打架的数</h3>
+<p>神经 codec 有三个独立的旋钮，改任何一个都会牵动另外两个：</p>
+<ul>
+<li><b>帧率（frame rate）</b>：每秒产生多少组 token。常见 50 / 75 Hz。帧率越高时间分辨率越好，但序列越长，自回归模型的计算量线性上升。</li>
+<li><b>层数（n_q）</b>：每组 token 用几个码本。层数越多码率越高、音质越好。</li>
+<li><b>码本大小</b>：每层多少个码字，通常 1024（10 bit）。</li>
+</ul>
+<div class="scroll"><table>
+<tr><th>配置</th><th>码率估算</th><th>每秒 token 数</th><th>后果</th></tr>
+<tr><td>50 Hz × 4 层</td><td>50×4×10 = <b>2 kbps</b></td><td>200</td><td>可懂但明显发闷，适合极低带宽</td></tr>
+<tr><td>50 Hz × 8 层</td><td>50×8×10 = <b>4 kbps</b></td><td>400</td><td>语音场景常用平衡点</td></tr>
+<tr><td>75 Hz × 8 层</td><td>75×8×10 = <b>6 kbps</b></td><td>600</td><td>含音乐/歌唱时的常见选择</td></tr>
+<tr><td>75 Hz × 16 层</td><td>75×16×10 = <b>12 kbps</b></td><td>1200</td><td>高保真，但自回归生成非常慢</td></tr>
+</table></div>
+<div class="bad"><b>最容易被忽略的一项：因果性与前瞻</b>。codec 若为提升质量用了双向卷积，就会引入固定的前瞻延迟（常见数十毫秒）。做实时通话时必须选<b>全因果（causal / streaming）</b>版本，否则再低的码率也救不回交互体验。</div>
+<div class="note">上面是<b>量级估算</b>，用于建立直觉：1 层 10 bit、帧率 × 层数决定码率。实际数字受具体模型与熵编码影响，请以官方实现为准。</div></section>
+
+<section class="panel" id="s5"><h3>神经 codec 怎么接入 TTS / 语音大模型</h3>
+<p>接入方式有三条，复杂度与可控性各不相同：</p>
+<div class="grid3">
+<div class="box"><b>① 两阶段：文本 → 语义 token → 声学 token</b><br>先由语言模型预测低层（语义）token，再用一个小的非自回归模型补全高层声学 token。<br><span class="muted">优点：主模型短、快；缺点：需要两套模型对齐。</span></div>
+<div class="box"><b>② 直接自回归全部层</b><br>模型一次输出 n_q 层 token（常配合「延迟模式」把各层错开一步预测）。<br><span class="muted">优点：端到端；缺点：序列长 8 倍，推理慢。</span></div>
+<div class="box"><b>③ codec 只做「最后一段」</b><br>模型仍输出 mel，用 codec 解码器替代声码器做 mel → 波形。<br><span class="muted">优点：改动最小；缺点：吃不到离散 token 的好处。</span></div>
+</div>
+<div class="note"><b>工程判断</b>：想做「能用提示词控制语气、能克隆音色」的语音大模型，走 ①；只想把现有 TTS 的音质提上去，走 ③ 成本最低。</div></section>
+
+<section class="panel" id="s6"><h3>常见翻车点</h3>
+<details><summary>换 codec 后音质变差，但客观指标没降</summary><p>多数是<b>采样率不匹配</b>：24 kHz 的 EnCodec 解码出的波形被当成 48 kHz 播放，声音会变尖；或者训练用 24 k、推理喂 16 k。任何 codec 换型，第一步先对齐采样率与响度归一化。</p></details>
+<details><summary>自回归生成出现「循环吐字」</summary><p>离散 token 的自回归和文本一样会陷入重复，**语音上表现为不断重复同一个音节**。缓解手段与 LLM 一致：温度、重复惩罚，以及在语义层加一个「已生成长度」的软约束。</p></details>
+<details><summary>实时性不达标</summary><p>先分离三段延迟：<b>算法前瞻</b>（codec 是否因果）+ <b>首块大小</b>（一次要攒多少帧才开始解码）+ <b>计算耗时</b>。经验上实时链路里 codec 不是瓶颈，瓶颈常在第一段的等待策略与模型本身。</p></details>
+<details><summary>把神经 codec 当通用传输 codec 用</summary><p>Opus 在 20 kbps 以下仍非常稳健、CPU 消耗极低、标准化程度高；神经 codec 在低码率更有潜力但算力高、兼容性差。<b>纯通话传输场景，Opus 仍是默认答案。</b></p></details></section>
+
+<section class="panel" id="s7"><h3>一句话总结</h3>
+<p>神经 codec 的价值不在「压得更小」，而在<b>把音频变成离散序列</b>——这件事让语音第一次能被语言模型直接读写，于是 TTS、语音克隆、端到端语音对话、音乐生成全部统一到了同一套范式上。理解 RVQ 的<b>层级分工</b>和<b>码率 = 帧率 × 层数 × 10 bit</b>这两个点，就够判断绝大多数工程取舍了。</p>
+<div class="good">选型速记：语音大模型用 EnCodec；高保真/克隆试 DAC；纯传输继续用 Opus；实时链路务必确认 codec 是<b>因果</b>版本。</div></section>
+
+<footer><p>Visuals · 人工智能 / 语音与音频模型 / 声码器与编解码 ·
+<a href="../../index.html">返回目录</a> ·
+<a href="../../../../index.html">返回知识地图</a></p></footer>
+
+<script>
+const toc=document.getElementById('toc');
+const secs=[...document.querySelectorAll('section[id]')];
+secs.forEach(s=>{const a=document.createElement('a');a.href='#'+s.id;toc.appendChild(a);});
+const links=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+ if(e.isIntersecting){links.forEach(l=>l.classList.remove('act'));
+  const i=secs.findIndex(s=>s.id===e.target.id);if(i>=0)links[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+secs.forEach(s=>io.observe(s));
+</script>
+
+</main></body></html>

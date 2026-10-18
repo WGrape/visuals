@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Milvus 数据模型 · Collection / Partition / Segment 完全图解</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Milvus 数据模型</h1>
+  <p>Database、Collection、Schema 字段类型、Partition Key、Shard/Replica 与 Segment 生命周期</p>
+  <div>
+    <span class="tag">数据模型</span>
+    <span class="tag">Schema</span>
+    <span class="tag">Partition</span>
+    <span class="tag">Segment</span>
+    <span class="tag">Entity</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#layers">① 五层结构</a>
+  <a href="#schema">② Schema 与字段类型</a>
+  <a href="#pk">③ 主键与 auto_id</a>
+  <a href="#dynamic">④ 动态字段与 JSON</a>
+  <a href="#partition">⑤ Partition / Partition Key</a>
+  <a href="#shard">⑥ Shard 与 Replica</a>
+  <a href="#segment">⑦ Segment 生命周期</a>
+  <a href="#example">⑧ 建模示例</a>
+  <a href="#checklist">⑨ 建模决策清单</a>
+</nav>
+
+<main>
+
+
+<section id="layers">
+  <h2><span class="n">①</span>五层结构：Database → Collection → Partition → Segment → Entity</h2>
+  <div class="lead">Milvus 的数据组织是一棵<b>自顶向下收窄</b>的树：<b>Database</b> 做租户/业务隔离，<b>Collection</b> 是建 Schema 和索引的地方，<b>Partition</b> 是物理分组，<b>Segment</b> 是存储与检索的最小单位，<b>Entity</b> 是一行数据。理解这五层的边界，才知道该在哪一层做隔离、在哪一层做优化。</div>
+
+  <svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="190" y="14" width="300" height="54" rx="10" fill="#1f2433" stroke="#d2a8ff"/>
+    <text x="340" y="38" fill="#e0c0ff" font-size="14" text-anchor="middle" font-weight="bold">Database</text>
+    <text x="340" y="58" fill="#cdd6f4" font-size="11" text-anchor="middle">逻辑命名空间，隔离 Collection（可选层）</text>
+
+    <rect x="130" y="98" width="200" height="58" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="230" y="122" fill="#9ec5ff" font-size="14" text-anchor="middle" font-weight="bold">Collection A</text>
+    <text x="230" y="142" fill="#cdd6f4" font-size="11" text-anchor="middle">Schema + 索引定义</text>
+    <rect x="350" y="98" width="200" height="58" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="450" y="122" fill="#9ec5ff" font-size="14" text-anchor="middle" font-weight="bold">Collection B</text>
+    <text x="450" y="142" fill="#cdd6f4" font-size="11" text-anchor="middle">独立维度 / 独立索引</text>
+
+    <rect x="60" y="186" width="170" height="54" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="145" y="210" fill="#7fe3ea" font-size="13" text-anchor="middle" font-weight="bold">Partition P1</text>
+    <text x="145" y="229" fill="#cdd6f4" font-size="10.5" text-anchor="middle">按租户 / 时间分</text>
+    <rect x="255" y="186" width="170" height="54" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="340" y="210" fill="#7fe3ea" font-size="13" text-anchor="middle" font-weight="bold">Partition P2</text>
+    <text x="340" y="229" fill="#cdd6f4" font-size="10.5" text-anchor="middle">可整块加载 / 卸载</text>
+    <rect x="450" y="186" width="170" height="54" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="535" y="210" fill="#7fe3ea" font-size="13" text-anchor="middle" font-weight="bold">_default</text>
+    <text x="535" y="229" fill="#cdd6f4" font-size="10.5" text-anchor="middle">未指定时的兜底分区</text>
+
+    <rect x="60" y="268" width="250" height="60" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="185" y="292" fill="#a6f0ab" font-size="13" text-anchor="middle" font-weight="bold">Sealed Segment</text>
+    <text x="185" y="311" fill="#cdd6f4" font-size="10.5" text-anchor="middle">已落盘、已建索引、ANN 检索</text>
+    <rect x="370" y="268" width="250" height="60" rx="10" fill="#1f2433" stroke="#f0a868"/>
+    <text x="495" y="292" fill="#ffd0a0" font-size="13" text-anchor="middle" font-weight="bold">Growing Segment</text>
+    <text x="495" y="311" fill="#cdd6f4" font-size="10.5" text-anchor="middle">在内存中、暴力扫描、立即可见</text>
+
+    <rect x="190" y="356" width="300" height="54" rx="10" fill="#1f2433" stroke="#94a3b8"/>
+    <text x="340" y="380" fill="#e2e8f0" font-size="13.5" text-anchor="middle" font-weight="bold">Entity（一行）</text>
+    <text x="340" y="400" fill="#cdd6f4" font-size="10.5" text-anchor="middle">主键 + 向量字段 + 标量字段 + $meta(JSON)</text>
+
+    <line x1="340" y1="68" x2="230" y2="96" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="340" y1="68" x2="450" y2="96" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="230" y1="156" x2="145" y2="184" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="230" y1="156" x2="340" y2="184" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="450" y1="156" x2="535" y2="184" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="145" y1="240" x2="185" y2="266" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="535" y1="240" x2="495" y2="266" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="185" y1="328" x2="300" y2="354" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+    <line x1="495" y1="328" x2="380" y2="354" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
+  </svg>
+</section>
+
+<section id="schema">
+  <h2><span class="n">②</span>Schema 与字段类型</h2>
+  <p>Collection 在建的时候必须声明 Schema。字段分两大类：<b>向量字段</b>（参与相似度计算、建 ANN 索引）和<b>标量字段</b>（用于过滤、排序、回表展示）。</p>
+
+  <h3>向量字段类型</h3>
+  <table>
+    <tr><th>类型</th><th>存什么</th><th>常见维度 / 用途</th></tr>
+    <tr><td><code>FLOAT_VECTOR</code></td><td>32 位浮点稠密向量</td><td>768 / 1024 / 1536 维，文本 Embedding 的绝对主力</td></tr>
+    <tr><td><code>FLOAT16_VECTOR</code><br><code>BFLOAT16_VECTOR</code></td><td>半精度稠密向量</td><td>显存/内存紧张时的压缩方案，召回损失很小</td></tr>
+    <tr><td><code>BINARY_VECTOR</code></td><td>位向量（0/1）</td><td>图像指纹、SimHash，用 HAMMING / JACCARD 度量</td></tr>
+    <tr><td><code>SPARSE_FLOAT_VECTOR</code></td><td>稀疏向量（词权重）</td><td>BM25 / SPLADE 稀疏检索，与稠密向量做混合检索</td></tr>
+  </table>
+
+  <h3>标量字段类型</h3>
+  <table>
+    <tr><th>类型</th><th>说明</th><th>建索引建议</th></tr>
+    <tr><td><code>BOOL</code> / <code>INT8/16/32/64</code></td><td>整型与布尔</td><td>低基数用 <code>INVERTED</code>，高基数用 <code>STL_SORT</code></td></tr>
+    <tr><td><code>FLOAT</code> / <code>DOUBLE</code></td><td>浮点，注意精度比较</td><td><code>INVERTED</code> / <code>STL_SORT</code></td></tr>
+    <tr><td><code>VARCHAR</code></td><td>字符串，需指定 <code>max_length</code>（上限 65535）</td><td>等值 / <code>in</code> 用 <code>INVERTED</code></td></tr>
+    <tr><td><code>JSON</code></td><td>半结构化对象，支持路径索引</td><td>2.4+ 可对 JSON 内部键建 <code>INVERTED</code> 索引</td></tr>
+    <tr><td><code>ARRAY</code></td><td>同类型数组（2.4+）</td><td>标签集合、多值属性，用 <code>array_contains</code> 过滤</td></tr>
+  </table>
+
+  <div class="warn">字段数量、VARCHAR 长度、向量维度都有上限（维度上限通常 32768）。<b>维度是建表时就固定的</b>，换 Embedding 模型等于换维度，往往要重建 Collection——这是 RAG 项目最容易踩的坑。</div>
+</section>
+
+<section id="pk">
+  <h2><span class="n">③</span>主键与 auto_id</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4>自己指定主键</h4>
+      <p><code>auto_id=False</code>：用业务 ID（如 MySQL 主键、文档 ID）。好处是<b>天然幂等</b>——重复插入同一 ID 会覆盖，能做断点续跑；删除时也直接用业务 ID。</p>
+    </div>
+    <div class="card">
+      <h4>服务端生成</h4>
+      <p><code>auto_id=True</code>：Milvus 分配雪花类递增 ID。好处是写入无需查重；代价是<b>业务侧拿不到自然键</b>，必须把业务 ID 另存一个标量字段，更新/删除要先查后删。</p>
+    </div>
+  </div>
+  <p>主键类型只能是 <code>INT64</code> 或 <code>VARCHAR</code>，且<b>一个 Collection 只有一个主键字段</b>。RAG 场景的推荐做法：<code>auto_id=False</code> + 业务 <code>doc_id</code> 作主键，文档更新时直接 <code>upsert</code> 覆盖。</p>
+</section>
+
+<section id="dynamic">
+  <h2><span class="n">④</span>动态字段与 JSON</h2>
+  <p>开启 <code>enable_dynamic_field=True</code> 后，写入时 Schema 里没声明的字段会被塞进保留字段 <code>$meta</code>（JSON 类型），查询时可以按 <code>$meta['author']</code> 过滤。</p>
+  <div class="grid">
+    <div class="card"><h4>好处</h4><p>元数据演进不用改表：今天加 <code>category</code>，明天加 <code>source</code>，直接写就行。适合元数据不稳定的探索期。</p></div>
+    <div class="card"><h4>代价</h4><p>动态字段无法保证类型一致，过滤前要做类型转换，性能弱于显式字段；序列化体积也更大。稳定下来的高频过滤字段<b>应该提升为显式字段并建索引</b>。</p></div>
+    <div class="card"><h4>折中做法</h4><p>显式声明 80% 会被过滤的字段，剩下的塞进 <code>$meta</code> 兜底；对 <code>$meta</code> 里确实要高频过滤的键单独建 JSON path 索引。</p></div>
+  </div>
+</section>
+
+<section id="partition">
+  <h2><span class="n">⑤</span>Partition 与 Partition Key</h2>
+  <p>Partition 是 Collection 内的<b>物理分组</b>：查询时指定分区名就能只扫这部分数据，等价于“手工分区裁剪”。Partition Key 则是把这件事自动化——指定一个标量字段，Milvus 按其哈希值自动把数据分到不同分区。</p>
+  <table>
+    <tr><th>维度</th><th>手工 Partition</th><th>Partition Key</th></tr>
+    <tr><td>谁来创建</td><td>业务侧显式创建 + 写入时指定分区名</td><td>建表时声明字段，写入自动路由</td></tr>
+    <tr><td>分区数量</td><td>有限（上限约 1024，版本相关）</td><td>同样受数量上限约束，但无需人工维护</td></tr>
+    <tr><td>典型用法</td><td>按时间（<code>2026_q3</code>）、按大客户切分，冷热分区可单独加载/释放</td><td>按 <code>tenant_id</code> 自动分桶，天然做多租户隔离</td></tr>
+    <tr><td>注意</td><td>分区过多会产生大量小 Segment，反而拖慢检索</td><td>分区键基数要足够且分布均匀，否则出现热点分区</td></tr>
+  </table>
+  <div class="note">Partition 不是“缩小召回范围以提升精度”的工具——它只是<b>减少扫描量</b>。如果过滤条件本来就高度选择，用 <code>INVERTED</code> 标量索引 + 过滤表达式往往更灵活。</div>
+</section>
+
+<section id="shard">
+  <h2><span class="n">⑥</span>Shard 与 Replica</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4>Shard（<code>num_shards</code>）</h4>
+      <p>写入通道数。每条数据按主键哈希落到某个 shard，对应一条独立的 WAL 流。<b>提升写入吞吐</b>靠它；shard 太多会让每个 shard 的 batch 变小、Segment 变碎，反而不利于检索。</p>
+    </div>
+    <div class="card">
+      <h4>Replica（<code>num_replicas</code>）</h4>
+      <p>把若干 QueryNode 组织成一组，共同承载同一批 Segment 的读请求。<b>提升查询 QPS 与容灾</b>靠它；它消耗额外内存（同一份数据多份驻留）。</p>
+    </div>
+  </div>
+  <p>一句话记忆：<b>shard 决定写多快，replica 决定读多快</b>。写入瓶颈加 shard，读 QPS 瓶颈或需要滚动升级时加 replica。</p>
+</section>
+
+<section id="segment">
+  <h2><span class="n">⑦</span>Segment 生命周期</h2>
+  <div class="lead">Segment 是 Milvus 里<b>索引和并行的最小单位</b>。理解它的状态机，几乎能解释 Milvus 一半的行为：为什么刚写入的数据能立刻查到、为什么过一会儿才变快、为什么删除了空间没释放。</div>
+
+  <svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg" font-family="Menlo,monospace">
+    <defs><marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+    <rect x="20" y="40" width="130" height="62" rx="10" fill="#1f2433" stroke="#f0a868"/>
+    <text x="85" y="66" fill="#ffd0a0" font-size="12.5" text-anchor="middle" font-weight="bold">Growing</text>
+    <text x="85" y="86" fill="#cdd6f4" font-size="10.5" text-anchor="middle">内存 + WAL，暴力扫描</text>
+    <rect x="190" y="40" width="130" height="62" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+    <text x="255" y="66" fill="#9ec5ff" font-size="12.5" text-anchor="middle" font-weight="bold">Sealed</text>
+    <text x="255" y="86" fill="#cdd6f4" font-size="10.5" text-anchor="middle">落盘对象存储，仍暴力</text>
+    <rect x="360" y="40" width="130" height="62" rx="10" fill="#1f2433" stroke="#7ee787"/>
+    <text x="425" y="66" fill="#a6f0ab" font-size="12.5" text-anchor="middle" font-weight="bold">Indexed</text>
+    <text x="425" y="86" fill="#cdd6f4" font-size="10.5" text-anchor="middle">索引构建完成，走 ANN</text>
+    <rect x="530" y="40" width="130" height="62" rx="10" fill="#1f2433" stroke="#d2a8ff"/>
+    <text x="595" y="66" fill="#e0c0ff" font-size="12.5" text-anchor="middle" font-weight="bold">Compacted</text>
+    <text x="595" y="86" fill="#cdd6f4" font-size="10.5" text-anchor="middle">小段合并 + 删除真正清理</text>
+    <line x1="150" y1="71" x2="188" y2="71" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="320" y1="71" x2="358" y2="71" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="490" y1="71" x2="528" y2="71" stroke="#94a3b8" stroke-width="2" marker-end="url(#ar2)"/>
+    <text x="169" y="122" fill="#94a3b8" font-size="10.5" text-anchor="middle">flush</text>
+    <text x="339" y="122" fill="#94a3b8" font-size="10.5" text-anchor="middle">建索引</text>
+    <text x="509" y="122" fill="#94a3b8" font-size="10.5" text-anchor="middle">compaction</text>
+  </svg>
+  <ul>
+    <li><b>Growing</b>：数据先进 WAL 再进 QueryNode 内存，可立即被检索，走暴力计算（小数据量下反而最快）。</li>
+    <li><b>Sealed</b>：达到大小/时间阈值或手动 <code>flush()</code> 后封口，DataNode 把它序列化写入对象存储。</li>
+    <li><b>Indexed</b>：IndexNode 异步对该段建索引，就绪前检索仍走暴力，就绪后切换为 ANN。</li>
+    <li><b>Compacted</b>：后台把多个小段合并成大段，并把“软删除”的数据真正清除——<b>删除不释放空间的原因基本都在这里</b>。</li>
+  </ul>
+</section>
+
+<section id="example">
+  <h2><span class="n">⑧</span>建模示例：一个文档库 Collection</h2>
+  <pre><code><span class="kw">from</span> pymilvus <span class="kw">import</span> MilvusClient, DataType
+
+client = MilvusClient(uri=<span class="str">"http://localhost:19530"</span>)
+
+schema = client.create_schema(auto_id=<span class="typ">False</span>, enable_dynamic_field=<span class="typ">True</span>)
+schema.add_field(<span class="str">"doc_id"</span>,     DataType.INT64,       is_primary=<span class="typ">True</span>)
+schema.add_field(<span class="str">"tenant"</span>,     DataType.VARCHAR,     max_length=<span class="num">64</span>)   <span class="cmt"># 高频过滤 → 显式字段</span>
+schema.add_field(<span class="str">"publish_ts"</span>, DataType.INT64)                          <span class="cmt"># 时间范围过滤</span>
+schema.add_field(<span class="str">"text"</span>,       DataType.VARCHAR,     max_length=<span class="num">4096</span>)
+schema.add_field(<span class="str">"embedding"</span>,  DataType.FLOAT_VECTOR, dim=<span class="num">768</span>)           <span class="cmt"># 向量字段：维度建表后不可改</span>
+
+index_params = client.prepare_index_params()
+index_params.add_index(field_name=<span class="str">"embedding"</span>, index_type=<span class="str">"HNSW"</span>,
+                       metric_type=<span class="str">"COSINE"</span>, params={<span class="str">"M"</span>: <span class="num">16</span>, <span class="str">"efConstruction"</span>: <span class="num">200</span>})
+index_params.add_index(field_name=<span class="str">"tenant"</span>,    index_type=<span class="str">"INVERTED"</span>)
+index_params.add_index(field_name=<span class="str">"publish_ts"</span>, index_type=<span class="str">"INVERTED"</span>)
+
+client.create_collection(collection_name=<span class="str">"docs"</span>, schema=schema,
+                         index_params=index_params, num_shards=<span class="num">2</span>)</code></pre>
+  <div class="note">把高频过滤字段显式声明 + 建 <code>INVERTED</code> 索引，是这个建模里最关键的一步；不建索引的过滤条件会退化成全段扫描。</div>
+</section>
+
+<section id="checklist">
+  <h2><span class="n">⑨</span>建模决策清单</h2>
+  <table>
+    <tr><th>决策点</th><th>怎么定</th></tr>
+    <tr><td>维度</td><td>由 Embedding 模型定死，改模型 ≈ 重建表。提前确认模型与降维方案。</td></tr>
+    <tr><td>主键</td><td>能用业务 ID 就用业务 ID（<code>auto_id=False</code>），换来自幂等写入与直接删除。</td></tr>
+    <tr><td>过滤字段</td><td>80% 会被过滤的字段显式声明 + 建标量索引；元数据易变的部分交给 <code>$meta</code>。</td></tr>
+    <tr><td>分区</td><td>租户数少且固定 → 手工 Partition；租户多或不确定 → Partition Key。</td></tr>
+    <tr><td>shard 数</td><td>按写入峰值定，通常个位数起步；别为了“看起来分布式”开几十个。</td></tr>
+    <tr><td>索引</td><td>先和数据量、内存、召回目标对齐，见<a href="../03-indexes/milvus-index-types.html">Milvus 索引类型</a>。</td></tr>
+  </table>
+  <div class="warn">本页数值（上限、默认值）随版本演进，给出的是 Milvus 2.x 常见取值，落地前请用你部署版本的官方文档核对。</div>
+</section>
+
+
+</main>
+
+<footer>
+  
+  Milvus 的数据模型可以概括为一句话：<b>Collection 定结构，Partition 定分组，Segment 定执行，Entity 定内容</b>。把「哪些字段会被过滤」和「数据会被切成多大的段」这两件事想清楚，后面索引、一致性、容量规划的问题都会简单很多。<br>
+  延伸阅读：<a href="../03-indexes/milvus-index-types.html">Milvus 索引类型</a> · <a href="../04-search-and-query/milvus-search-query.html">检索与查询</a>。
+
+</footer>
+
+</body>
+</html>

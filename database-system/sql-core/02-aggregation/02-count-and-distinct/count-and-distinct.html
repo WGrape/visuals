@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL COUNT 与 DISTINCT 的语义与代价</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>COUNT 与 DISTINCT</h1>
+  <p>四种 COUNT 各数什么、DISTINCT 的排序/哈希去重成本、精确计数与近似计数的取舍</p>
+  <span class="tag">COUNT(*)</span><span class="tag">COUNT(col)</span><span class="tag">DISTINCT</span><span class="tag">HyperLogLog</span><span class="tag">汇总表</span>
+</header>
+<nav>
+  <a href="#count">① COUNT 四写法</a>
+  <a href="#distinct">② DISTINCT 成本</a>
+  <a href="#group">③ 与 GROUP BY 分工</a>
+  <a href="#approx">④ 精确 vs 近似</a>
+</nav>
+<main>
+<section id="count">
+<h2><span class="n">①</span>COUNT 的四种写法各数什么</h2>
+
+  <table>
+    <tr><th>写法</th><th>统计对象</th><th>含 NULL？</th><th>典型代价</th></tr>
+    <tr><td><code>COUNT(*)</code></td><td><b>行数</b></td><td>数所有行，不看列值</td><td>最低，优化器可选最小索引</td></tr>
+    <tr><td><code>COUNT(1)</code></td><td>行数</td><td>同 <code>COUNT(*)</code></td><td>与 <code>COUNT(*)</code> 基本等价</td></tr>
+    <tr><td><code>COUNT(col)</code></td><td>该列<b>非 NULL</b> 值的个数</td><td>跳过 NULL</td><td>需读该列，可能回表</td></tr>
+    <tr><td><code>COUNT(DISTINCT col)</code></td><td>该列去重后的值个数</td><td>跳过 NULL</td><td>需排序或哈希去重，最贵</td></tr>
+  </table>
+
+  <div class="lead warn"><b><code>COUNT(*)</code> 与 <code>COUNT(1)</code> 没有性能差别</b>，
+  优化器都会改写成同一形式，老资料里「用 1 更快」的说法早已不成立。
+  真正有差别的是 <code>COUNT(col)</code>——它必须判断该列是否为 NULL，且如果该列不在索引里就要回表。</div>
+
+  <pre><code>-- 用 COUNT(*) 与 COUNT(col) 的差值探测 NULL 数量
+SELECT COUNT(*) AS total,
+       COUNT(phone) AS has_phone,
+       COUNT(*) - COUNT(phone) AS null_phone
+FROM users;
+
+-- 多列同时去重计数（标准 SQL 支持，MySQL 也支持）
+SELECT COUNT(DISTINCT user_id, product_id) FROM orders;</code></pre>
+
+  <div class="lead bad"><b>InnoDB 里 <code>COUNT(*)</code> 为什么慢？</b>因为它没有像 MyISAM 那样维护一个行计数器——
+  MVCC 下「当前事务能看到多少行」取决于快照，无法用一个全局数字回答。
+  所以大表精确计数只能扫（优化器会挑最小的二级索引扫，而不是聚簇索引）。
+  解决路径：<b>近似值</b>用 <code>SHOW TABLE STATUS</code> / 统计信息；<b>精确值</b>维护计数表或用缓存；
+  <b>带条件的计数</b>用汇总表（summary table）预聚合。</div>
+
+</section>
+<section id="distinct">
+<h2><span class="n">②</span>DISTINCT 的真实成本</h2>
+
+  <p><code>DISTINCT</code> 不是「过滤」，而是<b>一次去重运算</b>——要么排序后相邻去重（O(n log n)），
+  要么建哈希表去重（O(n) 内存）。理解这点就能解释它为什么常常成为慢查询的元凶。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 180" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="180" fill="#171b26"/>
+    <text x="340" y="22" fill="#94a3b8" font-size="13" text-anchor="middle">DISTINCT 的两种物理实现</text>
+    <g font-family="monospace" font-size="12">
+      <rect x="30" y="44" width="290" height="100" rx="8" fill="#0b0e13" stroke="#6ea8fe"/>
+      <text x="175" y="66" fill="#6ea8fe" text-anchor="middle">Sort + Dedup</text>
+      <text x="175" y="92" fill="#94a3b8" text-anchor="middle" font-size="11">全量排序 → 扫描相邻行</text>
+      <text x="175" y="114" fill="#94a3b8" text-anchor="middle" font-size="11">可落盘，内存可控</text>
+      <text x="175" y="134" fill="#6ea8fe" text-anchor="middle" font-size="11">O(n log n)</text>
+      <rect x="360" y="44" width="290" height="100" rx="8" fill="#0b0e13" stroke="#f0a868"/>
+      <text x="505" y="66" fill="#f0a868" text-anchor="middle">Hash Dedup</text>
+      <text x="505" y="92" fill="#94a3b8" text-anchor="middle" font-size="11">边扫边建哈希集合</text>
+      <text x="505" y="114" fill="#94a3b8" text-anchor="middle" font-size="11">内存吃紧时退化成排序</text>
+      <text x="505" y="134" fill="#f0a868" text-anchor="middle" font-size="11">O(n) 内存</text>
+    </g>
+    <text x="340" y="166" fill="#94a3b8" font-size="11.5" text-anchor="middle">执行计划里看到 "Using temporary" / "Sort" 即为此处开销</text>
+  </svg>
+  <div class="cap">去重一定要「看见全部数据」之后才能输出结果的第一行——这也是它天然不利于流式响应</div>
+  </div>
+
+  <ol>
+    <li><b>DISTINCT 作用于整个 SELECT 列表的组合</b>，不是作用于第一个列。<code>SELECT DISTINCT a, b</code> 是 (a,b) 组合去重。</li>
+    <li><b><code>SELECT DISTINCT a</code> 与 <code>GROUP BY a</code> 在无聚合时等价</b>，多数优化器生成相同计划。</li>
+    <li><b>DISTINCT 与 ORDER BY 字段不一致会强制额外排序</b>，甚至报错（PG 要求 ORDER BY 的表达式必须出现在 SELECT DISTINCT 列表中）。</li>
+    <li><b>有索引时能跳过去重：</b>若去重的列上有索引，优化器可用「索引跳跃扫描 / loose index scan」只读每个不同值的第一条，代价骤降。MySQL 对 <code>GROUP BY</code> 有此优化，<code>DISTINCT</code> 支持度较弱。</li>
+  </ol>
+
+  <div class="qa"><b>Q：<code>SELECT DISTINCT</code> 能加速 <code>COUNT</code> 吗？</b><br>
+  A：常见误解。<code>COUNT(DISTINCT col)</code> 与先 <code>DISTINCT</code> 再 <code>COUNT</code> 代价相当，
+  真正的加速来自<b>索引覆盖 + loose scan</b>。数据量大又要求精确，就建汇总表。</div>
+
+</section>
+<section id="group">
+<h2><span class="n">③</span>DISTINCT 与 GROUP BY 的分工</h2>
+
+  <table>
+    <tr><th>维度</th><th><code>DISTINCT</code></th><th><code>GROUP BY</code></th></tr>
+    <tr><td>目的</td><td>去掉重复行</td><td>分组后每组产出一行（通常配聚合）</td></tr>
+    <tr><td>能否带聚合函数</td><td>能但语义奇怪</td><td>天然搭配</td></tr>
+    <tr><td>能否 <code>HAVING</code></td><td>不能</td><td>能</td></tr>
+    <tr><td>是否排序</td><td>不保证</td><td>历史上 MySQL 会隐式排序，8.0 起不再保证</td></tr>
+    <tr><td>输出列限制</td><td>只能输出去重列</td><td>可输出分组列 + 聚合结果</td></tr>
+  </table>
+
+  <pre><code>-- 两种写法等价（无聚合时）
+SELECT DISTINCT dept FROM emp;
+SELECT dept FROM emp GROUP BY dept;
+
+-- 但一旦要统计，只能用 GROUP BY
+SELECT dept, COUNT(*) FROM emp GROUP BY dept;
+
+-- 去重后再统计人数：先收敛到键，再 JOIN 明细
+SELECT COUNT(*) FROM (SELECT DISTINCT user_id FROM orders) t;</code></pre>
+
+  <div class="lead warn"><b>ONLY_FULL_GROUP_BY：</b>开启后（MySQL 5.7+ 默认），<code>SELECT</code> 列表里的非聚合列
+  <b>必须</b>出现在 <code>GROUP BY</code> 中或函数依赖于分组列。它拦住的是「返回哪一行的值是随机的」这类不确定查询，
+  不要为了跑通旧 SQL 去关掉它——正确做法是补全 <code>GROUP BY</code> 或用 <code>ANY_VALUE()</code> 显式表态。</div>
+
+</section>
+<section id="approx">
+<h2><span class="n">④</span>精确 vs 近似：什么时候不必较真</h2>
+
+  <div class="grid">
+    <div class="card"><h4>精确计数</h4>
+      <p>扫索引 / 汇总表 / 计数表。适合财务、库存、对账，以及任何用户会「拿它做决策」的场景。</p></div>
+    <div class="card"><h4>近似计数</h4>
+      <p>读统计信息或系统表的估算值，零成本但可能差 10%~50%。适合「约 120 万条」这类展示，
+      以及是否走某个执行路径的优化器决策。</p></div>
+    <div class="card"><h4>基数估算（UV 类）</h4>
+      <p>HyperLogLog 类结构，用几 KB 内存估出亿级去重基数，误差约 1%~2%。
+      Redis 的 <code>PFCOUNT</code>、部分数据库的近似 <code>APPROX_COUNT_DISTINCT</code> 即为此。</p></div>
+    <div class="card"><h4>预聚合</h4>
+      <p>按天/按维度写汇总表，查询直接读汇总。写入侧多花一点，读取侧快几个数量级。
+      日报、看板、大盘类需求的标准解法。</p></div>
+  </div>
+
+  <div class="lead ok"><b>经验口径：</b>「总数」展示用近似，翻页到第 N 页这种需要精确边界的用精确，
+  UV/DAU 这类去重基数可以接受 1%~2% 误差就用 HLL。
+  先问清楚<b>业务能不能容忍误差</b>，再决定架构——这一步省下来的资源往往比优化 SQL 大得多。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / COUNT 与 DISTINCT ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

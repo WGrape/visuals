@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VAD、端点检测与打断：实时语音最难的一环 - Visuals</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1c2a40;--panel2:#243751;--line:#40516b;--text:#ecf2f8;--muted:#b8c7d7;--accent:#78d3e5;--focus:#ffc873;--ok:#7ee787;--warn:#f0a868;--bad:#ff7b72}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.75 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--accent)}a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.shell{width:min(1000px,calc(100% - 32px));margin:auto;padding:26px 0 72px}.back{display:inline-block;margin-bottom:24px}
+h1{font-size:clamp(1.9rem,5vw,2.8rem);line-height:1.22;margin:.2em 0}.lead{font-size:1.12rem;color:var(--muted);max-width:72ch}
+h2{font-size:1.35rem;margin:0 0 14px}h3{font-size:1.08rem;margin:22px 0 6px;color:var(--accent)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:clamp(18px,3vw,28px);margin:18px 0}
+.panel p:last-child{margin-bottom:0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:16px 0}
+@media(max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+.box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.box b{color:var(--accent)}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:20px 0}
+.flow span{border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--panel2);font-size:14px}
+.flow b{color:var(--accent)}
+.scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}
+th,td{border-bottom:1px solid var(--line);padding:12px;vertical-align:top;text-align:left}
+th{color:var(--accent)}ul,ol{padding-left:1.35em}li{margin:8px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--panel2);padding:2px 6px;border-radius:5px;font-size:14px}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow:auto;font-size:13.5px;line-height:1.7;margin:14px 0}
+pre code{background:none;padding:0;color:#cfe6ef}
+.svgbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin:18px 0;overflow-x:auto}
+svg{display:block;width:100%;height:auto}
+details{margin:12px 0;background:var(--panel2);border-radius:9px;padding:12px 16px}summary{cursor:pointer;font-weight:700}
+.note{border-left:3px solid var(--accent);padding:8px 14px;margin:12px 0;background:rgba(120,211,229,.08);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.warn{border-left:3px solid var(--warn);padding:8px 14px;margin:12px 0;background:rgba(240,168,104,.09);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.good{border-left:3px solid var(--ok);padding:8px 14px;margin:12px 0;background:rgba(126,231,135,.08);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.bad{border-left:3px solid var(--bad);padding:8px 14px;margin:12px 0;background:rgba(255,123,114,.09);border-radius:0 8px 8px 0;font-size:14.5px;color:var(--muted)}
+.toc{position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:30;display:flex;flex-direction:column;gap:7px}
+.toc a{width:10px;height:10px;border-radius:50%;background:var(--line);transition:.2s}
+.toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.3)}
+@media(max-width:900px){.toc{display:none}}
+footer{color:var(--muted);font-size:.87rem;margin-top:28px}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body><nav class="toc" id="toc"></nav><main class="shell">
+<a class="back" href="../../index.html">← 返回语音与音频模型</a>
+<header><span aria-hidden="true">✋</span><h1>VAD 与打断机制</h1><p class="lead">VAD 在链路上的位置与漏检误检如何向上放大、静音裁剪为什么必须保留 padding、四种打断策略的选择、自激与误打断的根因，以及六项可调参数清单。</p></header>
+<section class="panel" id="s1">
+<h2>VAD 在链路上站在哪</h2>
+<div class="flow">
+  <span>音频流</span><b>→</b><span><b>VAD</b> 判定有声/无声</span><b>→</b><span>送入 ASR</span><b>→</b><span>端点判定</span><b>→</b><span>触发响应</span>
+</div>
+<p>VAD（Voice Activity Detection）做的是<b>帧级别</b>的判断：「这一小段音频里有没有人声」。
+它不等于端点检测，但端点检测建立在它之上。VAD 出错会向上放大：</p>
+<div class="grid2">
+  <div class="box"><b>漏检（该有判成没有）</b><br>把用户语音当静音裁掉 → 识别结果缺字、缺句，
+  <b>且这种错误不可恢复</b>，因为原始音频已经被丢弃。</div>
+  <div class="box"><b>误检（噪声判成人声）</b><br>键盘声、电视声被送进 ASR → 出现幻觉文本，
+  进而触发无意义的回答，<b>在开放麦克风场景下尤其明显</b>。</div>
+</div>
+</section>
+
+<section class="panel" id="s2">
+<h2>静音裁剪与尾部保留</h2>
+<div class="svgbox">
+<svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+  <text x="30" y="22" fill="#b8c7d7" font-size="13">为什么裁掉的静音不能是零</text>
+  <rect x="30" y="40" width="800" height="30" rx="4" fill="#243751"/>
+  <rect x="60" y="44" width="150" height="22" fill="#2f6b58"/><text x="135" y="60" fill="#ecf2f8" font-size="11" text-anchor="middle">人声 A</text>
+  <rect x="230" y="44" width="120" height="22" fill="#1c2a40"/><text x="290" y="60" fill="#78d3e5" font-size="11" text-anchor="middle">静音</text>
+  <rect x="370" y="44" width="150" height="22" fill="#2f6b58"/><text x="445" y="60" fill="#ecf2f8" font-size="11" text-anchor="middle">人声 B</text>
+  <rect x="540" y="44" width="120" height="22" fill="#1c2a40"/><text x="600" y="60" fill="#78d3e5" font-size="11" text-anchor="middle">静音</text>
+  <rect x="680" y="44" width="120" height="22" fill="#2f6b58"/><text x="740" y="60" fill="#ecf2f8" font-size="11" text-anchor="middle">人声 C</text>
+  <text x="430" y="96" fill="#b8c7d7" font-size="12.5" text-anchor="middle">只在人声段两侧保留一小段 padding（几十到几百毫秒），中间的长静音可裁掉</text>
+  <rect x="30" y="114" width="380" height="66" rx="10" fill="#1c2a40" stroke="#7ee787"/>
+  <text x="220" y="140" fill="#7ee787" font-size="13" text-anchor="middle">保留 padding 的理由</text>
+  <text x="220" y="164" fill="#b8c7d7" font-size="12" text-anchor="middle">起始辅音能量低，裁太狠会吃掉字头</text>
+  <text x="220" y="182" fill="#b8c7d7" font-size="12" text-anchor="middle">句末气音承载着「说完了」的线索</text>
+  <rect x="440" y="114" width="390" height="66" rx="10" fill="#1c2a40" stroke="#ff7b72"/>
+  <text x="635" y="140" fill="#ff7b72" font-size="13" text-anchor="middle">裁过头的后果</text>
+  <text x="635" y="164" fill="#b8c7d7" font-size="12" text-anchor="middle">字头缺失 → 识别成别的字</text>
+  <text x="635" y="182" fill="#b8c7d7" font-size="12" text-anchor="middle">句末线索丢失 → 端点判断更不准</text>
+</svg>
+</div>
+</section>
+
+<section class="panel" id="s3">
+<h2>打断：四种处理方式</h2>
+<table>
+  <tr><th>策略</th><th>行为</th><th>适用</th></tr>
+  <tr><td><b>立即停止</b></td><td>打断即丢弃当前回答，播放中断并清空缓冲</td><td>助手类、任务导向，最干脆</td></tr>
+  <tr><td><b>播完当前句</b></td><td>允许当前句子说完再停，避免半截话</td><td>朗读、播报类，语义完整更重要</td></tr>
+  <tr><td><b>降音量</b></td><td>检测到用户说话时把合成音压低而非停掉</td><td>陪伴类，营造「同时说话」的自然感</td></tr>
+  <tr><td><b>记住并补回</b></td><td>中断后可以问「你刚才说到哪了」并续上</td><td>需要保留完整信息的场景，实现最复杂</td></tr>
+</table>
+<div class="warn"><b>打断必须同时停止"播放"和"生成"。</b>
+只停播放而让 LLM 继续生成，浪费算力且状态不一致；
+只停生成而继续播放则会播完一段已经过时的话。<b>两个都要发取消信号，并让下游能及时感知。</b></div>
+</section>
+
+<section class="panel" id="s4">
+<h2>误打断与自激</h2>
+<p>实时语音最常见的两类"灵异现象"，根因都在音频回环：</p>
+<div class="grid2">
+  <div class="box"><b>自激（模型听自己）</b><br>扬声器播放的 TTS 声音被麦克风采集，
+  ASR 把它识别成用户输入，模型回答自己的话，形成循环。
+  <b>解法：AEC 回声消除 + 播放期间降低 ASR 灵敏度（但不能完全关闭，否则无法打断）。</b></div>
+  <div class="box"><b>误打断（噪声触发）</b><br>环境噪声、咳嗽、旁人说话被判定为用户打断，
+  助手频繁中断自己的回答。<b>解法：要求打断信号持续若干帧才生效，
+  并结合能量阈值与人声置信度双重判定。</b></div>
+</div>
+<div class="good"><b>一个关键设计：<code>播放期间是否接受打断</code> 这个开关应该按场景配置。</b>
+朗读长文时关闭打断（避免误触）、对话助手时开启打断但要求连续确认帧数、
+客服播报关键条款时说完当前句再停。<b>不要用一个全局策略覆盖所有场景。</b></div>
+</section>
+
+<section class="panel" id="s5">
+<h2>调参清单</h2>
+<ol>
+  <li><b>VAD 灵敏度</b>：太灵敏 → 噪声误触发；太迟钝 → 漏掉轻声字头。用真实环境录音调，不要用合成数据。</li>
+  <li><b>起始静音容忍</b>：用户按下说话到真正出声之间的等待时间。</li>
+  <li><b>结束静音阈值</b>：多长静音判定说完。短句场景要更短，朗读场景要更长。</li>
+  <li><b>绝对超时</b>：防止一直检测不到结束而无限等待。</li>
+  <li><b>打断确认帧数</b>：连续多少帧判定为有效打断。</li>
+  <li><b>播放期灵敏度衰减</b>：播放时把打断判定阈值抬高多少。</li>
+</ol>
+<div class="note">这些参数之间存在耦合（例如结束阈值改短会让打断更频繁），
+<b>每次只改一个并用真实对话回归测试</b>。把参数集中配置并支持热更新，能省掉大量发版时间。</div>
+</section>
+
+<footer><p>Visuals · 人工智能 / 语音与音频模型 / VAD 与打断 ·
+<a href="../../index.html">返回目录</a> ·
+<a href="../../../../index.html">返回知识地图</a></p></footer>
+
+<script>
+const toc=document.getElementById('toc');
+const secs=[...document.querySelectorAll('section[id]')];
+secs.forEach(s=>{const a=document.createElement('a');a.href='#'+s.id;toc.appendChild(a);});
+const links=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+ if(e.isIntersecting){links.forEach(l=>l.classList.remove('act'));
+  const i=secs.findIndex(s=>s.id===e.target.id);if(i>=0)links[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+secs.forEach(s=>io.observe(s));
+</script>
+
+</main></body></html>

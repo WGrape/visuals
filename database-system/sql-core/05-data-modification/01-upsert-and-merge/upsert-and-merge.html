@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UPSERT：ON DUPLICATE KEY / ON CONFLICT / MERGE</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>UPSERT 与 MERGE</h1>
+  <p>为什么先查后写必然出错、三种语法的语义差异、并发死锁与幂等设计</p>
+  <span class="tag">UPSERT</span><span class="tag">ON CONFLICT</span><span class="tag">MERGE</span><span class="tag">幂等</span><span class="tag">死锁</span>
+</header>
+<nav>
+  <a href="#why">① 为何要原子</a>
+  <a href="#syntax">② 三种语法</a>
+  <a href="#conc">③ 并发与死锁</a>
+  <a href="#pattern">④ 应用场景</a>
+</nav>
+<main>
+<section id="why">
+<h2><span class="n">①</span>为什么不能先查后写</h2>
+
+  <p>「存在就更新，不存在就插入」的朴素写法是 <code>SELECT</code> 判断再决定 <code>INSERT/UPDATE</code>。
+  它在并发下<b>必然出错</b>：两个请求同时查到「不存在」，然后都去 INSERT，一个成功一个唯一键冲突。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="680" height="200" fill="#171b26"/>
+    <text x="340" y="22" fill="#94a3b8" font-size="12.5" text-anchor="middle">两个并发请求的交错</text>
+    <g font-family="monospace" font-size="11.5">
+      <text x="30" y="52" fill="#6ea8fe">T1</text>
+      <rect x="70" y="38" width="120" height="26" rx="4" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="130" y="55" fill="#e2e8f0" text-anchor="middle">SELECT → 无</text>
+      <rect x="200" y="38" width="120" height="26" rx="4" fill="#1f2433" stroke="#6ea8fe"/>
+      <text x="260" y="55" fill="#e2e8f0" text-anchor="middle">INSERT ✓</text>
+      <text x="30" y="98" fill="#f0a868">T2</text>
+      <rect x="70" y="84" width="120" height="26" rx="4" fill="#1f2433" stroke="#f0a868"/>
+      <text x="130" y="101" fill="#e2e8f0" text-anchor="middle">SELECT → 无</text>
+      <rect x="200" y="84" width="150" height="26" rx="4" fill="#2b1a1a" stroke="#ff7b72"/>
+      <text x="275" y="101" fill="#ff7b72" text-anchor="middle">INSERT ✗ 冲突</text>
+      <text x="30" y="146" fill="#7ee787">UPSERT</text>
+      <rect x="70" y="132" width="330" height="26" rx="4" fill="#1f2433" stroke="#7ee787"/>
+      <text x="235" y="149" fill="#e2e8f0" text-anchor="middle">单条原子语句：由唯一索引保证互斥，两个请求都成功</text>
+    </g>
+    <text x="340" y="184" fill="#94a3b8" font-size="11.5" text-anchor="middle">前提：冲突列上必须有 UNIQUE 约束——UPSERT 靠它识别「已存在」</text>
+  </svg>
+  <div class="cap">UPSERT 把「判断 + 写入」合并成一条原子语句</div>
+  </div>
+
+  <div class="lead ok"><b>唯一索引是 UPSERT 的前提。</b>没有唯一键，数据库无从判断什么叫「已存在」，
+  所谓 UPSERT 就退化成无条件插入。<b>先确保冲突列上有 PRIMARY KEY 或 UNIQUE。</b></div>
+
+</section>
+<section id="syntax">
+<h2><span class="n">②</span>三种语法的语义差异</h2>
+
+  <table>
+    <tr><th>数据库</th><th>语法</th><th>冲突判据</th><th>特点</th></tr>
+    <tr><td>MySQL</td><td><code>INSERT ... ON DUPLICATE KEY UPDATE</code></td><td>任意唯一键冲突</td><td>可用 <code>VALUES(col)</code> 引用待插入值</td></tr>
+    <tr><td>PostgreSQL / SQLite</td><td><code>INSERT ... ON CONFLICT (col) DO UPDATE</code></td><td>指定列/约束</td><td>可加 <code>WHERE</code> 条件成为条件更新；<code>DO NOTHING</code> 即忽略</td></tr>
+    <tr><td>SQL 标准 / Oracle / SQL Server</td><td><code>MERGE INTO ... WHEN MATCHED</code></td><td>ON 条件</td><td>表达力最强（可同时处理删除），语法最冗长</td></tr>
+  </table>
+
+  <pre><code>-- MySQL
+INSERT INTO daily_stat (dt, biz, cnt) VALUES ('2026-10-18', 'order', 1)
+ON DUPLICATE KEY UPDATE cnt = cnt + VALUES(cnt);
+
+-- PostgreSQL
+INSERT INTO daily_stat (dt, biz, cnt) VALUES ('2026-10-18', 'order', 1)
+ON CONFLICT (dt, biz) DO UPDATE SET cnt = daily_stat.cnt + EXCLUDED.cnt;
+
+-- SQL 标准 MERGE
+MERGE INTO daily_stat t
+USING (SELECT DATE '2026-10-18' dt, 'order' biz, 1 cnt) s
+ON (t.dt = s.dt AND t.biz = s.biz)
+WHEN MATCHED     THEN UPDATE SET t.cnt = t.cnt + s.cnt
+WHEN NOT MATCHED THEN INSERT (dt, biz, cnt) VALUES (s.dt, s.biz, s.cnt);</code></pre>
+
+  <div class="lead warn"><b>语义细节差异必须实测：</b>
+  <b>①</b> MySQL 的 <code>ON DUPLICATE KEY</code> 在<b>任意</b>唯一键冲突时触发（可能是你没想到的那个索引）；
+  PG 的 <code>ON CONFLICT</code> 必须指定列或约束名，更精确。
+  <b>②</b> 自增 ID 的消耗：MySQL 的 UPSERT 冲突时仍可能消耗一个自增值，导致 ID 空洞。
+  <b>③</b> 影响行数各库含义不同（MySQL 插入=1、更新=2、未变=0）。</div>
+
+</section>
+<section id="conc">
+<h2><span class="n">③</span>并发、死锁与幂等</h2>
+
+  <ol>
+    <li><b>UPSERT 不是无锁的。</b>它要在唯一索引上加锁判断冲突，高并发对<b>同一键</b>的 UPSERT 会排队，
+    若一个事务里 UPSERT 多个键且顺序不一致，就会死锁。<b>批量时按同一顺序（如主键升序）排序后执行</b>。</li>
+    <li><b>先删后插的写法更危险。</b><code>DELETE + INSERT</code> 顺序做幂等会产生 gap lock 与更多 undo，
+    且中间态会让其他事务读到「不存在」。优先用 UPSERT。</li>
+    <li><b>幂等设计的核心是业务唯一键。</b>用「订单号 + 业务类型」这类天然唯一键作冲突判据，
+    而不是依赖数据库自增 ID。</li>
+    <li><b>批量 UPSERT 与单条 UPSERT 的锁范围不同。</b>多行 VALUES 的 UPSERT 可能扩大锁范围，
+    大批量时建议分批（如每批 500~1000 行）。</li>
+  </ol>
+
+  <div class="qa"><b>Q：<code>ON CONFLICT DO NOTHING</code> 值得用吗？</b><br>
+  A：值得，它是实现「不存在才插入」幂等的最简写法，比 <code>INSERT IGNORE</code> 更精确
+  （<code>INSERT IGNORE</code> 会<b>吞掉所有错误</b>，包括非空约束违反、类型转换失败，排查时非常痛苦）。
+  但要注意：<code>DO NOTHING</code> 时如果你想拿到已有行的 ID，需要再查一次或用
+  <code>RETURNING</code> 配合 CTE。</div>
+
+  <div class="qa"><b>Q：怎么拿到 UPSERT 后的主键？</b><br>
+  A：PostgreSQL 用 <code>RETURNING id</code>（UPDATE 分支也能返回）；
+  MySQL 用 <code>LAST_INSERT_ID()</code>，但冲突更新分支下它不可靠，
+  常见做法是 <code>ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)</code> 显式把 ID 写回去再取。</div>
+
+</section>
+<section id="pattern">
+<h2><span class="n">④</span>典型应用场景</h2>
+
+  <div class="grid">
+    <div class="card"><h4>计数与统计累加</h4>
+      <p>日活、库存扣减、点赞数。把「多行明细」变成「一行聚合」，
+      用 <code>cnt = cnt + 1</code> 原子累加，避免读写竞态。</p></div>
+    <div class="card"><h4>幂等写入</h4>
+      <p>消息队列重复消费、接口重试。以消息 ID 或业务单号作唯一键，
+      重复投递时 <code>DO NOTHING</code> 或 <code>DO UPDATE</code> 为幂等更新。</p></div>
+    <div class="card"><h4>缓存表 / 物化视图刷新</h4>
+      <p>按主键覆盖写入最新快照，无需关心是否已存在。</p></div>
+    <div class="card"><h4>配置与开关表</h4>
+      <p>以 <code>(tenant, key)</code> 唯一，写入即覆盖。比「先查再插」少一次往返。</p></div>
+  </div>
+
+  <div class="lead bad"><b>不适合用 UPSERT 的场景：</b>需要记录历史变更（应写流水表而非覆盖）、
+  更新逻辑依赖旧值做复杂判断（应在事务里显式 <code>SELECT ... FOR UPDATE</code>）、
+  以及大批量初始化（用 <code>COPY</code>/<code>LOAD DATA</code> 更快）。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / UPSERT ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

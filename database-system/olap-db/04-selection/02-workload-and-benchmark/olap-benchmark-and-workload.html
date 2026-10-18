@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OLAP 基准测试与负载画像：怎么测才可信</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>OLAP 基准测试与负载画像</h1>
+  <p>用五个维度量化你的负载，用标准集做初筛，用业务查询集做决策——一套可复现的 OLAP 评测方法。</p>
+  <span class="tag">负载画像</span><span class="tag">基准测试</span><span class="tag">TPC-H / TPC-DS</span><span class="tag">P99</span>
+</header>
+<nav>
+  <a href="#why">为什么要先画像</a>
+  <a href="#dim">负载的五个维度</a>
+  <a href="#bench">基准集怎么选</a>
+  <a href="#method">怎么测才可信</a>
+  <a href="#read">怎么读结果</a>
+  <a href="#pit">常见陷阱</a>
+</nav>
+<main>
+<section id="why">
+<h2><span class="n">01</span>选型前先画像：别拿参数表做决策</h2>
+
+<p>OLAP 选型最常见的失败，是把「引擎能力对比表」当成决策依据。能力表只能排除，不能选择——因为<b>决定体验的是你的负载落在哪个区域</b>，而不是引擎的全集能力。</p>
+<div class="qa">
+  <b>Q：为什么"某某引擎支持 X 功能"不足以决策？</b><br>
+  A：因为"支持"有实现质量差异。同样支持物化视图，一个能自动匹配改写、一个只能手动指定；同样支持 JOIN，一个走 Broadcast 秒回、一个走 Shuffle 跑五分钟。<b>功能的存在性和它在你的数据规模下的表现，是两件事。</b>
+</div>
+<div class="lead">正确顺序是：<b>先量化负载 → 再定候选 → 最后用你自己的查询实测</b>。能力表只用在第一步之后做剪枝。</div>
+
+</section>
+<section id="dim">
+<h2><span class="n">02</span>负载画像的五个维度</h2>
+
+<table>
+<tr><th>维度</th><th>要回答的问题</th><th>为什么决定选型</th></tr>
+<tr><td><b>数据新鲜度</b></td><td>能接受多久的延迟？秒 / 分钟 / 小时 / 天</td><td>决定要不要实时导入链路（Routine Load、Flink 写入）</td></tr>
+<tr><td><b>查询形态</b></td><td>单表聚合为主，还是多表大 JOIN？是否固定报表？</td><td>决定是否必须 Colocate / Runtime Filter / 强 JOIN 能力</td></tr>
+<tr><td><b>并发量</b></td><td>同时跑多少查询？峰值 QPS 多少？</td><td>列存引擎天然不适合高并发，需要预聚合或缓存</td></tr>
+<tr><td><b>数据规模与增长</b></td><td>当前多少 TB？月增长多少？保留多久？</td><td>决定分区策略、冷热分层与存储成本</td></tr>
+<tr><td><b>查询灵活性</b></td><td>是固定看板，还是分析师临时探索？</td><td>固定看板可预聚合；临时查询要求引擎足够通用</td></tr>
+</table>
+<div class="lead"><b>把这五个维度写下来，候选范围通常会从"五六个引擎"收敛到"一两个"</b>。这比跑任何 benchmark 都省时间。</div>
+
+</section>
+<section id="bench">
+<h2><span class="n">03</span>标准基准集各自测什么</h2>
+
+<table>
+<tr><th>基准</th><th>测什么</th><th>适用</th><th>局限</th></tr>
+<tr><td><b>SSB</b>（Star Schema Benchmark）</td><td>星型模型下的单表/简单多表聚合</td><td>看基础扫描与聚合能力，最快跑完</td><td>JOIN 太简单，区分度低</td></tr>
+<tr><td><b>TPC-H</b></td><td>8 张表、22 条复杂分析查询</td><td>事实上的入门标准，覆盖 JOIN / 子查询 / 聚合</td><td>数据分布均匀，不含倾斜与更新</td></tr>
+<tr><td><b>TPC-DS</b></td><td>24 张表、99 条查询，含复杂多维与交互式</td><td>最贴近真实数仓，区分度高</td><td>跑起来重，且需要正确实现全部查询</td></tr>
+<tr><td><b>业务自有查询集</b></td><td>你真正的慢查询</td><td><b>最有决策价值</b></td><td>需要自己整理与脱敏</td></tr>
+</table>
+<div class="lead warn"><b>标准集的正确用法</b>：用它做<b>初筛和回归</b>，不要用它做最终决策。最终决策必须用业务查询集——因为你的数据分布、倾斜程度、表结构长什么样，标准集完全不知道。</div>
+
+</section>
+<section id="method">
+<h2><span class="n">04</span>怎么测才可信：六条硬规矩</h2>
+
+<div class="grid">
+<div class="card"><b>① 用真实规模的数据</b>。1 GB 数据上所有引擎都很快，差异被缓存与启动开销掩盖。<b>至少用生产量级的十分之一</b>。</div>
+<div class="card"><b>② 每类查询跑多次，取中位数和 P99</b>。第一次必然包含编译、缓存预热、连接建立，<b>只看单次结果毫无意义</b>。</div>
+<div class="card"><b>③ 明确是否清空缓存</b>。冷查询（清缓存）与热查询（缓存命中）代表两种场景，<b>分开测、分开报</b>。</div>
+<div class="card"><b>④ 并发要测</b>。单并发下的排名在高并发时经常反转——这正是列存引擎最脆弱的地方。</div>
+<div class="card"><b>⑤ 同时导入</b>。真实系统查询和写入是并发的，<b>只读不写的测试会严重高估性能</b>。</div>
+<div class="card"><b>⑥ 记录配置</b>。机器规格、副本数、分区分桶、压缩方式、会话参数，全部记下来，否则结果无法复现。</div>
+</div>
+<div class="lead bad"><b>厂商公布的 benchmark 只能当参考</b>。它们通常在最优配置、单一查询、无并发下取得。<b>不是造假，但和你的场景差得很远。</b></div>
+
+</section>
+<section id="read">
+<h2><span class="n">05</span>怎么读测试结果</h2>
+
+<table>
+<tr><th>现象</th><th>可能的含义</th><th>下一步</th></tr>
+<tr><td>单并发快，并发一上去就崩</td><td>每查询吃满资源，无资源隔离</td><td>加资源组/队列，或做预聚合</td></tr>
+<tr><td>冷查询慢、热查询极快</td><td>缓存命中率高，依赖页缓存</td><td>评估内存是否扛得住工作集</td></tr>
+<tr><td>某几条查询特别慢</td><td>通常是 JOIN 策略或数据倾斜</td><td>看执行计划，检查分桶键与倾斜</td></tr>
+<tr><td>导入时查询抖动剧烈</td><td>compaction / 资源争抢</td><td>错峰导入，限制导入资源</td></tr>
+<tr><td>P99 远高于中位数</td><td>存在长尾（大分区、倾斜、重试）</td><td>按查询类型分桶，定位长尾来源</td></tr>
+</table>
+<div class="lead"><b>中位数决定"平均体验"，P99 决定"会不会被投诉"</b>。选型报告里两个都必须有。</div>
+
+</section>
+<section id="pit">
+<h2><span class="n">06</span>六个常见陷阱</h2>
+
+<div class="qa"><b>Q：测完发现引擎 A 全面优于引擎 B？</b><br>A：先怀疑测试。很可能是 B 的分桶键没设好、统计信息没收集、或用了默认配置。<b>引擎间的差距通常没那么大，配置差距才是数量级的。</b></div>
+<div class="qa"><b>Q：能不能只测导入速度？</b><br>A：不能。导入是批处理可以错峰，查询延迟直接影响用户。<b>导入慢可以用时间换，查询慢没法换。</b></div>
+<div class="qa"><b>Q：小数据量测试能不能外推？</b><br>A：不能。<b>数据规模跨过内存容量、跨过分区数阈值后，瓶颈会整体切换</b>（从 CPU 变为 IO，从扫描变为 shuffle）。</div>
+<div class="qa"><b>Q：同一份 SQL 在不同引擎上跑，结果对得上吗？</b><br>A：要验。<b>窗口函数的 NULL 处理、去重语义、时区与精度</b>都可能不同。性能对比的前提是结果一致。</div>
+<div class="qa"><b>Q：需不需要测故障恢复？</b><br>A：需要但常被跳过。至少测一次<b>节点宕机时的查询失败率与恢复时间</b>——副本配置不同，表现差别很大。</div>
+<div class="qa"><b>Q：测一次定终身？</b><br>A：<b>负载会变。</b>建议把基准查询集固化成回归测试，版本升级与数据量翻倍时各跑一次。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP / 选型指南 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

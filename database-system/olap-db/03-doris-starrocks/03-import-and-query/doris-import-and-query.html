@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Doris / StarRocks 数据导入与查询优化</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>导入与查询优化</h1>
+  <p>Routine Load / Stream Load / Broker Load 的选择、Colocate 与 Runtime Filter 两类 JOIN 优化、慢查询排查表与运维关注点</p>
+  <span class="tag">Routine Load</span><span class="tag">Stream Load</span><span class="tag">Colocate Join</span><span class="tag">Runtime Filter</span><span class="tag">Compaction</span>
+</header>
+<nav>
+  <a href="#import">① 导入方式</a>
+  <a href="#join">② JOIN 优化</a>
+  <a href="#query">③ 查询调优</a>
+  <a href="#ops">④ 运维关注</a>
+</nav>
+<main>
+<section id="import">
+<h2><span class="n">①</span>四种导入方式怎么选</h2>
+
+  <table>
+    <tr><th>方式</th><th>数据源</th><th>语义</th><th>适用</th></tr>
+    <tr><td><b>Routine Load</b></td><td>Kafka（持续消费）</td><td>常驻任务，准实时</td><td>日志、行为流实时入仓</td></tr>
+    <tr><td><b>Stream Load</b></td><td>HTTP 推送（本地文件/程序）</td><td>单次同步导入，返回即成功</td><td>小批量、脚本导入、程序直写</td></tr>
+    <tr><td><b>Broker Load</b></td><td>HDFS / 对象存储</td><td>异步批量，可重试</td><td>大批量离线导入、历史数据回灌</td></tr>
+    <tr><td><b>INSERT INTO ... SELECT</b></td><td>库内其他表 / 外部表</td><td>同步执行</td><td>ETL 加工、表间转换</td></tr>
+  </table>
+
+  <div class="lead warn"><b>每条导入都是一个「事务」</b>：要么整批可见，要么整批不可见，不会出现部分可见。
+  这带来两个实践结论：<b>①</b> 批太小会导致事务过多、版本堆积、compaction 压力大；
+  <b>②</b> 批太大失败时回滚成本高。<b>常见做法是攒批到「几十秒~几分钟的数据量」再提交</b>——
+  具体阈值按数据速率与压测结果定。</div>
+
+  <pre><code>-- Routine Load：常驻消费 Kafka
+CREATE ROUTINE LOAD db.job_orders ON orders
+COLUMNS TERMINATED BY ","
+PROPERTIES ("desired_concurrent_number"="3", "max_batch_interval"="30")
+FROM KAFKA ("kafka_broker_list"="broker:9092", "kafka_topic"="orders");
+
+-- 导入任务出问题时的排查顺序
+SHOW ROUTINE LOAD;            -- 看状态与进度
+SHOW ROUTINE LOAD FOR db.job_orders;   -- 看具体的错误行与原因</code></pre>
+
+</section>
+<section id="join">
+<h2><span class="n">②</span>JOIN 优化：Colocate 与 Runtime Filter</h2>
+
+  <div class="grid">
+    <div class="card"><h4>Colocate Join</h4>
+      <p>两张表<b>用相同的分桶列、相同的桶数、相同的副本分布</b>时，
+      相同 key 的行一定落在同一台机器上，JOIN 可以<b>本地完成，免去重分布</b>。
+      这是大表 JOIN 大表最有效的优化。</p></div>
+    <div class="card"><h4>Bucket Shuffle Join</h4>
+      <p>只把<b>右表</b>按左表所在节点重分布，比全量重分布传输量小。
+      在无法 Colocate（分桶列不同）时的次优选择。</p></div>
+    <div class="card"><h4>Broadcast Join</h4>
+      <p>把小表广播到所有节点。<b>右表很小的星型模型维表关联首选</b>，
+      大表广播会打爆网络与内存。</p></div>
+    <div class="card"><h4>Runtime Filter</h4>
+      <p>大表 JOIN 小表时，先扫小表生成<b>运行时过滤条件</b>（bloom / min-max / in list）
+      下推到大表扫描，大幅减少读取量。<b>星型模型的性能关键</b>。</p></div>
+  </div>
+
+  <div class="lead ok"><b>优化顺序：</b>
+  <b>①</b> 先看执行计划确实用了哪种分布方式（<code>EXPLAIN</code> 里会显示）；
+  <b>②</b> 大表 JOIN 大表优先改造成 Colocate；
+  <b>③</b> 星型模型确认 Runtime Filter 已生效（有时因类型不匹配或统计信息缺失而不下推）；
+  <b>④</b> 最后才考虑调 session 变量或加 hint。</div>
+
+</section>
+<section id="query">
+<h2><span class="n">③</span>查询调优的常见问题</h2>
+
+  <table>
+    <tr><th>现象</th><th>可能原因</th><th>排查</th></tr>
+    <tr><td>没有命中分区裁剪</td><td>时间列上包了函数，或条件不是范围形式</td><td><code>EXPLAIN</code> 看扫描的分区数</td></tr>
+    <tr><td>没走物化视图</td><td>维度或聚合函数与定义不匹配</td><td>确认查询能否从物化视图<b>上卷</b>得到</td></tr>
+    <tr><td>COUNT(DISTINCT) 极慢</td><td>高基数列精确去重</td><td>改用 bitmap 或近似函数（接受误差时）</td></tr>
+    <tr><td>JOIN 慢且网络打满</td><td>两表都做了全量重分布</td><td>改 Colocate 或用 Broadcast</td></tr>
+    <tr><td>导入后查询变慢</td><td>版本堆积、compaction 没跟上</td><td>看 tablet 版本数与 compaction 状态</td></tr>
+    <tr><td>内存超限</td><td>大结果集排序 / 大 JOIN / 广播了不该广播的表</td><td>看 query profile 的内存峰值算子</td></tr>
+  </table>
+
+  <div class="lead bad"><b>不要照抄网上调优参数的数值。</b>执行内存、并行度、compaction 线程这类参数
+  与集群规模、数据量、并发强相关，<b>同一份参数在小集群上救命、在大集群上可能压垮节点</b>。
+  先通过 profile 定位到具体算子，再有针对性地调。</div>
+
+</section>
+<section id="ops">
+<h2><span class="n">④</span>日常运维关注点</h2>
+
+  <ol>
+    <li><b>导入延迟</b>：Routine Load 的 lag 是最直接的实时性指标，要有告警。</li>
+    <li><b>Compaction 压力</b>：写入过快会产生大量待合并版本，影响查询性能与磁盘占用。</li>
+    <li><b> Tablet 分布均衡</b>：节点扩容/下线后要重新均衡，否则出现热点节点。</li>
+    <li><b>存储增长</b>：列存压缩比高但明细表仍会快速增长，配合分区做生命周期管理（冷热分层/过期删除）。</li>
+    <li><b>慢查询归档</b>：定期收集慢查询，判断是该加物化视图、改模型，还是该拒绝这类查询。</li>
+  </ol>
+
+  <div class="qa"><b>Q：实时写入和查询性能冲突怎么办？</b><br>
+  A：这是 OLAP 的固有矛盾——<b>写入越实时，小文件与版本越多，查询越慢</b>。
+  三种缓解：<b>①</b> 攒批，用几分钟延迟换更大的批次；
+  <b>②</b> 读写分离，查询走独立副本；
+  <b>③</b> 分层——实时层存最近几小时用明细，历史层转成预聚合。
+  <b>先明确业务能接受多少延迟，再定架构。</b></div>
+
+  <div class="qa"><b>Q：该不该用 INSERT 逐行写？</b><br>
+  A：<b>不该</b>。列存的写入路径是为批量设计的，逐行 INSERT 会产生大量小事务与版本，
+  迅速拖垮集群。应用侧应攒批后走 Stream Load，或写入 Kafka 由 Routine Load 消费。</div>
+
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / SQL 核心 / Doris / StarRocks · 导入与查询 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>
