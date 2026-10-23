@@ -11,6 +11,84 @@
 <section class="panel"><h2>刷新模式与可见性</h2><p>全量刷新容易理解，但大表重算昂贵；增量刷新只处理新增或变更数据，但必须能正确处理删除、更新和迟到事件。同步维护让写入承担更多成本，异步刷新则带来新鲜度窗口。某些系统提供自动查询改写与刷新机制，行为和限制因产品而异。报表标题应标明数据截至时间，关键账务结果还需定义可接受延迟。</p><p>若一次刷新只完成了一半却把新旧结果混在一起，用户会看到不一致报表。应使用可原子切换的快照、版本或分区发布流程，让查询读取同一批次结果。实时增量与历史回补并行时，尤其要避免重复计数：同一订单事件既在增量流里处理、又被回补任务覆盖，应以订单 ID 与版本保证最终状态正确。</p></section>
 <section class="panel"><h2>查询改写怎么验收</h2><p>用 EXPLAIN 确认报表是读原始明细还是命中物化视图，再核对过滤条件是否完全覆盖、聚合粒度是否足够细。构造门店 A 两单、B 八单的样例，检查跨门店 AVG 返回 60。再放入一个跨店用户，检查精确去重没有把分组计数直接相加。最后加入一笔迟到退款，观察刷新后总额是否减少。</p><p>性能验收不要只看单次查询延迟，还要记录刷新耗时、写入放大、额外存储与数据新鲜度。若报表一天只跑一次，直接扫描列式明细可能比持续维护大量物化视图更简单。预聚合是用维护成本换查询成本，值得与实际负载一起量化。</p></section>
 <section class="panel"><h2>一眼辨认错误答案</h2><p>看到“把每日平均值相加再除以天数”，先查每天订单数是否相同；看到“各门店 UV 相加就是全城 UV”，先查用户是否跨店；看到“刷新成功即报表最新”，先查源数据有没有迟到与回补；看到“视图包含金额就能回答所有金额问题”，先查维度与过滤条件是否已经被聚合丢弃。这四个检查能覆盖很多分析报表的隐蔽错误。</p><p>练习：日表保存 date、store、sum_amount、order_count。写出月度平均订单额的计算式，并说明若需求新增“只看新用户”条件，为什么这张日表可能不够。</p></section>
+<section class="panel" data-dry-goods><h2>三类物化视图的刷新语义</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>刷新方式</th><th>数据新鲜度</th><th>代表</th></tr></thead><tbody><tr><td>增量物化视图</td><td>源表写入时按变更同步更新</td><td>近实时（与写入同批）</td><td>ClickHouse 物化视图、Doris Rollup</td></tr><tr><td>全量刷新物化视图</td><td>定时/手动整体重算</td><td>取决于刷新周期</td><td>PostgreSQL <code>REFRESH MATERIALIZED VIEW</code></td></tr><tr><td>可增量刷新的物化视图</td><td>记录变更日志按增量应用</td><td>准实时，代价居中</td><td>Oracle MVIEW FAST、BigQuery 部分场景</td></tr></tbody></table></div><p class="muted">正确性核心：<b>预聚合的定义必须与查询的定义严格一致</b>，包括维度层级、时间边界、去重语义与过滤条件。任何一边走样，结果就不可信。</p></section><section class="panel"><h2>聚合状态的 State / Merge 模型（ClickHouse）</h2><div class="table-wrap"><table><thead><tr><th>环节</th><th>写法</th><th>说明</th></tr></thead><tbody><tr><td>写入侧（物化视图）</td><td><code>sumState(amount)</code> / <code>uniqState(uid)</code></td><td>存的是<b>中间状态</b>不是最终值</td></tr><tr><td>查询侧</td><td><code>sumMerge(s)</code> / <code>uniqMerge(u)</code></td><td>把多个状态合并成最终结果</td></tr><tr><td>存储类型</td><td><code>AggregateFunction(sum, Decimal(18,2))</code></td><td>列类型必须声明聚合函数与参数类型</td></tr><tr><td>引擎</td><td><code>AggregatingMergeTree</code></td><td>合并时把状态再合并一次</td></tr></tbody></table></div><p><b>ClickHouse</b></p><pre><code>-- 1) 明细表
+CREATE TABLE orders_raw
+(
+    dt      DateTime,
+    shop_id UInt32,
+    amount  Decimal(18,2)
+) ENGINE = MergeTree PARTITION BY toYYYYMM(dt) ORDER BY (dt, shop_id);
+
+-- 2) 聚合状态表（存 State）
+CREATE TABLE orders_agg
+(
+    day     Date,
+    shop_id UInt32,
+    s_amount AggregateFunction(sum, Decimal(18,2)),
+    s_orders AggregateFunction(count)
+) ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(day) ORDER BY (day, shop_id);
+
+-- 3) 物化视图：写入时同步聚合
+CREATE MATERIALIZED VIEW orders_mv TO orders_agg AS
+SELECT toDate(dt) AS day,
+       shop_id,
+       sumState(amount) AS s_amount,          -- 注意是 State
+       countState()     AS s_orders
+  FROM orders_raw
+ GROUP BY day, shop_id;
+
+-- 4) 查询：用 Merge 还原
+SELECT day, shop_id,
+       sumMerge(s_amount)  AS amount,
+       countMerge(s_orders) AS orders
+  FROM orders_agg
+ WHERE day &gt;= today() - 7
+ GROUP BY day, shop_id;</code></pre><p><b>PostgreSQL</b></p><pre><code>-- PostgreSQL：全量刷新（CONCURRENTLY 不阻塞读，但要求有唯一索引）
+CREATE MATERIALIZED VIEW mv_daily AS
+SELECT date_trunc('day', created_at) AS day, shop_id, sum(amount) AS amount
+  FROM orders GROUP BY 1, 2;
+
+CREATE UNIQUE INDEX ON mv_daily (day, shop_id);   -- CONCURRENTLY 的前提
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily;   -- 不锁读
+REFRESH MATERIALIZED VIEW mv_daily;                -- 快但排他锁</code></pre></section>
+<section class="panel"><h2>Rollup 的维度层级与一致性校验</h2><div class="table-wrap"><table><thead><tr><th>层级</th><th>粒度</th><th>校验方法</th></tr></thead><tbody><tr><td>L0 明细</td><td>原始行</td><td>行数与源表一致</td></tr><tr><td>L1 分钟/小时</td><td>按时间聚合</td><td>与 L0 按该粒度重算对比，差值为 0</td></tr><tr><td>L2 天</td><td>按天聚合</td><td>L2 = Σ(L1)，逐日对比</td></tr><tr><td>L3 月/维度汇总</td><td>跨维度汇总</td><td>各维度拆分之和 = 总计（可加性检查）</td></tr></tbody></table></div><p>可加性陷阱：<b>sum/count 可加，uniq/avg/max 不可直接相加</b>。UV（去重数）不能由小时 UV 相加得到日 UV，必须保留中间状态（如 HLL）才能正确上卷。</p><p><b>对账</b></p><pre><code>-- 一致性校验：用重算结果对比预聚合结果
+SELECT day,
+       (SELECT sum(amount) FROM orders_raw WHERE toDate(dt) = a.day) AS recomputed,
+       a.amount AS precomputed,
+       (SELECT sum(amount) FROM orders_raw WHERE toDate(dt) = a.day) - a.amount AS diff
+  FROM orders_agg_daily a
+ WHERE day &gt;= today() - 30
+HAVING diff != 0                       -- 有输出即不一致
+ ORDER BY day;</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>预聚合结果比明细少</td><td>视图建好后历史数据未回填</td><td>建完 MV 后对历史数据做一次回填插入</td></tr><tr><td>UV 上卷后偏大</td><td>直接相加了去重值</td><td>改用 HLL/uniqState 等可合并状态</td></tr><tr><td>avg 汇总不对</td><td>平均值的平均值 ≠ 总体平均</td><td>存 sum 与 count，上卷后再相除</td></tr><tr><td>源表删改后视图没变</td><td>增量 MV 只跟随插入，不跟随 UPDATE/DELETE</td><td>用 Collapsing/Versioned 引擎或改为可感知删除的设计</td></tr><tr><td>刷新太慢/锁表</td><td>全量刷新代价高</td><td>用 CONCURRENTLY；或改增量；按分区刷新</td></tr><tr><td>结果与明细对不上</td><td>过滤条件或时区口径不一致</td><td>统一时间函数与时区；按上面的对账 SQL 定期校验</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>增量物化视图和全量刷新的本质区别是什么？</summary><p>增量 MV 是在源表写入时把变更同步应用到预聚合结果（近实时、代价低但只跟随插入）；全量刷新是定时整体重算（结果始终与源表一致，但代价随数据量增长，且刷新期间数据陈旧或锁表）。</p></details><details><summary>为什么 UV 不能按小时相加得到日 UV？</summary><p>因为去重计数不具备可加性：同一个用户出现在两个小时里，小时 UV 各计 1，相加得 2，而日 UV 应是 1。正确做法是保留可合并的中间状态（HLL、uniqState），在上卷时合并状态再求值。</p></details><details><summary>建好物化视图后为什么历史数据没进去？</summary><p>ClickHouse 的物化视图只对<b>建好之后的新写入</b>生效，历史数据不会被自动处理。标准做法是建 MV 后立即执行一次回填（INSERT INTO 目标表 SELECT ... FROM 源表 WHERE 历史条件），并注意避免与实时写入冲突。</p></details><details><summary>ClickHouse 的 State/Merge 为什么必须成对出现？</summary><p>因为 AggregatingMergeTree 存的是聚合中间状态（如 sum 的累加器、uniq 的 HLL 结构），而不是最终数值。写入侧用 sumState 存状态，读取侧必须用 sumMerge 把状态合并回数值；混用会得到类型错误或无意义的结果。</p></details><details><summary>如何保证预聚合的结果长期可信？</summary><p>建立对账机制：定期对同一口径用明细重算，与预聚合结果对比，非零差异即告警（如上面对账 SQL）。同时把可加性约束写进设计文档——哪些指标能上卷、哪些必须保留状态，避免后人误用。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>A 店 2 单均价 100，B 店 8 单均价 50，全区平均订单额是 75 吗？</summary><p>不是。应按订单数加权：总金额 200+400=600，总单数 2+8=10，平均为 60。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第二层 · 参数·命令·量化：刷新策略、粒度与验收参数</h2><p>物化视图能不能用，取决于三件事：<b>什么时候刷新</b>、<b>以什么粒度预聚合</b>、<b>查询会不会被自动改写</b>。</p><div class="table-wrap"><table><thead><tr><th>刷新模式</th><th>可见性延迟</th><th>开销</th><th>适用</th></tr></thead><tbody><tr><td><b>ON COMMIT</b>（事务提交即刷）</td><td><b>几乎 0</b></td><td>写入放大明显</td><td>小表、要求强一致</td></tr><tr><td><b>ON DEMAND</b>（定时/手动）</td><td>取决于调度间隔（常见 5～60 分钟）</td><td>集中在刷新窗口</td><td><b>最常用</b></td></tr><tr><td><b>增量刷新</b>（Fast Refresh）</td><td>同上但只刷增量</td><td>低</td><td>有变更日志 / 支持增量的引擎</td></tr><tr><td><b>全量刷新</b></td><td>同上</td><td><b>高</b>（重算全表）</td><td>聚合逻辑跨行、无法增量时</td></tr></tbody></table></div><p><b>ClickHouse 与 PostgreSQL 的物化视图写法</b></p><pre><code>-- ClickHouse：AggregatingMergeTree + 物化视图（最典型的 Rollup 实现）
+CREATE TABLE sales_raw (                  -- 明细表
+    shop       String,
+    region     String,
+    amount     Decimal(18,2),
+    qty        UInt64,
+    ts         DateTime
+) ENGINE = MergeTree ORDER BY (region, shop, ts);
+
+-- 存「聚合状态」而不是最终值，这样才可继续上卷
+CREATE MATERIALIZED VIEW sales_by_region
+ENGINE = AggregatingMergeTree() ORDER BY (region)
+AS SELECT
+    region,
+    sumState(amount) AS amount_state,     -- State：中间状态
+    sumState(qty)    AS qty_state
+FROM sales_raw
+GROUP BY region;
+
+-- 查询时用 Merge 把状态合并成最终值
+SELECT region, sumMerge(amount_state) FROM sales_by_region GROUP BY region;
+
+-- PostgreSQL：全量刷新（会锁表读）
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_name;   -- CONCURRENTLY 不阻塞读，需要唯一索引</code></pre><div class="table-wrap"><table><thead><tr><th>关键参数</th><th>作用</th><th>常见取值</th></tr></thead><tbody><tr><td><b>聚合粒度</b></td><td>决定能回答多细的问题</td><td>必须 <= 最细查询维度，否则无法下钻</td></tr><tr><td><code>-State</code> 函数</td><td>存中间状态以支持再上卷</td><td><code>sumState</code> / <code>uniqState</code> / <code>quantilesState</code></td></tr><tr><td><code>-Merge</code> 函数</td><td>把状态合并成最终结果</td><td><code>sumMerge</code> / <code>uniqMerge</code></td></tr><tr><td><code>ORDER BY</code></td><td>决定聚合键与合并依据</td><td>Rollup 的维度顺序：从粗到细</td></tr><tr><td>刷新间隔</td><td>数据新鲜度与成本的权衡</td><td>5 分钟（实时看板）/ 1 小时（日报）</td></tr></tbody></table></div><p class="muted">量化口径：<b>SUM / COUNT / MIN / MAX 可滚动，AVG 和 COUNT(DISTINCT) 不可直接滚动</b>。AVG 必须存 (sum, count) 两个分量，DISTINCT 必须存 HLL / uniqState 这类近似状态。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界：结果对不上的排查路径</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>怎么查 / 怎么办</th></tr></thead><tbody><tr><td>区域均值 ≠ 各门店均值的平均</td><td>把 AVG 直接上卷了</td><td>改成 <code>SUM(sum)/SUM(count)</code>，别对均值再求均值</td></tr><tr><td>UV 累加后比真实值大</td><td>COUNT(DISTINCT) 跨组相加会重复计人</td><td>改用 <code>uniqState</code> / HLL，或不允许跨维度加总</td></tr><tr><td>刷新后数据反而变旧</td><td>刷新失败但没告警，读到上次结果</td><td>查刷新任务日志；给物化视图加数据新鲜度监控</td></tr><tr><td>查询没走物化视图</td><td><b>查询改写条件不满足</b>（维度不匹配、函数不支持）</td><td>用 <code>EXPLAIN</code> 看是否命中；手工改写 SQL 直查物化视图</td></tr><tr><td>刷新时写入抖动</td><td>全量刷新占用大量 CPU / IO</td><td>改增量刷新；把刷新窗口挪到低峰</td></tr></tbody></table></div><ul><li><b>排查顺序：</b>先用明细表跑一遍正确结果 → 再查物化视图 → 对比差异定位是「滚动方式错」还是「刷新没生效」。</li><li><b>边界一：</b>带<b>时间窗口</b>的聚合（如最近 7 天）无法简单上卷——7 天窗口与 1 天窗口之间不存在加法关系。</li><li><b>边界二：</b>维度层级必须显式声明（地区 → 省 → 市），否则引擎不知道该按哪条路径 Rollup。</li><li><b>边界三：</b>刷新是<b>最终一致</b>的：刚写入的明细在刷新前查不到，业务上要能接受这个延迟。</li></ul></section>
 <footer>继续阅读：<a href="../01-dimensional-modeling/star-schema-modeling.html">星型模型与事实表粒度</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

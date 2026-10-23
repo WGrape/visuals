@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>零拷贝：为什么文件传输能少几次内存拷贝 - Visuals</title>
+<link rel="stylesheet" href="../../../../assets/knowledge-lesson.css">
+<style>
+  /* 在 lesson 主题上扩展可视化组件，沿用其 token */
+  .figure{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 14px;margin:18px 0;overflow-x:auto;text-align:center;}
+  .figure svg{max-width:100%;height:auto;}
+  .cap{font-size:12.5px;color:var(--muted);text-align:center;margin-top:8px;}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;background:var(--panel);border-radius:12px;overflow:hidden;}
+  th,td{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{background:rgba(118,215,219,.12);color:var(--accent);font-weight:700;}
+  tr:last-child td{border-bottom:none;}
+  td ul{margin:0;padding-left:18px;}
+  .callout{border-radius:12px;padding:13px 16px;margin:16px 0;font-size:14.5px;line-height:1.75;}
+  .callout.tip{background:rgba(118,215,219,.10);border:1px solid rgba(118,215,219,.32);color:#cdeef0;}
+  .callout.warn{background:rgba(255,209,125,.10);border:1px solid rgba(255,209,125,.32);color:#f4e3c2;}
+  .qa{margin:22px 0;}
+  .qa h3{color:var(--accent);font-size:16px;margin-bottom:6px;}
+  .qa .a{color:var(--muted);font-size:14px;margin-bottom:14px;}
+  .quiz{border-left:3px solid var(--accent);background:var(--panel2);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0;}
+  footer a{color:var(--accent);}
+</style>
+</head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
+<header><span class="eyebrow">VISUALS · 知识专题</span><h1>零拷贝：文件传输为什么能少几次内存拷贝</h1><p class="lead">把一个文件从磁盘发到网络，传统写法要在内核态与用户态之间来回拷贝四五次。零拷贝不是「一次拷贝都不做」，而是「去掉不必要的 CPU 拷贝与上下文切换」，把数据搬运交给 DMA 和内核。</p></header>
+
+<section class="panel"><h2>先建立直觉：一次普通文件发送发生了什么
+日常代码 <code>read(file)+write(socket)</code> 看起来只有两步，底层却要把数据在「内核缓冲区」和「用户缓冲区」之间反复搬。每一次搬移都消耗 CPU 周期，且每次系统调用都要在用户态和内核态之间切换。数据量越大、请求越频繁，这些拷贝的占比越高，CPU 反而比磁盘/网卡更先成为瓶颈。</h2><p>所谓「拷贝次数」指 CPU 参与的<b>数据复制</b>次数（DMA 在设备与内核缓冲区间的搬运不占 CPU，通常不算在内）。零拷贝的目标，就是把这些 CPU 拷贝尽可能压缩到 0 或 1 次。</p></section>
+
+<section class="panel"><h2>传统路径：4 次拷贝 + 4 次上下文切换
+假设网卡与磁盘都走 DMA：① 磁盘 DMA 把数据读入<b>内核页缓存</b>；② CPU 把数据从内核页缓存<b>拷贝到用户缓冲区</b>（read 返回）；③ CPU 再把用户缓冲区的数据<b>拷贝回内核 socket 缓冲区</b>（write 调用）；④ 网卡 DMA 从 socket 缓冲区发出。其中 ②③ 两次 CPU 拷贝完全是为了「让应用程序看一眼数据」，多数场景其实看都不看就转发了。</h2>
+<div class="figure">
+<svg viewBox="0 0 720 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="传统文件发送的四次拷贝">
+  <defs><marker id="z1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7fa6c0"/></marker></defs>
+  <rect x="40" y="20" width="150" height="46" rx="8" fill="#22364c" stroke="#40556c"/><text x="115" y="48" text-anchor="middle" font-size="12" fill="#edf4fa">磁盘</text>
+  <rect x="40" y="90" width="150" height="46" rx="8" fill="#22364c" stroke="#40556c"/><text x="115" y="118" text-anchor="middle" font-size="12" fill="#edf4fa">内核页缓存</text>
+  <rect x="40" y="160" width="150" height="46" rx="8" fill="#19283b" stroke="#40556c"/><text x="115" y="188" text-anchor="middle" font-size="12" fill="#edf4fa">用户缓冲区</text>
+  <rect x="40" y="220" width="150" height="40" rx="8" fill="#22364c" stroke="#40556c"/><text x="115" y="245" text-anchor="middle" font-size="12" fill="#edf4fa">socket 缓冲区</text>
+  <rect x="540" y="220" width="140" height="40" rx="8" fill="#22364c" stroke="#40556c"/><text x="610" y="245" text-anchor="middle" font-size="12" fill="#edf4fa">网卡</text>
+  <line x1="190" y1="113" x2="40" y2="113" stroke="#76d7db" stroke-width="0"/> 
+  <text x="360" y="60" text-anchor="middle" font-size="12" fill="#76d7db">① DMA 读入</text>
+  <line x1="190" y1="113" x2="115" y2="160" stroke="#ffd17d" stroke-width="1.8" marker-end="url(#z1)"/><text x="250" y="138" font-size="11" fill="#ffd17d">② CPU 拷入用户态</text>
+  <line x1="190" y1="183" x2="115" y2="220" stroke="#ffd17d" stroke-width="1.8" marker-end="url(#z1)"/><text x="250" y="210" font-size="11" fill="#ffd17d">③ CPU 拷回内核</text>
+  <line x1="190" y1="240" x2="540" y2="240" stroke="#76d7db" stroke-width="1.8" marker-end="url(#z1)"/><text x="360" y="232" font-size="11" fill="#76d7db">④ DMA 发出</text>
+</svg>
+<div class="cap">图：②③ 两次 CPU 拷贝是零拷贝要消除的主要对象。</div>
+</div>
+</section>
+
+<section class="panel"><h2>方案一：mmap + write
+用 <code>mmap</code> 把内核页缓存直接映射到用户空间，省掉「内核→用户」那一次拷贝；应用 write 时再把页缓存拷到 socket 缓冲区。拷贝次数从 4 降到 3，但仍需一次 CPU 拷贝和一次系统调用。适合「需要读取并加工数据再发送」的场景。</h2><p>注意 mmap 在小文件、随机写场景收益有限，且映射区过大可能触发额外的页表与缺页开销。</p></section>
+
+<section class="panel"><h2>方案二：sendfile（最常用的零拷贝）
+<code>sendfile(out_fd, in_fd, ...)</code> 让数据完全在内核态内流动：页缓存 → socket 缓冲区，由内核完成，应用不参与数据搬运。在支持「DMA 收集拷贝」的网卡上，连「页缓存→socket 缓冲区」这次 CPU 拷贝也能省掉——网卡直接从页缓存 DMA 取数，真正做到<b>0 次 CPU 拷贝</b>。这是静态文件服务器、消息中间件高吞吐传输的基石。</h2>
+<div class="figure">
+<svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="sendfile 零拷贝路径">
+  <defs><marker id="z2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7fa6c0"/></marker></defs>
+  <rect x="60" y="40" width="140" height="44" rx="8" fill="#22364c" stroke="#40556c"/><text x="130" y="67" text-anchor="middle" font-size="12" fill="#edf4fa">磁盘</text>
+  <rect x="300" y="40" width="150" height="44" rx="8" fill="#22364c" stroke="#40556c"/><text x="375" y="62" text-anchor="middle" font-size="12" fill="#edf4fa">内核页缓存</text>
+  <rect x="540" y="40" width="130" height="44" rx="8" fill="#22364c" stroke="#40556c"/><text x="605" y="67" text-anchor="middle" font-size="12" fill="#edf4fa">网卡</text>
+  <line x1="200" y1="62" x2="300" y2="62" stroke="#76d7db" stroke-width="1.8" marker-end="url(#z2)"/><text x="240" y="54" font-size="11" fill="#76d7db">DMA 读入</text>
+  <line x1="450" y1="62" x2="540" y2="62" stroke="#76d7db" stroke-width="1.8" marker-end="url(#z2)"/><text x="485" y="54" font-size="11" fill="#76d7db">DMA 直取(收尾)</text>
+  <text x="375" y="120" text-anchor="middle" font-size="12.5" fill="#b9cbd9">应用全程不碰数据；现代网卡下 CPU 拷贝次数 = 0</text>
+</svg>
+<div class="cap">图：sendfile 让数据在内核内直达，应用只发一个系统调用。</div>
+</div>
+</section>
+
+<section class="panel"><h2>方案三：splice / 管道中转
+<code>splice</code> 通过内核管道（pipe）在两个文件描述符间移动数据，同样避免用户态拷贝，且能处理「两个都是文件描述符」的通用场景（不只是 socket）。它移动的是内核里的页面引用而非逐字节拷贝，适合在用户态完全不参与时做高效转发。</h2><p>与 sendfile 相比，splice 更通用（源/目标都可不是 socket），但需要一对 pipe fd 作为中转，使用上稍繁琐。</p></section>
+
+<section class="panel"><h2>三方案怎么选
+<figure> </figure></h2>
+<table>
+<thead><tr><th>方案</th><th>CPU 拷贝次数</th><th>系统调用</th><th>能否加工数据</th><th>典型用途</th></tr></thead>
+<tbody>
+<tr><td>read + write</td><td>2 次</td><td>2 次</td><td>能（用户态可见）</td><td>需要读取并修改内容的通用场景</td></tr>
+<tr><td>mmap + write</td><td>1 次</td><td>2 次</td><td>能（映射可见）</td><td>需读取/校验再发送的中等场景</td></tr>
+<tr><td>sendfile</td><td>0~1 次</td><td>1 次</td><td>不能（纯内核转发）</td><td>静态文件服务、大文件下载、MQ 落盘转发</td></tr>
+<tr><td>splice</td><td>0~1 次</td><td>1 次</td><td>不能</td><td>fd 间通用零拷贝转发（含非 socket）</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="panel"><h2>为什么它能快：把 CPU 从搬运工变回调度员
+传统方式里 CPU 花大量时间在「搬数据」，而这些数据应用根本不修改。零拷贝把搬运交给 DMA 与内核，CPU 只负责「下指令 + 维护描述符」，腾出的算力去处理更多连接、做业务逻辑。在千兆/万兆网卡的大文件场景，零拷贝常带来数倍吞吐提升。</h2>
+<div class="callout tip">💡 类比：传统方式像快递员把包裹从仓库搬到自己车上、再搬回分拣中心、再搬上卡车——其实仓库和卡车可以直接对接。零拷贝就是拆掉中间那两道「人工搬运」，让仓库（磁盘）和卡车（网卡）通过调度中心（内核）直接交接。</div>
+<div class="callout warn">⚠️ 避坑：零拷贝只优化「转发不修改」的场景。如果你的业务逻辑必须读取内容（如加解密、压缩、按行解析），那次 CPU 拷贝在所难免，强行零拷贝反而要绕路。先确认「应用是否真的需要看数据」。</div>
+</section>
+
+<section class="panel"><h2>面试问答</h2>
+<div class="qa">
+<div class="q">Q：零拷贝是不是一次拷贝都不做了？</div><div class="a">不是。它消除的是<b>CPU 参与的冗余内存拷贝</b>和多余的上下文切换；磁盘/网卡与内核缓冲区间的 DMA 搬运仍存在（但不占 CPU）。在支持 DMA 收集的现代网卡上，sendfile 可实现 CPU 拷贝 0 次。</div>
+<div class="q">Q：mmap 和 sendfile 哪个更快？</div><div class="a">纯转发（不修改内容）用 sendfile 更少拷贝、更少系统调用，更快；若必须在用户态读取或修改数据，mmap 省一次拷贝但仍需一次，比 read+write 好，但比 sendfile 多一步。</div>
+<div class="q">Q：为什么 Kafka / 高性能网关大量用零拷贝？</div><div class="a">它们的核心动作是「从磁盘/页缓存把消息原样发给网络」，数据无需修改。用 sendfile/transferTo 把搬运交给内核与 DMA，单机可支撑极高吞吐，CPU 不被拷贝拖累。</div>
+</div>
+</section>
+
+<section class="panel" data-dry-goods><h2>零拷贝的三种实现与实测收益</h2><p>「零拷贝」不是真的 0 次拷贝，而是<b>避免 CPU 在内核态和用户态之间来回搬数据</b>。理解那 4 次拷贝 + 4 次上下文切换，就知道省在哪。</p><div class="table-wrap"><table><thead><tr><th>方式</th><th>拷贝次数</th><th>上下文切换</th><th>说明</th></tr></thead><tbody><tr><td><b>传统 read + write</b></td><td><b>4 次</b>（DMA×2 + CPU×2）</td><td><b>4 次</b></td><td>磁盘→内核缓冲→用户缓冲→socket缓冲→网卡</td></tr><tr><td><b>mmap + write</b></td><td>3 次</td><td>4 次</td><td>省掉内核→用户那一次 CPU 拷贝</td></tr><tr><td><b>sendfile</b></td><td><b>2 次</b>（DMA×2）</td><td><b>2 次</b></td><td>数据在内核里直接从 fd 到 fd，<b>不进用户态</b></td></tr><tr><td><b>sendfile + SG-DMA</b></td><td><b>1 次</b>（真正意义的零 CPU 拷贝）</td><td>2 次</td><td>网卡支持 scatter-gather 时，连内核内的那次也省了</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>系统调用</th><th>原型</th><th>适用</th><th>限制</th></tr></thead><tbody><tr><td><b>sendfile</b></td><td><code>sendfile(out_fd, in_fd, offset, count)</code></td><td><b>文件 → socket</b>（最典型）</td><td>Linux 2.6.33 起 out_fd 可以是任意 fd；之前必须是 socket</td></tr><tr><td><b>splice</b></td><td><code>splice(fd_in, off_in, fd_out, off_out, len, flags)</code></td><td>两个 fd 间，<b>至少要有一个是管道</b></td><td>需要借助 pipe 中转</td></tr><tr><td><b>mmap</b></td><td><code>mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0)</code></td><td>需要随机访问或多次读同一文件</td><td>有缺页开销；小文件不划算</td></tr><tr><td><b>direct IO</b></td><td><code>open(..., O_DIRECT)</code></td><td>数据库自管缓存</td><td>绕过 page cache，需自己对齐</td></tr><tr><td><b>SO_ZEROCOPY</b></td><td>socket 选项</td><td>网络发送</td><td>Linux 4.14+；有额外的通知开销</td></tr></tbody></table></div><p><b>代码示例</b></p><pre><code># ---------- sendfile（最经典的零拷贝）----------
+#include &lt;sys/sendfile.h&gt;
+int fd_in  = open("bigfile.iso", O_RDONLY);
+int fd_out = socket(...);                    // 或另一个文件 fd
+off_t offset = 0;
+// 直接从文件描述符搬到 socket，数据不经过用户态
+ssize_t n = sendfile(fd_out, fd_in, &amp;offset, file_size);
+
+# ---------- mmap ----------
+void *p = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+write(sockfd, p, len);                       // 少一次内核-&gt;用户拷贝
+munmap(p, len);
+
+# ---------- Java 的 transferTo / transferFrom（底层就是 sendfile）----------
+FileChannel src = new FileInputStream("f").getChannel();
+SocketChannel dst = SocketChannel.open(addr);
+src.transferTo(0, src.size(), dst);          // 零拷贝
+
+# ---------- Go 的 SendFile ----------
+// net/http 对大文件已经自动用了 sendfile
+// 手动：syscall.Sendfile(outFd, inFd, &amp;offset, count)
+
+# ---------- Kafka 为什么快：正是用了 sendfile ----------
+#   消费者读消息时：磁盘 -&gt; page cache -&gt; 网卡，不进 JVM 堆
+#   这也是 Kafka 敢说「顺序读写 + 零拷贝 = 接近网络上限」的原因
+
+# 实测参考（1GB 文件，千兆网）：
+#   read+write:  CPU 占用高，吞吐 ~600 MB/s
+#   sendfile:    CPU 降 60%+，吞吐 ~900 MB/s（接近网卡上限）</code></pre><ul><li><b>零拷贝的「零」指的是 CPU 拷贝</b>：DMA 拷贝（磁盘→内存、内存→网卡）依然存在，只是由 DMA 控制器做，不占 CPU。</li><li><b> Kafka、Nginx、RocketMQ 快的秘密之一</b>：都用 sendfile。Nginx 的 <code>sendfile on;</code> 是默认开启的。</li><li><b>sendfile 不适合「要改数据」的场景</b>：因为数据不进用户态，你没法在传输过程中加密、压缩、修改。要做这些只能用 mmap 或普通 read。</li><li><b>小文件用零拷贝反而慢</b>：sendfile 有系统调用和内核路径切换的固定开销，通常 <b>&gt;1MB</b> 才有明显收益。几 KB 的文件用普通 read 更快。</li><li><b>mmap 有缺页开销</b>：首次访问每个页都会触发缺页异常，随机访问大文件时可能比 read 还慢。顺序大文件传输用 sendfile，随机访问用 mmap。</li><li><b>Go 的 io.Copy 会自动优化</b>：如果 src 是 <code>*os.File</code>、dst 是 <code>*net.TCPConn</code>，标准库会尝试 sendfile。</li><li><b>直接 IO（O_DIRECT）不等于零拷贝</b>：它绕开 page cache，是给数据库自管缓存用的，和 sendfile 是两回事。</li></ul><details><summary>零拷贝到底省了什么？</summary><p>省的是 <b>2 次 CPU 拷贝 + 2 次上下文切换</b>。传统 <code>read()+write()</code> 发一个文件的过程是：① DMA 把磁盘数据拷到内核缓冲区；② <b>CPU 把内核缓冲区拷到用户缓冲区</b>（read 返回）；③ <b>CPU 把用户缓冲区拷到 socket 缓冲区</b>（write 调用）；④ DMA 把 socket 缓冲区拷到网卡。其中 ② 和 ③ 是 CPU 亲自搬的，而且每次拷贝都伴随一次用户态↔内核态的切换（read 一次、write 一次，各 2 次切换）。<b>sendfile 把 ②③ 合并成内核里的一次指针传递</b>，数据自始至终没进用户态——CPU 拷贝从 2 次降到 0 次，上下文切换从 4 次降到 2 次。收益是双向的：CPU 占用大幅下降（高吞吐时尤其明显），且因为少了一次数据搬运，延迟也更低。如果网卡再支持 scatter-gather DMA，连内核里那次 buffer 到 socket buffer 的拷贝也省了，就是真正意义上的「零 CPU 拷贝」。</p></details><details><summary>什么情况下零拷贝没有收益？</summary><p>四种典型：① <b>小文件</b>——sendfile 的固定开销（系统调用、内核路径切换）在几 KB 的数据上占比很高，可能比普通 read 还慢，经验值是 <b>&gt;1MB 才划算</b>；② <b>需要修改数据</b>——加密、压缩、加协议头，都必须让数据进用户态，sendfile 用不了；③ <b>数据不在页缓存里且后续要多次访问</b>——第一次读取的磁盘 IO 是省不掉的，如果之后还要反复读同一份数据，page cache 命中后的普通 read 已经很快了；④ <b>网络不是瓶颈</b>——如果瓶颈在磁盘 IO 或应用层逻辑，优化 CPU 拷贝毫无意义。<b>判断方法很简单：用 perf 看 CPU 是不是花在 <code>copy_user_enhanced_fast_string</code> 之类的拷贝函数上，是才值得优化</b>。</p></details><details><summary>Kafka 为什么能做到那么高的吞吐？</summary><p>四个因素叠加，零拷贝是其中之一：① <b>顺序磁盘 IO</b>——消息只追加写、顺序读，顺序写的磁盘吞吐接近内存（这也是为什么 Kafka 敢用磁盘而不是内存队列）；② <b>page cache 而不是 JVM 堆</b>——数据放在 OS 的页缓存里，避免了 JVM GC 开销和堆内存翻倍（不用在堆里再存一份）；③ <b>sendfile 零拷贝</b>——消费者拉取消息时，数据从 page cache 直接到网卡，<b>不进 JVM、不做 CPU 拷贝</b>；④ <b>批量与压缩</b>——生产者批量发送、端到端压缩，减少了网络往返和传输字节数。合起来的效果是：<b>Kafka 的瓶颈通常在网卡而不是 CPU 或磁盘</b>，这也是它能支撑百万级 TPS 的原因。对比之下，很多消息队列慢在「数据在用户态和内核态之间反复搬运 + GC 压力大」。</p></details></section>
+<section class="panel"><h2>自检</h2>
+<div class="quiz">给一个「读取上传文件 → 计算哈希 → 再原样存盘」的流水线，零拷贝在哪一环能省、哪一环不能省？<br><b>答：</b>「原样存盘」可零拷贝转发；但「计算哈希」必须读取内容，这一环的 CPU 拷贝无法省，否则哈希无从算起。</div>
+</section>
+
+<footer>继续阅读：<a href="../01-locality/locality.html">局部性与性能</a> · © 2026 Visuals</footer></main>
+<script src="../../../../assets/knowledge-lesson.js"></script></body></html>

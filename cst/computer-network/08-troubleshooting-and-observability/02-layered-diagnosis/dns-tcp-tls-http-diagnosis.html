@@ -12,6 +12,30 @@
 <section class="panel"><h2>HTTP 和应用阶段</h2><p>握手成功后记录请求方法、Host、路径、状态码、响应头、首字节时间和响应体。404 可能是路径或路由错误，401/403 可能是认证授权问题，429 是限流线索，502/503/504 需要区分网关到后端的失败、无可用实例或上游超时。状态码只是入口给的结果，真实原因仍需请求 ID 对齐后端日志。</p><p>若 HTTP 返回 200 但页面空白，继续检查资源请求、CSP、脚本错误和浏览器渲染。若首字节很慢，比较网关排队、后端处理与数据库时间；若正文传输慢，看窗口、丢包、队列与客户端读取速度。把“连接建立成功”误当成“页面可用”，会漏掉一半故障链。</p></section>
 <section class="panel"><h2>一张简化的决策树</h2><p>无 DNS 答案，查权威、递归与缓存；有答案但端口连不上，查去程、回程、监听和策略；端口通但 TLS 不通过，查名称与链；TLS 通但 HTTP 报错，按状态和请求 ID 查网关与应用；HTTP 正常但用户仍失败，查浏览器资源和渲染。每步都保留一个可复现命令或抓包证据，下一步才不会建立在猜测上。</p><p>诊断应记录“哪一层已被证实正常、证据来自哪里、尚未验证什么”。例如本机 SYN 发出只证明客户端发包，不证明服务器收到；服务器返回 200 只证明入口回包，不证明浏览器执行 JS 成功。对每一层区分观察点，才能避免错误归因。</p></section>
 <section class="panel"><h2>复盘和长期监控</h2><p>建立分阶段指标：DNS 错误率、连接建立成功率和耗时、TLS 失败原因、HTTP 状态分布、首字节与总耗时、前端资源错误。用请求 ID 或 trace 串起网关与后端，并按地区、运营商、IPv4/IPv6、HTTP 版本切片。平均成功率可能掩盖某一地区全部故障，应观察关键切片的尾部。</p><p>复盘时把故障开始时间与 DNS 变更、证书轮换、路由发布、网关配置和应用部署对齐。提出修复时明确验证指标与回滚条件，避免“重启后好了”成为唯一结论。</p></section>
+<section class="panel" data-dry-goods><h2>分层诊断命令清单</h2><div class="table-wrap"><table><thead><tr><th>层级</th><th>要回答的问题</th><th>命令</th><th>失败含义</th></tr></thead><tbody><tr><td><b>1. 链路/网卡</b></td><td>网卡 UP 吗？有错包吗？</td><td><code>ip link</code>、<code>ethtool -S eth0</code></td><td>物理/驱动问题</td></tr><tr><td><b>2. IP 连通</b></td><td>能到对端吗？走哪条路？</td><td><code>ping</code>、<code>ip route get</code>、<code>mtr</code></td><td>路由/防火墙问题</td></tr><tr><td><b>3. DNS</b></td><td>能解析吗？解析到哪？</td><td><code>dig +short</code>、<code>dig @8.8.8.8</code>、<code>dig +trace</code></td><td>DNS 配置/缓存问题</td></tr><tr><td><b>4. TCP</b></td><td>端口通吗？握手成功吗？</td><td><code>nc -vz host 443</code>、<code>ss -tan</code>、<code>tcpdump</code></td><td>端口未监听/被拦</td></tr><tr><td><b>5. TLS</b></td><td>证书有效吗？链完整吗？</td><td><code>openssl s_client -showcerts</code></td><td>证书/信任库/SNI</td></tr><tr><td><b>6. HTTP</b></td><td>返回什么码？耗时分布？</td><td><code>curl -w</code>、<code>curl -I</code></td><td>应用层问题</td></tr><tr><td><b>7. 应用</b></td><td>业务日志/慢查询？</td><td>看日志、链路追踪</td><td>业务逻辑/依赖问题</td></tr></tbody></table></div><p><b>分层诊断命令</b></p><pre><code># 一条命令做全链路耗时分解（最实用）
+curl -o /dev/null -s -w \
+  'DNS解析: %{time_namelookup}s\nTCP建连: %{time_connect}s\nTLS握手: %{time_appconnect}s\n首字节TTFB: %{time_starttransfer}s\n总计: %{time_total}s\n状态码: %{http_code}\n' \
+  https://example.com/
+
+# 由上式可推导各阶段耗时：
+#   DNS      = time_namelookup
+#   TCP      = time_connect      - time_namelookup
+#   TLS      = time_appconnect   - time_connect
+#   服务端处理 = time_starttransfer - time_appconnect
+#   内容传输  = time_total       - time_starttransfer
+
+# 各层单独验证
+dig +short example.com                       # DNS
+nc -vz -w2 example.com 443                   # TCP
+openssl s_client -connect example.com:443 -servername example.com &lt;/dev/null  # TLS
+curl -I https://example.com/                 # HTTP
+
+# 路由可视化（ping + traceroute 结合）
+mtr -n -T -P 443 example.com                 # TCP 模式的 mtr（UDP 常被拦）
+traceroute -T -p 443 example.com
+
+# 抓包定位（最后手段，最权威）
+tcpdump -i any -nn 'host example.com' -w /tmp/p.pcap</code></pre></section><section class="panel"><h2>按耗时定位问题</h2><div class="table-wrap"><table><thead><tr><th>耗时异常阶段</th><th>可能原因</th><th>验证与处理</th></tr></thead><tbody><tr><td><b>DNS 慢</b>（&gt; 100 ms）</td><td>递归服务器远/不可达、负缓存、搜索域</td><td>换 <code>dig @8.8.8.8</code> 对比；检查 <code>/etc/resolv.conf</code> 的搜索域</td></tr><tr><td><b>TCP 建连慢</b>（&gt; 200 ms）</td><td>跨地域、链路丢包、SYN 被丢</td><td><code>mtr</code> 看跳点延迟；检查防火墙</td></tr><tr><td><b>TLS 握手慢</b>（&gt; 500 ms）</td><td>证书链缺中间证书要额外下载、OCSP 查询慢、密钥交换慢</td><td>开 OCSP Stapling；补齐中间证书</td></tr><tr><td><b>TTFB 大</b>（服务端慢）</td><td>应用处理慢、数据库慢查询、线程池满</td><td>看应用监控与慢查询日志</td></tr><tr><td><b>传输慢</b>（大响应）</td><td>带宽小、窗口受限、未压缩</td><td>对比 <code>size_download/time_total</code>；开 gzip/br</td></tr><tr><td><b>偶发超时</b></td><td>conntrack 满、LB 健康检查延迟、GC 停顿</td><td>看 dmesg、LB 摘除时间、GC 日志</td></tr></tbody></table></div><ul><li><b>先分层再深入</b>：不要一上来就抓包。先用 <code>curl -w</code> 把耗时分解到各层，锁定是哪一层的问题，再针对性排查——这能省掉 80% 的时间。</li><li><b>对比法最有效</b>：换 DNS（8.8.8.8 / 1.1.1.1）、换网络（4G / 有线）、换客户端（curl / 浏览器）、换地域。哪一项变了就定位到哪一项。</li><li><b>别只看平均值</b>：<code>curl -w</code> 的单次结果可能偶然。批量跑取分位数：<code>for i in $(seq 20); do curl -w '%{time_total}\n' -o /dev/null -s URL; done | sort -n</code> 看中位数与最大值。</li><li><b>抓包是最终裁判</b>：当所有迹象矛盾时，抓包能给出事实——包有没有发出去、有没有回来、什么时候回来的。注意抓包要在<b>两端同时抓</b>，否则无法区分“没发出”和“没收到”。</li></ul><details><summary>curl 很慢但浏览器很快（或相反）是什么原因？</summary><p>常见差异：① 浏览器有连接复用与缓存（curl 每次新建连接，包含 TLS 握手）；② 浏览器走 HTTP/2 而 curl 默认 HTTP/1.1；③ 代理配置不同；④ DNS 缓存。用 <code>curl -w</code> 分解各阶段就能看出差在哪。</p></details><details><summary>ping 通但服务不通，怎么继续排查？</summary><p>ping 只证明 ICMP 通（三层）。继续：<code>nc -vz host port</code> 测端口（四层）→ <code>openssl s_client</code> 测 TLS → <code>curl</code> 测 HTTP。逐级排除，就能定位是防火墙拦端口、进程没监听、还是应用返回错误。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>浏览器收到了 HTTP 200，就能证明用户一定看到了完整页面吗？</summary><p>不能。后续资源请求、脚本执行和渲染仍可能失败；还需前端错误与资源加载证据。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../01-packet-capture/network-packet-capture.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -327,6 +345,23 @@ WHERE user_id &gt; 1000 GROUP BY user_id;</code></pre>
   </div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第二层 · 参数·命令·量化：聚合函数的 NULL 行为与模式</h2><div class="table-wrap"><table><thead><tr><th>函数</th><th>对 NULL 的处理</th><th>常见误用</th></tr></thead><tbody><tr><td><code>COUNT(*)</code></td><td><b>统计所有行</b>（含 NULL）</td><td>—</td></tr><tr><td><code>COUNT(col)</code></td><td><b>跳过 NULL</b></td><td>以为与 COUNT(*) 一样</td></tr><tr><td><code>COUNT(DISTINCT col)</code></td><td>去重后计数，跳过 NULL</td><td>跨维度不能相加（会重复计）</td></tr><tr><td><code>SUM(col)</code></td><td>跳过 NULL；全 NULL 返回 <b>NULL</b></td><td>以为返回 0，导致后续计算变 NULL</td></tr><tr><td><code>AVG(col)</code></td><td><b>分母不含 NULL</b></td><td>与 <code>SUM/COUNT(*)</code> 不等价</td></tr><tr><td><code>MAX/MIN(col)</code></td><td>跳过 NULL</td><td>—</td></tr><tr><td><code>GROUP_CONCAT</code></td><td>跳过 NULL</td><td>默认长度上限 1024</td></tr></tbody></table></div><p><b>NULL 行为与 ONLY_FULL_GROUP_BY</b></p><pre><code>-- SUM 返回 NULL 的经典坑
+SELECT SUM(amount) FROM t WHERE ...;         -- 无匹配时返回 NULL，不是 0
+SELECT COALESCE(SUM(amount), 0) FROM t;      -- 正确：兜底为 0
+
+-- COUNT(*) vs COUNT(col) 的区别
+SELECT COUNT(*), COUNT(phone) FROM users;    -- 前者总行数，后者 phone 非 NULL 的行数
+
+-- ONLY_FULL_GROUP_BY（MySQL 5.7+ 默认开启）
+-- 开启时：SELECT 里的非聚合列必须出现在 GROUP BY 中
+SET SESSION sql_mode = 'ONLY_FULL_GROUP_BY';
+SELECT name, COUNT(*) FROM users GROUP BY dept;   -- 报错：name 不在 GROUP BY 中
+
+-- GROUP_CONCAT 长度上限
+SET SESSION group_concat_max_len = 102400;</code></pre><div class="table-wrap"><table><thead><tr><th>参数 / 模式</th><th>默认</th><th>说明</th></tr></thead><tbody><tr><td><code>ONLY_FULL_GROUP_BY</code></td><td><b>MySQL 5.7+ 默认开</b></td><td>防止 SELECT 出现不确定的非聚合列</td></tr><tr><td><code>group_concat_max_len</code></td><td>1024 字节</td><td>超出会静默截断</td></tr><tr><td><code>sql_mode</code></td><td>因版本而异</td><td>MySQL 的兼容模式开关</td></tr><tr><td><code>div_precision_increment</code></td><td>4</td><td>除法结果的小数位增量</td></tr></tbody></table></div><p class="muted">量化提醒：<b>AVG(col) ≠ SUM(col)/COUNT(*)</b>——因为 AVG 的分母不含 NULL。想要「总分/总人数」必须显式写 <code>SUM(col)/COUNT(*)</code>，或用 <code>COALESCE(col,0)</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第一层 · 概念与判定：聚合的执行顺序</h2><p>SQL 子句的<b>逻辑</b>执行顺序（不是书写顺序）：</p><div class="table-wrap"><table><thead><tr><th>顺序</th><th>子句</th><th>作用</th><th>能否引用聚合结果</th></tr></thead><tbody><tr><td>1</td><td><code>FROM / JOIN</code></td><td>确定数据源</td><td>—</td></tr><tr><td>2</td><td><code>WHERE</code></td><td><b>聚合前</b>过滤行</td><td>❌ 不能</td></tr><tr><td>3</td><td><code>GROUP BY</code></td><td>分组</td><td>—</td></tr><tr><td>4</td><td><code>HAVING</code></td><td><b>聚合后</b>过滤组</td><td>✅ 可以</td></tr><tr><td>5</td><td><code>SELECT</code></td><td>计算输出列</td><td>✅ 可以</td></tr><tr><td>6</td><td><code>ORDER BY</code></td><td>排序</td><td>✅ 可以</td></tr><tr><td>7</td><td><code>LIMIT</code></td><td>限制行数</td><td>—</td></tr></tbody></table></div><ul><li>信号一：要过滤「明细行」→ WHERE。</li><li>信号二：要过滤「分组后的结果」（如「订单数 &gt; 5 的用户」）→ HAVING。</li><li>信号三：WHERE 里写 <code>COUNT(*) &gt; 5</code> 会报错，必须挪到 HAVING。</li></ul><p class="muted">这条顺序解释了几乎所有 GROUP BY 相关的报错：<b>WHERE 执行时还没有分组，所以不能引用聚合函数</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：GROUP BY 的三种执行方式</h2><p>优化器实现 GROUP BY 有三种算法，选择取决于是否有索引、数据量与内存：</p><div class="table-wrap"><table><thead><tr><th>方式</th><th>做法</th><th>什么时候用</th><th>代价</th></tr></thead><tbody><tr><td><b>松散索引扫描</b></td><td>直接跳着读索引，跳过整组</td><td>有合适索引且 <code>GROUP BY</code> 列是索引前缀</td><td><b>最快</b>，但适用范围窄</td></tr><tr><td><b>紧凑索引扫描</b></td><td>顺序扫索引，边扫边聚合</td><td>有索引但需扫全部</td><td>无需额外排序</td></tr><tr><td><b>临时表 + 排序</b></td><td>建临时表存中间结果再排序</td><td>无索引 / 大结果集</td><td>需要 <code>tmp_table_size</code> 内存，可能落磁盘</td></tr></tbody></table></div><details><summary>为什么加了 GROUP BY 就变慢？</summary><p>多半是走了「临时表 + 排序」。<code>EXPLAIN</code> 里看到 <code>Using temporary; Using filesort</code> 就说明如此。解决办法是给 <code>GROUP BY</code> 的列建索引，让它变成紧凑/松散索引扫描。</p></details><details><summary>HAVING 能改用 WHERE 吗？</summary><p>如果过滤条件<b>不依赖聚合结果</b>，就应该放到 WHERE——因为 WHERE 在聚合前过滤，能显著减少参与分组的行数，性能更好。只有依赖 <code>COUNT/SUM</code> 等结果的条件才必须用 HAVING。</p></details><details><summary>COUNT(DISTINCT) 为什么不能跨维度相加？</summary><p>因为同一个用户在多个维度里会被重复计数。例如「北京 UV + 上海 UV ≠ 全国 UV」——有用户两地都访问过。要正确相加必须用 <code>uniqState</code>/HLL 这类可合并的近似状态，或在最细粒度上重新计算。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / GROUP BY ·

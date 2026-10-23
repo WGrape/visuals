@@ -11,6 +11,25 @@
 <section class="panel"><h2>一个双出口算例</h2><p>企业持有一个对外服务前缀，出口 A 与出口 B 都有连接。内部用户访问互联网时，可用 LOCAL_PREF 让多数流量优先走 A；服务被外部访问的入口则由外部网络自己的策略决定，不能仅靠本地偏好强制全球流量从 A 进来。若 A 故障，BGP 需撤销或失去 A 路径，内部设备也要把出口路径切到 B。若外部仍在把包送向 A，需看前缀宣告和上游传播，而不只是本机路由表。</p><p>静态默认路由指向 A 而 BGP 已切到 B，可能让企业内的转发仍走坏出口。设计时要明确“路由如何进入全网”和“谁是权威默认出口”，避免协议状态正确但静态表项抢先转发。</p></section>
 <section class="panel"><h2>常见误判</h2><p>看到 BGP 邻居状态 Established，只能证明会话建立，不证明收到所需前缀或把它安装进转发表；看到 OSPF 邻居 Full，也不证明下游防火墙放行。可按“邻居—数据库或收到前缀—策略过滤—路由表—下一跳—实际报文”逐层检查。若某个更具体前缀被错误发布，它可能覆盖健康的聚合前缀，把局部流量导入黑洞。</p><p>路由泄漏或劫持的风险来自错误宣告、过滤与授权不足。对外发布前缀应有明确允许列表、变更审查和异常监控；对收到的前缀也要限制范围。网络稳定性取决于控制面与数据面共同正确，不只是协议选型。</p></section>
 <section class="panel"><h2>怎样做故障演练</h2><p>搭一个三路由器内部拓扑，再接两个模拟出口。先断开一条内部链路，测 OSPF 邻居变化、到目标网段的新下一跳和业务恢复时间；再断开一个外部出口，测 BGP 前缀变化、默认路由切换、外部用户能否访问服务。每次记录去程与回程，以及收敛期内的丢包和连接重试。</p><p>考试题常问“OSPF 与 BGP 谁更快、谁更短”，真实答案要写清范围、配置与策略。OSPF 在域内根据链路状态和成本计算路径，BGP 在自治系统边界按策略选路；不能只拿两个协议名字比较一个抽象的速度。</p></section>
+<section class="panel" data-dry-goods><h2>OSPF 与 BGP 的核心参数</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>OSPF</th><th>BGP</th></tr></thead><tbody><tr><td>类型</td><td>IGP（内部）</td><td>EGP（外部）</td></tr><tr><td>算法/依据</td><td>SPF（Dijkstra），按 cost 累加</td><td>路径属性（策略驱动）</td></tr><tr><td>管理距离</td><td><b>110</b></td><td>eBGP <b>20</b> / iBGP <b>200</b></td></tr><tr><td>度量</td><td>cost = 参考带宽 / 接口带宽</td><td>AS_Path、MED、Local_Pref 等</td></tr><tr><td>收敛</td><td>秒级（LSA 泛洪 + SPF 重算）</td><td>慢（默认通告间隔 30 s，可配）</td></tr><tr><td>规模</td><td>单区域内建议 ≤ 50–100 台</td><td>可承载全球路由表（约 90 万条）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>接口带宽</th><th>OSPF cost（参考带宽 100 Mbps）</th><th>OSPF cost（参考带宽 100 Gbps）</th></tr></thead><tbody><tr><td>10 Mbps</td><td>10</td><td>10000</td></tr><tr><td>100 Mbps</td><td><b>1</b></td><td>1000</td></tr><tr><td>1 Gbps</td><td><b>1</b>（⌊100/1000⌋→1）</td><td>100</td></tr><tr><td>10 Gbps</td><td><b>1</b></td><td>10</td></tr><tr><td>100 Gbps</td><td><b>1</b></td><td>1</td></tr></tbody></table></div><p><b>关键坑</b>：OSPF 默认参考带宽是 <b>100 Mbps</b>，导致 1 G、10 G、100 G 链路的 cost 全都是 <b>1</b>——完全无法区分快慢，流量可能被引导到慢链路。必须统一设置：<code>auto-cost reference-bandwidth 100000</code>（单位 Mbps，即 100 G）。<b>全网必须一致</b>，否则 cost 不可比。</p><p><b>路由协议排查</b></p><pre><code># FRRouting / Quagga（Linux 常用）
+vtysh -c "show ip ospf neighbor"
+vtysh -c "show ip ospf interface eth0"
+vtysh -c "show ip ospf route"
+vtysh -c "show ip bgp summary"
+vtysh -c "show ip bgp 8.8.8.0/24 bestpath"      # 看选路原因
+vtysh -c "show ip route 8.8.8.8"
+
+# BIRD
+birdc show protocols
+birdc show route for 8.8.8.8 all
+
+# 手动配置示例（FRR）
+# router ospf
+#   auto-cost reference-bandwidth 100000
+#   network 10.0.0.0/8 area 0
+# router bgp 65001
+#   neighbor 10.1.1.2 remote-as 65002
+#   neighbor 10.1.1.2 route-map SET-LP in</code></pre></section><section class="panel"><h2>BGP 选路的完整顺序</h2><p>BGP 只在<b>前缀长度相同</b>的多条路径间按以下顺序比较（厂商实现略有差异，这是 Cisco 的经典顺序）：</p><div class="table-wrap"><table><thead><tr><th>顺序</th><th>属性</th><th>比较规则</th><th>常用吗</th></tr></thead><tbody><tr><td>1</td><td>Weight（Cisco 私有）</td><td>大者优先，仅本地有效</td><td>常用</td></tr><tr><td>2</td><td><b>Local_Preference</b></td><td>大者优先，AS 内传播</td><td><b>最常用</b>（控制出口）</td></tr><tr><td>3</td><td>本地起源</td><td>本机产生的优先（network &gt; aggregate &gt; redistribute）</td><td>少用</td></tr><tr><td>4</td><td><b>AS_Path 长度</b></td><td>短者优先</td><td>常用（默认行为）</td></tr><tr><td>5</td><td>Origin 类型</td><td>IGP &gt; EGP &gt; Incomplete</td><td>少用</td></tr><tr><td>6</td><td><b>MED</b></td><td>小者优先（跨 AS 比较，需配置）</td><td>常用（影响入向）</td></tr><tr><td>7</td><td>eBGP 优于 iBGP</td><td>外部学到的优先</td><td>默认</td></tr><tr><td>8</td><td>到 NEXT_HOP 的 IGP metric</td><td>小者优先</td><td>默认</td></tr><tr><td>9</td><td>Router ID / 邻居地址</td><td>小者或最老的连接胜出（打破平局）</td><td>兜底</td></tr></tbody></table></div><ul><li><b>Local_Pref 控制出向流量</b>（我怎么出去）：值越大越优先，在 AS 内传播，是控制出口的首选手段。</li><li><b>MED 影响入向流量</b>（别人怎么进来）：告诉邻居“从我这里进来更近”。但邻居完全可以忽略（MED 不跨 AS 传播，且比较范围有限）。真正控制入向要靠 <b>AS_Path Prepend</b>（把自己的 AS 号重复几次，人为变长）。</li><li><b>AS_Path Prepend</b>：如 <code>65001 65001 65001</code>，让路径看起来更长从而降低优先级。这是多宿主（multihoming）场景控制入向流量的实际标准做法。</li><li><b>路由反射器 / 联邦</b>：iBGP 要求全互联（N² 个会话），规模大时用 Route Reflector 打破；这是数据中心 BGP（如 Calico、K8s 网络）的常见形态。</li><li><b>黑洞与 Route Leak</b>：BGP 没有内建的合法性校验，一次错误的宣告就能把流量劫持走（历史上多次全球性事故）。生产必须用 <b>ROA/RPKI 校验</b> + <b>max-prefix 限制</b>（防止邻居误发全表撑爆内存）。</li></ul><details><summary>BGP 为什么不选最快的路？</summary><p>BGP 是<b>策略驱动</b>而非性能驱动：它默认按 AS_Path 长度等属性选路，完全不知道带宽、延迟、丢包。要按性能选路需要额外注入 metric（如基于延迟的 Local_Pref）。</p></details><details><summary>OSPF 和 BGP 该用哪个？</summary><p>自治系统<b>内部</b>用 OSPF/IS-IS（自动发现、快速收敛）；<b>跨组织/跨 AS</b> 用 BGP（策略可控、规模巨大）。数据中心内部现在也流行用 BGP（CLOS 架构 + eBGP），因为它简单且可扩展。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>BGP 邻居 Established，能证明某业务前缀已可达吗？</summary><p>不能。还需核对前缀接收、策略过滤、生效转发表、下一跳和实际去回程流量。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="longest-prefix-default-route.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

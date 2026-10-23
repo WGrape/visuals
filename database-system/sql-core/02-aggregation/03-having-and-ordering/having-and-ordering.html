@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -197,7 +215,67 @@ LIMIT 20 OFFSET 40;</code></pre>
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>执行顺序与 HAVING vs WHERE</h2><p><b>逻辑执行顺序</b></p><pre><code>书写顺序：   SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY ... LIMIT
+实际执行：   FROM -&gt; WHERE -&gt; GROUP BY -&gt; HAVING -&gt; SELECT -&gt; DISTINCT -&gt; ORDER BY -&gt; LIMIT
+
+注意 SELECT 在 HAVING 之后才执行——这解释了下面两个现象：
+  1) MySQL 允许 HAVING 引用 SELECT 里的别名
+  2) WHERE 不能引用聚合函数（MySQL 报 ERROR 1111: Invalid use of group function）</code></pre><div class="table-wrap"><table><thead><tr><th>对比项</th><th>WHERE</th><th>HAVING</th></tr></thead><tbody><tr><td>作用对象</td><td><b>行</b>（分组前过滤）</td><td><b>组</b>（分组后过滤）</td></tr><tr><td>能否用聚合函数</td><td><b>不能</b></td><td><b>能</b>（如 <code>HAVING COUNT(*) &gt; 5</code>）</td></tr><tr><td>能否用 SELECT 别名</td><td>MySQL 不允许</td><td>MySQL 允许（因为 SELECT 先于 HAVING 求值）</td></tr><tr><td>能否走索引</td><td><b>可以</b>，优先用它过滤</td><td>通常不行（分组后才过滤）</td></tr><tr><td>性能影响</td><td>先过滤再分组，数据量小</td><td>分组完再过滤，<b>尽量把条件前推到 WHERE</b></td></tr></tbody></table></div><p><b>ONLY_FULL_GROUP_BY</b>：MySQL 5.7 起默认开启，SELECT 里出现非聚合列就必须出现在 GROUP BY 中，否则报 <b>ERROR 1055</b>。别用「关掉 sql_mode」来解决，正确做法是显式加进 GROUP BY 或加聚合函数（如 <code>ANY_VALUE(col)</code>）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排序稳定性与分页（线上最常见的两坑）</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>问题</th><th>解法</th></tr></thead><tbody><tr><td>ORDER BY 非唯一列</td><td>并列行的顺序<b>不确定</b>，翻页时可能重复或漏行</td><td>末尾追加唯一列：<code>ORDER BY score DESC, id ASC</code></td></tr><tr><td><code>LIMIT n OFFSET m</code> 深翻页</td><td>OFFSET 100000 要先扫并丢弃 100000 行</td><td>改<b>键集分页</b>：<code>WHERE (score, id) &lt; (?, ?)</code></td></tr><tr><td>排序内存不足</td><td><code>sort_buffer_size</code> 默认 <b>256KB</b>，超出落盘，EXPLAIN 显示 <code>Using filesort</code></td><td>减少参与排序的列宽（只取需要的列），或调大 sort_buffer_size</td></tr><tr><td>NULL 的排序位置</td><td>MySQL 认为 NULL <b>最小</b>（ASC 排最前）；PostgreSQL 认为 NULL <b>最大</b>（ASC 排最后）</td><td>PG 用 <code>NULLS LAST</code> 显式指定；MySQL 用 <code>ORDER BY col IS NULL, col</code></td></tr><tr><td>中文排序</td><td>排序规则决定结果，<code>utf8mb4_general_ci</code> 与 <code>unicode_ci</code> 结果可能不同</td><td>统一 collation；PG 注意 collation 的来源（ICU vs libc）</td></tr><tr><td>GROUP BY 的隐式排序</td><td>MySQL 5.7 及以前 GROUP BY 会顺带排序，8.0 已移除</td><td>要排序就显式写 ORDER BY，别依赖老行为</td></tr></tbody></table></div><p><b>SQL 对照</b></p><pre><code>-- ❌ 深翻页：OFFSET 越大越慢（要扫过 100000 行再丢掉）
+SELECT id, score FROM t ORDER BY score DESC, id DESC LIMIT 20 OFFSET 100000;
+
+-- ✅ 键集分页（游标分页）：直接定位，与页码无关，恒定快
+SELECT id, score FROM t
+WHERE (score, id) &lt; (9821, 13579)        -- 上一页最后一行的 (score, id)
+ORDER BY score DESC, id DESC
+LIMIT 20;
+-- 前提：必须有联合索引 (score, id)，否则照样慢
+
+-- 排序稳定性：并列时必须加唯一列兜底
+SELECT id, name, score FROM t ORDER BY score DESC, id ASC;   -- ✅ 稳定
+
+-- 看排序是否落盘
+EXPLAIN SELECT * FROM t ORDER BY big_col;      -- Extra: Using filesort
+SHOW VARIABLES LIKE 'sort_buffer_size';        -- 默认 262144 (256KB)
+SET SESSION sort_buffer_size = 4 * 1024 * 1024;
+
+-- HAVING 能用但应前推的例子
+SELECT dept, COUNT(*) c FROM emp GROUP BY dept HAVING dept &lt;&gt; 'test';  -- ❌
+SELECT dept, COUNT(*) c FROM emp WHERE dept &lt;&gt; 'test' GROUP BY dept;   -- ✅ 先过滤</code></pre><p class="muted">键集分页的代价：不能「跳到第 N 页」，只能「下一页」。产品上用「无限滚动 / 加载更多」替代页码是最省事的解法。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检</h2><details><summary>为什么 COUNT(*) 加 LIMIT 还是慢？</summary><p>LIMIT 是在结果集产出后才截断的，COUNT 必须先把所有行扫完才能知道总数。要快就得用近似值（如 EXPLAIN 的 rows 估算、Redis 计数器）或单独的汇总表。</p></details><details><summary>HAVING 能用索引吗？</summary><p>基本不能。HAVING 作用在分组之后，索引已经用不上。任何能提到 WHERE 的条件都应该提前——这是 GROUP BY 查询最简单有效的优化。</p></details><details><summary>ORDER BY 的列不在索引里一定慢吗？</summary><p>不绝对。小结果集在内存里排很快；慢的是「大结果集 + 宽行 + 排序内存不足落盘」。先看 EXPLAIN 的 rows 估算和 Extra，再决定是否加索引。</p></details><details><summary>GROUP BY 和 DISTINCT 能互换吗？</summary><p>只去重不聚合时语义等价，很多优化器会生成相同计划。但要聚合时只能用 GROUP BY。</p></details></div></section>
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 概念与判定：HAVING 与 WHERE 的分工</h2><p>一句话：<b>WHERE 过滤「行」（聚合前），HAVING 过滤「组」（聚合后）</b>。</p><div class="table-wrap"><table><thead><tr><th>维度</th><th>WHERE</th><th>HAVING</th></tr></thead><tbody><tr><td>执行时机</td><td><b>聚合前</b></td><td><b>聚合后</b></td></tr><tr><td>过滤对象</td><td>单条记录</td><td>分组结果</td></tr><tr><td>能否用聚合函数</td><td>❌ <b>不能</b></td><td>✅ 可以</td></tr><tr><td>能否用列的别名</td><td>❌ 不能</td><td>⚠️ MySQL 允许，PG 不允许</td></tr><tr><td>性能影响</td><td><b>先过滤能大幅减少参与分组的行</b></td><td>过滤发生在分组之后</td></tr></tbody></table></div><p><b>WHERE 与 HAVING 的正确分工</b></p><pre><code>-- 正确分工：能放 WHERE 的绝不放到 HAVING
+-- 慢：先对全表分组，再过滤
+SELECT dept, COUNT(*) c FROM emp GROUP BY dept HAVING dept &lt;&gt; 'HR';
+-- 快：先过滤行，再分组
+SELECT dept, COUNT(*) c FROM emp WHERE dept &lt;&gt; 'HR' GROUP BY dept;
+
+-- 必须用 HAVING 的场景：条件依赖聚合结果
+SELECT dept, COUNT(*) c FROM emp GROUP BY dept HAVING COUNT(*) &gt; 10;
+
+-- 两者配合
+SELECT dept, AVG(salary) avg_sal
+FROM emp
+WHERE hire_date &gt;= '2020-01-01'      -- 先过滤行
+GROUP BY dept
+HAVING AVG(salary) &gt; 10000           -- 再过滤组
+ORDER BY avg_sal DESC;               -- 可用 SELECT 别名</code></pre><ul><li>信号一：过滤条件不依赖 COUNT/SUM/AVG → 放 WHERE（性能更好）。</li><li>信号二：条件里有聚合函数 → 必须 HAVING。</li><li>信号三：想按聚合值排序 → <code>ORDER BY COUNT(*) DESC</code> 或引用 SELECT 别名。</li></ul><p class="muted">性能原则：<b>WHERE 越早过滤越好</b>。把 100 万行先过滤到 1 万行再分组，比分组 100 万行再过滤快得多。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 参数·命令·量化：ORDER BY 的行为与排序代价</h2><div class="table-wrap"><table><thead><tr><th>点</th><th>规则</th><th>注意</th></tr></thead><tbody><tr><td>NULL 的排序位置</td><td>MySQL：<b>NULL 最小</b>（升序在前）；PG：<b>NULL 最大</b></td><td>跨库迁移时行为不同，建议显式写 <code>NULLS LAST</code></td></tr><tr><td>多列排序</td><td>按列的书写顺序依次比较</td><td><code>ORDER BY a DESC, b ASC</code> 是各自方向</td></tr><tr><td>能否用别名</td><td>✅ 可以（ORDER BY 在 SELECT 之后执行）</td><td>与 WHERE 不同</td></tr><tr><td>能否用序号</td><td>✅ <code>ORDER BY 2</code> 表示第 2 列</td><td>可读性差，不推荐</td></tr><tr><td>走索引免排序</td><td>ORDER BY 列上有索引且顺序一致</td><td><code>EXPLAIN</code> 无 <code>Using filesort</code></td></tr></tbody></table></div><p><b>ORDER BY 与分页优化</b></p><pre><code>-- 显式控制 NULL 位置（PostgreSQL / Oracle）
+SELECT * FROM t ORDER BY score DESC NULLS LAST;
+-- MySQL 的等价写法
+SELECT * FROM t ORDER BY score IS NULL, score DESC;
+
+-- LIMIT + ORDER BY 的经典慢查询：大偏移量
+SELECT * FROM orders ORDER BY id LIMIT 1000000, 20;   -- 慢：要先扫 100 万行
+-- 改写成游标分页（keyset）
+SELECT * FROM orders WHERE id &gt; :last_id ORDER BY id LIMIT 20;   -- 快：O(1) 定位
+
+-- 让 ORDER BY 走索引（避免 filesort）
+CREATE INDEX idx_orders_created ON orders(created_at);
+EXPLAIN SELECT * FROM orders ORDER BY created_at;     -- Extra 不应出现 Using filesort</code></pre><div class="table-wrap"><table><thead><tr><th>参数</th><th>作用</th><th>说明</th></tr></thead><tbody><tr><td><code>sort_buffer_size</code></td><td>排序缓冲区</td><td>默认 256KB～2MB，不够则落磁盘</td></tr><tr><td><code>max_length_for_sort_data</code></td><td>决定全字段排序还是 rowid 排序</td><td>MySQL 专用</td></tr><tr><td><code>max_sort_length</code></td><td>参与排序的字节数上限</td><td>超长字符串会被截断比较</td></tr></tbody></table></div><p class="muted">量化参考：<code>LIMIT 1000000, 20</code> 需要扫描并丢弃 <b>100 万行</b>；改成 <code>WHERE id &gt; last_id LIMIT 20</code> 是<b>直接定位</b>，从秒级降到毫秒级——这是分页优化收益最大的一处。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 原理与取舍：为什么 ORDER BY 会慢</h2><p>排序的代价来自两点：<b>① 比较次数 O(n log n)</b>；<b>② 内存不够时落磁盘做归并排序（filesort）</b>。避免它的唯一办法是让数据<b>已经有序</b>——即 ORDER BY 的列上有索引。</p><details><summary>为什么有时候 ORDER BY 主键还是很慢？</summary><p>因为 InnoDB 的二级索引叶子存的是主键值，用二级索引过滤后再按主键排序，仍需回表并排序。要让 ORDER BY 免排序，需要 <b>WHERE 条件与 ORDER BY 列组成复合索引</b>，且顺序、方向都匹配。</p></details><details><summary>ORDER BY 能用索引的严格条件是什么？</summary><p>① 索引的列顺序与 ORDER BY 一致；② 排序方向一致（都 ASC 或都 DESC，MySQL 8.0 支持降序索引）；③ WHERE 中的等值条件列在索引中位于 ORDER BY 列之前。任一不满足就会出现 filesort。</p></details><details><summary>大偏移量分页除了游标还有什么办法？</summary><p>① <b>延迟关联</b>：先用覆盖索引找出 id，再 JOIN 回原表取数据（减少回表量）；② 业务上禁止跳到很深的页（只允许「上一页/下一页」）；③ 用搜索引擎（ES）的 scroll / search_after。</p></details></div></section>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / HAVING 与排序 ·
   <a href="../../index.html">返回目录</a> ·

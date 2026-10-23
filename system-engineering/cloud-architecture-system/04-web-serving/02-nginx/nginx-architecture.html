@@ -71,6 +71,24 @@
     color: #38bdf8;
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="container">
@@ -390,5 +408,61 @@
 </div>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>进程模型与连接处理</h2><div class="table-wrap"><table><thead><tr><th>进程</th><th>数量</th><th>职责</th><th>特点</th></tr></thead><tbody><tr><td><b>Master</b></td><td><b>1 个</b></td><td>读取配置、管理 worker、平滑重启</td><td>以 root 运行</td></tr><tr><td><b>Worker</b></td><td><b>= CPU 核数</b>（默认）</td><td><strong>实际处理请求</strong></td><td>以普通用户运行，<b>相互独立</b></td></tr><tr><td><b>Cache Manager</b></td><td>1 个</td><td>缓存索引管理</td><td>—</td></tr><tr><td><b>Cache Loader</b></td><td>1 个</td><td>启动时加载缓存</td><td>—</td></tr></tbody></table></div><p><b>为什么 worker 数设为 CPU 核数</b>：每个 worker 是<strong>单线程事件循环</strong>，一个 worker 只能占一个核。多于核数会造成上下文切换浪费；少于核数则浪费 CPU。多核机器上的标准做法是 <code>worker_processes auto;</code>。</p><p><b>进程与连接配置</b></p><pre><code># nginx.conf 核心配置
+worker_processes auto;                  # 自动 = CPU 核数
+worker_cpu_affinity auto;               # 绑定 CPU，减少缓存失效（可选）
+worker_rlimit_nofile 65535;             # &lt;strong&gt;必须调&lt;/strong&gt;，默认 1024 太小
+
+events {
+    use epoll;                          # Linux 必用 epoll
+    worker_connections 65535;           # 单 worker 最大连接数
+    multi_accept on;                    # 一次 accept 多个连接
+}
+
+http {
+    # 理论最大连接数 = worker_processes × worker_connections
+    # 但作为反向代理时，一个客户端连接会占用&lt;strong&gt;两个&lt;/strong&gt;连接（上下游各一）
+    #   实际并发 ≈ worker_processes × worker_connections / 2
+    # 例：8 核 × 65535 / 2 ≈ 26 万（理论值，实际受内存限制）
+}
+
+# 系统侧必须同步
+#   ulimit -n 65535
+#   /etc/security/limits.conf：* soft nofile 65535</code></pre><p class="muted"><b>最常见的故障</b>：<code>worker_connections are not enough</code> 或 accept 失败。原因是 <code>worker_rlimit_nofile</code> 与系统 <code>ulimit</code> 没调。两者都要改，且 nginx 的 <code>worker_connections</code> 不能超过 <code>worker_rlimit_nofile</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>事件驱动模型：为什么能支撑高并发</h2><p>Nginx 用 <strong>epoll + 非阻塞 IO + 事件循环</strong>，一个 worker 单线程处理数万连接。</p><div class="table-wrap"><table><thead><tr><th>模型</th><th>连接数 vs 线程数</th><th>C10K 表现</th><th>代表</th></tr></thead><tbody><tr><td><b>每连接一线程</b></td><td>1:1</td><td><b>崩溃</b>（内存与切换开销）</td><td>早期 Apache prefork</td></tr><tr><td><b>线程池</b></td><td>N:M</td><td>有限（池大小封顶）</td><td>Apache worker</td></tr><tr><td><b>事件驱动</b></td><td><b>N:1</b></td><td><b>轻松支撑</b></td><td><b>Nginx / Node / Redis</b></td></tr></tbody></table></div><ul><li><strong>epoll 的优势</strong>：<code>select/poll</code> 每次都要把 fd 集合<strong>从用户态拷到内核态并线性扫描</strong>（O(n)）；epoll 用红黑树管理 fd、就绪链表返回结果，<strong>只返回活跃连接</strong>（O(1) 摊销）。</li><li>代价：<strong>一个 worker 内不能有阻塞操作</strong>。任何阻塞（如同步磁盘 IO）会卡住该 worker 上所有连接。</li></ul><p><b>验证与监控</b></p><pre><code># 验证 epoll 是否启用
+nginx -V 2&gt;&amp;1 | grep -o 'with-http_ssl_module'
+# 或看error_log 里的 "using the epoll event method"
+
+# 查看当前连接数
+curl http://127.0.0.1/nginx_status
+# Active connections: 1234
+# server accepts handled requests
+#  100000 100000 250000
+# Reading: 10 Writing: 50 Waiting: 1174
+#   Waiting = keepalive 空闲连接，高说明 keepalive 生效</code></pre><p><b>与 Apache 的对比结论</b>：Nginx 在高并发静态资源与反向代理场景优势明显（内存占用低一个数量级）；但<strong>动态内容处理</strong>需要交给后端（FastCGI/uWSGI 或 upstream）。所以典型架构是 <strong>Nginx 做反向代理与静态资源，应用服务器在后</strong>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>反向代理与超时配置</h2><div class="table-wrap"><table><thead><tr><th>指令</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><code>proxy_connect_timeout</code></td><td><b>60s</b></td><td>与上游<strong>建立连接</strong>的超时，内网可降到 <b>5s</b></td></tr><tr><td><code>proxy_send_timeout</code></td><td><b>60s</b></td><td>发送请求给上游的超时</td></tr><tr><td><code>proxy_read_timeout</code></td><td><b>60s</b></td><td><strong>等待上游响应</strong>的超时，<b>最常调</b></td></tr><tr><td><code>proxy_buffering</code></td><td><b>on</b></td><td>缓冲上游响应；<strong>流式响应要关掉</strong></td></tr><tr><td><code>keepalive</code></td><td>无</td><td>upstream 里的长连接数，<b>必配</b></td></tr><tr><td><code>proxy_next_upstream</code></td><td>error timeout</td><td>失败时转发到下一台</td></tr></tbody></table></div><p><b>反向代理配置</b></p><pre><code>upstream backend {
+    server 10.0.0.1:8080 max_fails=3 fail_timeout=30s;
+    server 10.0.0.2:8080 max_fails=3 fail_timeout=30s;
+    keepalive 64;                    # &lt;strong&gt;必须配&lt;/strong&gt;，否则每次请求都新建连接
+    keepalive_requests 1000;         # 单连接最多复用次数
+    keepalive_timeout 60s;
+}
+
+server {
+    location /api/ {
+        proxy_pass http://backend;   # 注意：带 / 会剥离路径前缀，不带则保留
+        proxy_http_version 1.1;      # keepalive 需要 HTTP/1.1
+        proxy_set_header Connection "";   # 清除 close，启用长连接
+
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;      # 按后端 P99 设定
+        proxy_send_timeout 30s;
+
+        proxy_next_upstream error timeout http_502;
+        proxy_next_upstream_tries 2;
+    }
+}</code></pre><p class="muted"><b>流式响应（SSE、大模型流式输出）必须关 <code>proxy_buffering</code></b>：开启时 Nginx 会攒够缓冲区再发给客户端，导致流式输出变成一次性返回。同时要设 <code>proxy_read_timeout</code> 足够长，否则长连接会被中途断开。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：<code>proxy_pass</code> 带不带斜杠有什么区别？</summary><p>A：<strong>这是最经典的配置陷阱</strong>。<code>proxy_pass http://backend;</code>（不带路径）会把<strong>完整 URI</strong> 转发；<code>proxy_pass http://backend/;</code>（带路径）会把 location 匹配的部分<strong>替换掉</strong>。例如 location 是 <code>/api/</code>，请求 <code>/api/user</code>：不带斜杠转发 <code>/api/user</code>，带斜杠转发 <code>/user</code>。混用会导致后端 404，排查时直接看后端收到的 path。</p></details><details><summary>Q：502 和 504 分别说明什么？</summary><p>A：<strong>502 Bad Gateway = 连不上或上游直接拒绝</strong>（上游进程挂了、端口不通、连接被拒）；<strong>504 Gateway Timeout = 上游超时未响应</strong>（上游处理太慢，超过 <code>proxy_read_timeout</code>）。排查方向完全不同：502 查上游是否存活与网络连通性；504 查上游处理耗时与超时配置。看 error_log 里的具体信息：<code>connect() failed</code> 是 502，<code>upstream timed out</code> 是 504。</p></details><details><summary>Q：Nginx 的负载均衡策略有哪些？</summary><p>A：四种——① <strong>轮询</strong>（默认，平均分配）；② <strong>weight</strong>（按权重，用于机器性能不同）；③ <strong>ip_hash</strong>（按客户端 IP，实现会话保持，但扩容时会大量重映射）；④ <strong>least_conn</strong>（发给连接数最少的，<strong>长连接场景优于轮询</strong>）。商业版还有 <code>least_time</code>。若需要真正的会话保持，更推荐<strong>把会话外置到 Redis</strong>，而不是依赖 ip_hash。</p></details><details><summary>Q：reload 会导致请求中断吗？</summary><p>A：<strong>不会</strong>。Nginx 的热重载是：master 收到 HUP 信号 → 启动新 worker → 新 worker 接新连接，老 worker <strong>处理完存量请求后退出</strong>。所以 <code>nginx -s reload</code> 是安全的。但要注意：老 worker 若卡在长连接（如 WebSocket）上不会立即退出，需要 <code>worker_shutdown_timeout</code> 强制（默认无限制，可能残留进程）。</p></details></div></section>
 </body>
 </html>

@@ -11,6 +11,63 @@
 <section class="panel"><h2>索引如何配合</h2><p>对于 `WHERE tenant_id=? ORDER BY created_at DESC,id DESC`，可考虑以 tenant_id 开头、后接排序列的复合索引。游标谓词和排序方向要与索引能力相配；混合升降序、表达式排序、NULLS FIRST/LAST 在不同数据库中的优化不同。用 EXPLAIN 或实际执行统计比较扫描行数、排序节点、回表次数和延迟，而不是只凭 SQL 形式判断。</p><p>若需要精确跳到“第 5001 页”，游标方案没有天然的随机页码定位；可以保存里程碑游标、按时间区间跳转，或接受 OFFSET 的代价。产品界面通常更适合“下一页/加载更多”，而财务报表可能需要明确页码与稳定快照。两者可按用例分别选择。</p></section>
 <section class="panel"><h2>三条查询的手算</h2><p>假设排序后 id 依次为 105、104、103、102、101，页大小 2。第一页返回 105、104；此时新插入 106，序列变为 106、105、104、103、102、101。OFFSET 2 的第二页得到 104、103，重复 104。以第一页末尾 104 为游标，第二页查 id&lt;104，得到 103、102。若 104 被删除，游标仍可按其记录的排序键继续，因为不需要再次找到 104 这行。</p><p>实际列表按 created_at、id 排序时，游标应同时携带两个值，而不是只携带 id。为防篡改或跨租户复用，可在应用层把排序字段、租户与过滤条件编码进受保护的游标，解码时验证它仍适用于当前查询。</p></section>
 <section class="panel"><h2>常见误区</h2><p>“加 LIMIT 20 就只扫描 20 行”忽略了 OFFSET；“按时间排序天然稳定”忽略了并列时间；“游标一定完全无重复漏读”忽略了更新和删除；“加一个索引就能解决所有深分页”忽略了扫描和回表。优化前用代表性数据量测试第 1 页、第 100 页和最深页，记录实际扫描行数及 P95。练习：上例新插入 id 106 后，分别列出 OFFSET 第二页和游标第二页，并解释为什么不同。</p></section>
+<section class="panel" data-dry-goods><h2>两种分页的量化对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th>OFFSET 分页</th><th>键集（keyset）分页</th></tr></thead><tbody><tr><td>SQL</td><td><code>LIMIT n OFFSET m</code></td><td><code>WHERE id &gt; last_id LIMIT n</code></td></tr><tr><td>复杂度</td><td><b>O(m + n)</b>：要跳过 m 行</td><td><b>O(log N + n)</b>：索引直接定位</td></tr><tr><td>10 万行处取 20 条</td><td>需扫描 <b>100020</b> 行</td><td>只扫描 <b>20</b> 行</td></tr><tr><td>深分页耗时</td><td>第 10 万页可能 <b>数秒</b></td><td>始终 <b>毫秒级</b></td></tr><tr><td>能否跳页</td><td><b>可以</b>（直接算 offset）</td><td><b>不可以</b>，只能「下一页」</td></tr><tr><td>数据变动影响</td><td>会重复/漏数据（行位移）</td><td><b>稳定</b>（基于游标）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>实测参考</th><th>OFFSET</th><th>键集</th></tr></thead><tbody><tr><td>第 1 页</td><td>5 ms</td><td>5 ms</td></tr><tr><td>第 1000 页</td><td>50 ms</td><td>5 ms</td></tr><tr><td>第 10 万页</td><td>2000 ms</td><td>5 ms</td></tr><tr><td>第 100 万页</td><td>20 s+</td><td>5 ms</td></tr></tbody></table></div><p><b>为什么 OFFSET 慢</b>：数据库必须<b>真的读出并丢弃</b>前 m 行，因为 SQL 语义要求从第 m+1 行开始返回。它没有「跳到第 m 行」的能力——行没有固定地址（MVCC、删除留下的空洞都让物理位置不连续）。所以 OFFSET 越大，丢弃的工作越多。</p></section><section class="panel"><h2>实现与优化</h2><pre><code>-- OFFSET 分页（浅分页可用）
+SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 100000;
+-- 慢：要扫 100020 行
+
+-- 键集分页（推荐）
+SELECT * FROM orders WHERE id &gt; 100000 ORDER BY id LIMIT 20;
+-- 快：索引直接定位到 id=100000 之后
+
+-- 键集分页要求：排序列&lt;b&gt;唯一且有序&lt;/b&gt;
+-- 若排序列可能重复（如 created_at），要用复合游标：
+SELECT * FROM orders
+WHERE (created_at, id) &gt; ('2026-10-22 10:00:00', 12345)
+ORDER BY created_at, id
+LIMIT 20;
+-- 用 (created_at, id) 复合索引支撑</code></pre><pre><code>-- 优化 1：延迟关联（deferred join）—— 大 OFFSET 的救急方案
+-- 先只查 id（走覆盖索引，不回表），再关联取完整行
+SELECT o.* FROM orders o
+INNER JOIN (
+    SELECT id FROM orders ORDER BY id LIMIT 20 OFFSET 100000
+) t ON o.id = t.id;
+-- 原理：子查询只扫索引（不回表），回表次数从 100020 降到 20
+-- 实测能快 5~10 倍
+
+-- 优化 2：覆盖索引（让 OFFSET 分页也能走索引）
+CREATE INDEX idx_orders_cover ON orders(id, status, amount);
+SELECT id, status, amount FROM orders ORDER BY id LIMIT 20 OFFSET 100000;
+-- 不回表，全在索引里完成
+
+-- 优化 3：用书签记录上一页位置（键集分页的工程实现）
+-- 返回给前端的 cursor 要加密或至少编码，避免暴露 id 规律
+-- 常见做法：base64(created_at + id)</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>翻页越来越慢</td><td>OFFSET 线性增长</td><td>改键集分页；或至少用延迟关联</td></tr><tr><td>翻页时出现重复数据</td><td>OFFSET 期间有新数据插入</td><td>键集分页；或加稳定快照</td></tr><tr><td>翻页漏数据</td><td>前面有数据被删除，行位移</td><td>键集分页</td></tr><tr><td>键集分页结果不对</td><td>排序列不唯一</td><td>加 id 作为第二排序键，用复合游标</td></tr><tr><td>无法跳到第 N 页</td><td>键集分页的固有限制</td><td>混合方案：前几页用 OFFSET，深分页用键集；或用预计算的位置索引</td></tr><tr><td>游标暴露了业务 id</td><td>游标明文</td><td>加密或编码游标；或用不透明的 token</td></tr><tr><td>排序方向变化导致游标失效</td><td>升/降序切换</td><td>游标里记录方向；或固定排序方向</td></tr></tbody></table></div><p class="muted"><b>最实用的组合</b>：产品上把「跳到第 N 页」改成「上一页/下一页」或「加载更多」，就能全面使用键集分页。<b>「跳页」这个需求本身就是性能杀手</b>，很多产品在深分页时直接不给跳页（如 Twitter、微博的时间线）。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>第一页末尾是 104，新插入 106 后，OFFSET 2 第二页会重复哪条？</summary><p>会再次看到 104；游标按小于 104 的稳定排序键继续则返回 103、102。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第一层 · 概念与判定：两种分页怎么选</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>OFFSET 分页</b></th><th><b>游标（keyset）分页</b></th></tr></thead><tbody><tr><td>写法</td><td><code>LIMIT n OFFSET m</code></td><td><code>WHERE id &gt; :last_id LIMIT n</code></td></tr><tr><td>能否跳页</td><td>✅ <b>可以任意跳</b></td><td>❌ 只能顺序翻</td></tr><tr><td>深翻性能</td><td><b>O(m)，越深越慢</b></td><td><b>O(1)，恒定</b></td></tr><tr><td>数据变动时</td><td>可能重复/漏行</td><td>稳定（基于游标位置）</td></tr><tr><td>总页数</td><td>需要 COUNT(*)</td><td>不需要</td></tr><tr><td>适用</td><td>后台管理、页数少</td><td><b>信息流、无限滚动、深翻</b></td></tr></tbody></table></div><ul><li>信号一：产品形态是「信息流/无限下拉」→ 必须用游标分页。</li><li>信号二：需要「跳到第 57 页」→ 只能 OFFSET（并接受深翻慢）。</li><li>信号三：数据会实时新增 → OFFSET 会导致重复展示，游标不会。</li></ul><p class="muted">核心差异：<b>OFFSET 是「跳过前 m 行」——数据库必须真的把前 m 行读出来再丢弃</b>；游标是「从某个位置继续」——用索引直接定位，一步到位。</p></section>
+<section class="panel"><h2>第二层 · 参数·命令·量化：写法与性能数据</h2><p><b>两种分页写法</b></p><pre><code>-- OFFSET 分页（页数少时没问题）
+SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 40;          -- 第 3 页
+
+-- 游标分页（需要记录上一页最后一个 id）
+SELECT * FROM orders WHERE id &gt; 12345 ORDER BY id LIMIT 20;
+-- 下一页用本页最后一条的 id 作为 :last_id
+
+-- 多列排序时的游标（如按 created_at DESC, id DESC）
+SELECT * FROM orders
+WHERE (created_at, id) &lt; ('2025-01-01 10:00:00', 999)        -- 行值比较（MySQL 8 / PG）
+ORDER BY created_at DESC, id DESC LIMIT 20;
+-- 或展开写
+WHERE created_at &lt; '2025-01-01 10:00:00'
+   OR (created_at = '2025-01-01 10:00:00' AND id &lt; 999)
+
+-- 延迟关联：优化 OFFSET 深翻（减少回表）
+SELECT o.* FROM orders o
+JOIN (SELECT id FROM orders ORDER BY id LIMIT 1000000, 20) t USING (id);
+-- 内层只扫覆盖索引拿 id，外层只回表 20 行
+
+-- 建索引支撑游标分页
+CREATE INDEX idx_orders_created_id ON orders(created_at DESC, id DESC);</code></pre><div class="table-wrap"><table><thead><tr><th>场景</th><th>OFFSET 100万</th><th>游标</th><th>差距</th></tr></thead><tbody><tr><td>扫描行数</td><td><b>1,000,020</b></td><td><b>20</b></td><td>5 万倍</td></tr><tr><td>实测耗时（千万级表）</td><td>约 1～5 秒</td><td>约 1～5 毫秒</td><td><b>约 1000 倍</b></td></tr><tr><td>随页深变化</td><td>线性恶化</td><td>恒定</td><td>—</td></tr></tbody></table></div><p class="muted">量化结论：OFFSET 的耗时<b>与偏移量成正比</b>（O(m)）；游标是 O(1)。第 1 页两者差不多，第 1000 页差上百倍。</p></section>
+<section class="panel"><h2>第四层 · 原理与取舍：为什么 OFFSET 无法优化</h2><p>因为 <b>OFFSET m 的语义就是「先算出前 m 行，再丢弃」</b>——数据库没有任何捷径能跳过它们（除非有预计算的行号）。这是语义决定的，不是索引能解决的。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>原理</th><th>代价</th></tr></thead><tbody><tr><td><b>游标分页</b></td><td>用索引直接定位起始位置</td><td>不能跳页；需要有序唯一列</td></tr><tr><td><b>延迟关联</b></td><td>只在覆盖索引上 OFFSET，减少回表</td><td>仍要扫 m 行，只是每行更轻</td></tr><tr><td><b>预计算行号</b></td><td>冗余一列存行号/页码</td><td>写入时要维护，数据变动即失效</td></tr><tr><td><b>搜索引擎</b></td><td>ES 的 search_after</td><td>引入新组件</td></tr></tbody></table></div><details><summary>游标分页要求排序键唯一吗？</summary><p>必须。如果排序键有重复（如只按 created_at 排，同一秒有多条），游标位置会有歧义，可能漏行或重复。标准做法是<b>追加主键作为第二排序键</b>：<code>ORDER BY created_at DESC, id DESC</code>，游标用 (created_at, id) 二元组。</p></details><details><summary>既想跳页又想快，有折中吗？</summary><p>有几种：① 限制最大页数（如只允许前 100 页）；② 用延迟关联把 OFFSET 的回表成本降到最低；③ 按时间/区间先粗筛（如「只看 2025 年」），把 m 变小；④ 引入 ES。实际中第 ① 种最常用——业务上很少真的需要跳到第 5000 页。</p></details><details><summary>数据新增时 OFFSET 为什么会重复展示？</summary><p>因为 OFFSET 是按<b>位置</b>取的。你在第 1 页时，别人插入了 10 条新数据；你翻到第 2 页时，整体向后移了 10 行——于是第 1 页的最后 10 条又出现在第 2 页。游标分页基于<b>值</b>（id &gt; last_id），不受新增影响。</p></details></section>
 <footer>继续阅读：<a href="../../03-execution/02-execution-plans/explain-cardinality-estimates.html">用 EXPLAIN 检查扫描成本</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

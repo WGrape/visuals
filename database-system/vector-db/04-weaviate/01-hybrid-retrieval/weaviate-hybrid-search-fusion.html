@@ -16,6 +16,42 @@ Weaviate 可以使用集成向量化，也可以导入外部生成的向量。�
 从真实搜索日志抽样并标注查询意图、相关文档与可访问范围。按错误码、产品名称、自然语言问法、跨语言问法四类报告 Recall@K、MRR 或 NDCG，同时看 P95 延迟。评测集要包含零结果和过期文档，避免只有“本来就容易搜到”的正例。切块大小、向量模型、关键词字段权重、融合参数应一次只变一个维度。</h2><p>若后续用检索增强生成，生成答案正确率也要独立评测。检索到相关块不保证答案引用了正确版本；模型可能忽略证据或拼接两份冲突文档。返回结果应带版本与来源，过期手册需要降低权重或下线，而不是靠语言模型猜最新规则。</p></section>
 <section class="panel"><h2>上线观察与回滚
 记录每路候选数量、过滤后数量、融合前后名次、点击或人工采纳结果，便于定位“关键词有命中却没进最终列表”的问题。注意日志只存必要的脱敏查询和文档标识，不能把用户隐私原文全部落盘。对热门查询建立回归集合，索引更新或模型升级后立即重跑。</h2><p>上线时先让混合检索与旧方案并行，对同一查询比较结果和耗时，再逐步切流。若精确码命中率下降或租户过滤发生异常，应能迅速切回旧配置与旧索引。效果改进必须同时满足权限、延迟与更新可见性的底线。</p></section>
-<section class="panel"><h2>融合参数如何留证据</h2><p>选取“ERR-4821”“支付重复扣款”“英文产品名加中文症状”等样例，记录向量前十、关键词前十与融合后前十的文档 ID 和名次。若调整权重让一个样例变好，却使另一类查询大幅变差，就需要按查询类型分层报告，而不能只汇总一个平均分。人工标注时至少区分完全相关、部分相关、过期或无权限四种状态；过期和无权限的文档即使语义接近，也不能算成功召回。</p><p>若查询同时带时间过滤，应明确文档的创建时间、修订时间和生效时间使用哪一个。法规或产品说明以生效版本为准，最新修改时间不一定代表当前有效版本。时间范围过滤与租户权限都应先于最终展示可靠生效。</p></section><section class="panel"><h2>自检</h2><details><summary>把 BM25 分数与向量相似度直接相加，权重就有统一含义吗？</summary><p>没有。两路分数尺度不同，应选定归一化或排名融合方案，并用标注查询验证。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<section class="panel"><h2>融合参数如何留证据</h2><p>选取“ERR-4821”“支付重复扣款”“英文产品名加中文症状”等样例，记录向量前十、关键词前十与融合后前十的文档 ID 和名次。若调整权重让一个样例变好，却使另一类查询大幅变差，就需要按查询类型分层报告，而不能只汇总一个平均分。人工标注时至少区分完全相关、部分相关、过期或无权限四种状态；过期和无权限的文档即使语义接近，也不能算成功召回。</p><p>若查询同时带时间过滤，应明确文档的创建时间、修订时间和生效时间使用哪一个。法规或产品说明以生效版本为准，最新修改时间不一定代表当前有效版本。时间范围过滤与租户权限都应先于最终展示可靠生效。</p></section><section class="panel" data-dry-goods><h2>混合检索的参数</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>取值</th><th>含义</th></tr></thead><tbody><tr><td><b>alpha</b></td><td><b>0 – 1</b></td><td><b>0 = 纯关键词（BM25）</b>，1 = 纯向量，0.5 = 各占一半</td></tr><tr><td>fusionType</td><td><code>ranked</code> / <code>relativeScore</code></td><td>融合算法：RRF 或相对分数融合</td></tr><tr><td><b>k（RRF 常数）</b></td><td><b>60</b>（默认）</td><td>RRF 公式 <code>1/(k + rank)</code> 中的平滑常数</td></tr><tr><td>limit</td><td>按业务</td><td>返回条数</td></tr><tr><td>score / explainScore</td><td>true</td><td>返回各路得分与融合过程（调试必备）</td></tr><tr><td><b>rerank</b></td><td>可选（Cohere / 本地 cross-encoder）</td><td>融合后再精排，通常显著提升准确率</td></tr></tbody></table></div><p><b>RRF（Reciprocal Rank Fusion）</b>：不看具体分数，只看排名。<code>score(d) = Σ 1/(k + rank_i(d))</code>。它的最大好处是<b>不需要归一化</b>——BM25 的分数（可能几十）和向量相似度（0–1）量纲完全不同，直接加权会出问题，而 RRF 只用排名，天然免疫量纲差异。</p><p><b>Weaviate 混合检索</b></p><pre><code># Weaviate GraphQL 混合查询
+{
+  Get {
+    Article (
+      hybrid: {
+        query: "如何优化向量检索"
+        alpha: 0.5
+        fusionType: ranked
+      }
+      limit: 10
+    ) {
+      title
+      content
+      _additional {
+        score
+        explainScore      # 看两路得分与融合细节
+      }
+    }
+  }
+}
+
+# Python 客户端
+import weaviate
+client = weaviate.Client("http://localhost:8080")
+res = (
+    client.query
+    .get("Article", ["title", "content"])
+    .with_hybrid(query="如何优化向量检索", alpha=0.5, fusion_type="ranked")
+    .with_limit(10)
+    .with_additional(["score", "explainScore"])
+    .do()
+)
+
+# 带 rerank（精度更高）
+# .with_hybrid(query=..., alpha=0.5)
+# .with_rerank(prop="content", query="...")</code></pre></section><section class="panel"><h2>融合策略与调参</h2><div class="table-wrap"><table><thead><tr><th>融合方式</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td><b>RRF（ranked）</b></td><td>只用排名，<code>1/(60+rank)</code></td><td><b>无需归一化、鲁棒</b>，默认推荐</td><td>忽略了分数的绝对差异（如向量相似度 0.9 vs 0.5 被同等对待）</td></tr><tr><td><b>相对分数融合</b></td><td>先把各路分数归一化到 0–1，再按 alpha 加权</td><td>利用了分数的<b>强度信息</b></td><td>对分数分布敏感；一路分数若普遍偏低会被系统性压制</td></tr><tr><td><b>加权求和（手动）</b></td><td>自己拿两路结果做 alpha 加权</td><td>可控性最强</td><td>必须自己做归一化，容易踩坑</td></tr></tbody></table></div><ul><li><b>alpha 怎么调</b>：语义模糊、同义词多的查询（用户口语化提问）→ 提高 alpha（偏向量）；含专有名词、型号、错误码、人名的查询 → 降低 alpha（偏 BM25）。务实做法是<b>用真实 query 集做网格搜索</b>（alpha 从 0 到 1 步长 0.1），选 NDCG/召回率最高的。</li><li><b>为什么纯向量检索会漏掉精确匹配</b>：向量是“语义模糊匹配”，对于 <code>ERR_2049</code>、<code>iPhone 15 Pro Max</code> 这类精确字符串，语义相近的干扰项会挤占前排。BM25 恰好擅长这个。这就是混合检索的核心价值。</li><li><b>先融合再 rerank</b>：混合检索负责“召得全”（两路各取 top 50–100），rerank（cross-encoder）负责“排得准”（精排 top 10）。这两级架构的准确率通常比任何单路都高得多。</li><li><b>代价</b>：混合检索要同时维护倒排索引和向量索引，内存与写入开销都更高；rerank 会引入额外延迟（cross-encoder 对每个候选都要算一次）。需要权衡。</li><li><b>排障顺序</b>：① 用 <code>explainScore</code> 看两路各自的得分与排名；② 确认 alpha 是否让某一路被完全压制；③ 检查是否只有一路命中（说明另一路的查询没匹配上，如向量化模型不覆盖该语言）；④ 加 rerank 复测。</li><li><b>评估要做对</b>：建一个<b>标注过的 query 集</b>（50–200 条真实问题 + 相关文档），用 NDCG@10 和 Recall@50 衡量。没有这个基线，调参就是瞎猜。</li></ul><details><summary>alpha 设 0.5 就万事大吉了吗？</summary><p>不一定。0.5 只是个中性起点。不同业务的最优值差异很大：FAQ/客服场景常偏向量（0.7–0.8），代码/日志/商品型号检索常偏关键词（0.2–0.4）。必须用真实数据测。</p></details><details><summary>RRF 的 k=60 需要调吗？</summary><p>一般不需要。k 的作用是让排名靠前者的优势不过分放大：k 越小，top1 的优势越大；k 越大，排名差异越被平滑。60 是 Cormack 等人论文里的经验值，实践上在 20–100 之间影响很小。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>把 BM25 分数与向量相似度直接相加，权重就有统一含义吗？</summary><p>没有。两路分数尺度不同，应选定归一化或排名融合方案，并用标注查询验证。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="../00-overview/weaviate-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

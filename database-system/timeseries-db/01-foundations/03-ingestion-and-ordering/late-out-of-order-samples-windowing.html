@@ -11,6 +11,32 @@
 <section class="panel"><h2>去重键与版本冲突</h2><p>可用 device_id、传感器编号、采样序号或事件时间组合成逻辑测量 ID。若设备每次重试都生成新 ID，服务端就无法可靠判断是否同一次采样；若两个真实样本恰好有同一秒时间戳，只按时间去重又会误删。最好让设备提供单调序号或稳定采样 ID，同时规定重启后序号如何换代。服务端保存原始事件与接收批次信息，方便查错。</p><p>有时传感器会更正先前校准值，这不是网络重复，而是业务修正。应附版本号或修正原因，明确“保留原始值并叠加修正”还是“以最新值为准”。报警是否撤回、报表是否重算也要事先定义。</p></section>
 <section class="panel"><h2>保留期和降采样会挡住补报</h2><p>原始高精度数据只保留 7 天，设备离线 10 天后补传，写入目标分区可能已过期；即使接收成功，日汇总可能早已生成且原始数据无法重算。接入侧要定义最大允许补报时长，并为超期数据安排拒绝、另存审计或触发历史重算。降采样不能只在新数据到来时顺手增量累加，还要处理迟到修正和重复消息，否则日报与原始明细会不一致。</p><p>时区和夏令时也会影响“自然日”窗口。内部应尽量用 UTC 时间戳，报表按明确的业务时区转换，并记录规则版本；跨时区设备只上报本地“12:00”而无时区和偏移，可能根本无法准确重建事件顺序。</p></section>
 <section class="panel"><h2>验收一个离线场景</h2><p>准备一台设备先上报 12:00 的 38℃、39℃，随后断网三分钟，再补传 12:00:30 的 42℃ 与一条重复消息。分别检查原始明细是否只保留预期版本、分钟最大值是否更新为 42℃、报警是否补触发以及下游是否收到修订。再模拟设备时间快五分钟和超保留期补传，确认系统是显式拒绝还是记录为待修正，而非静默丢掉。</p><p>监控应分开统计事件时间滞后、乱序比例、重复比例、补传峰值、窗口修订次数和最终报表延迟。只看“写入成功率 100%”不足以证明历史数据正确。</p></section>
+<section class="panel" data-dry-goods><h2>乱序与迟到的判定参数</h2><div class="table-wrap"><table><thead><tr><th>系统 / 参数</th><th>默认</th><th>含义</th></tr></thead><tbody><tr><td>Prometheus <code>lookback_delta</code></td><td>5 分钟</td><td>区间向量查询时向回看多久找样本；超过则视为断流</td></tr><tr><td>Prometheus <code>--query.lookback-delta</code></td><td>5m</td><td>同上，可启动参数调整</td></tr><tr><td>VictoriaMetrics <code>-search.maxStalenessInterval</code></td><td>0（按查询区间推算）</td><td>控制查询时能回溯多久的陈旧样本</td></tr><tr><td>VictoriaMetrics <code>-dedup.minScrapeInterval</code></td><td>0（关闭）</td><td>设为抓取间隔可去掉重复样本</td></tr><tr><td>InfluxDB 写入时间戳</td><td>可显式指定（纳秒）</td><td>由客户端写入，服务端不做乱序拒绝（受 retention 与 shard 限制）</td></tr><tr><td>TDengine 乱序处理</td><td>按配置策略丢弃或更新</td><td>写入时超出时间窗的数据按策略处理</td></tr></tbody></table></div><p>两条基本事实：① 采样间隔决定乱序容忍窗口（通常取 <b>2~3 倍采集间隔</b>）；② 超出窗口的迟到样本要么被丢弃，要么需要显式写入历史时间戳并由存储支持。</p></section><section class="panel"><h2>窗口与降采样的对照</h2><div class="table-wrap"><table><thead><tr><th>窗口策略</th><th>如何处理迟到</th><th>代价</th><th>适用</th></tr></thead><tbody><tr><td>滚动窗口（tumbling）</td><td>迟到超窗口即丢弃</td><td>简单，可能丢数据</td><td>实时监控、告警</td></tr><tr><td>滑动窗口 + 水位线</td><td>等待 watermark 后再输出</td><td>有延迟（等于容忍时长）</td><td>流式计算（Flink）</td></tr><tr><td>允许迟到 + 侧输出</td><td>迟到数据进侧输出另处理</td><td>需要额外处理逻辑</td><td>不能丢的场景</td></tr><tr><td>写入时指定时间戳</td><td>直接落到历史时间点</td><td>存储需支持乱序写</td><td>补数、回灌历史</td></tr></tbody></table></div><p><b>Flink</b></p><pre><code># Flink 的乱序容忍：水位线 + 允许迟到 + 侧输出
+stream.assign_timestamps_and_watermarks(
+    WatermarkStrategy
+        .for_bounded_out_of_orderness(Duration.of_seconds(10))   # 容忍 10s 乱序
+        .with_timestamp_assigner(...)
+)
+.key_by(...)
+.window(TumblingEventTimeWindows.of(Time.minutes(1)))
+.allowed_lateness(Time.minutes(1))              # 窗口关闭后再等 1 分钟
+.side_output_late_data(late_tag)                # 超期的进侧输出，不丢
+.aggregate(...)
+
+# 判据：watermark = 已见最大事件时间 - 容忍时长
+#       允许迟到 = 窗口结束后仍接受更新的时长
+#       总延迟 = 容忍时长 + 允许迟到时长</code></pre><p><b>Prometheus / VM</b></p><pre><code># Prometheus：区间向量只看 lookback_delta（默认 5 分钟）内的样本
+#   超过 5 分钟没有新样本 -&gt; 该序列在区间查询中被视为"断流"
+rate(http_requests_total[5m])          # 5m 窗口
+last_over_time(metric[10m])            # 取窗口内最后一个样本，缓解断流
+
+# 调整 lookback（启动参数，需与采集间隔匹配）
+prometheus --query.lookback-delta=2m
+
+# VictoriaMetrics：去掉多副本重复抓取的样本
+victoria-metrics -dedup.minScrapeInterval=30s   # = 你的抓取间隔</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>曲线出现断点</td><td>采集失败或样本超出 lookback</td><td>查 target 的 up 与 scrape_duration；调大 lookback_delta</td></tr><tr><td>rate 出现突变尖峰</td><td>断点后第一个区间只覆盖部分数据</td><td>用 <code>rate</code> 前先确认无断流；或用更长窗口平滑</td></tr><tr><td>数据重复/跳变</td><td>多副本 Prometheus 同时写</td><td>VM 设 dedup；或用外部去重</td></tr><tr><td>补写历史数据查不到</td><td>超出存储的时间窗或 retention</td><td>确认 retention；用支持显式时间戳的写入接口</td></tr><tr><td>流式计算少数据</td><td>watermark 推进太快，迟到被丢</td><td>调大 out-of-orderness 与 allowed_lateness；用侧输出兜底</td></tr><tr><td>窗口结果一直不输出</td><td>watermark 未推进（某分区无数据）</td><td>检查空闲分区；设置 idle timeout</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>lookback_delta 5 分钟是什么意思？</summary><p>Prometheus 在执行区间向量查询（如 <code>rate(m[5m])</code>）时，只会向回看 5 分钟内的样本。若某个序列在最近 5 分钟内没有任何样本，该序列在该区间被视为不存在，表现为曲线断点或 rate 突降。它默认等于 5 分钟，可用启动参数调整。</p></details><details><summary>为什么断点后的 rate 会出现假尖峰？</summary><p>因为 rate 用区间内首尾样本的差值除以时间跨度。断流后第一个区间只覆盖了实际的一小段数据，却被当作整个窗口来外推，于是速率被放大。处理办法是先消除断流（保证采集稳定），再用 <code>last_over_time</code> 或更长窗口平滑。</p></details><details><summary>流式计算里怎么既保证及时又不丢迟到数据？</summary><p>三层机制配合：① 水位线容忍一定乱序（如 10 秒）；② 窗口结束后再允许迟到一段时间（allowed_lateness，如 1 分钟），期间会更新已输出的结果；③ 超过允许迟到时长的数据进侧输出单独处理（写回存储或告警），而不是静默丢弃。</p></details><details><summary>多副本采集导致数据重复怎么办？</summary><p>两条路：存储侧去重（VictoriaMetrics 设 <code>-dedup.minScrapeInterval</code> 等于抓取间隔，保留时间戳最新的样本），或查询侧用 <code>max by</code> 之类的聚合消除副本差异。前者更彻底，后者依赖查询写法且对 rate 类计算更麻烦。</p></details><details><summary>历史数据回灌要注意什么？</summary><p>三点：① 保留期是否覆盖目标时间；② 写入接口是否支持显式时间戳（InfluxDB line protocol 支持；Prometheus remote_write 也带时间戳）；③ 回灌后指标的量级会突增，可能影响基于近期数据的告警规则，必要时临时静默。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>设备 12:03 才上传 12:00:30 的样本，按写入时间把它放进 12:03 分钟报表正确吗？</summary><p>若目标是还原测量发生时的温度，应按事件时间归入 12:00 窗口，并按迟到策略修订已发布结果。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../04-retention-and-downsampling/retention-downsampling.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -492,6 +492,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -1048,5 +1066,48 @@ x-dead-letter-routing-key=<span class="code-string">"dead.messages"</span>
         isRunning = true;
         setInterval(simulate, 100);
     </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>消息积压的判断与处理</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>健康范围</th><th>说明</th></tr></thead><tbody><tr><td><b>堆积量（Lag）</b></td><td>接近 0；或 &lt; 消费能力 × 几分钟</td><td>Kafka 用 <code>LOG-END-OFFSET - CURRENT-OFFSET</code></td></tr><tr><td><b>消费速率</b></td><td>≥ 生产速率</td><td>小于则必然持续堆积</td></tr><tr><td><b>堆积增长趋势</b></td><td>不增长</td><td><b>关键看趋势</b>，瞬时堆积不可怕</td></tr><tr><td>消息滞留时长</td><td>&lt; SLA（如 1 分钟）</td><td>比堆积量更能反映实际影响</td></tr><tr><td>消费者数量</td><td>≤ 分区数（Kafka）</td><td>超过的消费者会空闲</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>扩容方式</th><th>上限</th><th>说明</th></tr></thead><tbody><tr><td>增加消费者实例</td><td><b>≤ 分区数</b>（Kafka）</td><td>这是 Kafka 的硬限制</td></tr><tr><td>增加分区数</td><td>单 broker 分区 &lt; <b>100~200</b></td><td>分区是并行度上限</td></tr><tr><td>单消费者内加线程</td><td>受下游承受能力限制</td><td>注意消费顺序会被打乱</td></tr><tr><td>批量消费</td><td>一次拉 <b>500~5000</b> 条</td><td>减少网络往返，吞吐提升明显</td></tr></tbody></table></div><p><b>积压的核心公式</b>：<code>消费能力 = 消费者数 × 单消费者吞吐</code>。要追上积压，消费能力必须<b>大于</b>生产速率，且差值要能在可接受时间内消化存量。例如积压 100 万条，生产 5000 条/秒，消费能力提到 8000 条/秒，则需要 <code>100万 / (8000-5000) ≈ 333 秒 ≈ 5.5 分钟</code>追平。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>处理手段</h2><pre><code># 1) 先看清楚积压情况
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group mygroup
+# TOPIC  PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+# orders 0          12000           15000           3000
+# 关键：看 LAG 的总和与变化趋势（连续两次采样算速率）
+
+# 2) 紧急扩容（Kafka 的限制：消费者数 &lt;= 分区数）
+# 若分区数不够，先加分区（注意会打乱 key 的顺序性）
+kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic orders --partitions 12
+
+# 3) 临时降级：跳过非关键消息
+# 按业务优先级过滤，只处理重要的
+# 或把积压的消息转到「慢队列」延后处理（不影响新消息）
+
+# 4) 批量消费提升吞吐
+# 关键参数：
+#   max.poll.records = 500        # 默认 500，可调到 2000~5000
+#   fetch.min.bytes = 1           # 攒够了再返回
+#   fetch.max.wait.ms = 500       # 最多等 500ms
+# 效果：减少网络往返，吞吐常能提升 3~5 倍</code></pre><pre><code>// 5) 消费者线程池模式（突破单线程消费的限制）
+// 拉取是单线程（保证分区顺序），处理交给线程池
+executor = Executors.newFixedThreadPool(32);
+while (true) {
+    ConsumerRecords&lt;String, String&gt; records = consumer.poll(Duration.ofMillis(100));
+    // 按分区分组，保证同分区的消息交给同一个线程（保序）
+    for (TopicPartition tp : records.partitions()) {
+        List&lt;ConsumerRecord&lt;String,String&gt;&gt; part = records.records(tp);
+        executor.submit(() -&gt; {
+            for (ConsumerRecord&lt;String,String&gt; r : part) process(r);
+            // 处理完后手动提交该分区的 offset
+            synchronized (consumer) {
+                consumer.commitSync(Collections.singletonMap(tp,
+                    new OffsetAndMetadata(part.get(part.size()-1).offset() + 1)));
+            }
+        });
+    }
+}
+// 注意：手动提交 offset 要小心，避免「处理失败但 offset 已提交」导致丢消息</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>积压持续上涨</td><td>消费能力 &lt; 生产速率</td><td>扩容消费者/分区；优化单条处理耗时</td></tr><tr><td>加了消费者没用</td><td>消费者数 &gt; 分区数（Kafka）</td><td>先加分区；多余的消费者是空闲的</td></tr><tr><td>消费很慢</td><td>单条处理有 IO/网络等待</td><td>批量处理；改异步；查下游瓶颈</td></tr><tr><td>频繁 rebalance</td><td>消费超时 / 心跳超时</td><td>调 <code>max.poll.interval.ms</code>；减少单批处理量</td></tr><tr><td>重复消费</td><td>offset 提交时机不对</td><td>先处理再提交；或用幂等消费</td></tr><tr><td>丢消息</td><td>自动提交 offset 但处理失败</td><td>改手动提交；保证「处理成功后再提交」</td></tr><tr><td>顺序乱了</td><td>多线程处理同一分区</td><td>按分区分配线程；或用单线程处理</td></tr></tbody></table></div><p class="muted"><b>积压处理的优先级</b>：① 先<b>止血</b>（扩容/降级，防止继续恶化）；② 再<b>消化</b>存量；③ 最后<b>根治</b>（优化处理逻辑）。不要一上来就改代码——先扩容把积压压下去，再从容优化。</p></div></section>
 </body>
 </html>

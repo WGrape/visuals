@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -184,7 +202,68 @@ SELECT * FROM t WHERE id IN (
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>四种集合运算对照</h2><div class="table-wrap"><table><thead><tr><th>运算</th><th>语义</th><th>去重</th><th>代价量级</th></tr></thead><tbody><tr><td><code>UNION</code></td><td>并集</td><td><b>去重</b>（需排序/哈希）</td><td>最贵，O(n log n)</td></tr><tr><td><code>UNION ALL</code></td><td>并集</td><td><b>不去重</b></td><td>最便宜，直接拼接</td></tr><tr><td><code>INTERSECT</code></td><td>交集</td><td>去重</td><td>中等，需两遍扫描</td></tr><tr><td><code>EXCEPT / MINUS</code></td><td>差集（左减右）</td><td>去重</td><td>中等，同上</td></tr></tbody></table></div><p><b>能用 UNION ALL 就别用 UNION</b>：去重要额外做一次排序或建哈希表，在百万行上是<strong>数倍</strong>差距。只有在确实需要去重、或两源有重叠且逻辑要求唯一时才用 <code>UNION</code>。</p><p><b>去重粒度</b></p><pre><code>-- 陷阱：UNION 的去重是整行比较，包含所有列
+SELECT id, name FROM a
+UNION
+SELECT id, name FROM b;
+-- 若 a 有 (1,'x')、b 有 (1,'x') → 只留一行
+-- 若 a 有 (1,'x')、b 有 (1,'y') → 两行都留
+
+-- 想按“主键去重”而非整行去重，应改用 ROW_NUMBER
+SELECT id, name FROM (
+  SELECT id, name,
+         ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC) rn
+  FROM (SELECT * FROM a UNION ALL SELECT * FROM b) t
+) x WHERE rn = 1;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>NULL 在集合运算中的行为</h2><p><b>关键差异</b>：集合运算的去重把 <code>NULL</code> 视为<strong>相等</strong>（与 <code>=</code> 比较的行为相反）。所以两行都是 NULL 会被合并成一行。</p><div class="table-wrap"><table><thead><tr><th>场景</th><th>结果</th><th>说明</th></tr></thead><tbody><tr><td><code>UNION</code> 两侧各有 NULL 行</td><td><b>合并为一行</b></td><td>去重时 NULL = NULL 成立</td></tr><tr><td><code>INTERSECT</code> 含 NULL</td><td><b>能匹配上</b></td><td>同上，两边 NULL 视为相同</td></tr><tr><td><code>EXCEPT</code> 含 NULL</td><td><b>NULL 行会被减掉</b></td><td>左侧 NULL 在右侧也出现时被剔除</td></tr></tbody></table></div><p class="muted">这与 <code>WHERE</code> 里的 NULL 行为<strong>不一致</strong>，是集合运算最容易踩的坑。如果业务上要区分“未知”与“相同”，必须先 <code>COALESCE</code> 成哨兵值。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>列数、类型与排序规则</h2><ul><li>两侧<strong>列数必须相同</strong>，否则直接语法报错。</li><li>对应列的<strong>类型必须兼容</strong>，MySQL 会隐式转换（易踩坑），PostgreSQL 要求可隐式转换，否则报 <code>UNION types ... cannot be matched</code>。</li><li>结果集的<strong>列名取自第一个 SELECT</strong>，后续 SELECT 的别名被忽略。</li><li><code>ORDER BY</code> 只能写在<strong>最后一条 SELECT 之后</strong>，且只能引用第一个 SELECT 的列名或位置编号。</li><li><code>ORDER BY 1</code>（位置编号）在集合运算里是常见写法，但可读性差且列顺序变动时易错，建议显式别名。</li></ul><p><b>排序写法</b></p><pre><code>-- 正确：ORDER BY 写在最后，引用第一个 SELECT 的列名
+SELECT id, name, created_at FROM orders_2025
+UNION ALL
+SELECT id, name, created_at FROM orders_2026
+ORDER BY created_at DESC
+LIMIT 100;
+
+-- 错误：在单个分支里写 ORDER BY（语法错误或无效果）
+SELECT id FROM a ORDER BY id      -- ✗
+UNION ALL
+SELECT id FROM b;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：<code>UNION</code> 和 <code>OR</code> 什么时候等价？</summary><p>A：把两个条件拆成两次查询再 <code>UNION</code>，通常<strong>比 <code>OR</code> 更快</strong>——因为 <code>OR</code> 常导致索引失效而走全表。但两者语义不等价：<code>UNION</code> 会去重，<code>OR</code> 不会。要等价需写成 <code>UNION ALL</code> 且确保两条件互斥（无重叠行）。</p></details><details><summary>Q：怎么判断两表差异（有/没有的行）？</summary><p>A：双向差集：左减右 + 右减左。更高效的是一次全外连接加状态标记：<code>SELECT COALESCE(a.id,b.id) id, CASE WHEN a.id IS NULL THEN 'only_b' WHEN b.id IS NULL THEN 'only_a' ELSE 'both' END FROM a FULL OUTER JOIN b ON a.id=b.id</code>。</p></details><details><summary>Q：<code>EXCEPT</code> 在 MySQL 里没有怎么办？</summary><p>A：MySQL 8.0.31 之前不支持 <code>INTERSECT/EXCEPT</code>。替代写法：差集用 <code>LEFT JOIN ... WHERE b.id IS NULL</code> 或 <code>NOT EXISTS</code>；交集用 <code>INNER JOIN</code> 或 <code>IN</code>。<strong>注意 NULL 语义差异</strong>——<code>NOT IN</code> 遇 NULL 会返回空集，务必用 <code>NOT EXISTS</code>。</p></details><details><summary>Q：为什么 <code>UNION ALL</code> 结果行数比预期多？</summary><p>A：<code>UNION ALL</code> 不做任何去重，两源若有重叠就会重复出现。这是它的正确行为——常用于「分库分表汇总」或「按月份分区合并」，此时各源互斥，行数应该正好相加。若不该多，说明上游有重复数据，而不是 UNION ALL 的问题。</p></details></div></section>
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 概念与判定：三种集合运算</h2><div class="table-wrap"><table><thead><tr><th>运算</th><th>语义</th><th>数学符号</th><th>是否去重</th><th>典型用途</th></tr></thead><tbody><tr><td><b>UNION</b></td><td>合并两个结果</td><td>A ∪ B</td><td><b>去重</b></td><td>合并同类数据</td></tr><tr><td><b>UNION ALL</b></td><td>合并两个结果</td><td>A ∪ B</td><td><b>不去重</b></td><td><b>性能更好，首选</b></td></tr><tr><td><b>INTERSECT</b></td><td>取交集</td><td>A ∩ B</td><td>去重</td><td>找共同部分</td></tr><tr><td><b>EXCEPT / MINUS</b></td><td>取差集（在 A 不在 B）</td><td>A − B</td><td>去重</td><td>找差异（Oracle 叫 MINUS）</td></tr></tbody></table></div><ul><li>信号一：合并两个查询且不需要去重 → <b>UNION ALL</b>（比 UNION 快很多）。</li><li>信号二：需要「两个表都有」→ INTERSECT（可用 INNER JOIN 替代）。</li><li>信号三：需要「在 A 不在 B」→ EXCEPT（可用 NOT EXISTS 替代）。</li></ul><p class="muted">关键性能点：<b>UNION 会做一次去重（排序或哈希），UNION ALL 不会</b>。在确认没有重复时，UNION ALL 能省掉这一步，大结果集下差距明显。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 参数·命令·量化：语法与规则</h2><p><b>集合运算语法</b></p><pre><code>-- 基本规则：两个查询的列数、列类型必须对应；列名取自第一个查询
+SELECT id, name FROM t1
+UNION ALL
+SELECT id, name FROM t2;
+
+-- UNION（去重）vs UNION ALL（不去重）
+SELECT city FROM customers
+UNION                        -- 去重：需要额外排序/哈希
+SELECT city FROM suppliers;
+
+SELECT city FROM customers
+UNION ALL                    -- 不去重：直接拼接，更快
+SELECT city FROM suppliers;
+
+-- INTERSECT：两个表都出现过的城市（MySQL 无 INTERSECT，用 INNER JOIN 替代）
+SELECT city FROM customers
+INTERSECT
+SELECT city FROM suppliers;
+-- MySQL 替代写法
+SELECT DISTINCT c.city FROM customers c JOIN suppliers s ON s.city = c.city;
+
+-- EXCEPT：在 A 不在 B（Oracle 用 MINUS，MySQL 用 NOT EXISTS 替代）
+SELECT city FROM customers
+EXCEPT
+SELECT city FROM suppliers;
+-- MySQL 替代写法
+SELECT DISTINCT city FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM suppliers s WHERE s.city = c.city);
+
+-- ORDER BY 只能写在最后，且作用于整个结果
+SELECT id, name FROM t1 UNION ALL SELECT id, name FROM t2 ORDER BY id;</code></pre><div class="table-wrap"><table><thead><tr><th>规则</th><th>说明</th><th>易错点</th></tr></thead><tbody><tr><td>列数必须相同</td><td>两个 SELECT 的列数一致</td><td>报「列数不匹配」</td></tr><tr><td>类型需兼容</td><td>对应列类型可隐式转换</td><td>MySQL 宽松，PG 严格</td></tr><tr><td>列名取第一个</td><td>结果列名来自第一个 SELECT</td><td>给第一个查询起别名</td></tr><tr><td>ORDER BY 放最后</td><td><b>只能有一个，作用整体</b></td><td>不能给单个分支加 ORDER BY</td></tr><tr><td>括号改变优先级</td><td><code>(A UNION B) INTERSECT C</code></td><td>复杂组合时用</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>数据库</th><th>UNION ALL</th><th>INTERSECT</th><th>EXCEPT</th><th>替代方案</th></tr></thead><tbody><tr><td>PostgreSQL</td><td>✅</td><td>✅</td><td>✅</td><td>—</td></tr><tr><td>MySQL 8.0</td><td>✅</td><td><b>❌</b></td><td><b>❌</b></td><td>用 JOIN / NOT EXISTS</td></tr><tr><td>Oracle</td><td>✅</td><td>✅</td><td><code>MINUS</code></td><td>—</td></tr><tr><td>SQL Server</td><td>✅</td><td>✅</td><td>✅</td><td>—</td></tr></tbody></table></div><p class="muted">量化参考：百万行级结果集，<code>UNION</code> 比 <code>UNION ALL</code> 慢 <b>2～5 倍</b>（去重需要排序或建哈希表）。确认无重复时永远用 UNION ALL。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 原理与取舍：集合运算 vs JOIN</h2><div class="table-wrap"><table><thead><tr><th>需求</th><th>集合运算</th><th>JOIN 替代</th><th>选哪个</th></tr></thead><tbody><tr><td>合并行（纵向拼接）</td><td><b>UNION ALL</b></td><td>做不到</td><td>集合运算</td></tr><tr><td>取交集</td><td>INTERSECT</td><td><code>INNER JOIN + DISTINCT</code></td><td>MySQL 用 JOIN</td></tr><tr><td>取差集</td><td>EXCEPT</td><td><code>NOT EXISTS</code> / LEFT JOIN IS NULL</td><td><b>NOT EXISTS 更快</b></td></tr><tr><td>同时取多列关联</td><td>不适合</td><td><b>JOIN 更自然</b></td><td>JOIN</td></tr></tbody></table></div><details><summary>什么时候用集合运算，什么时候用 JOIN？</summary><p>核心区别：<b>集合运算是「纵向」拼行（行数相加），JOIN 是「横向」拼列（列数相加）</b>。要合并同类记录用 UNION ALL；要按关联键把两张表的字段拼到一起用 JOIN。</p></details><details><summary>为什么 EXCEPT 常被 NOT EXISTS 替代？</summary><p>两个原因：① MySQL 不支持 EXCEPT，只能替代；② NOT EXISTS 可以<b>提前终止</b>（找到匹配就停），而 EXCEPT 通常要物化两个结果集再做差，大数据量下 NOT EXISTS 更快。</p></details><details><summary>UNION 的去重是怎么实现的？</summary><p>通常是「排序去重」或「哈希去重」：把所有行排一遍/建哈希表，相邻/哈希相同的只留一条。这就是为什么它比 UNION ALL 慢——多了一次 O(n log n) 或额外的内存开销。</p></details></div></section>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 集合运算 ·
   <a href="../../index.html">返回目录</a> ·

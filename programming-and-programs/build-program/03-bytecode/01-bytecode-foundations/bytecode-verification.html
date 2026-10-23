@@ -18,6 +18,50 @@ RETURN   ; 返回 5</code></pre>
 <section class="panel" data-depth-note><h2>验证器的安全边界</h2><p>若字节码来自不可信来源，非法跳转、越界操作数或类型混淆可能成为运行时崩溃甚至逃逸的入口，因此验证器本身也是攻击面。解析时要先检查长度和索引边界，再构造控制流；不要在确认偏移合法前直接按它访问指令数组。验证器要对畸形输入快速拒绝，防止攻击者提交极大控制流图消耗 CPU 或内存。即使验证成功，仍要用权限隔离、资源配额和运行时边界保护宿主环境。结构正确的字节码仍可能写出无限循环或发起不被允许的外部访问。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>一个有效测试是自动生成畸形控制流：随机跳转偏移、缺失操作数、分支汇合时不一致的栈高度，以及深层循环。验证器应稳定拒绝非法输入，而不是崩溃、无限循环或消耗无界内存。对可信编译器输出和不可信外部字节码采用不同测试集。</p></section>
 <section class="panel" data-final-case><h2>补充判断</h2><p>同一控制流图中，不可达代码是否仍需验证由 VM 规范决定。有的格式要求所有指令结构合法，有的检查只传播可达路径。实现与测试必须遵循目标 VM 的规范，不能凭一次样本运行结果猜测。</p></section>
+<section class="panel" data-dry-goods><h2>字节码校验的检查项</h2><div class="table-wrap"><table><thead><tr><th>检查类别</th><th>具体内容</th><th>目的</th></tr></thead><tbody><tr><td><b>结构检查</b></td><td>魔数 <code>0xCAFEBABE</code>、版本号、常量池合法性</td><td>确认是合法的 class 文件</td></tr><tr><td><b>类型检查</b></td><td>操作数栈上的类型与指令要求匹配</td><td>防止类型混淆攻击</td></tr><tr><td><b>栈深度检查</b></td><td>每条指令处操作数栈深度确定且一致</td><td>防止栈上溢/下溢</td></tr><tr><td><b>控制流检查</b></td><td>跳转目标必须是<b>指令边界</b>且在本方法内</td><td>防止跳到指令中间执行非法字节码</td></tr><tr><td><b>局部变量检查</b></td><td>使用前必须已初始化（除 int 的 0 初始化）</td><td>防止读到未定义值</td></tr><tr><td><b>访问权限</b></td><td>不能访问 private 字段/方法</td><td>类型安全</td></tr><tr><td><b>final 语义</b></td><td>final 类不能被继承，final 字段不能被写</td><td>语言语义保证</td></tr></tbody></table></div><p><b>为什么需要校验</b>：字节码不一定由 javac 生成，可能是手写的、被篡改的、或从网络下载的。JVM 必须在<b>运行前</b>确认它不会破坏类型系统——否则攻击者可以构造「把 int 当对象引用用」的字节码，直接读写任意内存。<b>这是 JVM 安全模型的第一道防线</b>（第二道是安全管理器与类加载隔离）。</p></section><section class="panel"><h2>观察与分析</h2><pre><code># 查看字节码
+javap -c MyClass.class          # 反汇编
+javap -v MyClass.class          # 详细（含常量池、栈深度、局部变量表）
+# 输出示例：
+#   public int add(int, int);
+#     Code:
+#       stack=2, locals=3, args_size=3     &lt;- 最大栈深度2，局部变量3个
+#          0: iload_1
+#          1: iload_2
+#          2: iadd
+#          3: ireturn
+#       LineNumberTable: ...
+
+# 栈深度是&lt;b&gt;静态确定&lt;/b&gt;的：校验器在加载时就能算出每条指令处的栈深度
+# 这是 JVM 能高效执行的基础——运行时不需要动态检查
+
+# 关闭校验（仅调试用，生产绝对不行）
+java -Xverify:none MyClass
+# 或 -noverify（旧版本）
+
+# 栈 Map Table（Java 7+ 的 StackMapTable 属性）
+# 为了让校验只需&lt;b&gt;一遍&lt;/b&gt;扫描，class 文件里预先存了控制流汇聚点的类型状态
+# javac 会自动生成；手写字节码时必须正确填写，否则会 VerifyError</code></pre><pre><code>// 常见的 VerifyError 及原因
+// 1) 跳转目标落在指令中间
+//    goto 到某条指令的第 2 个字节 -&gt; "Illegal target of jump or branch"
+
+// 2) 操作数栈类型不匹配
+//    iconst_1        // 压入 int
+//    invokevirtual #Method java/lang/String.length:()I
+//    -&gt; "Bad type on operand stack"（栈顶是 int 不是 String 引用）
+
+// 3) 栈深度不一致（不同路径到达同一指令时栈深度不同）
+//    if (x) { push } else { /* 没 push */ }
+//    // 汇聚点栈深度不同 -&gt; "Inconsistent stackmap frames"
+
+// 4) 使用未初始化的局部变量
+//    -&gt; "Accessing value from uninitialized register"
+
+// 5) 栈溢出
+//    -&gt; "Stack overflow"（操作数栈超过 max_stack）
+
+// 修复办法：用 ASM 等库生成字节码，它们会自动计算栈帧
+// 或手写时用 -Xverify:all 反复验证</code></pre></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么 Java 的校验能在加载时完成，而某些语言需要运行时检查？</summary><p>因为 JVM 字节码是<b>强类型</b>的、栈深度<b>静态可确定</b>的。校验器沿控制流做一遍数据流分析，就能确认所有路径上类型一致。像 C 那样的语言无法做到，因为指针运算让类型不可静态判定。</p></details><details><summary>校验会影响启动速度吗？</summary><p>会，但很小。JVM 只对<b>首次加载</b>的类做完整校验，且校验主要是线性扫描，通常占启动时间的百分之几。Java 7 引入 StackMapTable 后，校验从「多遍迭代」优化为「单遍」，进一步加快。</p></details><details><summary>手改字节码为什么容易 VerifyError？</summary><p>因为 StackMapTable 必须与代码<b>严格一致</b>。改了指令却没更新栈帧表，或者跳转目标偏移算错（字节码里的偏移量是按<b>字节</b>算的），都会失败。这就是必须用 ASM/ByteBuddy 这类库的原因。</p></details><details><summary><code>-Xverify:none</code> 为什么不该用？</summary><p>它关闭了类型安全保证。恶意或损坏的字节码会直接执行，可能读写任意内存、绕过访问控制。生产环境永远不要开。</p></details><details><summary>Android 的 Dalvik/ART 有类似机制吗？</summary><p>有，但设计不同：dex 是<b>寄存器架构</b>（不是栈式），校验更复杂；ART 在 AOT 编译时做大部分验证，运行时开销更小。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>为什么“字节码验证通过”不能保证运行时不出错？</summary><p>它只保证被检查的结构和类型约束；除零、缺失资源和业务逻辑错误仍可能发生。</p></details></section>
 <footer>继续阅读：<a href="bytecode-explainer.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

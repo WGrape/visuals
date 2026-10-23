@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -179,6 +197,59 @@
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>LIKE 与正则的能力边界</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>语法</th><th>通配能力</th><th>能否走索引</th></tr></thead><tbody><tr><td><b>LIKE</b></td><td><code>%</code> 任意多字符、<code>_</code> 单字符</td><td><b>最弱</b></td><td><strong>前缀匹配可走索引</strong></td></tr><tr><td><b>REGEXP / RLIKE</b></td><td>正则</td><td><b>强</b></td><td><strong>通常不能</strong></td></tr><tr><td><b>全文索引</b></td><td><code>MATCH ... AGAINST</code></td><td>分词 + 相关性</td><td><b>能</b>（专用索引）</td></tr></tbody></table></div><p><b>能否走索引的关键规则</b>：</p><div class="table-wrap"><table><thead><tr><th>写法</th><th>走索引?</th><th>原因</th></tr></thead><tbody><tr><td><code>LIKE 'abc%'</code></td><td><b>是</b></td><td>前缀确定，可在 B+ 树定位</td></tr><tr><td><code>LIKE '%abc'</code></td><td><b>否</b></td><td><strong>前缀不确定，只能全扫</strong></td></tr><tr><td><code>LIKE '%abc%'</code></td><td><b>否</b></td><td>同上</td></tr><tr><td><code>LIKE 'abc_'</code></td><td><b>是</b>（到 abc 为止）</td><td>前半段确定</td></tr></tbody></table></div><p><b>后缀匹配优化</b></p><pre><code>-- 反例：后缀/包含匹配在大表上是灾难
+SELECT * FROM users WHERE email LIKE '%@gmail.com';
+-- 1000 万行全表扫描，秒级到分钟级
+
+-- 解法 1：冗余一个反转列（专门优化后缀匹配）
+ALTER TABLE users ADD COLUMN email_rev VARCHAR(255);
+UPDATE users SET email_rev = REVERSE(email);
+CREATE INDEX idx_rev ON users(email_rev);
+SELECT * FROM users WHERE email_rev LIKE REVERSE('%@gmail.com');
+--   REVERSE('%@gmail.com') = 'moc.liamg@%'  → &lt;strong&gt;变成前缀匹配，走索引&lt;/strong&gt;
+
+-- 解法 2：生成列（MySQL 5.7+/PG 都支持，自动维护）
+ALTER TABLE users ADD COLUMN domain VARCHAR(100)
+  GENERATED ALWAYS AS (SUBSTRING_INDEX(email, '@', -1)) STORED;
+CREATE INDEX idx_domain ON users(domain);
+SELECT * FROM users WHERE domain = 'gmail.com';   -- 等值匹配，最快</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>NULL 与转义的坑</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>结果</th><th>说明</th></tr></thead><tbody><tr><td><code>x LIKE '%'</code> 且 x 为 NULL</td><td><b>NULL</b>（不匹配）</td><td><strong>NULL 不参与 LIKE 匹配</strong></td></tr><tr><td><code>x NOT LIKE 'a%'</code> 且 x 为 NULL</td><td><b>NULL</b>（不返回）</td><td>三值逻辑，需 <code>OR x IS NULL</code></td></tr><tr><td>模式里含 <code>%</code>/<code>_</code> 字面量</td><td><strong>需转义</strong></td><td>用 <code>ESCAPE</code> 子句</td></tr><tr><td>大小写</td><td><strong>取决于排序规则</strong></td><td><code>utf8mb4_general_ci</code> 不区分</td></tr></tbody></table></div><p><b>转义与排序</b></p><pre><code>-- 转义特殊字符（搜索字面量 % 或 _）
+SELECT * FROM t WHERE name LIKE '%100\%%' ESCAPE '\';
+--   匹配包含 "100%" 的字符串
+--   注意：ESCAPE 子句必须写，否则 \% 行为未定义
+
+-- PostgreSQL 的写法不同
+SELECT * FROM t WHERE name LIKE '%100#%%' ESCAPE '#';
+
+-- 大小写敏感控制（MySQL）
+SELECT * FROM t WHERE name LIKE 'abc%' COLLATE utf8mb4_bin;   -- 敏感
+SELECT * FROM t WHERE name LIKE 'abc%' COLLATE utf8mb4_general_ci;  -- 不敏感
+
+-- 陷阱：&lt;strong&gt;排序规则决定是否走索引&lt;/strong&gt;
+--   若列的 collation 与查询指定的不同，索引可能失效</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>正则与全文检索的选择</h2><div class="table-wrap"><table><thead><tr><th>需求</th><th>方案</th><th>理由</th></tr></thead><tbody><tr><td><b>简单的前缀/包含</b></td><td><code>LIKE</code></td><td>最简单，前缀能走索引</td></tr><tr><td><b>复杂模式</b>（手机号、邮箱格式校验）</td><td><code>REGEXP</code></td><td>LIKE 表达不了</td></tr><tr><td><b>中文/英文分词搜索</b></td><td><strong>全文索引</strong></td><td><strong>LIKE 与正则都不分词</strong></td></tr><tr><td><b>高亮、相关性排序</b></td><td>全文索引</td><td>LIKE 无相关性概念</td></tr><tr><td><b>模糊搜索 + 相关性</b></td><td>ES / Lucene</td><td>数据库全文索引能力有限</td></tr></tbody></table></div><p><b>为什么中文搜索不能用 LIKE</b>：LIKE 是<strong>子串匹配，不分词</strong>。搜「数据库」能匹配「数据库系统」，但搜「数据 库」（带空格）或「据库」就匹配不到——因为它不理解词的边界。中文全文索引需要<strong>专门的分词器</strong>（MySQL 的 ngram parser、PG 的 zhparser、或直接用 ES）。</p><p><b>中文全文索引</b></p><pre><code>-- MySQL 中文全文索引（ngram 分词器）
+CREATE TABLE articles (
+  id INT PRIMARY KEY,
+  title VARCHAR(200),
+  body TEXT,
+  FULLTEXT (title, body) WITH PARSER ngram      -- &lt;strong&gt;关键：ngram&lt;/strong&gt;
+) ENGINE=InnoDB;
+
+-- ngram_token_size 默认 2（二字分词），需重启生效
+--   SHOW VARIABLES LIKE 'ngram_token_size';
+
+SELECT *, MATCH(title, body) AGAINST('分布式系统' IN NATURAL LANGUAGE MODE) AS score
+FROM articles
+WHERE MATCH(title, body) AGAINST('分布式系统' IN NATURAL LANGUAGE MODE)
+ORDER BY score DESC;
+
+-- 限制：
+#   1) 默认忽略长度 &lt; ngram_token_size 的词（如单字「书」搜不到）
+#   2) 有停用词表，常见词被忽略
+#   3) InnoDB 全文索引仅支持 CHAR/VARCHAR/TEXT
+#   4) 分区表不支持全文索引</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：<code>LIKE '%x%'</code> 一定全表扫描吗？</summary><p>A：<strong>通常是的，但有两个例外</strong>——① 如果查询<strong>只需要索引列</strong>（覆盖索引），优化器可能扫索引而不扫表（索引通常比表小得多，IO 更少）；② MySQL 8.0 的<strong>倒排索引</strong>或某些数据库的 GIN/trigram 索引（PostgreSQL 的 <code>pg_trgm</code> 扩展）能加速包含匹配。所以真有高频的包含搜索需求，PostgreSQL 的 pg_trgm 或专门的搜索引擎是正解，而不是硬扛 LIKE。</p></details><details><summary>Q：为什么我加了索引，LIKE 还是慢？</summary><p>A：按可能性——① <strong>模式以 % 开头</strong>（前面说的，无法用 B+ 树）；② <strong>返回行数太多</strong>：即使走索引，命中 50% 的行时优化器会判断全表更快；③ <strong>索引列上做了函数变换</strong>（如 <code>LOWER(name) LIKE ...</code>），导致索引失效；④ <strong>排序规则不匹配</strong>。诊断用 <code>EXPLAIN</code> 看 <code>type</code> 是 <code>range</code>（走索引）还是 <code>ALL</code>（全扫）。</p></details><details><summary>Q：<code>RLIKE</code> 和 <code>REGEXP</code> 有区别吗？</summary><p>A：<strong>MySQL 里完全等价</strong>，<code>RLIKE</code> 是 <code>REGEXP</code> 的同义词。真正的区别在<strong>正则方言</strong>：MySQL 8.0 前用 Henry Spencer 正则（不支持 <code>\d</code>、<code>\w</code> 等 PCRE 简写），8.0+ 改用 ICU（支持 <code>\d</code>）。PostgreSQL 用 POSIX 正则，<code>~</code> 操作符区分大小写、<code>~*</code> 不区分。<strong>跨库迁移时正则语法必须重写</strong>，这是常见的迁移坑。</p></details><details><summary>Q：全文索引和 LIKE 该什么时候切换？</summary><p>A：<strong>三个信号</strong>——① 需要<strong>分词</strong>（中文、英文单词边界）；② 需要<strong>相关性排序</strong>（不只是「匹配/不匹配」，还要「有多匹配」）；③ 数据量与查询量让 LIKE 的全表扫描扛不住（大表上 LIKE 是 O(n)）。若只是简单的前缀搜索（如「输入 abc 自动补全」），LIKE + 索引完全够用，<strong>不要过早引入全文索引</strong>——它有额外的维护成本与限制。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 模式匹配 ·

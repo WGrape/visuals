@@ -869,6 +869,24 @@
             transform: translateY(0);
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="bg-animation"></div>
@@ -1396,7 +1414,56 @@ consumer:
         </section>
     </div>
 
-    <footer>
+    
+<section class="hero" data-dry-goods><div class="x-dry"><h2>热点问题的两种形态与定位</h2><p>ES 的热点分两类，解法完全不同：<b>热点分片</b>（某个 shard 承载过多查询）和<b>热点文档</b>（某个 doc 被疯狂访问）。先分清是哪一类。</p><div class="table-wrap"><table><thead><tr><th>类型</th><th>表现</th><th>定位方法</th><th>根因</th></tr></thead><tbody><tr><td><b>热点分片</b></td><td>某几个节点的 CPU / LOAD 明显高于其他</td><td><code>GET _cat/shards</code> 看各分片 docs/store；<code>_cat/nodes</code> 看 CPU</td><td>路由键分布不均（如按租户 id 路由，大租户全落一片）</td></tr><tr><td><b>热点文档</b></td><td>整体 CPU 不高但某查询极慢</td><td><code>_nodes/hot_threads</code> 看具体线程栈</td><td>高频词/热门商品，倒排列表超长</td></tr><tr><td><b>热点索引</b></td><td>单个索引 QPS 远高于其他</td><td>按索引统计 <code>_cat/indices</code> 的 search.total</td><td>大促/热点事件集中在一个索引</td></tr><tr><td><b>写入热点</b></td><td>某分片 indexing 延迟高、段合并频繁</td><td><code>_cat/thread_pool/write</code> 看队列与拒绝</td><td>单分片写入超过几千 docs/s</td></tr></tbody></table></div><p><b>定位命令</b></p><pre><code># 1) 看分片分布是否均衡（最容易发现热点分片）
+GET _cat/shards?v&amp;s=node,index,shard&amp;h=index,shard,prirep,node,docs,store
+
+# 2) 看节点负载
+GET _cat/nodes?v&amp;h=name,cpu,load_1m,heap.percent,ram.percent,disk.used_percent
+
+# 3) 定位热点线程（每 5 秒采一次，采 10 次）
+GET _nodes/hot_threads?threads=5&amp;interval=5s&amp;snapshots=10&amp;type=cpu
+
+# 4) 看线程池是否被拒绝（rejected &gt; 0 就是过载信号）
+GET _cat/thread_pool/search?v&amp;h=node,active,queue,rejected,completed
+GET _cat/thread_pool/write?v&amp;h=node,active,queue,rejected
+
+# 5) 单查询剖析（找到底慢在哪一步）
+GET my_index/_search
+{
+  "profile": true,
+  "query": { "match": { "title": "hotword" } }
+}
+#   返回里看每个 Query/TermQuery 的 time_in_nanos，定位到具体子查询</code></pre><p class="muted">健康阈值参考：<code>search</code> 线程池队列默认 1000，<b>rejected &gt; 0 就是明确过载</b>；<code>write</code> 队列默认 200~1000。分片大小建议 <b>20~50 GB</b>（最大不超过 100GB），单节点分片数 <b>不超过 堆内存 GB × 20</b>（如 30GB 堆 → 最多 600 个分片）。</p></div></section>
+<section class="hero" ><div class="x-dry"><h2>解法清单与配置</h2><div class="table-wrap"><table><thead><tr><th>问题</th><th>解法</th><th>代价 / 注意</th></tr></thead><tbody><tr><td>热点分片（路由不均）</td><td>① 换路由键（用更分散的字段）；② <code>_routing</code> 显式分散；③ 增加主分片数</td><td>改路由要重建索引</td></tr><tr><td>热点分片（读多）</td><td><b>增加副本数</b>（<code>number_of_replicas</code>），读请求分散到副本</td><td>存储翻倍；副本过多会影响写入性能</td></tr><tr><td>热点索引（读多）</td><td>副本水平扩容 + 加节点；用 <code>preference</code> 分散读</td><td>同上</td></tr><tr><td>热点文档（高频词）</td><td>① 拆分索引（按时间/业务）；② 加<b>查询缓存</b>在应用层；③ 用 <code>terminate_after</code> 限制</td><td>缓存带来一致性问题</td></tr><tr><td>写入热点</td><td>① 增加主分片；② 调大 <code>translog</code> 刷盘间隔；③ 批量写（bulk <b>5~15MB/批</b>）</td><td>刷盘间隔大 = 宕机丢更多</td></tr><tr><td>大促突发流量</td><td>提前<b>扩容 + 预热</b>（<code>_warmers</code> 已废弃，用压测预热）；限流保核心查询</td><td>预热要提前做</td></tr></tbody></table></div><p><b>配置命令</b></p><pre><code># 调整副本（立刻生效，读热点最快的解法）
+PUT my_index/_settings
+{ "index.number_of_replicas": 3 }
+
+# 分片搬迁（把热点分片挪到空闲节点）
+POST _cluster/reroute
+{
+  "commands": [{
+    "move": {
+      "index": "my_index", "shard": 0,
+      "from_node": "node-1", "to_node": "node-4"
+    }
+  }]
+}
+
+# 写入优化（批量导入场景）
+PUT my_index/_settings
+{
+  "index.refresh_interval": "30s",          # 默认 1s，批量导入时调大
+  "index.translog.durability": "async",     # 异步刷盘
+  "index.translog.sync_interval": "10s",
+  "index.number_of_replicas": 0             # 导入期间可先关副本，完成后再开
+}
+
+# bulk 批量大小（经验值）
+#   单批 5~15 MB 或 1000~5000 条，看单条大小
+#   太小：网络往返多；太大：内存压力大、失败重试点大
+curl -XPOST _bulk --data-binary @bulk.json -H 'Content-Type: application/x-ndjson'</code></pre><ul><li><b>副本是读热点最有效的解法</b>：增加副本 = 增加读的并行度，且 ES 会自动把查询分散到所有可用副本。这是唯一一个<b>在线生效、无需重建</b>的扩容手段，所以生产索引一般至少 1 个副本。</li><li><b>分片数一旦设定不能改</b>（除非 reindex）。这是 ES 最重要的设计约束：<code>number_of_shards</code> 要在建索引时按<b>未来 1~2 年的数据量</b>规划，而不是当前。改分片数 = 新建索引 + reindex。</li><li><b>写入瓶颈常在 translog 和 refresh</b>：默认 <code>refresh_interval=1s</code> 意味着每秒生成一个新段，段多了要合并，合并吃 CPU。批量导入场景调到 30s 或 <code>-1</code>（关闭，手动 refresh）能提速数倍。</li><li><b>限流保核心</b>：ES 没有内置的请求优先级，突发流量会挤掉核心查询。实践是在<b>应用层/网关层</b>做限流和优先级队列，把「搜索框联想」和「后台批量导出」分开限流。</li></ul><details><summary>副本数设多少合适？</summary><p>常规 <b>1~2 个</b>。权衡三件事：① <b>可用性</b>——1 个副本可容忍 1 节点故障；② <b>读性能</b>——副本越多读并行度越高；③ <b>成本与写入</b>——每加一个副本，存储翻倍、写入要同步到所有副本。热点读场景可以临时加到 3~5，峰值过后再降回来（在线生效，很方便）。</p></details><details><summary>分片数怎么定？</summary><p>按<b>目标分片大小反推</b>：分片大小目标 20~50 GB。若预计 1 年后数据 500GB，则 <code>500/30 ≈ 16</code> 个主分片。宁可略少不要过多——分片多了每个分片的固定开销（文件句柄、内存）会累积，且聚合查询要跨片合并，片越多越慢。<b>常见错误是按节点数平均分</b>，结果数据量增长后分片过大无法分裂。</p></details><details><summary>为什么加了副本还是慢？</summary><p>三种情况：① <b>热点是单个查询本身慢</b>（如深分页、大 aggregation），加副本只是并行度增加，单次查询复杂度没降——要去优化查询（用 search_after、限制 size、加 filter 顺序）；② <b>瓶颈在协调节点</b>（coordinating node 做合并），加数据节点没用；③ <b>副本还没分配完</b>（<code>GET _cat/shards</code> 看有没有 UNASSIGNED）。</p></details></div></section>
+<footer>
         <p>💡 面试提示：回答时先分析问题，再讲解决思路，最后说具体方案，体现出系统性的架构思维</p>
     </footer>
 

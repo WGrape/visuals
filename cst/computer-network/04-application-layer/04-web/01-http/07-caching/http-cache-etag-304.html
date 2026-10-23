@@ -11,6 +11,23 @@
 <section class="panel"><h2>一次 CDN 与浏览器双层缓存</h2><p>用户请求 `/logo.png`，浏览器缓存未命中；CDN 节点若有新鲜副本，会直接返回，源站看不到请求。若 CDN 副本过期，它可能向源站条件验证，源站回 304 后 CDN 再按自身策略响应用户。浏览器与 CDN 的缓存期限可以不同，因此“源站日志没有请求”并不说明用户没有访问。分析故障要从浏览器响应头、CDN 日志和源站日志三处对齐。</p><p>CDN 失效指令和普通 TTL 也不是同一个机制。发布新版本时使用文件名哈希，例如 `app.a1b2.js`，可以给不可变资源设置长缓存；HTML 入口保持短缓存或可验证，引用新文件名。覆盖写同一个长 TTL 文件名，再期待所有边缘和浏览器立即更新，容易产生版本混用。</p></section>
 <section class="panel"><h2>304 与其他状态的边界</h2><p>304 是对条件 GET 或 HEAD 的“资源未修改”回答，不能把它当作所有缓存失效请求的统一返回。若资源已删除，应按真实状态返回 404 或 410；若用户权限被撤销，不应因为客户端拿着旧 ETag 就继续返回可用正文。身份验证和授权检查必须在适当位置执行，不能让缓存验证绕过权限。</p><p>缓存层的错误还可能表现为 200 响应了旧正文，这比 304 更容易误导排查。需要记录资源版本、Age、ETag、Cache-Control 和边缘节点标识，再判断旧内容来自浏览器、CDN 还是源站。无论命中率多高，业务都要定义最大可容忍陈旧时间。</p></section>
 <section class="panel"><h2>动手验证一个资源</h2><p>浏览器开发者工具里先清空缓存请求一次，记录状态 200、正文、ETag 与 Cache-Control；随后不刷新或普通刷新，看是否直接用内存/磁盘缓存；待新鲜期过后看是否发送 If-None-Match 并收到 304。改动资源后再次请求，应看到 200 与新版本。测试时区分开发者工具“禁用缓存”开关，它会改变正常路径。</p><p>如果服务经 CDN，再分别直连源站与访问公开域名，对照响应头和版本。用真实用户身份与另一用户身份测试私人资源，确保缓存键不会串数据。</p></section>
+<section class="panel" data-dry-goods><h2>Cache-Control 指令速查</h2><div class="table-wrap"><table><thead><tr><th>指令</th><th>含义</th><th>适用场景</th></tr></thead><tbody><tr><td><code>max-age=秒</code></td><td>新鲜期，期间不发请求</td><td>静态资源，配版本号用长值（31536000 = 1 年）</td></tr><tr><td><code>s-maxage=秒</code></td><td>只对<b>共享缓存</b>（CDN/代理）生效，优先级高于 max-age</td><td>CDN 缓存时间</td></tr><tr><td><code>no-cache</code></td><td><b>可以缓存，但每次必须先校验</b>（发条件请求）</td><td>HTML 入口、需要实时但可复用 304</td></tr><tr><td><code>no-store</code></td><td>完全不缓存（含磁盘）</td><td>含敏感信息的响应</td></tr><tr><td><code>must-revalidate</code></td><td>过期后必须校验成功才能用，不允许用陈旧副本</td><td>金融/订单类</td></tr><tr><td><code>immutable</code></td><td>告诉浏览器“带指纹的资源永不变更”，别再校验</td><td>配合 hash 文件名（app.a1b2c3.js）</td></tr><tr><td><code>stale-while-revalidate=秒</code></td><td>过期后先给旧的，后台异步刷新</td><td>容忍短暂陈旧换零延迟</td></tr><tr><td><code>private</code> / <code>public</code></td><td>只能私有缓存 / 允许共享缓存</td><td>用户相关数据用 private</td></tr></tbody></table></div><p><b>强缓存 vs 协商缓存</b>：<code>Cache-Control</code> 决定“要不要发请求”；<code>ETag</code>/<code>Last-Modified</code> 决定“发了请求后能否返回 304 空体”。命中强缓存时浏览器<b>完全不发请求</b>（Network 面板显示 from disk/memory cache）。</p><p><b>缓存验证命令</b></p><pre><code># 看响应缓存头
+curl -I https://example.com/app.js
+# cache-control: public, max-age=31536000, immutable
+# etag: "a1b2c3"
+# last-modified: Tue, 20 Oct 2026 08:00:00 GMT
+
+# 模拟条件请求（协商缓存）
+curl -i -H 'If-None-Match: "a1b2c3"' https://example.com/app.js
+# → 304 Not Modified（无 body，省流量）
+
+curl -i -H 'If-Modified-Since: Tue, 20 Oct 2026 08:00:00 GMT' https://example.com/app.js
+
+# 对比大小与耗时
+curl -o /dev/null -w 'code=%{http_code} size=%{size_download} t=%{time_total}\n' https://example.com/app.js
+
+# 强制绕过缓存
+curl -H 'Cache-Control: no-cache' -I https://example.com/app.js</code></pre><p class="muted">ETag 分强弱：<code>"abc"</code> 是<b>强校验</b>（字节级一致），<code>W/"abc"</code> 是<b>弱校验</b>（语义等价即可，如只压缩方式不同）。弱 ETag 只能用于 GET 的 304 判断，不能用于断点续传的 <code>If-Range</code>。</p></section><section class="panel"><h2>过期时间计算与常见坑</h2><ul><li><b>启发式过期</b>：响应<b>没有</b> Cache-Control/Expires，但有 Last-Modified 时，浏览器会按 <code>(当前时间 − Last-Modified) / 10</code> 猜一个新鲜期。这是“没配缓存头却还是被缓存了”的原因。</li><li><b>Age 头</b>：表示响应在共享缓存里已经存了多久（秒）。CDN 返回 Age &gt; 0 说明是缓存副本；判断缓存是否快过期要看 <code>max-age − Age</code>。</li><li><b>Vary 要谨慎</b>：<code>Vary: User-Agent</code> 会让缓存 key 爆炸（成千上万个 UA），命中率暴跌。只按真正影响响应的头变化（<code>Accept-Encoding</code>、<code>Origin</code>）。</li><li><b>最佳实践</b>：HTML 用 <code>no-cache</code>（每次校验，秒级更新）；带 hash 的 JS/CSS 用 <code>max-age=31536000, immutable</code>（一年不变）；图片/字体同理。这样既零延迟又能即时发布。</li><li><b>Service Worker 是额外一层</b>：它在 HTTP 缓存之上再缓存一次，排查时要区分 <code>from ServiceWorker</code> 与 <code>from disk cache</code>。</li><li><b>排障清单</b>：① 看 <code>Cache-Control</code> 有没有；② 看 <code>Age</code> 判断是否 CDN 缓存；③ 用 <code>If-None-Match</code> 测 304 是否正常；④ 检查 <code>Vary</code> 是否过宽导致命中率低。</li></ul><details><summary>设置了 no-cache 为什么还是看到旧内容？</summary><p><code>no-cache</code> 的语义是“必须校验后使用”，不是“不缓存”。如果服务端 ETag 判断逻辑有问题（或没返回 304），就会一直返回新内容——那反而是正常的。真正“绝不缓存”是 <code>no-store</code>。</p></details><details><summary>max-age=0 和 no-cache 一样吗？</summary><p>效果上几乎等价（都要求立即校验），但 <code>no-cache</code> 语义更明确，且对旧代理的兼容性更好。规范上 <code>must-revalidate</code> 还需要配合才能禁止使用陈旧响应。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>响应头写了 no-cache，浏览器是否绝对不能保存正文？</summary><p>不是。no-cache 通常允许保存，但复用前必须验证；no-store 才是不要存储的指令。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../03-message-format/http-packet-format-dynamic.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -67,6 +67,16 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,31 +86,145 @@
   <p>为什么 PG 必须定期 vacuum：回收死元组、更新统计、冻结事务ID。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#v1">为什么需要</a><a href="#v2">三种 vacuum</a><a href="#v3">autovacuum 调优</a><a href="#v4">监控</a></nav>
+  <nav class="toc"><a href="#s1">① 为什么需要 VACUUM</a><a href="#s2">② 三种清理方式对比</a><a href="#s3">③ Autovacuum：什么时候自动清</a><a href="#s4">④ 事务 ID 回卷与 freeze</a><a href="#s5">⑤ 什么会阻止 VACUUM 回收</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="v1"><h2>① 为什么 PG 必须 vacuum</h2>
-<p>MVCC 的 UPDATE/DELETE 只标记旧版本为死元组，不会立即释放空间。死元组堆积会：拖慢扫描、撑大表文件（膨胀）、并让事务 ID 不断前进逼近回卷阈值。VACUUM 负责回收这些空间、更新可见性映射、<strong>冻结老事务 ID</strong>。</p>
+<section id="s1"><h2>① 为什么需要 VACUUM</h2>
+
+<p>PostgreSQL 的 MVCC 让 UPDATE 变成「插入新版本 + 旧版本标记删除」。旧版本（<strong>死元组 dead tuple</strong>）不会自动消失：</p>
+<ul>
+<li>它们<strong>仍占用磁盘页</strong>，让表与索引变大（膨胀），IO 变多；</li>
+<li>它们<strong>仍在索引里</strong>，让索引扫描要多走无效条目；</li>
+<li>它们可能<strong>阻塞事务 ID 回卷防护</strong>（需要 freeze）。</li>
+</ul>
+<p><strong>VACUUM 的职责</strong>就是：把不再被任何事务可见的行版本<strong>标记为可复用</strong>、更新可见性映射（VM）与空闲空间映射（FSM）、回收事务 ID（freeze）、更新统计信息（配合 ANALYZE）。</p>
+<figure class="fig">
+<svg viewBox="0 0 700 190" role="img" aria-label="VACUUM 前后对比">
+  <text x="170" y="24" fill="#e6edf3" font-size="13" text-anchor="middle">VACUUM 前</text>
+  <rect x="40" y="40" width="260" height="120" fill="#161b22" stroke="#30363d"/>
+  <rect x="50" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <text x="75" y="66" fill="#e6edf3" font-size="11" text-anchor="middle">活</text>
+  <rect x="105" y="50" width="50" height="24" fill="rgba(248,81,73,.5)" stroke="#f85149"/>
+  <text x="130" y="66" fill="#e6edf3" font-size="11" text-anchor="middle">死</text>
+  <rect x="160" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <rect x="215" y="50" width="50" height="24" fill="rgba(248,81,73,.5)" stroke="#f85149"/>
+  <rect x="50" y="82" width="50" height="24" fill="rgba(248,81,73,.5)" stroke="#f85149"/>
+  <rect x="105" y="82" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <rect x="160" y="82" width="50" height="24" fill="rgba(248,81,73,.5)" stroke="#f85149"/>
+  <rect x="215" y="82" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <text x="170" y="140" fill="#8b949e" font-size="12" text-anchor="middle">8 个槽位，4 个是死元组</text>
+  <text x="170" y="178" fill="#f85149" font-size="12" text-anchor="middle">扫描要读全部 8 个槽</text>
+  <path d="M320,100 L380,100" stroke="#58a6ff" stroke-width="2" marker-end="url(#vv1)"/>
+  <text x="350" y="90" fill="#58a6ff" font-size="11" text-anchor="middle">VACUUM</text>
+  <text x="510" y="24" fill="#e6edf3" font-size="13" text-anchor="middle">VACUUM 后</text>
+  <rect x="390" y="40" width="260" height="120" fill="#161b22" stroke="#30363d"/>
+  <rect x="400" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <text x="425" y="66" fill="#e6edf3" font-size="11" text-anchor="middle">活</text>
+  <rect x="455" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <rect x="510" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <rect x="565" y="50" width="50" height="24" fill="rgba(63,185,80,.5)" stroke="#3fb950"/>
+  <rect x="400" y="82" width="215" height="24" fill="rgba(88,166,255,.18)" stroke="#58a6ff" stroke-dasharray="4 3"/>
+  <text x="507" y="99" fill="#58a6ff" font-size="11" text-anchor="middle">空闲空间（可复用）</text>
+  <text x="520" y="140" fill="#8b949e" font-size="12" text-anchor="middle">活元组紧凑，空闲连续</text>
+  <text x="520" y="178" fill="#3fb950" font-size="12" text-anchor="middle">文件没变小，但可复用</text>
+  <defs><marker id="vv1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#58a6ff"/></marker></defs>
+</svg>
+<figcaption>VACUUM 只做「整理」不「还空间」：文件长度不变，但空闲空间可被后续插入复用</figcaption>
+</figure>
+
 </section>
-<section id="v2"><h2>② 三种 vacuum</h2>
+<section id="s2"><h2>② 三种清理方式对比</h2>
+
 <table>
-  <tr><th>命令</th><th>作用</th><th>锁</th></tr>
-  <tr><td><code>VACUUM</code></td><td>回收空间给本表复用（不还给 OS），更新统计</td><td>不排他</td></tr>
-  <tr><td><code>VACUUM FULL</code></td><td>重建表、真正收缩文件还给 OS</td><td>排他（锁表！）</td></tr>
-  <tr><td><code>VACUUM ANALYZE</code></td><td>回收 + 更新优化器统计信息</td><td>不排他</td></tr>
+<tr><th>命令</th><th>作用</th><th>锁</th><th>是否还空间给 OS</th></tr>
+<tr><td><code>VACUUM</code></td><td>标记死元组可复用、更新 VM/FSM、freeze</td><td>不阻塞读写</td><td>❌ 不释放（除文件尾部全空）</td></tr>
+<tr><td><code>VACUUM FULL</code></td><td>重写整表，彻底收缩</td><td><strong>ACCESS EXCLUSIVE</strong>（阻塞一切）</td><td>✅ 释放</td></tr>
+<tr><td><code>VACUUM ANALYZE</code></td><td>清理 + 更新统计信息</td><td>不阻塞读写</td><td>❌</td></tr>
+<tr><td><code>ANALYZE</code></td><td>只更新统计信息（优化器用）</td><td>不阻塞读写</td><td>—</td></tr>
+<tr><td><code>pg_repack</code></td><td>在线重建，锁时间极短</td><td>短暂排他</td><td>✅ 释放</td></tr>
 </table>
-<div class="callout warn"><b>别滥用 VACUUM FULL：</b>它锁全表且需 2 倍磁盘，日常交给 autovacuum 即可；仅在严重膨胀时择机执行。</div>
+<pre><code>-- 单表清理并更新统计
+VACUUM (ANALYZE, VERBOSE) orders;
+
+-- 全库（需 superuser 或有权限；不建议在业务高峰跑）
+VACUUM ANALYZE;
+
+-- 并行清理大表（PostgreSQL 13+ 支持 PARALLEL）
+VACUUM (PARALLEL 4) big_table;</code></pre>
+<div class="callout tip"><b>「VACUUM 后文件没变小」不是 bug。</b>它只是把空间标记为可复用。若确实要收缩文件，用 <code>pg_repack</code>（在线）而不是 <code>VACUUM FULL</code>（长时间锁表，且需要额外一倍磁盘）。</div>
+
 </section>
-<section id="v3"><h2>③ autovacuum 调优</h2>
-<p>后台守护进程按阈值触发：<code>autovacuum_vacuum_scale_factor</code>（默认 0.2）+ <code>autovacuum_vacuum_threshold</code>（默认 50）。大表可单独设置：</p>
-<pre><code>ALTER TABLE orders SET (autovacuum_vacuum_scale_factor = 0.05);</code></pre>
-<p>写频繁的大表建议 <strong>调小 scale_factor</strong>，避免死元组堆积过快。</p>
+<section id="s3"><h2>③ Autovacuum：什么时候自动清</h2>
+
+<p>autovacuum 守护进程<strong>周期性检查</strong>各表的死元组数量，达到阈值就触发清理：</p>
+<div class="formula" style="background:#0b0f16;border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;color:#c9d1d9;font-size:.9rem;margin-bottom:16px;">
+触发阈值 = autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × 表行数<br>
+（默认：50 + 0.2 × n，即死元组超过约 20% 时触发）
+</div>
+<pre><code>-- 全局参数
+SHOW autovacuum;                        -- on
+SHOW autovacuum_vacuum_scale_factor;    -- 0.2
+SHOW autovacuum_vacuum_threshold;       -- 50
+SHOW autovacuum_max_workers;            -- 3
+SHOW autovacuum_naptime;                -- 15s
+
+-- 对高频写入的大表单独调参（关键调优手段！）
+ALTER TABLE events SET (
+  autovacuum_vacuum_scale_factor = 0.01,   -- 死元组 1% 就清
+  autovacuum_vacuum_threshold = 1000,
+  autovacuum_vacuum_cost_delay = 2,        -- 更积极
+  autovacuum_vacuum_cost_limit = 2000
+);</code></pre>
+<div class="grid3">
+<div class="card3"><h4>成本限制</h4><p><code>autovacuum_vacuum_cost_delay</code> / <code>cost_limit</code> 控制清理速度，避免抢业务 IO；默认偏保守，高写入库要放宽</p></div>
+<div class="card3"><h4>worker 数量</h4><p><code>autovacuum_max_workers</code>（默认 3）；大表多、写入高时应调大，但每个 worker 都吃 IO</p></div>
+<div class="card3"><h4>监控</h4><p><code>pg_stat_user_tables.last_autovacuum</code>、<code>n_dead_tup</code>；以及 <code>pg_stat_progress_vacuum</code> 查看进度</p></div>
+<div class="card3"><h4>表级调参</h4><p>热点大表一定要<strong>单独设置</strong>更小的 scale_factor，否则 20% 阈值意味着上千万死元组</p></div>
+</div>
+
 </section>
-<section id="v4"><h2>④ 监控</h2>
-<pre><code>SELECT relname, n_dead_tup, last_vacuum, last_autovacuum
-FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;
-SELECT datname, age(datfrozenxid) FROM pg_database;  -- 回卷风险</code></pre>
+<section id="s4"><h2>④ 事务 ID 回卷与 freeze</h2>
+
+<p>PostgreSQL 的事务 ID 是 32 位（约 42 亿）。若长时间不清理，ID 会<strong>耗尽并回卷</strong>，导致「未来事务的数据突然变成过去」——这是灾难性的。防护机制是 <strong>freeze</strong>：把足够老的行版本标记为「冻结」（对任何事务都可见），从而释放它们占用的事务 ID。</p>
+<pre><code>-- 查看各表离强制 freeze 还有多远（关键监控项！）
+SELECT c.oid::regclass AS table,
+       age(c.relfrozenxid) AS xid_age,
+       pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+FROM pg_class c
+WHERE c.relkind IN ('r','m','t')
+ORDER BY age(c.relfrozenxid) DESC LIMIT 20;
+
+-- 手动 freeze（VACUUM FREEZE 会立即冻结，而不是惰性）
+VACUUM (FREEZE, VERBOSE) old_table;</code></pre>
+<div class="callout warn"><b>危险线：</b><code>autovacuum_freeze_max_age</code> 默认 2 亿。当某表的 xid_age 接近它时，autovacuum 会<strong>强制</strong>对该表做 aggressive vacuum（即使它很干净）；若到 20 亿（约 <code>2^31</code>）仍未冻结，PostgreSQL 会<strong>拒绝写入并进入单用户模式</strong>。<strong>务必监控 age(relfrozenxid)，并在低峰期对大表分批执行 VACUUM FREEZE。</strong></div>
+
 </section>
-</main>
+<section id="s5"><h2>⑤ 什么会阻止 VACUUM 回收</h2>
+
+<table>
+<tr><th>阻塞源</th><th>现象</th><th>排查</th></tr>
+<tr><td>长事务（未提交）</td><td>它启动之后的死元组都不能回收</td><td><code>pg_stat_activity</code> 中 <code>state='idle in transaction'</code></td></tr>
+<tr><td>非活跃复制槽</td><td>主库必须保留备库未消费的版本</td><td><code>pg_replication_slots.active = false</code></td></tr>
+<tr><td>未消费的逻辑复制</td><td>订阅端掉线，WAL 与旧版本被保留</td><td><code>pg_stat_replication</code>、订阅端状态</td></tr>
+<tr><td>孤儿预备事务</td><td>2PC 事务未提交/回滚</td><td><code>pg_prepared_xacts</code></td></tr>
+<tr><td>长时间运行的查询</td><td>快照持有导致版本不可回收</td><td>慢查询监控</td></tr>
+<tr><td>hot_standby_feedback</td><td>备库长查询反馈，主库保留版本</td><td>备库 <code>pg_stat_activity</code></td></tr>
+</table>
+<pre><code>-- 找出最老的活跃事务
+SELECT pid, state, xact_start, now() - xact_start AS dur, query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start LIMIT 5;</code></pre>
+
+</section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：VACUUM 和 VACUUM FULL 的区别？生产环境该用哪个？</b><p>A：<strong>VACUUM</strong> 在线整理：标记死元组可复用、更新 VM/FSM、做 freeze，<strong>不阻塞读写</strong>，但<strong>不把空间还给操作系统</strong>；<strong>VACUUM FULL</strong> 重写整表并真正收缩文件，但持有 <strong>ACCESS EXCLUSIVE 锁</strong>（阻塞所有读写）且需要约一倍的额外磁盘空间。<strong>生产环境首选常规 VACUUM（交给 autovacuum），确需收缩文件用 pg_repack 在线重建；VACUUM FULL 只在维护窗口使用。</strong></p></div>
+<div class="qa"><b>Q：为什么 autovacuum 跑得很勤，表还是在膨胀？</b><p>A：常见原因：① 表太大而 <code>scale_factor=0.2</code> 意味着要积累上千万死元组才触发——<strong>应对热点大表单独设 0.01~0.05</strong>；② <code>cost_delay</code> 过大导致清理速度跟不上产生速度；③ <code>max_workers</code> 不够，大表排队；④ 存在<strong>长事务/非活跃复制槽</strong>使死元组无法回收（清理了但回收不了）；⑤ 索引膨胀需要 <code>REINDEX CONCURRENTLY</code>。<strong>排查顺序：先查 n_dead_tup 与 last_autovacuum，再查阻塞源。</strong></p></div>
+<div class="qa"><b>Q：什么是事务 ID 回卷（wraparound）？怎么预防？</b><p>A：事务 ID 是 32 位，约 42 亿个。若老的行版本长期不冻结，可用 ID 会耗尽并回卷，导致数据可见性混乱。PG 用 <strong>freeze</strong> 把足够老的版本标记为「永远可见」，释放其占用的 XID。<strong>预防</strong>：① 监控 <code>age(relfrozenxid)</code>，超过 1.5 亿就要关注；② 保证 autovacuum 能正常跑（不要在大表上禁用）；③ 对归档表在低峰期手动 <code>VACUUM FREEZE</code>；④ 及时清理长事务与孤儿复制槽。<strong>一旦接近 20 亿，数据库会拒绝写入——这是必须避免的严重事故。</strong></p></div>
+<div class="qa"><b>Q：ANALYZE 和 VACUUM 是一回事吗？</b><p>A：不是。<strong>VACUUM 管空间与可见性</strong>（回收死元组、更新 VM/FSM、freeze）；<strong>ANALYZE 管统计信息</strong>（收集列的分布、NULL 比例、最常见值等，供优化器估算选择性与行数）。因此 <strong>「统计信息过时导致执行计划变差」要跑 ANALYZE，而不是 VACUUM</strong>。autovacuum 会在清理时顺便触发 autoanalyze。大批量导入数据后应显式执行 <code>ANALYZE 表名</code>。</p></div>
+<div class="qa"><b>Q：VACUUM 会阻塞业务吗？</b><p>A：常规 <strong>VACUUM 不会阻塞读写</strong>（只拿不冲突的锁），但会消耗 CPU 与 IO，因此用 <code>cost_delay/cost_limit</code> 限速。<strong>例外</strong>：① VACUUM FULL 持排他锁，完全阻塞；② 清理索引时会短暂持有锁；③ 在需要截断文件尾部的罕见情形下，需要短暂排他锁（PG 会尽量避免并可能放弃截断）。<strong>实践：让 autovacuum 平稳运行，避免在业务高峰手动全库 VACUUM。</strong></p></div>
+<div class="qa"><b>Q：索引也会膨胀吗？怎么处理？</b><p>A：会。B-tree 索引中的<strong>死索引项</strong>由 VACUUM 清理，但索引页的空闲空间难以复用，长期随机写入（如随机 UUID 主键）会造成索引膨胀、层数变深。<strong>处理</strong>：① <code>REINDEX INDEX CONCURRENTLY idx_name;</code>（在线重建，PG 12+）；② <code>REINDEX TABLE CONCURRENTLY t;</code>；③ 用 <code>pgstattuple</code> 或 <code>pgstatindex</code> 评估 <code>avg_leaf_density</code>（低于 50% 通常值得重建）；④ 根本上避免随机键，用<strong>顺序或时间有序的主键</strong>。</p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

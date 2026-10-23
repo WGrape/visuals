@@ -61,11 +61,29 @@ pre code{background:transparent;padding:0;color:#e2e8f0}
 footer{text-align:center;color:var(--txt-3);font-size:.82rem;padding:2rem 1rem 3rem}
 @media(max-width:880px){.layout{flex-direction:column}.sidebar{width:100%;position:relative;top:0;max-height:none}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header><div class="topbar">
   <a href="../../index.html" class="logo">Visuals · AI</a>
-  <nav><a href="../../index.html">← 返回目录</a><a href="../../../model-basic/03-transformer/01-architecture/transformer-explained.html">Transformer</a><a href="../../../../system-engineering/ai-engineering-system/03-rag/01-foundations/rag-explained.html">RAG</a></nav>
+  <nav><a href="../../index.html">← 返回目录</a><a href="../../../model-basic/03-transformer/01-overview/01-what-is-transformer/transformer-explained.html">Transformer</a><a href="../../../../system-engineering/ai-engineering-system/03-rag/01-foundations/rag-explained.html">RAG</a></nav>
 </div></header>
 
 <div class="layout">
@@ -196,6 +214,42 @@ footer{text-align:center;color:var(--txt-3);font-size:.82rem;padding:2rem 1rem 3
   </div>
   <div class="note note-info">关联：注意力机制基础见《Transformer 注意力机制图解》；位置编码见《Transformer 详解》；Agent 记忆场景见 agent 目录。</div>
 </section>
+
+<section class="section" data-dry-goods><div class="x-dry"><h2>KV Cache 显存：一个能直接套的公式</h2><p>长上下文真正的成本不是「能不能塞进去」，而是 <b>KV Cache 显存</b> 和 <b>注意力计算量</b>。先会算，再谈方案。</p><p><b>显存与计算量手算</b></p><pre><code># KV Cache 显存（每 token，不含模型权重）
+#   bytes/token = 2(K和V) x layers x kv_heads x head_dim x dtype_bytes
+#
+# 例：Llama-3-8B 配置：32 层、kv_heads=8(GQA)、head_dim=128、FP16(2 bytes)
+#   = 2 x 32 x 8 x 128 x 2 = 131072 bytes ≈ 128 KB / token
+#
+#   上下文 8K  -&gt; 1.0 GB
+#   上下文 32K -&gt; 4.0 GB
+#   上下文 128K-&gt; 16.0 GB     &lt;- 单卡就放不下了
+#   再乘 batch：128K x batch=8 -&gt; 128 GB
+
+# 注意力计算量：O(n^2)，n 翻倍计算量翻 4 倍
+#   FLOPs ≈ 2 x 2 x layers x heads x head_dim x n^2   (QK^T + AV)
+#   prefill 是算力瓶颈，decode 是&lt;b&gt;显存带宽&lt;/b&gt;瓶颈（每生成 1 token 要读整个 KV Cache）
+
+# 首 token 延迟(TTFT) 与 每 token 延迟(TPOT)
+#   TTFT ∝ n^2（prefill 计算） -&gt; 长文本首字慢
+#   TPOT ∝ n   （decode 每步读 KV）-&gt; 越长生成越慢</code></pre><div class="table-wrap"><table><thead><tr><th>上下文长度</th><th>KV Cache（8B/FP16）</th><th>prefill 相对计算量</th><th>工程现实</th></tr></thead><tbody><tr><td>4K</td><td>~0.5 GB</td><td>1x</td><td>单卡轻松</td></tr><tr><td>8K</td><td>~1 GB</td><td>4x</td><td>主流默认档</td></tr><tr><td>32K</td><td>~4 GB</td><td>64x（相对 4K）</td><td>需 GQA + 高效实现</td></tr><tr><td>128K</td><td>~16 GB</td><td>1024x</td><td>必须分页/切分，单卡 batch 要很小</td></tr><tr><td>1M</td><td>~128 GB</td><td>65536x</td><td>必须稀疏/检索式，不能全注意力</td></tr></tbody></table></div><p class="muted">关键技术词：<b>GQA</b>（ grouped-query attention，多个 query head 共享 K/V head）把 KV Cache 直接降到 1/8；<b>MLA</b>（多头潜在注意力，DeepSeek）再压一个量级；<b>PagedAttention</b>（vLLM）把 KV 按块分配，消除碎片，吞吐提升 2~4 倍。这三项是长上下文能落地的工程基础。</p></div></section>
+<section class="section" ><div class="x-dry"><h2>长上下文的能力边界与外推方法</h2><p>「支持 128K」不等于「128K 范围内都好用」。实测中的两个经典现象决定了你怎么用长窗口。</p><div class="table-wrap"><table><thead><tr><th>现象 / 方法</th><th>说明</th><th>对你的影响</th></tr></thead><tbody><tr><td><b>Lost in the Middle</b></td><td>长上下文里模型对<b>开头和结尾</b>记得最好，中间部分召回率显著下降（U 形曲线）</td><td>重要信息放<b>首尾</b>，不要埋在中间；或显式编号/小标题</td></tr><tr><td>大海捞针（Needle in a Haystack）</td><td>在长文本里插一句无关事实，问模型能不能找回来</td><td>评估长上下文能力的<b>事实标准</b>，要看热力图而非单点</td></tr><tr><td><b>位置外推</b>（RoPE 外推）</td><td>训练 4K 直接推理 8K，效果明显劣化</td><td>不要裸外推</td></tr><tr><td><b>NTK-aware 插值</b></td><td>改 RoPE 基频，<b>无需微调</b>即可扩到 2~4 倍</td><td>成本低，短上下文性能几乎无损</td></tr><tr><td><b>YaRN</b></td><td>NTK + 注意力温度校正，<b>少量微调</b>可扩到 8~16 倍</td><td>开源模型扩窗的主流做法</td></tr><tr><td><b>滑动窗口注意力</b></td><td>每层只看局部 w 个 token，多层堆叠扩大感受野</td><td>计算量 O(n·w) 而非 O(n²)</td></tr><tr><td><b>稀疏 / 检索式</b></td><td>只 attend 到检索出来的 top-k 块</td><td>超长（百万级）唯一可行路径</td></tr></tbody></table></div><p><b>显存估算与自测</b></p><pre><code># 显存实测（vLLM 启动时看 KV Cache 能开多大）
+python -c "
+n=128*1024; layers=32; kvh=8; hd=128; b=2   # bytes per param
+print('KV per token KB:', 2*layers*kvh*hd*b/1024)
+print('KV for 128K x batch4 GB:', 2*layers*kvh*hd*b*n*4/1024**3)
+"
+
+# 长上下文能力自测模板（大海捞针，可自己改 needle 位置）
+# 1) 构造：把 needle 插到 context 的 0%/25%/50%/75%/100% 处
+# 2) 每个位置 x 每个长度 跑 N 次，统计召回率
+# 3) 画成热力图（横轴长度、纵轴位置）—— 开源实现：
+#    github.com/gkamradt/LLMTest_NeedleInAHaystack
+
+# 推理侧省显存的三档做法
+#   ① GQA / MLA：模型架构层，KV 直接少几倍
+#   ② PagedAttention（vLLM）：消除碎片，同样显存多开 2~4 倍并发
+#   ③ KV Cache 量化（FP8 / INT8）：显存再减半，质量损失很小</code></pre><ul><li><b>不是越长越好</b>：上下文变长会稀释注意力，短任务用长上下文反而准确率下降、成本飙升。实践上是「<b>够用就好 + 检索补充</b>」。</li><li><b>成本是平方级</b>：同样是 10 万 token，一次 10 万的长请求 vs 10 次 1 万的请求，前者 prefill 计算量约 <b>10 倍</b>于后者（O(n²)），但省掉的重复 prompt 可能更贵——要做实测权衡。</li><li><b>prefix caching</b>：多轮对话/固定 system prompt 场景下，把不变前缀的 KV 缓存复用，首 token 延迟可降 <b>50%~90%</b>，是投入产出比最高的一招。</li><li><b>RAG 和长上下文不是二选一</b>：长上下文适合「信息密度高、需要全局理解」（合同、代码库）；RAG 适合「语料巨大、只需局部命中」（知识库问答）。混合做法：先用 RAG 缩到 20~50K，再交给长上下文模型精读。</li></ul><details><summary>为什么模型号称 128K，实际 32K 之后就开始胡说？</summary><p>两个原因：① <b>训练分布</b>——模型在训练时见到的大部分样本远短于标称上限，长距离的注意力模式没被充分训练；② <b>Lost in the Middle</b>——位置编码对中间区域的相对距离感知更弱。所以标称长度是「能塞进去」，不是「能可靠使用」。验收方式必须是大海捞针热力图，而不是看宣传数字。</p></details><details><summary>KV Cache 能不能 offload 到 CPU/磁盘？</summary><p>能，但要算账。PCIe 带宽约 16~32 GB/s，而 HBM 是 2~3 TB/s，差 <b>100 倍</b>。decode 是带宽瓶颈，一旦 offload，每 token 延迟会从 20ms 涨到几百 ms。适用场景只有<b>吞吐优先、延迟不敏感</b>的离线批处理；在线服务基本不用。</p></details><details><summary>怎么判断该上长上下文还是该做 RAG？</summary><p>看三个数：① <b>语料总量</b>——超过单次窗口 10 倍以上就必须 RAG；② <b>命中位置是否可预测</b>——可预测（按用户/按文档）就 RAG，不可预测（要全文找关联）才用长上下文；③ <b>成本</b>——长上下文每次都要付全部 token 的钱，RAG 只需付检索到的部分。日均请求量大时，RAG 的成本优势是数量级的。</p></details></div></section>
 </main>
 </div>
 <script>

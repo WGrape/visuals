@@ -12,6 +12,54 @@
 <section class="panel"><h2>镜像更新不等于旧容器更新</h2><p>仓库把 `service:latest` 移到新镜像后，已经运行的容器不会自动替换文件系统或进程。编排系统要创建新 Pod 或容器，镜像拉取策略、节点已有缓存和部署配置决定它是否真的拿到新镜像。若同一 tag 被复用，排障时要看 Pod 实际 imageID/digest，而不是只看部署 YAML 里的 tag。生产发布更稳妥的方式是每次构建生成不可变版本或 digest，并让配置变更触发滚动发布。</p><p>回滚也必须有旧镜像 digest 与配置版本。若旧 tag 已被覆盖、旧层又被清理，口头上的“回滚到 previous”未必能实际拉到旧二进制。</p></section>
 <section class="panel"><h2>一个 3 节点故障算例</h2><p>节点 A 在上午拉取 `service:prod` 指向构建 X，节点 B/C 下午拉取同一 tag，此时它已指向构建 Y。若拉取策略或本地缓存不同，三节点可能同时服务两种代码，接口行为不一致。先读取每个运行实例的 imageID，核对对应 digest；随后固定目标 digest 并按滚动策略重建 Pod。若 Y 有漏洞，不能只把 tag 改回 X 而不重启已运行 Y 的实例。</p><p>排障还要比对配置、环境变量和数据版本。镜像一致是必要的发布证据，却不能证明业务运行状态完全一致。</p></section>
 <section class="panel"><h2>验收与供应链记录</h2><p>构建时记录源码提交、构建器版本、基础镜像 digest、锁文件、目标平台和输出镜像 digest；在干净环境重建并比较产物，若构建含时间戳或非确定性步骤，应说明差异来源。扫描镜像层是否误含秘密，确认非 root 用户、必要的文件权限和最小运行依赖。部署后抽样核对所有节点实际 imageID，并在回滚演练中验证旧 digest 仍可获取。</p><p>镜像分层使分发和构建高效，但只有明确可变 tag 与不可变内容、以及容器创建的时机，才能解释“同一个版本名为什么跑出两种程序”。</p></section>
+<section class="panel" data-dry-goods><h2>镜像的三个对象与寻址方式</h2><div class="table-wrap"><table><thead><tr><th>对象</th><th>内容</th><th>如何寻址</th></tr></thead><tbody><tr><td>Manifest</td><td>层的清单（digest 数组）+ config 引用</td><td><code>sha256:&lt;64 hex&gt;</code>（镜像 digest）</td></tr><tr><td>Config</td><td>环境变量、入口、历史、rootfs diff_ids</td><td>由 manifest 引用</td></tr><tr><td>Layer</td><td>每层的 tar.gz 或 tar.zstd 内容</td><td>每层一个 <code>sha256</code>；Registry 按 digest 去重</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>寻址方式</th><th>是否可变</th><th>示例</th><th>适用</th></tr></thead><tbody><tr><td>tag</td><td><b>可变</b>（可被重新推送覆盖）</td><td><code>app:1.2</code> / <code>app:latest</code></td><td>给人看、给 CI 用，不应作为部署依据</td></tr><tr><td>digest</td><td><b>不可变</b>（内容寻址）</td><td><code>app@sha256:3f1a...</code></td><td>部署、审计、回滚的可靠依据</td></tr></tbody></table></div><p class="muted">经验法则：<b>部署用 digest，开发用 tag</b>。同一个 tag 在不同时间拉取可能得到不同镜像，这是「环境不一致」最常见的根因。</p></section><section class="panel"><h2>层与构建缓存的规则</h2><div class="table-wrap"><table><thead><tr><th>规则</th><th>说明</th><th>影响</th></tr></thead><tbody><tr><td>每条 Dockerfile 指令生成一层</td><td><code>RUN/COPY/ADD</code> 产生层；<code>ENV/LABEL</code> 只改 config</td><td>层越少越小越好，但过少会牺牲缓存命中</td></tr><tr><td>缓存按指令顺序命中</td><td>某层失效则其后<b>所有</b>层都失效</td><td>把变化频繁的指令放在最后</td></tr><tr><td>COPY 内容变化即失效</td><td>按文件内容的校验和判断</td><td>先 COPY 依赖清单（package.json/go.mod），再 COPY 源码</td></tr><tr><td>层不可变</td><td>删除文件不会减小已有层的体积</td><td>在同一条 RUN 内清理缓存</td></tr><tr><td>多阶段构建</td><td>只有最终阶段的层进入镜像</td><td>把编译产物从 builder 拷出来，镜像体积可降一个数量级</td></tr></tbody></table></div><p><b>缓存顺序</b></p><pre><code># 反例：改一行代码就要重装依赖（缓存全失效）
+COPY . /app
+RUN npm install
+
+# 正例：依赖清单单独一层，源码变化不影响依赖层
+COPY package.json package-lock.json /app/
+WORKDIR /app
+RUN npm ci --omit=dev          # 依赖层：只有清单变化才重建
+COPY . /app                    # 源码层：改动只影响这一层</code></pre><p><b>瘦身</b></p><pre><code># 在同一条 RUN 内清理，避免缓存留在层里
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends curl \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# 多阶段构建：编译镜像很大，运行镜像很小
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/app ./cmd/app
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=builder /out/app /app
+ENTRYPOINT ["/app"]</code></pre></section>
+<section class="panel"><h2>常用命令</h2><p><b>查看</b></p><pre><code># 看镜像的层构成与每层大小
+docker history --no-trunc myapp:1.2
+docker inspect myapp:1.2 --format '{{.Id}} {{.Size}}'
+
+# 取 digest（内容寻址，不变）
+docker inspect --format='{{index .RepoDigests 0}}' myapp:1.2
+crane digest myrepo/myapp:1.2
+skopeo inspect docker://myrepo/myapp:1.2 | jq .Digest
+
+# 多架构 manifest 列表
+docker buildx imagetools inspect myrepo/myapp:1.2
+
+# 按 digest 拉取（部署推荐写法）
+docker pull myrepo/myapp@sha256:3f1a...</code></pre><p><b>构建缓存</b></p><pre><code># BuildKit 缓存：把缓存推到 Registry，让 CI 跨机器复用
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --cache-from type=registry,ref=myrepo/myapp:buildcache \
+  --cache-to   type=registry,ref=myrepo/myapp:buildcache,mode=max \
+  --push -t myrepo/myapp:1.2 .
+
+# 依赖下载缓存（不进镜像，只加速构建）
+# syntax=docker/dockerfile:1
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build ./...</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>同一个 tag 两次拉取结果不同</td><td>tag 被覆盖推送</td><td>部署改用 digest 锁定</td></tr><tr><td>镜像越删越大</td><td>删除发生在新的层，旧层内容仍在</td><td>同一 RUN 内清理；用多阶段构建</td></tr><tr><td>CI 构建很慢</td><td>每次都从头装依赖</td><td>COPY 顺序优化 + BuildKit registry 缓存</td></tr><tr><td>换台机器缓存就没了</td><td>缓存只在本地</td><td><code>--cache-to/--cache-from</code> 推到 Registry</td></tr><tr><td>本地能跑线上架构不匹配</td><td>镜像只有单一架构</td><td><code>docker buildx --platform</code> 构建多架构</td></tr><tr><td>回滚到 1.2 却是新代码</td><td>tag 被覆盖</td><td>回滚用 digest，或用不可变 tag 策略（Registry 开启 tag immutability）</td></tr><tr><td>层数量过多</td><td>每条 RUN 一层</td><td>合并 RUN，但保留依赖层以利缓存</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么部署要用 digest 而不是 tag？</summary><p>tag 是可变指针，可以被重新推送覆盖，因此「同一个 tag」在不同时间可能指向不同内容，导致环境漂移和回滚失效。digest 是内容寻址的哈希，只要内容不变它就恒定，是部署、审计与回滚的可靠依据。</p></details><details><summary>为什么删了文件镜像没变小？</summary><p>层是不可变的：删除操作记录在<b>新的层</b>里，旧层的内容仍然存在于镜像中并被拉取。要在同一条 RUN 内完成「安装 + 清理」，或者用多阶段构建只把必要产物拷进最终镜像。</p></details><details><summary>COPY 顺序为什么会影响构建速度？</summary><p>构建缓存按指令顺序匹配，一旦某层失效，其后的所有层都要重建。把变化少的内容（依赖清单）放在前面、变化多的（源码）放在后面，能让「改代码」只重建最后几层，依赖层直接命中缓存。</p></details><details><summary>多阶段构建到底省在哪？</summary><p>最终镜像只包含最后一个 FROM 之后的层，builder 阶段的编译器、SDK、中间产物都不会进入最终镜像。典型 Go 服务从带完整工具链的 800MB+ 降到基于 distroless 的几十 MB。</p></details><details><summary>CI 里如何让不同机器共享构建缓存？</summary><p>用 BuildKit 的远程缓存：<code>--cache-to type=registry,ref=...:buildcache,mode=max</code> 推送缓存，<code>--cache-from</code> 拉取。再加 <code>RUN --mount=type=cache</code> 缓存依赖目录（如 /go/pkg/mod、~/.cache），可显著缩短重复构建时间。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>仓库把 service:prod 指向新镜像，已运行的容器会自动替换成新代码吗？</summary><p>不会。运行容器仍使用创建时的文件系统；需要按部署策略重新创建，并核对实际 imageID。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="container-image-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

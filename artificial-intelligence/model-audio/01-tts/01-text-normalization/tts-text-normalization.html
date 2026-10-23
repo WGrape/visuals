@@ -14,6 +14,60 @@
 <section class="panel"><h2>边界与误区</h2><p>SSML 可以给出某些显式读法，但接口支持的标签不同；前端输出也不等于最终音质。排错时先查看规范化文本，再检查声学和波形阶段。</p></section>
 <section class="panel"><h2>规则系统与模型系统怎样协作</h2><p>确定性的格式，例如 ISO 日期、货币符号和常见单位，可以用明确规则解析，再让模型处理缺少上下文的多音字与韵律。这种分工便于复现错误：相同输入和地区设置应得到相同的结构化片段。规则与模型冲突时要有优先级，例如用户显式给出的音素标注通常应覆盖自动猜测，但非法标注也要回退或报错。上线新规则时，先在测试集上比较改变了哪些旧样本，而不只检查新样本是否正确。</p><p>一段文本还可能同时含中英文和缩写。“AI v2.1 于 10:05 发布”需要先确定 AI 是读字母、单词还是产品名，v2.1 是版本号而非小数测量值。仅以字符形状判断往往不够，要把语料领域、产品词典和语音播报场景一起纳入。对无法确定的输入，可以要求上游提供显式标注，而不是假装模型总能猜中。</p></section>
 <section class="panel" data-depth-note><h2>如何让读法可复现</h2><p>同一段播报在不同地区可能有不同日期顺序、货币名称和数字习惯。输入契约应显式包含语言与地区，而不是依赖服务端默认值；词典、规范化规则和模型版本也应随请求或日志记录。否则一次线上读法问题很难在本地复现。规则升级时抽取受影响的输入类别，逐条对比旧版与新版的规范化结果，再抽听音频。对于专有产品名，词典还要约定大小写、字母逐读与单词连读的优先级。若上游可以提供结构化字段，优先传入“日期”“金额”“订单号”等类型信息，减少从裸文本猜测的歧义。</p></section>
+<section class="panel" data-dry-goods><h2>文本规范化的处理项与规则</h2><div class="table-wrap"><table><thead><tr><th>类别</th><th>例子</th><th>规范化结果</th></tr></thead><tbody><tr><td><b>数字</b></td><td><code>1234</code></td><td>一千二百三十四（中文）/ one thousand two hundred thirty-four</td></tr><tr><td><b>日期</b></td><td><code>2026-10-22</code></td><td>二零二六年十月二十二日</td></tr><tr><td><b>时间</b></td><td><code>14:30</code></td><td>十四点三十分</td></tr><tr><td><b>货币</b></td><td><code>¥199</code></td><td>一百九十九元</td></tr><tr><td><b>百分比</b></td><td><code>45%</code></td><td>百分之四十五</td></tr><tr><td><b>小数</b></td><td><code>3.14</code></td><td>三点一四</td></tr><tr><td><b>分数</b></td><td><code>3/4</code></td><td>四分之三</td></tr><tr><td><b>电话号码</b></td><td><code>138-0013-8000</code></td><td>一三八 零零一三 八零零零（逐位读）</td></tr><tr><td><b>缩略语</b></td><td><code>AI / GPT</code></td><td>按字母读或按词表读</td></tr><tr><td><b>单位</b></td><td><code>5km</code></td><td>五公里</td></tr><tr><td><b>序数</b></td><td><code>第3名</code></td><td>第三名</td></tr></tbody></table></div><p><b>为什么需要 TN（Text Normalization）</b>：TTS 模型直接在文本上训练，见到 <code>199</code> 不知道该读「一九九」还是「一百九十九」。如果训练集里数字很少，模型会随机发挥。<b>TN 把非标准词（NSW）转成可读形式，是 TTS 流水线的第一道关卡</b>，它的错误会直接变成语音里的错误，且无法在后续环节修复。</p></section><section class="panel"><h2>实现方法</h2><pre><code># 方法 1：规则 + 正则（可控、可解释，工业界主流）
+import re
+
+def normalize_number(m):
+    s = m.group()
+    n = int(s)
+    if len(s) &lt;= 4: return num2zh(n)          # 1234 -&gt; 一千二百三十四
+    if re.match(r'^1[3-9]\d{9}$', s):          # 手机号
+        return ' '.join(digit2zh(d) for d in s)  # 逐位读
+    if len(s) &gt;= 8: return ' '.join(digit2zh(d) for d in s)  # 长号码也逐位
+    return num2zh(n)
+
+def normalize_currency(m):
+    s = m.group()
+    if s.startswith('¥') or s.startswith('￥'):
+        return num2zh(float(s[1:])) + '元'
+    if s.startswith('$'):
+        return num2zh(float(s[1:])) + '美元'
+    return s
+
+PATTERNS = [
+    (r'\d{4}-\d{2}-\d{2}', normalize_date),
+    (r'\d{1,2}:\d{2}',      normalize_time),
+    (r'[¥￥$]\d+(\.\d+)?',  normalize_currency),
+    (r'\d+(\.\d+)?%',      normalize_percent),
+    (r'\d+(\.\d+)?',       normalize_number),   # 数字放最后（最通用）
+]
+
+def text_normalize(text):
+    for pat, fn in PATTERNS:
+        text = re.sub(pat, fn, text)
+    return text
+
+# 关键：规则的顺序很重要！日期必须在普通数字之前匹配
+# 否则 2026-10-22 会被拆成三个数字分别处理</code></pre><pre><code># 方法 2：基于分类器的 TN（Google Kestrel 的思路）
+# 1) 用正则找出所有「非标准词」（NSW）候选
+# 2) 对每个 NSW 分类（CARDINAL / DATE / TIME / MONEY / PHONE ...）
+# 3) 按类别用对应的展开器（verbalizer）转成文本
+# 好处：规则好维护，可针对性优化每类
+# 关键难点：歧义消解
+#   "1990"  -&gt; 年份（一九九零）还是数量（一千九百九十）？
+#   "3/4"   -&gt; 日期（三月四日）还是分数（四分之三）？
+#   解决：看上下文（前面的词、单位、标点）
+
+# 验证方法（必须做）
+# 1) 构建测试集：常见的数字/日期/货币/缩略语各 100 条
+# 2) TN 后人工抽查（或 TTS 后听）
+# 3) 线上监控：用户反馈的「读错了」案例要回流到测试集
+
+# 常见错误
+# ✗ 数字规则放在日期前面 -&gt; 日期被拆散
+# ✗ 没处理小数点后的 0 -&gt; 3.10 读成「三点一」而不是「三点一零」
+# ✗ 英文缩略语没词表 -&gt; AI 读成「爱」而不是「A I\」</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>数字读错</td><td>规则顺序错或没匹配到</td><td>检查正则顺序；数字规则放最后</td></tr><tr><td>日期被拆成三个数字</td><td>数字规则优先级高于日期</td><td><b>特殊模式先匹配</b>，通用数字最后</td></tr><tr><td>长数字读法不对</td><td>该逐位读还是按数量级读没分清</td><td>手机号/身份证/编号逐位；金额/统计按数量级</td></tr><tr><td>英文缩写读错</td><td>没有缩略语词表</td><td>维护常见缩写词表；未知缩写按字母读</td></tr><tr><td>多音字读错</td><td>TTS 前端还有多音字消歧环节</td><td>TN 只管数字等 NSW；多音字由专门的模块处理</td></tr><tr><td>小数读法不对</td><td>小数点后的零被省略</td><td>小数部分要<b>逐位读</b>：3.10 → 三点一零</td></tr><tr><td>不同语言混排处理错</td><td>没做语言识别</td><td>先分句按语言，再分别 TN</td></tr></tbody></table></div><p class="muted"><b>TN 的两个工程原则</b>：① <b>规则要可测试</b>——每条规则都要有对应的测试用例，改动时跑一遍；② <b>歧义交给上下文</b>——同一串数字在不同上下文读法不同，这靠规则顺序和上下文判断解决，别指望一个正则搞定所有情况。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>“3.5kg”读法错误，应先改声码器吗？</summary><p>先检查文本前端是否把数字与单位展开成预期词序列；声码器只负责把声学表示变成声音。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/tts-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

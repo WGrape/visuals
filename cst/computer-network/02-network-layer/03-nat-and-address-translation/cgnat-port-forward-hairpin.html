@@ -11,6 +11,27 @@
 <section class="panel"><h2>NAT 回环的特殊现象</h2><p>同一 Wi-Fi 下，手机用内网地址能访问 NAS；改用家庭公网域名却不能访问，这可能是 NAT 回环或 hairpin NAT 未启用。内网客户端连接路由器公网地址时，路由器需把流量转回内网 NAS，并让回复经过自己维护的映射状态。若 NAS 直接回复同网段手机，手机看到的来源与它连接的公网目标不一致，连接可能失败。</p><p>有些路由器实现 NAT 回环，有些不实现。也可让内网 DNS 把相同域名解析到内网地址，即分视图 DNS，但要保证证书主机名和应用 Host 路由仍一致。“内网域名不通”与“外网用户也不通”需要从真正外部网络分别测试，不能在同一 Wi-Fi 下代表公网验收。</p></section>
 <section class="panel"><h2>IPv6 不等于无防火墙</h2><p>IPv6 主机可能直接拥有全球可路由地址，少了 IPv4 NAPT 的入站映射环节，但家庭网关和主机防火墙仍可能默认拒绝入站。即使 IPv6 地址可达，也必须确认 DNS AAAA、前缀稳定性、服务监听和入站策略。把“有 IPv6”误当作“任何人都可访问”或“无需安全控制”都不准确。</p><p>若上游前缀变化，硬编码在 DNS 的旧 IPv6 地址会失效。对长期发布的家庭服务，应有地址更新与故障监测，不只看一次成功连接。</p></section>
 <section class="panel"><h2>排障顺序</h2><p>先在 NAS 本机和同网段设备确认服务监听，随后从真正外部网络连路由器 WAN 地址及端口。核对路由器 WAN 是否真是可入站公网地址，再查每层 NAT 规则、协议、主机防火墙和回程网关。只有内网使用公网域名失败时，再重点查 NAT 回环或内网 DNS。用时间戳和四元组对齐抓包，避免把无关扫描流量误认成测试请求。</p><p>验收除了“某次连接成功”，还应测路由器重启、租约变化、IPv4/IPv6、不同运营商网络和认证失败场景。若外部访问一会儿通一会儿不通，检查动态公网地址、映射超时、CGNAT 状态和上游防护策略。</p></section>
+<section class="panel" data-dry-goods><h2>地址空间与端口资源</h2><div class="table-wrap"><table><thead><tr><th>地址块</th><th>范围</th><th>用途</th></tr></thead><tbody><tr><td><b>10.0.0.0/8</b></td><td>10.0.0.0 – 10.255.255.255</td><td>RFC 1918 私有（最常用）</td></tr><tr><td><b>172.16.0.0/12</b></td><td>172.16.0.0 – 172.31.255.255</td><td>RFC 1918 私有</td></tr><tr><td><b>192.168.0.0/16</b></td><td>192.168.0.0 – 192.168.255.255</td><td>RFC 1918 私有（家用默认）</td></tr><tr><td><b>100.64.0.0/10</b></td><td>100.64.0.0 – 100.127.255.255</td><td><b>CGNAT 共享地址空间（RFC 6598）</b></td></tr><tr><td>169.254.0.0/16</td><td>link-local</td><td>APIPA，DHCP 失败时的自分配</td></tr></tbody></table></div><p><b>CGNAT 的端口账</b>：一个公网 IPv4 只有 <b>65535</b> 个端口，去掉 0–1023 系统端口与保留段，实际可用约 <b>6 万</b>。若给每个用户分配 1024 个端口的端口块，一个公网 IP 只能服务约 <b>60 个</b>并发活跃用户；实际按“端口块 + 动态扩展”分配（如初始 512，按需扩到 4096）。</p><p><b>NAT 配置</b></p><pre><code># iptables：端口转发（DNAT）+ 出网（SNAT/MASQUERADE）
+# 端口映射：外网 8080 → 内网 10.0.0.5:80
+iptables -t nat -A PREROUTING -p tcp --dport 8080 \
+  -j DNAT --to-destination 10.0.0.5:80
+
+# 出网 MASQUERADE（动态 IP，如拨号）
+iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
+# 固定 IP 用 SNAT，性能更好
+iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 \
+  -j SNAT --to-source 203.0.113.1
+
+# 发夹 NAT（内网用公网 IP 访问内网服务）—— 关键补充规则
+iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -d 10.0.0.5 -p tcp --dport 80 \
+  -j MASQUERADE
+
+# 必须的配套：开转发
+sysctl -w net.ipv4.ip_forward=1
+
+# 看连接跟踪
+conntrack -L | head
+cat /proc/net/nf_conntrack | wc -l</code></pre></section><section class="panel"><h2>发夹 NAT 与常见故障</h2><p><b>发夹（Hairpin / NAT Loopback）问题</b>：内网主机用<b>公网地址</b>访问同在内网的服务时，包先到路由器做 DNAT 变成“内网 → 内网 10.0.0.5”，服务端回包时源地址是内网地址，客户端期待的是公网地址 → <b>客户端丢弃</b>，表现为“外网能访问，内网用公网 IP 反而访问不了”。</p><ul><li><b>解法一（推荐）</b>：在 POSTROUTING 上对“内网→内网服务”的流量再做一次 SNAT（见上面命令），让回包也经过路由器。</li><li><b>解法二</b>：用<b>分离 DNS（Split DNS / DNS 视）</b>——内网 DNS 把该域名解析成内网 IP，外网解析成公网 IP。这是企业里更干净的做法。</li><li><b>解法三</b>：路由器支持 hairpin 开关（很多家用路由器有 “NAT Loopback” 或 “NAT 回环” 选项）。</li><li><b>CGNAT 下的端口转发失效</b>：如果用户自己就在运营商 CGNAT 后面（WAN 口拿到的是 100.64.x.x），那么在任何地方配端口转发都<b>没用</b>——运营商不会给你映射。解决方案：申请公网 IP、用内网穿透（frp/ngrok）、或用 IPv6（v6 通常直接给公网前缀，无需 NAT）。</li><li><b>UPnP / NAT-PMP / PCP</b>：让内网设备自动请求端口映射。方便但有安全风险，企业环境通常关闭。</li><li><b>排查顺序</b>：① <code>ip_forward</code> 开了吗；② DNAT 规则是否命中（<code>iptables -t nat -L -nv</code> 看计数）；③ 回包有没有做 SNAT（发夹场景）；④ 服务端防火墙是否放行；⑤ 运营商是否给了真公网 IP（对比 WAN 口 IP 与 <code>curl ifconfig.me</code>）。</li></ul><details><summary>怎么判断我是否在 CGNAT 后面？</summary><p>看路由器 WAN 口获取的 IP：如果是 <b>10.x / 172.16–31.x / 192.168.x / 100.64.x</b> 之一，而 <code>curl ifconfig.me</code> 显示的是另一个公网 IP，那你就在 CGNAT 后。此时端口转发必然无效。</p></details><details><summary>为什么内网用内网 IP 访问正常，用域名就不行？</summary><p>域名解析到公网 IP，流量被送到路由器；如果路由器没有正确的 DNAT + hairpin SNAT，就会失败（或超时）。用 split DNS 让内网解析到内网地址即可彻底解决。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>家用路由器已经做端口映射，但 WAN 地址在运营商 CGNAT 后，外网一定能连接吗？</summary><p>不能。入站流量先到运营商 NAT，用户控制的映射无法自动穿越那一层。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="nat-principle.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

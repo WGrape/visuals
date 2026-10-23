@@ -11,6 +11,72 @@
 <section class="panel"><h2>LEFT JOIN 与过滤位置</h2><p>报表还要显示未支付订单时，可以 LEFT JOIN 预聚合支付结果。但若在最外层 WHERE 写 `payment_status=&#x27;SUCCESS&#x27;`，没有匹配支付记录的订单会被过滤掉，结果常等同于内连接。要判断是否保留未支付行，先明确业务问题；把条件放在支付子查询里、JOIN ON 里或 WHERE 里，含义可能不同。条件位置调整不是纯性能优化，还会改变结果集合。</p><p>退款、部分支付和多币种会使“成功金额”更复杂。应区分支付尝试、实际渠道交易、退款流水和最终净额，不能因为一个订单有成功尝试就忽略后续退款。</p></section>
 <section class="panel"><h2>用执行计划定位扇出</h2><p>EXPLAIN 或实际执行统计中观察各连接节点的估计行数与实际行数。若 orders 1000 行、明细平均 4 行、尝试平均 3 行，直接双连接可能生成约 12000 行；若优化器误估成 1000 行，可能选错连接顺序或内存预算。慢查询排查时同时看真实结果行数、各表键是否有索引、统计信息是否新鲜。索引可以让查找更快，却不会自动修正把金额乘大的语义错误。</p><p>数据质量也要核对：如果 payment_attempts 的 order_id 本身有异常重复或一条尝试被重复入库，先解决业务去重，再讨论 SQL 聚合。</p></section>
 <section class="panel"><h2>怎样设计验收数据</h2><p>建立订单 1：两条金额 30、70 的明细、两次支付尝试；订单 2：一条金额 50 的明细、一次成功尝试；订单 3：一条金额 20 的明细、没有支付尝试。期望订单明细总额依次为 100、50、20。分别用原始双 JOIN 和预聚合写法查询，观察订单 1 的 4 行扇出、订单 3 在 LEFT JOIN 下是否保留，以及最终汇总是否为 170。再把订单 1 两条明细都改为 30，证明 SUM(DISTINCT amount) 会低估。</p><p>真实报表应把每个 CTE 的“主键/粒度”和期望行数写成注释或测试断言。只有确保中间结果粒度正确，后面的 GROUP BY 才有可信含义。</p></section>
+<section class="panel" data-dry-goods><h2>JOIN 扇出与重复计数的判据</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>是否扇出</th><th>说明</th></tr></thead><tbody><tr><td><b>1:1</b>（主键对主键）</td><td>不扇出</td><td>行数不变，安全</td></tr><tr><td><b>N:1</b>（订单→用户）</td><td>不扇出</td><td>每条订单最多匹配 1 个用户，<b>安全</b></td></tr><tr><td><b>1:N</b>（用户→订单）</td><td><b>扇出</b></td><td>一个用户有多条订单，行数放大</td></tr><tr><td><b>N:M</b>（订单→商品→促销）</td><td><b>扇出且可能双重</b></td><td>两个 1:N 串联，倍数是<b>乘积</b></td></tr><tr><td>维度表有多条匹配</td><td><b>扇出</b></td><td>维度表不唯一是最常见的坑</td></tr></tbody></table></div><p><b>扇出的量化</b>：假设订单 100 万行，用户表 10 万行；订单 JOIN 用户（N:1）→ 结果仍是 <b>100 万</b>行（前提：用户表的 join key 唯一）。但如果用户表有重复（比如 ETL 重复导入导致一个 user_id 有 3 条），结果就变成 <b>300 万</b>行，<code>SUM(amount)</code> 直接<b>翻 3 倍</b>。这就是「金额对不上」最常见的根因。</p></section><section class="panel"><h2>检测与修复</h2><pre><code>-- 检测 1：join 后行数是否异常增加
+SELECT
+  (SELECT COUNT(*) FROM orders) AS n_orders,
+  (SELECT COUNT(*) FROM (
+      SELECT o.id FROM orders o JOIN users u ON o.user_id = u.id) t) AS n_joined;
+-- n_joined &gt; n_orders 说明用户表有重复的 user_id
+
+-- 检测 2：直接看维度表 join key 是否唯一
+SELECT user_id, COUNT(*) AS c
+FROM users GROUP BY user_id HAVING COUNT(*) &gt; 1
+ORDER BY c DESC LIMIT 10;
+-- 有结果 = 维度表不唯一，join 必然扇出
+
+-- 检测 3：对比 join 前后的聚合值
+SELECT
+  (SELECT SUM(amount) FROM orders)                                     AS direct_sum,
+  (SELECT SUM(o.amount) FROM orders o JOIN users u ON o.user_id=u.id)  AS joined_sum;
+-- 两者不等 = 重复计数，必须修</code></pre><pre><code>-- 修复 1：先聚合再 join（最推荐，从根本上消除扇出）
+WITH u AS (
+    SELECT user_id, MAX(city) AS city          -- 或用 ROW_NUMBER 取一条
+    FROM users GROUP BY user_id                -- 关键：保证每个 user_id 只有一行
+)
+SELECT u.city, SUM(o.amount)
+FROM orders o JOIN u ON o.user_id = u.user_id
+GROUP BY u.city;
+-- 这样 join 前维度表已经唯一，不可能扇出
+
+-- 修复 2：用窗口函数去重取一条
+WITH u AS (
+    SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id
+                                     ORDER BY updated_at DESC) AS rn
+        FROM users
+    ) t WHERE rn = 1
+)
+SELECT ... FROM orders o JOIN u ON o.user_id = u.user_id;
+
+-- 修复 3：用子查询代替 join（标量子查询天然不扇出）
+SELECT o.id, o.amount,
+       (SELECT city FROM users u WHERE u.user_id = o.user_id LIMIT 1) AS city
+FROM orders o;
+-- LIMIT 1 兜底防重复（但性能可能差，数据量大时用方案 1）</code></pre></section>
+<section class="panel"><h2>排查清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>SUM 结果比预期大</td><td>维度表 join key 不唯一</td><td>先聚合维度表再 join；加唯一性校验</td></tr><tr><td>COUNT(DISTINCT) 与 COUNT 差很多</td><td>存在扇出</td><td>明确该用哪个；通常 COUNT(DISTINCT id) 才是对的</td></tr><tr><td>两个 1:N 串联后数字暴涨</td><td>扇出相乘（N:M）</td><td>分别聚合到同一粒度后再合并，不要直接串 join</td></tr><tr><td>LEFT JOIN 后 NULL 增多</td><td>右表无匹配（正常）</td><td>用 <code>COALESCE</code>；但要区分「无匹配」和「匹配到 NULL 值」</td></tr><tr><td>预聚合表与明细对不上</td><td>聚合口径/时间粒度不一致</td><td>统一口径；建立对账任务定期校验</td></tr><tr><td>加了 DISTINCT 就对了但很慢</td><td>用 DISTINCT 掩盖了扇出</td><td><b>不要靠 DISTINCT 掩盖</b>，要修 join 逻辑；DISTINCT 只是遮住了症状</td></tr><tr><td>同一指标两个报表数值不同</td><td>join 路径不同</td><td>统一到一张事实表或统一的聚合层（语义层）</td></tr></tbody></table></div><p class="muted"><b>黄金规则</b>：做聚合时，<b>先保证每个维度表的 join key 唯一，再 join</b>。用 <code>GROUP BY</code> 或 <code>ROW_NUMBER</code> 把维度表收敛到唯一粒度，就能从根本上杜绝重复计数。靠 <code>DISTINCT</code> 善后是治标不治本，还拖慢查询。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>COUNT(DISTINCT order_id) 算回一单，是否也让 SUM(line.amount) 自动回到 100？</summary><p>不会。订单数的去重不影响已被复制的明细金额；应先按订单粒度聚合明细，再连接支付结果。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第一层 · 概念与判定：什么是扇出、怎么识别</h2><p>一句话：<b>JOIN 键不唯一时，行数会被放大，导致 SUM/COUNT 重复计算</b>。这就是「扇出（fan-out）」引发的双计问题。</p><div class="table-wrap"><table><thead><tr><th>术语</th><th>含义</th><th>后果</th></tr></thead><tbody><tr><td><b>扇出</b></td><td>左表 1 行匹配右表 N 行 → 变 N 行</td><td>行数放大 N 倍</td></tr><tr><td><b>双计</b></td><td>放大后对左表字段 SUM，被加了 N 次</td><td><b>金额/数量虚高</b></td></tr><tr><td><b>笛卡尔积</b></td><td>两边都不唯一，行数 = n × m</td><td>灾难级，可能打爆内存</td></tr></tbody></table></div><ul><li>信号一：JOIN 后的 <code>COUNT(*)</code> 明显大于左表 <code>COUNT(*)</code> → 扇出了。</li><li>信号二：<code>SUM(金额)</code> 与单独查左表的 SUM 对不上 → 双计了。</li><li>信号三：看起来「结果虚高但每条都对」→ 典型的扇出双计特征。</li></ul><p><b>扇出复现与三种解法</b></p><pre><code>-- 复现：订单 1 行，订单项 3 行，直接 JOIN 求和 -&gt; 订单金额被算 3 次
+SELECT o.id, SUM(o.amount)      -- 错：amount 被重复加
+FROM orders o JOIN items i ON i.order_id = o.id
+GROUP BY o.id;
+
+-- 验证扇出：对比 JOIN 前后行数
+SELECT COUNT(*) FROM orders;                              -- 基准
+SELECT COUNT(*) FROM orders o JOIN items i ON i.order_id = o.id;   -- 若更大则扇出
+
+-- 解法一（推荐）：先聚合到唯一粒度，再 JOIN
+SELECT o.id, o.amount, COALESCE(t.item_cnt, 0) AS item_cnt
+FROM orders o
+LEFT JOIN (SELECT order_id, COUNT(*) AS item_cnt FROM items GROUP BY order_id) t
+       ON t.order_id = o.id;                              -- 子查询已聚合到 1 行/订单
+
+-- 解法二：用 COUNT(DISTINCT) 修正计数（只能救计数，救不了 SUM）
+SELECT COUNT(DISTINCT o.id) FROM orders o JOIN items i ON i.order_id = o.id;
+
+-- 解法三：确认维度表唯一后再 JOIN（外键约束保证）
+-- 维度表（users/products）通常唯一，事实表（orders/items）不唯一
+-- 原则：事实表 JOIN 事实表 必须先在某一侧聚合</code></pre><p class="muted">核心原则：<b>事实表 JOIN 事实表，必须先把一侧聚合到唯一粒度</b>。维度表 JOIN 事实表通常是安全的（维度表主键唯一）。</p></section>
+<section class="panel"><h2>第四层 · 原理与取舍：三种解法的取舍</h2><div class="table-wrap"><table><thead><tr><th>解法</th><th>做法</th><th>能修 COUNT</th><th>能修 SUM</th><th>代价</th></tr></thead><tbody><tr><td><b>先聚合再 JOIN</b></td><td>子查询把一侧聚合到唯一键</td><td>✅</td><td>✅</td><td>SQL 变长，但<b>最正确</b></td></tr><tr><td><code>COUNT(DISTINCT)</code></td><td>去重计数</td><td>✅</td><td>❌</td><td><b>救不了 SUM</b>；大数据慢</td></tr><tr><td><code>SUM/COUNT(1/N)</code></td><td>按扇出倍数折算</td><td>⚠️ 不稳</td><td>⚠️ 不稳</td><td>倍数不固定时失效，<b>不推荐</b></td></tr><tr><td>改用 EXISTS</td><td>只判存在不取行</td><td>✅</td><td>✅</td><td>不能取右表字段</td></tr></tbody></table></div><details><summary>为什么 COUNT(DISTINCT) 救不了 SUM？</summary><p>因为 SUM 加的是<b>值</b>。订单金额 100 被复制 3 次，SUM 得 300；DISTINCT 只能对「哪些 id 出现过」去重，无法知道「100 应该只加一次」。所以 <b>SUM 的双计只能靠「先聚合再 JOIN」或「不在放大后的结果上求和」解决</b>。</p></details><details><summary>怎么快速判断我的 JOIN 有没有扇出？</summary><p>对比行数：分别跑 <code>SELECT COUNT(*) FROM 左表</code> 和 JOIN 后的 <code>COUNT(*)</code>。若后者更大，就是扇出。更精确的做法是 <code>COUNT(DISTINCT 左表主键)</code> 与 <code>COUNT(*)</code> 对比，两者不等即存在放大。</p></details><details><summary>有没有办法从设计上避免？</summary><p>有：① 建<b>星型模型</b>——事实表只 JOIN 维度表，事实表之间不直接 JOIN；② 用外键约束保证 JOIN 键唯一；③ 在数据仓库里建<b>汇总层（DWS）</b>，预先聚合到常用粒度，下游直接查汇总表。</p></details></section>
 <footer>继续阅读：<a href="join-principles.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -11,6 +11,29 @@
 <section class="panel"><h2>优先队列的饥饿风险</h2><p>严格优先队列先发高优先级包，低优先级在高优先级持续满载时可能长期得不到机会。若把所有业务都标高优先级，分类失去意义，也可能让普通业务饥饿。可为实时类设置带宽上限或保证、为普通类使用公平队列，让重要流量优先但不无限吞噬链路。不同设备支持的队列算法、缓冲和调度粒度不同，配置前要看实测。</p><p>QoS 还受包大小影响。一条 1500 字节大包一旦开始在慢链路发送，后来的小语音包必须等这一个包发完；更好的排队调度只能影响后续包，不能瞬间中断已在物理线上发送的帧。</p></section>
 <section class="panel"><h2>与拥塞控制的交互</h2><p>TCP/QUIC 依据丢包、ECN 和 RTT 等信号调节发送量。监管丢包可让大流降速，但也增加重传；整形可降低丢包，却可能形成深队列，使 RTT 上升。AQM 与公平队列可在队列持续变深前反馈拥塞，通常需要与端点行为配合。QoS 配置应同时看语音 P99 延迟、备份吞吐、丢包和队列长度，而不是只看某条规则的命中计数。</p><p>如果应用本身突发超出能力，网络 QoS 只能做最后一层保护。业务侧还应限速、分批发送或在高峰暂停备份。</p></section>
 <section class="panel"><h2>一次验收实验</h2><p>先无备份测会议端到端抖动与丢包，再启动备份，观察上行队列和 P95/P99 延迟。随后仅改变整形速率与队列策略，重复相同负载，报告会议质量和备份完成时长。若会议改善但备份几乎停滞，检查优先队列是否让低优先级饥饿。再模拟多个会议并发，确认高优先级类自身不会把链路打满。</p><p>跨多个站点时，分别确认每个瓶颈设备理解同一 DSCP 策略；只在入口标记、出口不识别，无法保障端到端体验。</p></section>
+<section class="panel" data-dry-goods><h2>DSCP 与 CoS 取值表</h2><div class="table-wrap"><table><thead><tr><th>类别</th><th>DSCP 名称</th><th>DSCP 值（十进制）</th><th>二进制</th><th>典型用途</th></tr></thead><tbody><tr><td>默认</td><td>BE（Best Effort）</td><td><b>0</b></td><td>000000</td><td>普通流量</td></tr><tr><td>低优先</td><td>CS1</td><td>8</td><td>001000</td><td> scavenger / 批量下载</td></tr><tr><td>保证转发</td><td>AF11 / AF21 / AF31</td><td>10 / 18 / 26</td><td>001010/010010/011010</td><td>业务数据（三类）</td></tr><tr><td>保证转发（高）</td><td>AF41 / AF42 / AF43</td><td>34 / 36 / 38</td><td>100010/100100/100110</td><td>关键业务</td></tr><tr><td>加速转发</td><td><b>EF</b></td><td><b>46</b></td><td>101110</td><td><b>语音/VoIP</b>，低延迟低抖动</td></tr><tr><td>网络控制</td><td>CS6</td><td>48</td><td>110000</td><td>路由协议</td></tr><tr><td>保留</td><td>CS7</td><td>56</td><td>111000</td><td>协议保留</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>802.1p CoS（二层 PCP）</th><th>优先级</th><th>典型映射</th></tr></thead><tbody><tr><td>0</td><td>Best Effort</td><td>默认</td></tr><tr><td>1</td><td>Background</td><td>批量</td></tr><tr><td>3</td><td>Critical Applications</td><td>业务</td></tr><tr><td>5</td><td><b>Voice（&lt; 10 ms 延迟）</b></td><td>语音</td></tr><tr><td>6</td><td>Internetwork Control</td><td>网络控制</td></tr><tr><td>7</td><td>Network Control</td><td>保留</td></tr></tbody></table></div><p><b>AF 编码规则</b>：AF<span style="font-style:italic">xy</span> 中 x 是<b>类别</b>（1–4，越高越优先），y 是<b>丢弃概率</b>（1 低、2 中、3 高）。所以 <code>AF31</code> = 类别 3、低丢弃率。DSCP 值 = 8x + 2y。</p><p><b>QoS 配置</b></p><pre><code># 打 DSCP 标记（iptables）
+iptables -t mangle -A POSTROUTING -p udp --dport 5060 -j DSCP --set-dscp 46   # SIP 语音
+iptables -t mangle -A POSTROUTING -p tcp --dport 22 -j DSCP --set-dscp-class CS6
+
+# Linux 队列（HTB：分层令牌桶）
+tc qdisc add dev eth0 root handle 1: htb default 30
+tc class add dev eth0 parent 1: classid 1:1 htb rate 100mbit ceil 100mbit
+tc class add dev eth0 parent 1:1 classid 1:10 htb rate 30mbit ceil 100mbit prio 1   # 高优先
+tc class add dev eth0 parent 1:1 classid 1:20 htb rate 50mbit ceil 100mbit prio 2   # 中
+tc class add dev eth0 parent 1:1 classid 1:30 htb rate 20mbit ceil 80mbit  prio 3   # 低
+# 按 DSCP 分流到不同 class
+tc filter add dev eth0 protocol ip parent 1:0 prio 1 handle 46 fw flowid 1:10
+
+# 限速（TBF：令牌桶）
+tc qdisc add dev eth0 root tbf rate 10mbit burst 32kbit latency 50ms
+
+# 查看与统计
+tc -s qdisc show dev eth0
+tc -s class show dev eth0
+tc filter show dev eth0
+
+# 抓包看 DSCP
+tcpdump -i eth0 -nn -v ip | grep -i tos</code></pre></section><section class="panel"><h2>Shaping vs Policing 与落地</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>Shaping（整形）</b></th><th><b>Policing（监管）</b></th></tr></thead><tbody><tr><td>超出速率时</td><td><b>缓存排队</b>（延迟增加）</td><td><b>直接丢弃</b>或降级标记</td></tr><tr><td>方向</td><td>只能用于<b>出方向</b></td><td>出入方向都可以</td></tr><tr><td>延迟影响</td><td>引入排队延迟</td><td>不引入延迟</td></tr><tr><td>突发容忍</td><td>能吸收突发</td><td>超出即丢</td></tr><tr><td>典型命令</td><td><code>tc tbf</code> / <code>htb</code></td><td><code>iptables limit</code> / <code>tc police</code></td></tr><tr><td>适用</td><td>自己出口要做平滑（如对接运营商固定带宽）</td><td><b>接入口限制对方速率</b></td></tr></tbody></table></div><p><b>令牌桶参数</b>：<code>CIR</code>（承诺速率）、<code>CBS</code>（承诺突发大小，桶容量）、<code>EIR/EBS</code>（超额速率与超额突发）。桶容量决定了<b>能容忍多大的突发</b>：CBS 太小 → 正常突发也被丢；太大 → 限速形同虚设。经验值 <code>CBS ≈ CIR × 目标延迟</code>。</p><ul><li><b>DSCP 只在你的网络里有效</b>：出公网时绝大多数运营商会<b>重置 DSCP 为 0</b>（不信任客户标记）。所以 QoS 主要用于<b>企业内网和 IDC 内部</b>，公网加速要靠专线或 CDN。</li><li><b>不要过度分类</b>：8 个队列通常够了。分太多队列会让配置复杂、排障困难，且每个队列都要分配带宽保证，反而降低利用率。</li><li><b>优先队列的副作用</b>：高优先队列若不限速，会<b>饿死</b>低优先队列。必须给每个 class 配 <code>rate</code>（保证）和 <code>ceil</code>（上限）。</li><li><b>HTB 的借用机制</b>：<code>ceil</code> 高于 <code>rate</code> 时，空闲带宽可被借用（提高利用率），拥塞时按比例收回。这是 HTB 比单纯限速好用的地方。</li><li><b>排障顺序</b>：① <code>tc -s class</code> 看各队列是否真的有流量（分类是否正确）；② 看 dropped 计数（判断是否被限速/丢弃）；③ 抓包确认 DSCP 标记是否被打上、是否被中间设备改写；④ 确认是否在正确的方向（shaping 只能出方向）。</li></ul><details><summary>为什么我配了 QoS 但没有效果？</summary><p>三种常见原因：① 标记没打上或被打在错误位置（要在流量进入队列<b>之前</b>打）；② 队列没按 DSCP 分流（缺 tc filter）；③ 出公网被运营商重置 DSCP。先在<b>内网可控链路</b>上验证。</p></details><details><summary>限速用 shaping 还是 policing？</summary><p>限制<b>自己发出</b>的流量用 shaping（平滑，避免 TCP 因突发丢包而降窗）；限制<b>别人发来</b>的流量用 policing（直接丢，让对方的 TCP 感知并降速）。入方向无法 shaping——包已经到了。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>给所有流量都标最高 DSCP，是否能让所有请求更快？</summary><p>不能。物理带宽不变，分类失去区分作用，高优先级持续满载还可能导致其他队列饥饿。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../02-queueing/queueing-delay-bufferbloat.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

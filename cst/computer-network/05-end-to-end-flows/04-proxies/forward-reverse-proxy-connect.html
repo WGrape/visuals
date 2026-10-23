@@ -11,6 +11,29 @@
 <section class="panel"><h2>反向代理怎样处理请求</h2><p>R 接受客户端连接，可以终止 TLS，依据 Host 和路径选订单后端，再建立独立的上游连接。此时客户端到 R、R 到后端是两段连接，超时、TLS、重试和连接池各有配置。若客户端请求已被后端提交，但 R 等响应超时并自动重试另一后端，仍可能重复执行非幂等写入。反向代理不提供分布式事务，业务要有幂等键和状态查询。</p><p>R 可以把客户端真实地址通过 Forwarded 或 X-Forwarded-For 传递给后端，但必须在边界清除外部用户伪造的同名头，并限定后端只信任 R。若 R 之后还有 CDN、网关等多层代理，需要约定哪个字段和哪个位置代表原始客户端；简单取列表第一个 IP 可能被伪造。</p></section>
 <section class="panel"><h2>一次完整的地址视图</h2><p>浏览器本地与企业代理 P 建 TCP；P 再向网站入口 R 建 TCP；R 再向订单服务 S 建上游连接。浏览器看到证书可能由 R 提供，P 在普通 CONNECT 隧道下不解密；S 看到的直接 TCP 对端是 R，R 看到的对端是 P。若要定位用户请求，需使用可信请求 ID 和代理链日志，把各段连接的时间、目标和状态拼起来。</p><p>这个例子解释了为何服务器 access log 只有代理 IP、而用户投诉来自不同地区。定位时先确认每段是否真有连接和响应，不要因为 R 返回 502 就断言 S 自己返回 502；502 也可能由 R 生成。</p></section>
 <section class="panel"><h2>配置与验收</h2><p>分别测试无代理直连、经 P 的 HTTP、经 P 的 HTTPS CONNECT、经 R 的后端路由。记录 DNS 是浏览器解析还是代理解析、每段 TLS 证书、Host/SNI、真实源 IP 和转发头。代理增加缓存或重试前，先验证用户隔离与写请求副作用；部署后监测每段建连耗时、上游错误与连接池状态。</p><p>若企业代理故障，外部站点可能仍健康；若 R 故障，浏览器即使能经 P 访问其他网站也无法访问该站。把链路分成客户端到 P、P 到 R、R 到 S 三段，是最有效的排障起点。</p></section>
+<section class="panel" data-dry-goods><h2>三种代理与关键头</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>代理谁</th><th>客户端是否知道</th><th>典型用途</th></tr></thead><tbody><tr><td><b>正向代理</b></td><td>代理<b>客户端</b>访问外网</td><td><b>知道</b>（要主动配置）</td><td>公司上网代理、翻墙、爬虫 IP 池、缓存</td></tr><tr><td><b>反向代理</b></td><td>代理<b>服务端</b>接收请求</td><td><b>不知道</b>（以为在访问真实服务器）</td><td>Nginx、CDN 回源、负载均衡、TLS 终结、WAF</td></tr><tr><td><b>透明代理</b></td><td>客户端无感知地劫持流量</td><td><b>不知道</b></td><td>运营商缓存、企业审计（需 iptables TPROXY）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>HTTP 头</th><th>含义</th><th>注意</th></tr></thead><tbody><tr><td><code>X-Forwarded-For</code>（XFF）</td><td>经过的客户端 IP 链，逗号分隔</td><td><b>最左</b>是最原始客户端；但可被伪造</td></tr><tr><td><code>X-Real-IP</code></td><td>Nginx 常用，单个 IP</td><td>只保留原始 IP</td></tr><tr><td><code>X-Forwarded-Proto</code></td><td>原始协议（http/https）</td><td>TLS 在代理终结时后端需要它判断</td></tr><tr><td><code>X-Forwarded-Host</code></td><td>原始 Host</td><td>多级代理时保留</td></tr><tr><td><code>Via</code></td><td>经过的代理标识</td><td>RFC 7230，用于检测环路</td></tr><tr><td><code>Forwarded</code></td><td>标准化的替代头（RFC 7239）</td><td>更规范但普及度低</td></tr></tbody></table></div><p><b>真实 IP 的正确取法</b>：从<b>信任的代理</b>链的最右侧往左数。Nginx 用 <code>real_ip_header X-Forwarded-For</code> + <code>set_real_ip_from 10.0.0.0/8</code> 指定可信代理段，这样 <code>$remote_addr</code> 就会变成真实客户端 IP。<b>绝不能</b>直接信任 XFF 最左值——客户端可以伪造。</p><p><b>代理配置</b></p><pre><code># Nginx 反向代理标准配置
+location / {
+    proxy_pass http://backend;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
+# 让后端拿到真实 IP（在最后一跳代理上）
+set_real_ip_from 10.0.0.0/8;
+set_real_ip_from 172.16.0.0/12;
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+
+# 正向代理（CONNECT 方法，用于 HTTPS 隧道）
+curl -x http://proxy:8080 https://example.com
+curl -x socks5://127.0.0.1:1080 https://example.com
+
+# 测试代理是否生效
+curl -x http://proxy:8080 -I https://ifconfig.me</code></pre></section><section class="panel"><h2>CONNECT 隧道与排障</h2><p><b>HTTPS 走正向代理必须用 CONNECT</b>：客户端发 <code>CONNECT example.com:443 HTTP/1.1</code>，代理建立到目标的 TCP 隧道后回 <code>200 Connection established</code>，之后客户端与目标直接做 TLS 握手——代理<b>看不到也改不了</b>里面的内容（这正是 HTTPS 不能被中间人解密的原因）。</p><ul><li><b>为什么反向代理看得到明文</b>：因为 TLS 在代理处<b>终结</b>（代理持有证书），代理解密后转发给后端（可能再加密）。这是 WAF、路由、灰度能工作的前提，也意味着代理是安全边界，必须重点保护。</li><li><b>常见故障 1：后端拿到的是代理 IP</b> → 没配 XFF 或 <code>set_real_ip_from</code>。日志、限流、风控全部失效。</li><li><b>常见故障 2：无限重定向</b> → 代理终结了 TLS，但后端不知道（没有 <code>X-Forwarded-Proto</code>），后端把请求重定向到 HTTPS，代理再转发...循环。解决：传 <code>X-Forwarded-Proto: https</code> 并让后端识别。</li><li><b>常见故障 3：Host 头不对</b> → <code>proxy_set_header Host</code> 没设，后端拿到的是 upstream 名字而非真实域名，导致路由错误或 cookie 域名不对。</li><li><b>常见故障 4：代理环路</b> → A 代理转发到 B，B 又转回 A。用 <code>Via</code> 头检测，或限制转发层数。</li><li><b>超时设置</b>：<code>proxy_connect_timeout</code>（建连，1–5 s）、<code>proxy_send_timeout</code>、<code>proxy_read_timeout</code>（等后端响应，按业务 P99）。三个都要设，否则慢后端会耗尽代理的连接。</li></ul><details><summary>代理能看到 HTTPS 的内容吗？</summary><p>取决于代理类型。<b>正向代理用 CONNECT 隧道</b>时看不到（端到端加密）；<b>反向代理终结 TLS</b>时能看到明文（这是设计如此）；<b>企业审计型代理</b>会做 MITM（在客户端装根证书），可以解密——所以公司电脑能审计 HTTPS 流量。</p></details><details><summary>XFF 里有多个 IP，该用哪个？</summary><p>语义上<b>最左</b>是原始客户端，但可以被伪造。安全做法是：只信任自己可控的代理添加的那一跳，从右往左跳过所有可信代理，第一个不可信的就是真实 IP（Nginx 的 <code>real_ip_recursive on</code> 就是这个逻辑）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>普通 HTTPS CONNECT 代理能直接看到加密后的 HTTP 请求路径吗？</summary><p>通常不能。它主要建立隧道并看到连接元数据；若显式做 TLS 检查并得到终端信任，才可能解密应用内容。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../03-load-balancing/l4-l7-load-balancing-health-checks.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

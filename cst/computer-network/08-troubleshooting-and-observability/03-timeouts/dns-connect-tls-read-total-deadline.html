@@ -12,6 +12,23 @@
 <section class="panel"><h2>不同超时现象的证据</h2><p>DNS 超时看解析器和响应码；connect 超时看 SYN 是否得到 SYN-ACK 与回程路由；TLS 超时看握手阶段和证书；write 超时可能是客户端发送缓冲、网络窗口或服务器不读；首字节慢可能是代理排队、应用或数据库；正文读得慢可能是服务端流式生成、网络拥塞或接收应用慢。抓包和分阶段 trace 能定位哪一段在等待。</p><p>如果每次恰好在固定 60 秒失败，优先找哪层代理或客户端配置了 60 秒空闲/总超时。若只在大响应失败，要看读超时是否是“每次读等待”还是“整个下载期限”，并检查 PMTU、窗口与代理缓冲。</p></section>
 <section class="panel"><h2>服务端与代理协同</h2><p>代理可能先于后端超时并返回 504，但后端仍继续处理。应让后端知道客户端 deadline，必要时取消无意义的计算。连接池获取连接、线程池排队和数据库查询也要计入服务端预算；如果只给数据库设置 500 毫秒，却让请求在连接池排队两秒，用户仍会超时。监控应记录 queue time、upstream connect time、first byte time、total time 和取消原因。</p><p>链路上不同代理的 timeout 若顺序颠倒，可能产生难理解的错误：内层 60 秒、外层 30 秒，外层先返回，内层继续浪费 30 秒。应按系统拓扑安排各层限制，并保留少量回包余量。</p></section>
 <section class="panel"><h2>故障演练与验收</h2><p>分别注入 DNS 不响应、目标端口无回包、TLS 服务卡住、后端处理超时、慢速流式正文和“提交成功但响应丢失”。每次记录哪个阶段触发、最终状态码、下游是否取消、业务是否有副作用。用同一请求 ID 串联客户端、代理和服务端时间线。</p><p>最后验证总等待不超过用户目标，并在超时时给出可行动的结果：可安全重试、处理中可查询、或明确失败。没有总预算和业务状态查询的“超时”只是把未知结果推给用户。</p></section>
+<section class="panel" data-dry-goods><h2>各阶段超时建议值</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>建议值</th><th>说明</th><th>过长后果</th></tr></thead><tbody><tr><td>DNS 解析</td><td><b>2 – 5 s</b></td><td>通常几十 ms，5 s 已足够宽裕</td><td>用户白屏等待</td></tr><tr><td>TCP 建连（connect）</td><td><b>1 – 5 s</b></td><td><b>要短</b>：连不上说明端口不通/被拦，重试比等待有效</td><td>占用连接槽位</td></tr><tr><td>TLS 握手</td><td><b>5 – 10 s</b></td><td>含证书下载与 OCSP，比 TCP 长一些</td><td>同上</td></tr><tr><td>首字节（TTFB / read）</td><td><b>按 P99 × 2–3</b></td><td>业务相关，慢接口可 30 s</td><td>慢请求堆积吃光资源</td></tr><tr><td>整体 deadline</td><td><b>各阶段之和 × 1.2</b></td><td>留一点余量</td><td>—</td></tr></tbody></table></div><p><b>典型 HTTP 客户端超时配置（以 Go 为例）</b>：</p><p><b>Go 超时配置</b></p><pre><code>client := &amp;http.Client{
+    Timeout: 30 * time.Second,          // 整体 deadline，兜底
+    Transport: &amp;http.Transport{
+        DialContext: (&amp;net.Dialer{
+            Timeout:   2 * time.Second,  // TCP 建连
+            KeepAlive: 30 * time.Second,
+        }).DialContext,
+        TLSHandshakeTimeout:   5 * time.Second,   // TLS 握手
+        ResponseHeaderTimeout: 10 * time.Second,  // 等响应头（TTFB）
+        ExpectContinueTimeout: 1 * time.Second,
+        IdleConnTimeout:       90 * time.Second,  // 空闲连接保持
+        MaxIdleConns:          100,
+        MaxIdleConnsPerHost:   10,
+    },
+}
+// 注意：Timeout 是整体的，Transport 里的是分阶段的
+// 分阶段超时必须 &lt; 整体超时，否则分阶段配置形同虚设</code></pre></section><section class="panel"><h2>超时级联与常见错误</h2><ul><li><b>超时必须层层递减</b>：网关 &gt; 服务 &gt; 下游。例如网关 30 s、服务 20 s、下游调用 10 s。若反过来（下游 30 s、网关 10 s），网关超时重试时下游还在忙 → 白做 + 放大负载。</li><li><b>最容易漏的是“整体超时”</b>：很多客户端只配了各阶段超时，没有整体 deadline，结果 DNS 2 s + connect 5 s + TLS 10 s + read 30 s 叠加起来可能 47 s 才失败。整体超时必须设。</li><li><b>连接超时要短，读超时要长</b>：连不上（1–2 s）说明目标不可达，快速失败重试更有效；读超时（按 P99）要给足，因为服务端确实在处理。</li><li><b>空闲超时要小于中间设备</b>：<code>IdleConnTimeout</code> 应<b>小于</b> LB/NAT 的空闲超时（常见 60–350 s），否则连接池里会有“已死但客户端以为可用”的连接。建议 90 s 或直接靠 TCP keepalive。</li><li><b>重试要有预算</b>：总重试不超过请求量的 10%，且退避加抖动。否则超时重试会放大故障。</li><li><b>排障</b>：用 <code>curl -w</code> 分解看卡在哪个阶段；服务端看处理时间是否与客户端感知一致（不一致说明是网络/排队，不是处理慢）。</li></ul><details><summary>设置了超时为什么还会卡很久？</summary><p>检查是否有<b>多层重试</b>：客户端超时 5 s × 重试 3 次 = 15 s，若外层网关再重试 2 次就是 30 s。要计算<b>总的端到端时间</b>：单次超时 × 重试次数 × 层级数。</p></details><details><summary>连接超时设 1 秒会不会太短？</summary><p>同机房/同地域通常 1–2 ms 就建连，1 s 非常宽裕。跨地域/公网可放宽到 3–5 s。关键是<b>要设</b>——不设就是无限等待（Go 默认是无限）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>每层串行调用都设 800 毫秒超时，能保证用户请求 800 毫秒内完成吗？</summary><p>不能。各层等待可能相加，还可能有排队和重试；应传递统一总截止时间。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../02-layered-diagnosis/dns-tcp-tls-http-diagnosis.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

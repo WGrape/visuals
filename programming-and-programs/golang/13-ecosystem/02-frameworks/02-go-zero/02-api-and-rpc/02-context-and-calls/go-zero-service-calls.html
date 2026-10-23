@@ -57,6 +57,24 @@
   .keyline { border-left: 3px solid var(--blue-400); padding-left: 16px; margin: 16px 0; }
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -303,3 +321,28 @@ PayHttp:
 
 </body>
 </html>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>内部 RPC 与第三方 HTTP 的调用方式</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>用什么</th><th>关键点</th></tr></thead><tbody><tr><td><b>调用本项目的 RPC 服务</b></td><td><code>zrpc.MustNewClient(c.OrderRpc)</code> + 生成的 client</td><td>客户端在 ServiceContext 里建一次，全局复用</td></tr><tr><td><b>调用第三方 HTTP</b></td><td><code>rest</code> 客户端或直接用 <code>net/http</code></td><td>必须设超时；复用 http.Client 而不是每次新建</td></tr><tr><td><b>调用其他语言的 RPC</b></td><td>gRPC 原生客户端（跨语言天然支持）</td><td>proto 契约要统一维护</td></tr><tr><td><b>需要服务发现</b></td><td>zrpc 内置（etcd / k8s endpoints）</td><td>配置文件里指定 <code>Etcd.Hosts</code> 或开启 k8s 模式</td></tr><tr><td><b>需要负载均衡</b></td><td>zrpc 默认带 P2C（Power of Two Choices）</td><td>比轮询更能应对慢节点</td></tr></tbody></table></div><p><b>配置与代码</b></p><pre><code>// config 里的 RPC 配置（直连模式）
+OrderRpc:
+  Endpoints: ["127.0.0.1:8080", "127.0.0.1:8081"]   # 多地址自动负载均衡
+  Timeout: 800   # 毫秒
+
+// etcd 服务发现模式
+OrderRpc:
+  Etcd:
+    Hosts: ["127.0.0.1:2379"]
+    Key: order.rpc
+
+// ServiceContext 里建客户端（只建一次！）
+orderclient.NewOrder(zrpc.MustNewClient(c.OrderRpc))
+
+// logic 里调用
+resp, err := l.svcCtx.OrderRpc.CreateOrder(l.ctx, &amp;orderpb.CreateReq{Uid: uid})
+
+// 调第三方 HTTP：务必复用 client 并设超时
+var cli = resty.New().SetTimeout(3 * time.Second)   // 全局复用
+resp, err := cli.R().SetContext(ctx).Get("https://api.example.com/x")
+
+// ❌ 反例：每次请求都 http.Client{} + 30s 默认无超时
+//   -&gt; 连接不复用（TIME_WAIT 堆积）+ 下游挂了会把协程全卡死</code></pre><ul><li><b>超时必须设，且层层递减</b>：网关 3s → 业务 1s → 单 RPC 800ms → 单次 DB 300ms。</li><li><b>重试要谨慎</b>：只对<b>幂等</b>的读操作重试；写操作重试可能造成重复下单。go-zero 的 <code>zrpc.Retry</code> 要显式开启，别默认打开。</li><li><b>重试会放大流量</b>：下游已经过载时重试会雪上加霜，要有<b>熔断</b>配合（go-zero 的 <code>breaker</code> 默认在 zrpc 上开启）。</li><li><b>客户端是长连接</b>：放在 ServiceContext 里复用，不要在 logic 里每次 new。</li><li><b>错误不要吞掉</b>：RPC 返回的错误要包装成业务错误再往上抛，保留错误链（<code>%w</code>）。</li></ul></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>排障清单</h2><ul><li><b>连不上</b>：先看配置里的 Endpoints/Etcd Key 是否正确，再 <code>telnet</code> 端口，最后看服务是否注册成功。</li><li><b>超时</b>：先量下游真实耗时（看链路或下游监控），再判断是超时设太短还是下游真的慢。</li><li><b>大量 connection refused</b>：可能是下游实例已下线但服务发现没摘掉（etcd TTL / k8s endpoints 延迟）。</li><li><b>context deadline exceeded</b>：上游预算用完；检查超时是否层层递减，别让下游超时大于上游。</li><li><b>熔断打开</b>：go-zero 的 breaker 在错误率达到阈值后会短路，属于保护行为；此时应该修下游而不是关掉熔断。</li></ul><details><summary>go-zero 的 RPC 默认有熔断吗？</summary><p>有。zrpc 客户端默认启用 breaker（滑动窗口统计错误率），错误率超阈值后会直接返回而不发请求，给下游恢复的时间。</p></details><details><summary>直连和 etcd 模式怎么选？</summary><p>本地开发 / 固定地址用直连；生产多实例、需要弹性扩缩容时用 etcd 或 K8s 服务发现。</p></details><details><summary>调用第三方 HTTP 要不要走 zrpc？</summary><p>不用，zrpc 是给内部 gRPC 用的。第三方 HTTP 用 resty / net/http，重点是超时、重试与连接池三项要配好。</p></details></div></section>

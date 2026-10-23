@@ -11,6 +11,27 @@
 <section class="panel"><h2>为什么回程同样重要</h2><p>A 发往 B 的包可能经路由器 R1 顺利到达 B，但 B 的返回路由指向 R2；若 R2 不知道 A 的前缀或被防火墙拦截，A 会表现为“请求超时”。检查时分别从 A 与 B 看去程、回程路由，并对照防火墙状态表。状态防火墙若要求双向流量经过同一设备，非对称路径也可能被丢弃。</p><p>源地址选择也影响回程。多网卡主机可能从接口 X 发包，却选择接口 Y 的 IP 作为源地址；远端回复走向 Y 所在网络。排障时记录真实报文的源与目的 IP，不能只根据应用绑定的主机名猜测。</p></section>
 <section class="panel"><h2>静态路由与动态路由</h2><p>静态路由适合简单、稳定且变更少的拓扑；动态协议用于在多路径网络中传播可达前缀和收敛故障。OSPF 等域内协议与 BGP 等域间协议解决的范围和策略不同，但最终仍需把选定路径安装到转发表。路由学习成功并不意味着转发一定成功，还要检查下一跳可达、接口、ACL 与设备容量。</p><p>最长前缀匹配还关系到安全。更具体路由可以覆盖聚合路由，让某个地址段走不同路径；错误宣告或配置可能造成流量劫持与黑洞。变更前后应比对受影响前缀的去程和回程，而非只检查一条目的地址。</p></section>
 <section class="panel"><h2>验证命令与实验</h2><p>在主机上可查路由表和针对某个目的地址的实际路由选择；在路由器上查看生效前缀、下一跳、邻居表与接口计数器。测试时选 /24 内、/24 外但 /16 内、/16 外但 /8 内、所有具体前缀外四个地址，逐个核对手算结果。若 traceroute 停在某跳，该跳之后可能丢包，也可能只是 ICMP 响应被限制，需要结合端口测试和抓包。</p><p>一个完整结论要包含“哪条前缀命中、哪个下一跳、该下一跳是否可达、回程是否存在”。少任何一项，都可能把应用超时误判成 DNS 或服务器问题。</p></section>
+<section class="panel" data-dry-goods><h2>路由选择的三条规则</h2><p>路由器转发时按以下顺序决策：<b>① 最长前缀匹配 → ② 管理距离（AD）→ ③ 度量值（Metric）</b>。注意顺序：先比前缀长度，<b>不同协议</b>之间比 AD，<b>同一协议</b>内比 Metric。</p><div class="table-wrap"><table><thead><tr><th>路由来源</th><th>管理距离 AD（Cisco）</th><th>说明</th></tr></thead><tbody><tr><td>直连接口</td><td><b>0</b></td><td>最可信</td></tr><tr><td>静态路由</td><td><b>1</b></td><td>手工配置</td></tr><tr><td>eBGP</td><td><b>20</b></td><td>外部 BGP</td></tr><tr><td>OSPF</td><td><b>110</b></td><td>内部网关协议</td></tr><tr><td>IS-IS</td><td>115</td><td></td></tr><tr><td>RIP</td><td>120</td><td>跳数，最大 15 跳</td></tr><tr><td>iBGP</td><td><b>200</b></td><td>内部 BGP</td></tr><tr><td>未知/不可达</td><td>255</td><td>不会被使用</td></tr></tbody></table></div><p><b>举例</b>：同时存在 <code>10.0.0.0/8 via A（静态，AD=1）</code> 和 <code>10.1.0.0/16 via B（OSPF，AD=110）</code>。去往 <code>10.1.2.3</code> 时，<b>/16 更长</b>，所以走 B —— 即使 AD 更差。这就是最长前缀优先。</p><p><b>路由表操作</b></p><pre><code># 查看路由表
+ip route show
+# default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.100 metric 100
+# 10.0.0.0/8 via 10.1.1.1 dev eth1
+# 192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.100
+
+# 查某个目的地址命中哪条路由（排障利器）
+ip route get 8.8.8.8
+ip route get 10.1.2.3 from 192.168.1.100
+
+# 添加/删除静态路由
+ip route add 10.2.0.0/16 via 10.1.1.1 dev eth1
+ip route add default via 192.168.1.1 metric 100
+ip route del 10.2.0.0/16
+
+# 策略路由（按源地址选路由表）
+ip rule add from 10.0.0.0/24 table 100
+ip route add default via 10.0.0.1 table 100
+
+# 看内核路由缓存/查找统计（老内核有 route -C）
+ip -s route show cache   # 新内核已移除缓存</code></pre></section><section class="panel"><h2>默认路由与黑洞排查</h2><ul><li><b>默认路由 <code>0.0.0.0/0</code></b> 的前缀长度是 0，永远最后匹配（兜底）。没有默认路由 = 只能访问直连和明细网段。</li><li><b>多默认路由的 metric</b>：多条 default 时按 metric 小的优先（等价路由会做 ECMP 负载）。Linux 上 DHCP 给的 default metric 常是 100，手工加的若 metric 更大会“配了但不生效”。</li><li><b>策略路由（Policy Routing）</b>：Linux 默认查 <code>local → main → default</code> 三张表，规则见 <code>ip rule</code>。多出口、VPN 分流要靠 <code>ip rule</code> + 自定义表实现（如按源地址或 fwmark）。</li><li><b>常见故障 1</b>：配了明细路由但走不通 → 检查<b>回程路由</b>。单向通（能去不能回）是最容易被忽略的问题：对端也要有回本端的路由。</li><li><b>常见故障 2</b>：VPN 连上后所有流量都走 VPN → 检查是否推了 <code>0.0.0.0/0</code> 路由（redirect-gateway）。要分流就用 <code>ip rule</code> 排除内网网段。</li><li><b>常见故障 3</b>：<code>ip route get</code> 显示走的是非预期接口 → 看 metric 和路由表优先级。</li><li><b>黑洞与 null0</b>：聚合路由常配一条指向 null0 的汇总路由（丢弃），配合明细路由使用；防止环路和匹配到默认路由后兜圈子。</li></ul><details><summary>为什么有两条能匹配的路由，走的却不是我认为的那条？</summary><p>按优先级排查：① 前缀更长的赢；② 前缀相同比 AD（直连 0 > 静态 1 > eBGP 20 > OSPF 110 > iBGP 200）；③ 同一来源比 metric。Linux 上还要看 <code>ip rule</code> 的策略路由顺序。</p></details><details><summary>ping 通但服务不通，可能是路由问题吗？</summary><p>可能。若存在非对称路由（去程走 A、回程走 B），且 B 路径上有状态防火墙/NAT 没看到去程的 SYN，回包会被丢弃。用 <code>traceroute</code> 双向测，或在两端同时抓包对比。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>一条更具体的 /24 路由指向坏网关，是否一定自动回退到可用的 /16？</summary><p>不一定。若 /24 仍在生效转发表中，最长前缀匹配可能持续选择坏网关；要看故障检测是否撤销该路由。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="routing-basics.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

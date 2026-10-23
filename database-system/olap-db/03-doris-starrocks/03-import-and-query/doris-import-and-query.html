@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -169,6 +187,42 @@ SHOW ROUTINE LOAD FOR db.job_orders;   -- 看具体的错误行与原因</code><
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>四种导入方式对照</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>数据源</th><th>单次规模建议</th><th>是否阻塞查询</th></tr></thead><tbody><tr><td><b>Stream Load</b></td><td>HTTP 直传本地文件/内存</td><td><b>1~10 GB</b></td><td>否（同步返回）</td></tr><tr><td><b>Routine Load</b></td><td><b>Kafka 持续订阅</b></td><td>持续流式</td><td>否</td></tr><tr><td><b>Broker Load</b></td><td>HDFS / 对象存储</td><td><b>几十 GB ~ TB</b></td><td>否（异步）</td></tr><tr><td><b>Insert Into</b></td><td>SQL 结果集</td><td><b>&lt; 1 GB</b></td><td>是（占用执行资源）</td></tr></tbody></table></div><p><b>导入命令</b></p><pre><code>-- Stream Load：curl 直传 CSV（label 必须唯一，用于幂等去重）
+curl -v --location-trusted -u root: \
+  -H "label:load_20261022_01" \
+  -H "column_separator:," \
+  -H "columns:dt,user_id,amount" \
+  -T data.csv \
+  http://fe_host:8030/api/db/orders/_stream_load
+
+-- Routine Load：持续消费 Kafka
+CREATE ROUTINE LOAD db.order_load ON orders
+COLUMNS(user_id, amount, dt)
+PROPERTIES (
+  "desired_concurrent_number" = "3",
+  "max_batch_interval" = "20",      -- 每 20 秒攒一批
+  "max_batch_rows" = "300000",      -- 或攒够 30 万行触发
+  "max_error_number" = "100"        -- 错误行数上限，超过则任务暂停
+)
+FROM KAFKA (
+  "kafka_broker_list" = "broker1:9092,broker2:9092",
+  "kafka_topic" = "orders",
+  "property.group.id" = "doris_cg"
+);</code></pre><p class="muted"><b>label 是幂等的键</b>：同一个 label 重复提交，Doris 会直接返回上次的结果而不会重复写入。这是做“至少一次”投递时保证不重不漏的关键。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>导入参数调优</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>调优建议</th></tr></thead><tbody><tr><td><code>max_batch_rows</code></td><td>200000</td><td>行宽较窄可加到 50 万，减少版本数</td></tr><tr><td><code>max_batch_interval</code></td><td>10 s</td><td>实时性要求不高时调到 <b>30~60 s</b>，攒大批</td></tr><tr><td><code>max_batch_size</code></td><td>100 MB</td><td>与行数共同触发，先到先生效</td></tr><tr><td><code>desired_concurrent_number</code></td><td>3</td><td>分区数多时可提到 <b>5~10</b>，但会占用更多执行资源</td></tr><tr><td><code>max_error_number</code></td><td>0</td><td>生产建议放宽到 <b>100~1000</b>，避免个别脏数据导致任务卡死</td></tr></tbody></table></div><p><b>写入放大问题的根因</b>：每次导入生成一个新版本（tablet version）。小批量高频写入会让版本数飙升，查询需要合并大量版本，性能急剧下降。</p><p><b>版本堆积排查</b></p><pre><code>-- 查看版本堆积情况（COMPACTION 状态）
+SHOW PROC '/dbs/db/orders/partitions';
+-- 关注 VisibleVersionCount，&gt; 100 说明导入批次过碎
+
+-- 手动触发合并
+ALTER TABLE orders COMPACT;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>查询侧：分区裁剪与前缀索引</h2><ul><li><b>分区裁剪</b>：按日期分区后，<code>WHERE dt = '2026-10-22'</code> 只扫对应分区，这是 OLAP 提速的第一手段。</li><li><b>分桶裁剪</b>：分桶键上的等值条件可进一步定位到具体 tablet。</li><li><b>前缀索引</b>：Doris 自动取表的前 <b>36 字节</b>作为前缀索引，<strong>建表时把高频过滤列放在最前面</strong>。</li><li><b>物化视图</b>：预聚合常用维度组合，查询自动命中，避免每次全量聚合。</li></ul><p><b>执行计划判读</b></p><pre><code>-- 查看执行计划，确认是否命中分区裁剪
+EXPLAIN SELECT dt, sum(amount) FROM orders WHERE dt &gt;= '2026-10-01' GROUP BY dt;
+
+-- 关注输出里的 partitions 字段：
+--   partitions=1/30   → 命中裁剪，只扫 1 个分区 ✓
+--   partitions=30/30  → 全表扫描 ✗（WHERE 条件没落到分区列上，或类型不匹配）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：Routine Load 任务突然 PAUSED 了，怎么查？</summary><p>A：<code>SHOW ROUTINE LOAD\G</code> 看 <code>ErrorLogUrls</code> 和 <code>ReasonOfStateChanged</code>。最常见三种：① 错误行数超过 <code>max_error_number</code>（脏数据）；② Kafka offset 越界（topic 被清理或重置）；③ 表结构变更导致列解析失败。修完用 <code>RESUME ROUTINE LOAD</code> 恢复。</p></details><details><summary>Q：导入很慢，先看什么？</summary><p>A：看 BE 的 <strong>并发导入任务数</strong>是否被占满（<code>SHOW BACKENDS</code> 里的 running txn）。若已满，说明并发上限不够或上游写太快；若没满还慢，则是单批太小——把 <code>max_batch_interval</code> 调大攒批，通常能提升数倍吞吐。</p></details><details><summary>Q：为什么查询没走分区裁剪？</summary><p>A：三个高频原因——① WHERE 条件对分区列做了函数变换（如 <code>DATE(dt)</code>），导致无法下推；② 分区列是字符串而传入的是数字（隐式转换）；③ 用了 <code>OR</code> 连接多个条件。把条件改成对分区列的直接范围比较即可。</p></details><details><summary>Q：Stream Load 返回成功但查不到数据？</summary><p>A：多半是<strong>事务还没提交可见</strong>。Stream Load 返回时数据已写入但可能处于 COMMITTED 而非 VISIBLE 状态，通常秒级内转为可见。若长时间不可见，检查 BE 是否有节点失联。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / Doris / StarRocks · 导入与查询 ·

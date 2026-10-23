@@ -622,6 +622,24 @@
         .check { color: var(--accent-green); }
         .cross { color: var(--accent-red); }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -1073,6 +1091,23 @@
                 </div>
             </div>
         </section>
+<section class="section"><div class="x-dry"><h2>GMP 的关键数字与机制</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>事实 / 数字</th></tr></thead><tbody><tr><td><b>G（goroutine）</b></td><td>用户态协程，初始栈 <b>2 KB</b>，按需增长（最大默认 1 GB）</td></tr><tr><td><b>M（machine）</b></td><td>内核线程，绑定一个 P 才能执行 Go 代码；数量受 <code>runtime/debug.SetMaxThreads</code> 限制（默认 10000）</td></tr><tr><td><b>P（processor）</b></td><td>逻辑处理器，数量 = <b>GOMAXPROCS</b>（默认 CPU 逻辑核数），持有本地运行队列</td></tr><tr><td><b>本地队列容量</b></td><td>每个 P 的本地 runq 为 <b>256</b>，满了会批量转移到全局队列</td></tr><tr><td><b>工作窃取</b></td><td>P 本地队列空时，先查全局队列（按 1/61 的概率避免饥饿），再从其他 P 偷一半</td></tr><tr><td><b>系统调用</b></td><td>G 进入 syscall 时 M 会与 P 分离（P 转给别的 M），syscall 返回后优先抢回原 P</td></tr><tr><td><b>网络轮询</b></td><td>netpoller 独立于 GMP，G 等待网络 IO 时不占 M，就绪后被放回队列</td></tr><tr><td><b>抢占</b></td><td>Go 1.14+ 支持<b>异步抢占</b>；sysmon 每 10ms 检查一次运行超 10ms 的 G</td></tr></tbody></table></div><p><b>观测</b></p><pre><code># 观察调度器
+GODEBUG=schedtrace=1000 ./app
+#   输出形如：SCHED 1000ms: gomaxprocs=8 idleprocs=6 threads=12 spinningthreads=0 ...
+#   关注：gomaxprocs（P 数）、threads（M 数）、idleprocs（空闲 P）
+
+GODEBUG=schedtrace=1000,scheddetail=1 ./app    # 更详细（含每个 P 的状态）
+GODEBUG=gctrace=1 ./app                          # GC 与 STW
+
+# 运行时查看
+runtime.GOMAXPROCS(0)      // 查询
+runtime.NumGoroutine()     // 当前 goroutine 数（做成监控指标！）
+runtime.NumCPU()           // CPU 核数
+
+# pprof
+go tool pprof http://localhost:6060/debug/pprof/goroutine</code></pre><ul><li><b>阻塞型 syscall 会占用 M</b>：大量阻塞系统调用会创建新 M（线程），这是 goroutine 数正常但线程数暴涨的常见原因。</li><li><b>CPU 密集型不要开太多 goroutine</b>：GOMAXPROCS 已经限制了并行度，远超核数的 goroutine 只会增加调度与切换开销。</li><li><b>IO 密集型可以多开</b>：等 IO 时 G 不占 M，所以 goroutine 数可以远大于核数。</li><li><b>goroutine 泄漏的判定</b>：<code>NumGoroutine()</code> 持续单调增长且不回落。把这条做成告警指标，比事后查 pprof 有用得多。</li><li><b>调度延迟</b>：Go 1.14 前的协作式调度会被「无函数调用的死循环」卡住，异步抢占解决了这个问题，但 GC 扫描仍需要协作点。</li></ul></div></section>
+<section class="section"><div class="x-dry"><h2>常见误区与自检</h2><details><summary>GOMAXPROCS 设大能变快吗？</summary><p>对 CPU 密集任务：设成核数是合理默认，设更大通常无益（反而增加切换）。容器里要注意 Go 会自动读取 cgroup 的 CPU 配额，一般不用手设。</p></details><details><summary>goroutine 泄漏最常见的原因是什么？</summary><p>三类：channel 没人接收/发送导致永久阻塞、timer/ticker 没 Stop、以及下游调用没有超时（context 没传或没设 deadline）。</p></details><details><summary>为什么我的程序 CPU 没跑满但吞吐上不去？</summary><p>典型是锁竞争或 channel 阻塞，而不是调度问题。用 <code>pprof</code> 的 mutex/block profile 定位，别先怀疑调度器。</p></details><details><summary>M 的数量会无限增长吗？</summary><p>不会，受 SetMaxThreads 限制（默认 10000），超了会 panic。线程数异常增长通常说明有大量阻塞型 syscall。</p></details></div></section>
+
     </div>
 
     <script>

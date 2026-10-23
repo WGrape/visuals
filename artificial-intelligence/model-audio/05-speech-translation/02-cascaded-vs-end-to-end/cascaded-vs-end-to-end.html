@@ -41,6 +41,24 @@ details{margin:12px 0;background:var(--panel2);border-radius:9px;padding:12px 16
 footer{color:var(--muted);font-size:.87rem;margin-top:28px}
 footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body><nav class="toc" id="toc"></nav><main class="shell">
 <a class="back" href="../../index.html">← 返回语音与音频模型</a>
@@ -122,4 +140,43 @@ const io=new IntersectionObserver(es=>{es.forEach(e=>{
 secs.forEach(s=>io.observe(s));
 </script>
 
+
+<section class="panel" data-dry-goods><div class="x-dry"><h2>两种架构的结构对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>级联（Cascaded）</b></th><th><b>端到端（End-to-End）</b></th></tr></thead><tbody><tr><td>流程</td><td>语音 → <b>ASR</b> → 文本 → <b>MT</b> → 译文（→ TTS）</td><td>语音 → <b>一个模型</b> → 译文</td></tr><tr><td>模块数</td><td><b>3 个独立模型</b></td><td><b>1 个模型</b></td></tr><tr><td>中间产物</td><td><b>有</b>（转录文本，可展示、可纠错）</td><td><b>无</b>（黑盒）</td></tr><tr><td>典型延迟</td><td><b>1.5 – 3 s</b>（三段串行）</td><td><b>0.5 – 1.2 s</b></td></tr><tr><td>错误传播</td><td><b>有</b>（ASR 错了，MT 一定错）</td><td><b>无</b>（直接学语音到译文映射）</td></tr><tr><td>数据需求</td><td>各模块<b>单模态数据充足</b></td><td><b>需语音-译文平行语料（稀缺）</b></td></tr><tr><td>可调试性</td><td><b>好</b>（能定位是哪个模块错）</td><td><b>差</b></td></tr></tbody></table></div><p><b>核心权衡</b>：级联<b>工程友好、数据充足、可调试</b>但<b>延迟高、有错误传播</b>；端到端<b>延迟低、无错误传播</b>但<b>数据稀缺、不可调试</b>。工业界大多数产品仍用级联——不是不知道端到端更优雅，而是<b>平行语料不够</b>。</p></div></section>
+<section class="panel" ><div class="x-dry"><h2>延迟拆解：级联慢在哪</h2><div class="table-wrap"><table><thead><tr><th>环节</th><th>典型耗时</th><th>说明</th></tr></thead><tbody><tr><td>流式 ASR（等完整句）</td><td><b>300 – 800 ms</b></td><td>要等 VAD 判定说完或出标点</td></tr><tr><td>机器翻译 MT</td><td><b>100 – 300 ms</b></td><td>纯文本，很快</td></tr><tr><td>TTS 合成</td><td><b>200 – 500 ms</b></td><td>流式可边生成边播</td></tr><tr><td>模块间网络/序列化</td><td><b>50 – 150 ms</b></td><td>三模块间的数据传递</td></tr><tr><td><b>级联总计</b></td><td><b>约 1.5 – 3 s</b></td><td>—</td></tr><tr><td><b>端到端</b></td><td><b>约 0.5 – 1.2 s</b></td><td>一次前向，且可流式</td></tr></tbody></table></div><p><b>关键洞察</b>：级联的延迟主要是 <b>ASR 要等完整句</b>造成的——ASR 需听到句末才能给出准确标点和最高置信结果。端到端可以<b>边听边译</b>（如 StreamSpeech、Seamless），延迟优势主要来自这里。</p><p><b>延迟测量与优化</b></p><pre><code># 延迟实测：p99 才是用户真正感知的
+import time
+
+def measure(fn, n=200):
+    ts = []
+    for _ in range(n):
+        t0 = time.perf_counter()
+        fn()
+        ts.append((time.perf_counter() - t0) * 1000)
+    ts.sort()
+    return {"p50": ts[n//2], "p95": ts[int(n*.95)],
+            "p99": ts[int(n*.99)], "max": ts[-1]}
+
+# 优化级联延迟的三个实用手段：
+# ① ASR 输出"局部结果 + 后续修正"（不等句末就出中间结果）
+#    延迟 800ms -&gt; 200ms，代价是首屏内容可能改一次（体验上可接受）
+# ② TTS 流式合成（chunk 级返回音频，不等整句）
+#    首个音频包从 300ms -&gt; 100ms
+# ③ 三模块同机部署，用共享内存 / Unix socket 代替 HTTP
+#    省掉 50-150ms 的网络与序列化开销</code></pre></div></section>
+<section class="panel" ><div class="x-dry"><h2>错误传播：量化级联的质量损失</h2><div class="table-wrap"><table><thead><tr><th>假设</th><th>数值</th><th>后果</th></tr></thead><tbody><tr><td>ASR 字错率（CER）</td><td><b>5%</b></td><td>100 字的句子平均错 5 字</td></tr><tr><td>这些错字进入 MT</td><td>MT <b>无法纠正</b>，且会放大</td><td>错字导致误译，甚至整句跑偏</td></tr><tr><td>MT 自身 BLEU 损失</td><td>约 <b>10 – 20%</b></td><td>错字让翻译模型失去上下文</td></tr><tr><td><b>端到端方式的差别</b></td><td><b>直接学语音→译文</b></td><td>ASR 的错不必然传导（模型可“听错但译对”）</td></tr></tbody></table></div><p><b>为什么端到端能缓解</b>：端到端模型<b>不需要显式地把语音转成文本</b>，它学的是“这段语音对应的译文是什么”。即使某些音素听不清，只要<b>整体语义线索足够</b>（语调、上下文），仍可能译对。这就是为什么学术界端到端的 BLEU 常能追平甚至超过级联。</p><p class="muted">反过来的优势：级联的<b>中间文本可展示</b>——同传字幕、会议记录都需要“原文 + 译文”双行显示，端到端<b>给不出原文</b>。这是很多产品坚持用级联的硬理由，不是技术问题。</p></div></section>
+<section class="panel" ><div class="x-dry"><h2>数据：端到端的最大瓶颈</h2><div class="table-wrap"><table><thead><tr><th>数据类型</th><th>规模</th><th>获取难度</th></tr></thead><tbody><tr><td>单语语音（ASR 训练用）</td><td><b>数十万小时</b></td><td>易（有标注语音数据）</td></tr><tr><td>平行文本（MT 训练用）</td><td><b>亿级句对</b></td><td>较易（WMT、OPUS）</td></tr><tr><td><b>语音-译文平行语料</b></td><td><b>仅数千小时</b></td><td><b>极难</b>（要人工对齐录音与译文）</td></tr></tbody></table></div><p><b>量级差距</b>：ASR 有 <b>10 万小时</b>级数据，MT 有 <b>亿级</b>句对，而语音翻译的三元组语料只有 <b>几千小时</b>——差了 <b>2 – 3 个数量级</b>。这是端到端质量难以超越级联的根本原因。</p><ul><li><b>① 预训练 + 微调</b>：用大量 ASR/MT 数据分别预训练 encoder 和 decoder，再用少量三元组微调</li><li><b>② 数据增强（伪标签）</b>：用级联系统给语音打伪译文标签，扩充训练集（<b>最常用</b>）</li><li><b>③ 多任务学习</b>：同时训练 ASR、MT、ST 三个目标，共享表示</li><li><b>④ 削弱对 ASR 的依赖</b>：用<b>离散单元（discrete units）</b>或 HuBERT 特征代替文本中间层</li></ul><p><b>数据增强策略</b></p><pre><code># 伪标签扩充（工业界最实用的套路）
+# ① 用高质量级联系统处理大量"语音 + 原文文本"（这类数据多）
+#    语音 -&gt; ASR -&gt; 原文 -&gt; MT -&gt; 伪译文
+# ② 得到 (语音, 伪译文) 对，虽然译文质量不如人工，但量可以很大
+# ③ 用少量人工标注的真实三元组 + 大量伪标签混合训练端到端模型
+
+# 典型的训练配置
+#   真实三元组: 2000 小时    (高质量，权重高)
+#   伪标签数据: 50000 小时   (质量一般，权重低)
+#   混合比例通常 1:10 ~ 1:25，再在真实数据上做最后的 fine-tune
+
+# 多任务学习（同一个模型同时学三个任务）
+loss = w_asr * loss_asr + w_mt * loss_mt + w_st * loss_st
+# 常见权重：w_st=1.0, w_asr=0.3, w_mt=0.3
+# ASR/MT 作为辅助任务帮助共享表示学得更好</code></pre></div></section>
+<section class="panel" ><div class="x-dry"><h2>深入自检</h2><details><summary>什么时候该选级联，什么时候选端到端？</summary><p>看四个条件：<b>① 要不要显示原文？</b>要 → 只能级联（字幕、会议记录场景）；<b>② 延迟要求多严？</b>要求 &lt; 1 s 的实时同传 → 端到端；<b>③ 有多少三元组语料？</b>&lt; 500 小时 → 老实用级联；<b>④ 语言对是什么？</b>小语种（三元组极少）→ 级联。现实答案：<b>大多数产品用级联，研究系统用端到端</b>。折中方案是级联但做<b>联合优化</b>（ASR 输出 N-best 给 MT，而不是只给 1-best）。</p></details><details><summary>ASR 输出 N-best 给 MT 有用吗？</summary><p>有用，这是<b>提升级联质量最经济的手段</b>。ASR 的 1-best 错了对下游是灾难，但正确结果常常排在 N-best 的第 2 – 5 位（oracle 字错率能低一半）。让 MT 对多个候选分别翻译，再用<b>语言模型或重排序模型</b>选最好的。代价是 N 倍 MT 计算（通常 N=3 – 5），延迟增加不多但质量提升明显。这是级联系统最实用的优化之一。</p></details><details><summary>端到端真的能超过级联吗？</summary><p>在特定条件下能。学术数据集（如 MuST-C）上，端到端在<b>高质量数据、资源丰富语言对</b>（英-德、英-法）上已经能持平或略超级联。但在<b>低资源语言</b>上仍明显落后。工业界的普遍结论：<b>端到端在延迟上有优势，质量上还没有稳定胜出</b>，所以主流产品仍用级联，端到端多用于<blockquote>实时对话</blockquote>这类延迟敏感场景。</p></details><details><summary>流式（streaming）翻译怎么做？</summary><p>核心是<b>决定“什么时候开始输出”</b>（policy）。三种策略：① <b>Wait-k</b>——等 k 个词后开始交替读写（k=1 最激进、k=5 较保守）；② <b>单调注意力</b>——强制注意力单调向右，天然可流式；③ <b>自适应策略</b>——模型自己学何时输出（如 <b>StreamSpeech</b>）。评价不能只看 BLEU，还要看 <b>延迟指标</b>（如 AL / AP / DAL）——<b>质量与延迟的权衡曲线</b>才是完整评估。这是该领域近年最热的方向。</p></details></div></section>
 </main></body></html>

@@ -77,6 +77,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -173,5 +191,108 @@ logging.<span class="fn">getLogger</span>(<span class="str">"myapp"</span>).setL
   }, { rootMargin: '-45% 0px -50% 0px' });
   Object.keys(map).forEach(id => obs.observe(document.getElementById(id)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>五个级别怎么用（不是随便选的）</h2><div class="table-wrap"><table><thead><tr><th>级别</th><th>数值</th><th>用途</th><th>生产是否开启</th></tr></thead><tbody><tr><td><b>DEBUG</b></td><td>10</td><td>调试细节（变量值、流程分支）</td><td><b>关</b>（排查时临时开）</td></tr><tr><td><b>INFO</b></td><td>20</td><td><b>关键业务节点</b>：启动、下单、支付成功</td><td><b>开</b></td></tr><tr><td><b>WARNING</b></td><td>30</td><td>可自愈的异常（重试成功、降级）</td><td><b>开</b></td></tr><tr><td><b>ERROR</b></td><td>40</td><td><b>需要人介入</b>的错误</td><td><b>开</b>（要告警）</td></tr><tr><td><b>CRITICAL</b></td><td>50</td><td>系统即将崩溃</td><td><b>开</b>（要告警）</td></tr></tbody></table></div><p><b>判断标准</b>：<code>WARNING</code> 是“<b>我处理了，但你应该知道</b>”；<code>ERROR</code> 是“<b>我处理不了，需要人来看</b>”。最常见的误用是把所有异常都记 <code>ERROR</code>——结果告警泛滥，真正的错误被淹没。</p><p class="muted"><b>一个硬规则</b>：<code>ERROR</code> 级别的日志<b>必须能触发告警</b>，否则就降级成 <code>WARNING</code>。反过来说，如果一条 ERROR 没人看，它就不该是 ERROR。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>性能陷阱：日志也能拖垮服务</h2><div class="table-wrap"><table><thead><tr><th>写法</th><th>问题</th><th>正确写法</th></tr></thead><tbody><tr><td><code>logger.debug(f"x={compute()}")</code></td><td><b>f-string 总会执行</b>，即使 DEBUG 关闭</td><td><code>logger.debug("x=%s", compute())</code></td></tr><tr><td><code>logger.info("%s", json.dumps(big))</code></td><td>序列化开销在调用点产生</td><td>传原始对象，让 Formatter 决定</td></tr><tr><td>每条请求打几十行</td><td>磁盘 IO + 采集成本暴涨</td><td><b>关键节点打，细节 DEBUG 按需开</b></td></tr><tr><td>高频循环里打日志</td><td>IO 阻塞主流程</td><td><b>采样</b>或聚合后打一条</td></tr></tbody></table></div><p><b>日志性能写法</b></p><pre><code># ✅ 惰性格式化：只有真正要输出时才格式化
+logger.debug("user=%s action=%s", user_id, action)   # ✅ 推荐
+logger.debug(f"user={user_id} action={action}")      # ❌ 即使不输出也会执行 f-string
+
+# 昂贵参数的惰性求值
+if logger.isEnabledFor(logging.DEBUG):              # ✅ 先判断再算
+    logger.debug("state=%s", expensive_dump())
+
+# 采样：高频日志只打 1%
+class SamplingFilter(logging.Filter):
+    def __init__(self, rate=0.01): self.rate = rate
+    def filter(self, record):
+        return random.random() &lt; self.rate
+
+# 高频路径的正确做法：聚合后打，而不是每条打
+counter = 0
+def on_event():
+    global counter; counter += 1
+    if counter % 1000 == 0:
+        logger.info("processed %d events", counter)   # 每 1000 条打一次</code></pre><p><b>实测数量级</b>：一条日志的完整开销约 <b>10 – 100 μs</b>（格式化 + IO）。如果请求处理只要 1 ms，打 20 条日志就会让耗时<b>翻倍</b>。所以热路径上要么不打，要么用 <b>异步 handler</b>（<code>QueueHandler</code>）。</p><p><b>异步日志</b></p><pre><code># 异步日志：把 IO 挪出主线程（高并发服务必备）
+from logging.handlers import QueueHandler, QueueListener
+import queue, logging
+
+q = queue.Queue(maxsize=10000)                  # 有界，满了降级
+handler = QueueHandler(q)
+root = logging.getLogger()
+root.addHandler(handler)
+
+# 后台线程负责真正写盘
+real = logging.FileHandler("app.log")
+listener = QueueListener(q, real)
+listener.start()
+# 退出时：listener.stop()
+
+# 好处：主线程的日志调用变成「入队」，从 100μs 降到 ~1μs
+# 代价：进程被 kill 时可能丢最后几条（用 atexit 保证 flush）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>结构化日志：让机器能读</h2><p><b>JSON 结构化日志</b></p><pre><code># 生产推荐：JSON 格式（可被 ELK / Loki / ClickHouse 直接解析）
+import logging, json, sys
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        d = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "module": record.module,
+            "line": record.lineno,
+        }
+        if record.exc_info:
+            d["exc"] = self.formatException(record.exc_info)
+        # 关键：把业务字段塞进 extra
+        for k, v in getattr(record, "fields", {}).items():
+            d[k] = v
+        return json.dumps(d, ensure_ascii=False)
+
+h = logging.StreamHandler(sys.stdout)
+h.setFormatter(JsonFormatter())
+logging.getLogger().addHandler(h)
+
+# 使用：用 extra 带上可检索的字段
+logger.info("order created", extra={"fields": {
+    "order_id": "ORD123", "user_id": 10086, "amount": 9900
+}})
+# 输出：{"ts":"...","level":"INFO","msg":"order created",
+#        "order_id":"ORD123","user_id":10086,"amount":9900}</code></pre><p><b>结构化日志的核心价值</b>：可以做<b>聚合查询</b>。有了 <code>order_id</code> 字段，就能在 Kibana 里直接搜“这个订单的所有日志”，或用 <code>sum(amount)</code> 统计流水——纯文本日志做不到这些。</p><ul><li><b>必带字段</b>：<code>trace_id</code>（串联一次请求）、<code>user_id</code>、<code>业务主键</code></li><li><b>禁止打敏感信息</b>：密码、身份证、完整卡号（脱敏后再打）</li><li><b>统一时间格式</b>：ISO 8601 + 时区，别用本地时间让人猜</li><li><b>异常要带堆栈</b>：<code>logger.exception()</code> 自动带 <code>exc_info</code></li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>配置方式：dictConfig 才是正解</h2><p><b>dictConfig 完整示例</b></p><pre><code># 生产配置（一次写对，别用 basicConfig）
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,      # 关键！否则第三方库日志全没了
+    "formatters": {
+        "json": {"()": "myapp.log.JsonFormatter"},
+        "plain": {"format": "%(asctime)s %(levelname)-8s %(name)s %(message)s"},
+    },
+    "filters": {
+        "sample": {"()": "myapp.log.SamplingFilter", "rate": 0.01},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler",
+                    "formatter": "json", "level": "INFO"},
+        "file": {"class": "logging.handlers.RotatingFileHandler",
+                 "filename": "app.log",
+                 "maxBytes": 200 * 1024 * 1024,   # 200MB 一个文件
+                 "backupCount": 10,               # 保留 10 个 -&gt; 最多 2GB
+                 "formatter": "json", "encoding": "utf-8"},
+        "error": {"class": "logging.handlers.RotatingFileHandler",
+                  "filename": "error.log", "level": "ERROR",   # 单独收集便于告警
+                  "maxBytes": 100 * 1024 * 1024, "backupCount": 5},
+    },
+    "loggers": {
+        "": {"handlers": ["console", "file", "error"], "level": "INFO"},
+        # 第三方库太吵？单独调高级别
+        "urllib3":     {"level": "WARNING"},
+        "asyncio":     {"level": "WARNING"},
+        "sqlalchemy.engine": {"level": "WARNING"},
+        # 自己的模块可以开 DEBUG
+        "myapp.payment": {"level": "DEBUG", "propagate": True},
+    },
+}
+logging.config.dictConfig(LOGGING)</code></pre><p class="muted">两个必知参数：<code>RotatingFileHandler</code> 按<b>大小</b>切分，<code>TimedRotatingFileHandler</code> 按<b>时间</b>切分（<code>when='midnight'</code>、<code>backupCount=7</code>）。生产建议<b>按大小切</b>——按时间切在流量突增时仍可能撑爆磁盘。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>为什么用了 logging 却什么都没输出？</summary><p>三个常见原因：① <b>没设 level</b>——root logger 默认 <code>WARNING</code>，<code>logger.info()</code> 被过滤掉了，要 <code>logging.basicConfig(level=logging.INFO)</code>；② <b>在 import 阶段就调用了 basicConfig</b> 或被后续覆盖；③ <b><code>disable_existing_loggers=True</code></b>（dictConfig 默认就是这个！）——它会禁用所有已存在的 logger，导致第三方库日志消失。务必显式设成 <code>False</code>。</p></details><details><summary>每个模块都要 <code>logger = logging.getLogger(__name__)</code> 吗？</summary><p>是的，这是<b>标准做法</b>。用 <code>__name__</code> 的好处是 logger 名字带完整模块路径（如 <code>myapp.payment.service</code>），可以<b>按模块精细控制级别</b>——排查支付问题时只把 <code>myapp.payment</code> 调到 DEBUG，其他保持 INFO，日志量可控且精准。<b>不要</b>直接用 <code>root logger</code>，那样无法区分来源。</p></details><details><summary>日志打太多磁盘满了怎么办？</summary><p>四道防线：① <b>RotatingFileHandler + backupCount</b>（硬上限，最基础）；② <b>降级策略</b>——队列满时丢弃低级别日志（<code>QueueHandler</code> 的 <code>maxsize</code>）；③ <b>采样</b>——高频 INFO 日志按 1% 采样；④ <b>集中式日志</b>——直接打到 stdout，由容器/采集器收走，本地不留文件（<b>云原生的推荐做法</b>）。</p></details><details><summary>日志、指标、链路追踪三者什么关系？</summary><p><b>日志（Logging）</b>记录<b>离散事件</b>（“用户 X 下单了”），适合查细节；<b>指标（Metrics）</b>记录<b>聚合数值</b>（QPS、错误率、p99），适合看趋势和告警；<b>链路追踪（Tracing）</b>记录<b>一次请求的完整路径</b>，适合定位哪个环节慢。三者靠 <b><code>trace_id</code></b> 串联——这就是结构化日志必须带 trace_id 的原因。经验比例：<b>指标用于告警，日志用于排查，追踪用于定位瓶颈</b>。</p></details></div></section>
 </body>
 </html>

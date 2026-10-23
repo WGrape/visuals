@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -188,6 +206,61 @@ WHEN NOT MATCHED THEN INSERT (dt, biz, cnt) VALUES (s.dt, s.biz, s.cnt);</code><
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>各数据库的 UPSERT 语法</h2><div class="table-wrap"><table><thead><tr><th>数据库</th><th>语法</th><th>特点</th></tr></thead><tbody><tr><td><b>MySQL</b></td><td><code>INSERT ... ON DUPLICATE KEY UPDATE</code></td><td><strong>最简单</strong>，依赖唯一键</td></tr><tr><td><b>PostgreSQL</b></td><td><code>INSERT ... ON CONFLICT DO UPDATE</code></td><td><strong>可指定冲突目标</strong>，更精确</td></tr><tr><td><b>SQL Server</b></td><td><code>MERGE</code></td><td>功能最全，<strong>有已知 bug</strong></td></tr><tr><td><b>Oracle</b></td><td><code>MERGE</code></td><td>标准语法</td></tr><tr><td><b>SQLite</b></td><td><code>INSERT ... ON CONFLICT</code>（3.24+）</td><td>同 PG</td></tr></tbody></table></div><p><b>语法对比</b></p><pre><code>-- MySQL
+INSERT INTO users (id, name, login_count)
+VALUES (1, 'Alice', 1)
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),              -- VALUES() 取插入时提供的值
+  login_count = login_count + 1;    -- 相对更新
+
+-- PostgreSQL（更精确：可指定是哪个约束冲突）
+INSERT INTO users (id, name, login_count)
+VALUES (1, 'Alice', 1)
+ON CONFLICT (id) DO UPDATE          -- 明确指定冲突目标（唯一列或约束名）
+SET name = EXCLUDED.name,           -- EXCLUDED 引用「想插入的那行」
+    login_count = users.login_count + 1
+WHERE users.name IS DISTINCT FROM EXCLUDED.name;   -- &lt;strong&gt;可加条件&lt;/strong&gt;
+
+-- PG 的 DO NOTHING（存在则跳过）
+INSERT INTO users (id, name) VALUES (1, 'Alice')
+ON CONFLICT (id) DO NOTHING;
+
+-- MySQL 的等价写法
+INSERT IGNORE INTO users (id, name) VALUES (1, 'Alice');</code></pre><p class="muted"><b>PG 的 <code>ON CONFLICT (col)</code> 比 MySQL 更安全</b>：它能精确指定「是哪个唯一约束冲突时才更新」。MySQL 的 <code>ON DUPLICATE KEY</code> 会在<strong>任何一个</strong>唯一键冲突时触发，若表上有多个唯一索引，可能不是你想要的行为。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>陷阱：影响行数与非确定性</h2><div class="table-wrap"><table><thead><tr><th>问题</th><th>说明</th><th>应对</th></tr></thead><tbody><tr><td><b>影响行数语义</b></td><td>MySQL：插入=1，更新=<strong>2</strong>，无变化=0</td><td><strong>判断结果别只看行数</strong></td></tr><tr><td><b>多唯一键</b></td><td>MySQL 任一冲突即触发，顺序不确定</td><td>避免多唯一键，或改用 PG</td></tr><tr><td><b>并发插入同一新键</b></td><td>可能死锁或报错</td><td><strong>重试</strong></td></tr><tr><td><b>自增 ID 跳跃</b></td><td>MySQL 的 InnoDB 会预分配 ID</td><td><strong>不要依赖自增连续</strong></td></tr><tr><td><b>触发器</b></td><td>更新路径触发 UPDATE 触发器</td><td>注意逻辑差异</td></tr></tbody></table></div><p><b>影响行数</b></p><pre><code># MySQL 影响行数的三种值（最容易踩坑）
+#   1  → 插入了新行
+#   2  → 更新了已存在的行
+#   0  → 行存在但&lt;strong&gt;SET 后值没变&lt;/strong&gt;（未实际更新）
+#
+# 所以不能写：
+#   if affected_rows == 1: print('新增')
+# 正确判断应基于业务逻辑或先 SELECT
+
+# 自增 ID 跳跃的原因：InnoDB 在 INSERT 时先分配自增 ID，
+#   若 ON DUPLICATE KEY 走了更新路径，这个 ID 就&lt;strong&gt;被丢弃了&lt;/strong&gt;
+#   所以连续 upsert 会让 auto_increment 值远大于实际行数
+# 这是&lt;strong&gt;正常现象&lt;/strong&gt;，不要当成 bug，也不要依赖 ID 连续</code></pre><p><b>并发安全</b>：UPSERT 本身是原子的（依赖唯一索引），但<strong>两个事务同时插入同一个不存在的键</strong>时，可能一个成功一个报死锁或唯一键冲突。<strong>应用必须有重试</strong>——这是使用 UPSERT 的必备配套。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>批量 UPSERT 与性能</h2><p><b>批量 upsert</b></p><pre><code>-- 批量 upsert（比逐条快 10 倍以上）
+INSERT INTO daily_stats (dt, user_id, pv, uv)
+VALUES
+  ('2026-10-22', 1, 10, 5),
+  ('2026-10-22', 2, 20, 8),
+  ('2026-10-22', 3, 5,  3)
+ON DUPLICATE KEY UPDATE
+  pv = pv + VALUES(pv),
+  uv = uv + VALUES(uv);
+
+-- 注意：批量时 VALUES() 引用的是&lt;strong&gt;对应行&lt;/strong&gt;的值
+
+-- 性能要点：
+#   1) 唯一索引是前提（没有唯一键则退化成纯插入）
+#   2) 单批 500~2000 行（太大锁等待久，太小往返多）
+#   3) 批量时务必按&lt;strong&gt;主键顺序&lt;/strong&gt;排列，减少死锁概率
+#   4) MySQL 8.0.20+ 推荐用新写法（VALUES() 已废弃）：
+INSERT INTO t (id, v) VALUES (1, 10) AS new
+ON DUPLICATE KEY UPDATE v = t.v + new.v;</code></pre><div class="table-wrap"><table><thead><tr><th>场景</th><th>推荐方案</th><th>理由</th></tr></thead><tbody><tr><td><b>计数累加</b></td><td>UPSERT + 相对更新</td><td><strong>避免先查后写的竞态</strong></td></tr><tr><td><b>幂等写入</b></td><td>UPSERT + 幂等键</td><td>重复投递不产生重复数据</td></tr><tr><td><b>全量覆盖</b></td><td><code>REPLACE INTO</code>（MySQL）</td><td><strong>会删旧行再插</strong>，注意自增 ID 变化</td></tr><tr><td><b>大批量导入</b></td><td><code>LOAD DATA</code> 或临时表 + JOIN</td><td>比逐条 upsert 快得多</td></tr></tbody></table></div><p class="muted"><b>REPLACE INTO 的危险</b>：它是<strong>先 DELETE 再 INSERT</strong>，不是 UPDATE。后果：① 自增 ID 会变；② 未指定的列被重置为默认值（数据丢失！）；③ 触发 DELETE 触发器。<strong>绝大多数场景应该用 ON DUPLICATE KEY UPDATE</strong>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：UPSERT 能保证幂等吗？</summary><p>A：<strong>它保证了数据库层面的幂等</strong>（同一主键不会重复插入），但<strong>业务幂等还需要幂等号</strong>。典型场景：消息队列重复投递同一条「创建订单」消息，若用订单号做唯一键 upsert，第二次会被当作更新——可能覆盖掉期间的其他变更。正确做法是<strong>单独的幂等表</strong>（记录已处理的 message_id），先判重再处理。<strong>UPSERT 解决的是「重复插入」，不是「重复执行业务逻辑」</strong>。</p></details><details><summary>Q：为什么我的 UPSERT 很慢？</summary><p>A：三个常见原因——① <strong>没有唯一索引</strong>：退化成纯 INSERT（甚至更慢，因为要判重）；② <strong>逐条执行</strong>：每条一次往返，应批量（500~2000 行/批）；③ <strong>更新的列上有索引</strong>：每次更新都要维护索引，索引越多越慢。另外 MySQL 的 <code>ON DUPLICATE KEY</code> 在<strong>高并发下会有间隙锁竞争</strong>，死锁较多——按主键顺序批量能显著缓解。</p></details><details><summary>Q：并发下 UPSERT 报死锁怎么办？</summary><p>A：<strong>这是正常的，必须重试</strong>。成因是两个事务以<strong>不同顺序</strong>插入/更新相同的键区间，形成循环等待。缓解手段：① <strong>批量时按主键排序</strong>（让所有事务以相同顺序加锁，最重要的优化）；② 减小单批大小；③ 降低隔离级别到 READ COMMITTED（减少间隙锁）；④ <strong>应用侧捕获死锁错误（MySQL 1213 / PG 40P01）并重试</strong>——这是必备的，不要指望完全避免。</p></details><details><summary>Q：MERGE 和 INSERT ON CONFLICT 怎么选？</summary><p>A：<strong>在 PostgreSQL 上用 ON CONFLICT</strong>，别用 MERGE（PG 15 才引入 MERGE，且 ON CONFLICT 更成熟、性能更好）。在 SQL Server/Oracle 上只能用 MERGE，但它<strong>有已知的 bug 历史</strong>（尤其早期版本），使用时要注意：① 用 <code>HOLDLOCK</code> 提示避免竞态；② 避免在 MERGE 里做复杂逻辑；③ 已知问题包括错误的结果与索引损坏（老版本）。<strong>能用 INSERT/UPDATE 分开写清楚的，就不必用 MERGE</strong>。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / UPSERT ·

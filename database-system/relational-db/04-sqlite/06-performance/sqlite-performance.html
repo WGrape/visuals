@@ -67,6 +67,26 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,40 +96,103 @@
   <p>事务批量写、WAL、索引、预编译语句、PRAGMA 调优等实践要点。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#p1">批量写</a><a href="#p2">WAL 与同步</a><a href="#p3">查询优化</a><a href="#p4">PRAGMA</a></nav>
+  <nav class="toc"><a href="#s1">① 事务：最大的性能杠杆</a><a href="#s2">② 关键 PRAGMA 调优</a><a href="#s3">③ 批量导入加速</a><a href="#s4">④ 并发与锁</a><a href="#s5">⑤ 常见问法</a></nav>
   <main class="content">
-<section id="p1"><h2>① 用事务批量写</h2>
-<p>SQLite 的瓶颈常是 <strong>每条语句一次 fsync</strong>。把大量 INSERT 包进单个事务，速度可提升几个数量级：</p>
-<pre><code>BEGIN;
-INSERT INTO log VALUES (...);  -- x 一万次
-COMMIT;                        -- 一次持久化</code></pre>
+<section id="s1"><h2>① 事务：最大的性能杠杆</h2>
+
+<p>SQLite 中<strong>每条 DML 语句默认是一个独立事务</strong>，而每个事务提交都要<strong>fsync</strong>（确保持久）。因此插入 1 万条会产生 1 万次 fsync——极慢。<strong>把它们包进一个事务</strong>是最大的提速手段。</p>
+<pre><code>-- 慢：每条语句一个事务（10000 次 fsync）
+for i in range(10000): conn.execute("INSERT INTO t VALUES (?)", (i,))
+
+# 快：显式事务（1 次 fsync）
+import sqlite3
+conn = sqlite3.connect('app.db')
+conn.execute("PRAGMA journal_mode=WAL")
+with conn:                                  # 自动 commit
+    for i in range(10000):
+        conn.execute("INSERT INTO t VALUES (?)", (i,))
+# 实测差距可达 100 倍以上</code></pre>
+<div class="callout tip"><b>WAL 模式（强烈建议开启）：</b><code>PRAGMA journal_mode=WAL;</code> 把回滚日志改成<strong>写前日志</strong>：<strong>读不阻塞写、写不阻塞读</strong>，且提交时只需一次追加写。<strong>代价</strong>：多出 <code>-wal</code> 文件、需要定期 checkpoint、网络文件系统上不支持。</div>
+
 </section>
-<section id="p2"><h2>② WAL 与同步模式</h2>
+<section id="s2"><h2>② 关键 PRAGMA 调优</h2>
+
 <table>
-  <tr><th>PRAGMA</th><th>效果</th></tr>
-  <tr><td><code>journal_mode=WAL</code></td><td>读写并发，性能与并发俱佳</td></tr>
-  <tr><td><code>synchronous=NORMAL</code></td><td>WAL 下几乎安全且更快（每 checkpoint 而非每写 fsync）</td></tr>
-  <tr><td><code>synchronous=FULL</code></td><td>最安全但慢（断电不丢）</td></tr>
+<tr><th>PRAGMA</th><th>建议值</th><th>作用</th><th>权衡</th></tr>
+<tr><td>journal_mode</td><td><strong>WAL</strong></td><td>读写并发、提交更快</td><td>需定期 checkpoint；不支持网络文件系统</td></tr>
+<tr><td>synchronous</td><td>NORMAL（WAL 下）</td><td>控制 fsync 频率</td><td><strong>OFF/FULL</strong>：OFF 掉电可能损坏；FULL 最安全但慢</td></tr>
+<tr><td>cache_size</td><td>-65536（64MB）</td><td>页缓存大小（负值为 KB）</td><td>越大越占内存</td></tr>
+<tr><td>temp_store</td><td>MEMORY</td><td>临时表/排序放内存</td><td>大排序会吃内存</td></tr>
+<tr><td>mmap_size</td><td>268435456（256MB）</td><td>内存映射读文件</td><td>减少拷贝，但占用地址空间</td></tr>
+<tr><td>page_size</td><td>4096 或 8192</td><td>页大小（<strong>建库前设置</strong>）</td><td>大页利于大 BLOB 与扫描；小页利于随机读写</td></tr>
+<tr><td>foreign_keys</td><td><strong>ON</strong></td><td>启用外键（默认关闭！）</td><td>略慢，但保证一致性</td></tr>
+<tr><td>busy_timeout</td><td>5000</td><td>遇到锁时等待毫秒数</td><td>避免立刻报 database is locked</td></tr>
 </table>
+<pre><code>-- 建库后立即设置（page_size 必须在创建任何表之前）
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -65536;      -- 64MB
+PRAGMA temp_store = MEMORY;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;</code></pre>
+
 </section>
-<section id="p3"><h2>③ 查询优化</h2>
-<ul>
-  <li>用 <strong>整数主键</strong> 直接按 ROWID 定位，最快。</li>
-  <li>为高频过滤/连接列建索引；避免 <code>SELECT *</code> 拉大行。</li>
-  <li><code>EXPLAIN QUERY PLAN</code> 看是否走索引（出现 <code>SCAN</code> 即全表）。</li>
-  <li>用 <strong>预编译语句</strong>（prepared statement / 参数化）避免重复解析 SQL。</li>
-</ul>
-<pre><code>EXPLAIN QUERY PLAN SELECT * FROM users WHERE email='a@b.c';</code></pre>
+<section id="s3"><h2>③ 批量导入加速</h2>
+
+<pre><code>-- 导入优化的「组合拳」
+PRAGMA journal_mode = OFF;        -- 或 MEMORY（导入期间可不记日志）
+PRAGMA synchronous = OFF;
+PRAGMA cache_size = -262144;      -- 256MB
+PRAGMA temp_store = MEMORY;
+
+BEGIN;
+-- 用预处理语句 + 批量参数
+INSERT INTO t VALUES (?, ?, ?);   -- executemany 批量绑定
+COMMIT;
+
+-- 导入完成后恢复
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+ANALYZE;                          -- 别忘了更新统计信息！</code></pre>
+<div class="grid3">
+<div class="card3"><h4>① 显式事务</h4><p>最大的提速点（见上一节）</p></div>
+<div class="card3"><h4>② 预处理语句</h4><p>复用编译好的语句，避免重复解析</p></div>
+<div class="card3"><h4>③ 导入后再建索引</h4><p>先插数据后 <code>CREATE INDEX</code>，比边插边维护索引快得多</p></div>
+<div class="card3"><h4>④ 关闭日志/同步</h4><p>仅用于<strong>可重建的导入过程</strong>，导入完恢复</p></div>
+<div class="card3"><h4>⑤ executemany</h4><p>一次绑定多行，减少往返</p></div>
+<div class="card3"><h4>⑥ ANALYZE</h4><p>导入后更新统计信息，否则优化器会选错计划</p></div>
+</div>
+
 </section>
-<section id="p4"><h2>④ 关键 PRAGMA</h2>
-<pre><code>PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA cache_size=-8000;      -- 约 8MB 页缓存
-PRAGMA foreign_keys=ON;       -- 默认关，需手动开
-PRAGMA busy_timeout=5000;     -- 锁等待</code></pre>
-<div class="callout tip"><b>移动端/嵌入式：</b>SQLite 在本地单文件场景下很适用；要重点评估高频小事务和并发写。合并写入、按需启用 WAL，通常能改善读写并发，但仍应按实际负载压测。</div>
+<section id="s4"><h2>④ 并发与锁</h2>
+
+<p>SQLite 的锁是<strong>库级</strong>的：写操作需要<strong>独占整个数据库文件</strong>。因此<strong>写并发为 1</strong>——这是它的设计取舍（换取零配置与单个文件）。</p>
+<table>
+<tr><th>模式</th><th>写时能否读</th><th>写时能否写</th></tr>
+<tr><td>rollback journal（默认）</td><td>❌ 读写互斥</td><td>❌</td></tr>
+<tr><td><strong>WAL</strong></td><td>✅ <strong>读不阻塞写</strong></td><td>❌ 写仍串行</td></tr>
+</table>
+<pre><code>-- 应对 "database is locked"
+PRAGMA busy_timeout = 5000;      -- 等 5 秒而不是立刻报错
+
+-- 应用层最佳实践
+-- ① 写操作加全局锁/队列，串行化
+-- ② 缩短写事务（不要在事务里做耗时计算或网络请求）
+-- ③ 用连接池，控制并发写
+-- ④ 读多写少场景：WAL + 多个只读连接
+-- ⑤ 写压力大时考虑分库（按业务拆成多个 .db 文件）</code></pre>
+<div class="callout warn"><b>典型死锁场景：</b>在事务中执行了<strong>耗时操作</strong>（HTTP 请求、大量计算），导致写锁长时间持有，其他连接全部阻塞并报 <code>database is locked</code>。<strong>原则：事务要「短」——只在事务里做数据库操作。</strong></div>
+
 </section>
-</main>
+<section id="s5"><h2>⑤ 常见问法</h2>
+<div class="qa"><b>Q：为什么 SQLite 插入很慢？怎么提速？</b><p>A：最常见原因是<strong>每条 INSERT 都在独立事务里</strong>，而每次提交都要 fsync，1 万条就是 1 万次 fsync。<strong>提速组合拳</strong>：① <strong>把批量插入包进一个显式事务</strong>（<strong>效果最显著，可达百倍</strong>）；② 开启 <strong>WAL 模式</strong>；③ 用<strong>预处理语句</strong> + <code>executemany</code>；④ 大量导入时<strong>先插数据、后建索引</strong>；⑤ 导入期间临时关闭 journal/synchronous，结束后恢复并 <code>ANALYZE</code>。<strong>注意：不要为了提速而长期关闭 synchronous（OFF 会在掉电时损坏数据库）。</strong></p></div>
+<div class="qa"><b>Q：WAL 模式有什么好处？有什么代价？</b><p>A：<strong>好处</strong>：① <strong>读不阻塞写、写不阻塞读</strong>（默认 rollback journal 模式下读写互斥）；② <strong>提交更快</strong>——只需向 WAL 文件追加，不必写回滚日志并多次 fsync；③ 并发性显著提升。<strong>代价</strong>：① 多出 <code>-wal</code> 与 <code>-shm</code> 文件，<strong>不能只拷贝 .db 文件做备份</strong>（要 <code>VACUUM INTO</code> 或 sqlite3 的 backup API）；② WAL 文件会增长，需要 checkpoint 回收（默认自动，1000 页触发）；③ <strong>不支持网络文件系统</strong>（NFS/SMB 上锁语义不可靠）；④ 写仍然串行（库级写锁）。<strong>结论：单机应用强烈建议开启 WAL。</strong></p></div>
+<div class="qa"><b>Q：synchronous 各档位怎么选？</b><p>A：<strong>FULL</strong>：每次提交都 fsync，最安全，掉电不丢已提交数据，但最慢；<strong>NORMAL</strong>：在 WAL 模式下<strong>检查点时才 fsync</strong>，<strong>推荐与 WAL 搭配</strong>——正常关机/进程崩溃不丢，但<strong>操作系统崩溃或掉电可能丢失最近几个事务</strong>；<strong>OFF</strong>：完全不 fsync，最快，但<strong>掉电或系统崩溃可能损坏数据库文件</strong>（不只是丢数据）。<strong>建议：生产用 WAL + NORMAL；只有可重建的导入过程才临时用 OFF，并务必恢复。</strong></p></div>
+<div class="qa"><b>Q：遇到 database is locked 怎么办？</b><p>A：它表示<strong>写锁冲突</strong>（SQLite 的写锁是库级独占的）。<strong>解决</strong>：① 设置 <code>PRAGMA busy_timeout = 5000</code>（等 5 秒而不是立刻报错）——<strong>这是最基本的防护</strong>；② <strong>缩短写事务</strong>，绝不在事务里做网络请求或耗时计算；③ 应用层把写操作<strong>串行化</strong>（单写者队列）；④ 开启 WAL 让读不被阻塞；⑤ 写压力大时<strong>拆分数据库文件</strong>（按业务分库）。<strong>注意：busy_timeout 对「死锁」无效（如同一连接内嵌套写事务），那种情况要改代码结构。</strong></p></div>
+<div class="qa"><b>Q：SQLite 能支撑多大的数据量与并发？</b><p>A：<strong>数据量</strong>：理论上限约 <strong>281TB</strong>（默认页大小下），实践中<strong>几十 GB 的单文件都很常见</strong>，性能与运维成本在 <strong>GB 级以内最舒适</strong>；超过几十 GB 后备份、VACUUM、恢复都会变慢。<strong>并发</strong>：<strong>读可并发（WAL 下数千读连接可行），写严格串行</strong>（库级写锁）。因此它适合<strong>读多写少、单写者</strong>的场景：移动 App、桌面软件、嵌入式设备、边缘缓存、小型 Web 应用（几百 QPS 写入以内）。<strong>不适合</strong>：高并发写入、多机共享（网络文件系统上锁不可靠）、需要横向扩展的场景——这时应选 PostgreSQL/MySQL。</p></div>
+<div class="qa"><b>Q：VACUUM 是什么？什么时候需要？</b><p>A：删除/更新数据后，SQLite <strong>默认不会把空闲页还给文件系统</strong>（只是标记为可复用，存在 freelist 中）。<code>VACUUM</code> 会<strong>重建整个数据库文件</strong>，回收空闲空间、整理碎片、并可能减小文件大小。<strong>何时需要</strong>：① 大量删除后文件仍很大；② 想减小文件便于分发/备份；③ 长期大量写入后碎片化严重。<strong>代价</strong>：需要<strong>约一倍的磁盘空间</strong>并<strong>全程加锁</strong>（阻塞读写）。<strong>替代</strong>：<code>VACUUM INTO 'new.db'</code>（3.27+）可在线生成整理后的副本而不阻塞原库；开启 <code>PRAGMA auto_vacuum=INCREMENTAL</code> 可做增量回收（但会增加写入开销）。</p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

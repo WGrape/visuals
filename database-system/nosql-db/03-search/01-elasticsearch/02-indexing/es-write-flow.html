@@ -210,6 +210,40 @@
   .sum-p ul li::before { color:#4ade80; }
   .sum-r ul li::before { color:#fb923c; }
 </style>
+<style>
+  .extra { max-width:900px; margin:46px auto 30px; padding:0 20px; }
+  .extra h2 { font-size:19.5px; margin:34px 0 12px; border-left:3px solid #4299e1;
+              padding-left:10px; color:#e2e8f0; letter-spacing:.5px; }
+  .extra h3 { font-size:15.5px; margin:18px 0 6px; color:#7dd3fc; }
+  .extra p { font-size:13.5px; color:#cbd5e1; line-height:1.85; margin:9px 0; }
+  .extra ul { padding-left:22px; margin:8px 0; }
+  .extra li { font-size:13.5px; color:#cbd5e1; margin:6px 0; line-height:1.7; }
+  .extra table { width:100%; border-collapse:collapse; margin:14px 0; font-size:12.5px; }
+  .extra th, .extra td { border:1px solid #2d3748; padding:8px 10px; text-align:left; vertical-align:top; color:#cbd5e1; }
+  .extra th { background:#1a202c; color:#a0aec0; }
+  .extra code { background:#1a202c; padding:2px 6px; border-radius:5px; font-size:12px; color:#fbd38d; }
+  .extra pre { background:#0b0e14; border:1px solid #2d3748; padding:14px 16px; border-radius:8px;
+               overflow:auto; font-size:12.5px; line-height:1.6; margin:12px 0; color:#cbd5e1; }
+  .extra pre code { background:none; color:inherit; padding:0; }
+  .kv4 { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; margin:14px 0; }
+  .kv4 .k { background:#1a202c; border:1px solid #2d3748; border-left:3px solid #4299e1;
+            border-radius:8px; padding:11px 13px; }
+  .kv4 .k b { display:block; color:#63b3ed; font-size:12.5px; margin-bottom:3px; }
+  .kv4 .k span { color:#cbd5e1; font-size:13px; }
+  .qa2 { background:#161b26; border:1px solid #2d3748; border-radius:8px; padding:12px 15px; margin:10px 0; }
+  .qa2 b { color:#7dd3fc; display:block; margin-bottom:4px; font-size:14px; }
+  .qa2 p { margin:0; font-size:13.5px; color:#a0aec0; }
+  .g2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px; margin:14px 0; }
+  .b2 { background:#161b26; border:1px solid #2d3748; border-radius:8px; padding:14px 16px; }
+  .b2 h3 { margin:0 0 6px; font-size:15px; color:#7dd3fc; }
+  .b2 p, .b2 li { font-size:13px; color:#a0aec0; }
+  .note2 { background:#16232b; border-left:3px solid #38b2ac; border-radius:6px;
+           padding:11px 14px; margin:12px 0; font-size:13px; color:#cbd5e1; }
+  .note2.w { border-color:#ed8936; background:#241c12; }
+  .extra .footnav { margin-top:26px; padding-top:16px; border-top:1px dashed #2d3748;
+                    text-align:center; font-size:13px; color:#64748b; }
+  .extra .footnav a { color:#63b3ed; text-decoration:none; margin:0 8px; }
+</style>
 </head>
 <body>
 
@@ -401,5 +435,106 @@
   </div>
 </div>
 
+<div class="extra">
+<h2>核心速览</h2>
+<div class="kv4">
+  <div class="k"><b>主分片是唯一入口</b><span>客户端不能直接写副本，副本由主分片转发</span></div>
+  <div class="k"><b>Translog</b><span>写内存 buffer 的同时记事务日志，防宕机丢失</span></div>
+  <div class="k"><b>refresh</b><span>默认 1 秒，buffer → 新 segment，此刻才<b>可被搜到</b></span></div>
+  <div class="k"><b>flush</b><span>Translog 刷盘 + 清空，触发时机由 translog 大小/时间决定</span></div>
+</div>
+
+<h2>三个最容易混淆的概念</h2>
+<table>
+<tr><th>动作</th><th>做了什么</th><th>触发时机</th><th>效果</th></tr>
+<tr><td><b>refresh</b></td><td>内存 buffer → 生成新 segment（进文件系统缓存，<strong>未 fsync</strong>）</td><td>默认每 <strong>1 秒</strong>（<code>index.refresh_interval</code>）</td><td>文档<strong>可被搜索</strong></td></tr>
+<tr><td><b>flush</b></td><td>把文件系统缓存中的 segment <strong>fsync 落盘</strong>，并清空 Translog</td><td>Translog 达 512MB 或 30 分钟</td><td>数据<strong>持久化</strong>，Translog 清空</td></tr>
+<tr><td><b>merge</b></td><td>后台合并多个小 segment 成大 segment</td><td>自动（后台线程，有限速）</td><td>减少文件数、回收删除空间</td></tr>
+</table>
+<div class="note2">💡 记忆口诀：<b>refresh 管「能不能搜到」，flush 管「会不会丢」</b>。文档写入后 1 秒可搜（refresh），但直到 flush 才真正落盘；中间这段靠 Translog 保证不丢。</div>
+
+<h2>一次完整写入的时间线</h2>
+<pre><code> ① 客户端发 index 请求到协调节点
+ ② 协调节点按 routing（默认 _id 哈希）算出目标主分片，转发过去
+ ③ 主分片本地执行：
+      写入内存 buffer  ──┐
+      追加 Translog     ─┘（两步都成功才算本地成功）
+ ④ 主分片把操作<b>并行转发</b>给所有同步副本（in-sync replicas）
+ ⑤ 副本各自执行 + 记自己的 Translog，ACK 回主分片
+ ⑥ 主分片收到足够 ACK 后，向协调节点返回成功
+ ⑦ 协调节点返回客户端
+ ─────── 以上是同步路径（毫秒级）───────
+ ⑧（后台）每 1s refresh → 新 segment → 可被搜索
+ ⑨（后台）translog 达阈值 → flush → segment 落盘 + translog 清空
+ ⑩（后台）segment 合并</code></pre>
+
+<h2>写入的持久性配置</h2>
+<table>
+<tr><th>配置</th><th>含义</th><th>建议</th></tr>
+<tr><td><code>index.translog.durability</code></td><td><code>request</code>（每次写都 fsync Translog，默认）／<code>async</code>（每 5 秒 fsync）</td><td>默认 <code>request</code> 最安全；<code>async</code> 能提吞吐但宕机可能丢最后 5 秒</td></tr>
+<tr><td><code>wait_for_active_shards</code></td><td>要求多少分片副本可用才接受写</td><td>默认 1（只要主分片在）；设为 <code>all</code> 或 <code>2</code> 更安全</td></tr>
+<tr><td><code>?refresh=</code></td><td><code>false</code>（默认）／<code>true</code>（立即刷新）／<code>wait_for</code>（等下次 refresh）</td><td>批量导入用 <code>false</code>；测试用 <code>true</code></td></tr>
+</table>
+
+<h2>为什么主分片是唯一入口</h2>
+<div class="g2">
+  <div class="b2">
+    <h3>顺序保证</h3>
+    <p>所有写都先到主分片，由它<strong>定序</strong>再转发给副本。这样同一文档的操作在所有副本上顺序一致，不会出现「更新和删除到达顺序不同导致结果不一致」。</p>
+  </div>
+  <div class="b2">
+    <h3>单一真相源</h3>
+    <p>主分片负责维护版本号（<code>_version</code>）与并发控制。乐观并发控制（<code>if_seq_no</code> + <code>if_primary_term</code>）也在主分片上判定。</p>
+  </div>
+</div>
+<div class="note2 w">⚠️ 如果副本写失败，主分片会向 Master 报告，Master 把该副本从<b>同步副本集（in-sync replicas）</b>里移除；后续写入不再等它。等它恢复并追上后才会重新加入。这就是为什么副本短暂故障不会阻塞写入。</div>
+
+<h2>写入性能优化</h2>
+<table>
+<tr><th>手段</th><th>做法</th><th>收益</th></tr>
+<tr><td><strong>用 Bulk API</strong></td><td>每次批量 5~15MB / 几百~几千条</td><td>减少网络往返与协调开销，<strong>收益最大</strong></td></tr>
+<tr><td>调大 refresh_interval</td><td>批量导入时设 <code>"refresh_interval":"-1"</code>（关闭）</td><td>不产生大量小 segment，省掉频繁 refresh 开销</td></tr>
+<tr><td>translog 改 async</td><td><code>"index.translog.durability":"async"</code></td><td>省掉每次 fsync（有丢数风险）</td></tr>
+<tr><td>去掉副本再导入</td><td><code>"number_of_replicas":0</code> 导入完再加回</td><td>省掉副本转发与同步（仅初始化场景）</td></tr>
+<tr><td>用自动生成的 _id</td><td>不指定 id</td><td>省掉「检查该 id 是否已存在」的一次查询</td></tr>
+<tr><td>加大 indexing buffer</td><td><code>indices.memory.index_buffer_size</code>（默认堆 10%）</td><td>减少 flush 次数</td></tr>
+</table>
+<pre><code>// 批量导入的推荐姿势
+PUT /my_index/_settings { "refresh_interval": "-1", "number_of_replicas": 0 }
+
+POST _bulk
+{ "index": { "_index": "my_index" } }
+{ "title": "doc 1", "ts": "2026-01-01" }
+{ "index": { "_index": "my_index" } }
+{ "title": "doc 2", "ts": "2026-01-02" }
+
+// 导入完成后恢复
+PUT /my_index/_settings { "refresh_interval": "1s", "number_of_replicas": 1 }</code></pre>
+
+<h2>并发写同一文档怎么办</h2>
+<p>ES 用<strong>乐观并发控制</strong>：每个文档有 <code>_seq_no</code>（序号）和 <code>_primary_term</code>（主分片任期）。更新时可带上期望值，不匹配就返回 409 冲突，由应用决定重试或合并。</p>
+<pre><code>PUT /my_index/_doc/1?if_seq_no=42&amp;if_primary_term=3
+{ "title": "new title" }
+// 若期间被别人改过 → 409 VersionConflictException，客户端重试</code></pre>
+
+<h2>🎯 常见问法与答题要点</h2>
+<div class="qa2"><b>Q：为什么 ES 写入是近实时的，而不是实时的？</b><p>A：因为写入先进<b>内存 buffer</b>，只有经过 <b>refresh</b>（默认每秒一次）生成新的不可变 segment 后，才会被 Lucene 检索到。这个 1 秒延迟换来的是「不用每次写都重建索引」的巨大性能收益。要立刻可见可以显式 refresh，但代价是产生大量小 segment、拖垮性能，只在低频场景用。</p></div>
+<div class="qa2"><b>Q：写入返回成功后数据会丢吗？</b><p>A：默认配置下不会。写入时<b>Translog 已 fsync 落盘</b>（<code>durability=request</code>），即使节点立刻断电，重启后重放 Translog 就能恢复。只有把 durability 改成 <code>async</code>（每 5 秒才 fsync）时，才有最多 5 秒的丢失窗口。</p></div>
+<div class="qa2"><b>Q：主分片挂了会怎样？</b><p>A：Master 节点检测到后，从<b>同步副本集（in-sync replicas）</b>里选一个提升为新主分片，整个过程通常几秒到几十秒。期间该分片的写入短暂不可用，读取可走其他副本。若一个同步副本都没有，集群会变红且该分片数据不可写（除非手工允许丢失）。</p></div>
+<div class="qa2"><b>Q：能不能直接写副本分片？</b><p>A：不能。所有写都必须先到主分片，由它定序后转发给副本。这样保证同一文档的操作在所有副本上<b>顺序一致</b>，也保证版本号与并发控制有单一判定点。副本只能接受读请求（这也是它提供读扩展的方式）。</p></div>
+<div class="qa2"><b>Q：refresh、flush、merge 分别做什么？</b><p>A：<b>refresh</b> 把内存 buffer 变成新的可搜索 segment（默认 1 秒，未 fsync）；<b>flush</b> 把缓存中的 segment 真正 fsync 落盘并清空 Translog（触发条件：translog 达 512MB 或 30 分钟）；<b>merge</b> 是后台把多个小 segment 合并成大的，减少文件数并回收被删除文档的空间。简单记：refresh 管「搜得到」，flush 管「不会丢」，merge 管「变整洁」。</p></div>
+<div class="qa2"><b>Q：批量导入千万级数据怎么最快？</b><p>A：五件套——①<b>Bulk API</b>（每批 5~15MB）；②<b>关闭 refresh</b>（<code>refresh_interval:-1</code>）；③<b>先去副本</b>（<code>number_of_replicas:0</code>，导入完再加回）；④<b>translog 改 async</b>；⑤<b>用自动生成 _id</b>（省掉存在性检查）。这几项叠加通常能提速 5~10 倍。导入完记得把设置改回来。</p></div>
+<div class="qa2"><b>Q：副本写失败会阻塞写入吗？</b><p>A：不会（短暂故障时）。主分片会把失败的副本报告给 Master，Master 把它从<b>同步副本集</b>中移除，后续写入就不再等它的 ACK。等该副本恢复并追上数据后，重新加入同步副本集。这套机制保证副本抖动不影响写入可用性。</p></div>
+<div class="qa2"><b>Q：文档是不可变的，那更新是怎么实现的？</b><p>A：Lucene 的 segment <b>不可变</b>，所以「更新」= <b>写一条新文档 + 把旧文档标记为删除</b>。旧版本在下次 segment merge 时才被物理清除。这就是为什么<b>频繁更新会产生大量垃圾</b>、磁盘占用先涨后降，以及为什么 delete 后空间不会立即释放。</p></div>
+
+<div class="footnav">
+  <a href="../01-architecture/es-architecture.html">ES 核心架构</a> ·
+  <a href="../01-architecture/es-shards-replicas.html">分片与副本</a> ·
+  <a href="../03-search/es-query-flow.html">查询流程</a> ·
+  <a href="inverted-index.html">倒排索引</a> ·
+  <a href="segment-explained.html">Segment 详解</a> ·
+  <a href="../../../index.html">返回 NoSQL 分类</a>
+</div>
+</div>
 </body>
 </html>

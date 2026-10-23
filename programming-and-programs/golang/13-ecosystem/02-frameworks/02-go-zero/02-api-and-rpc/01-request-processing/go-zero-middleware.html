@@ -58,6 +58,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -299,7 +317,7 @@ s := zrpc.<span class="fn">MustNewServer</span>(c.RpcServerConf, <span class="kw
     <span class="kw">return</span> resp, err
 }</pre>
 
-    <div class="cmp-table">
+    <table class="cmp-table">
       <thead><tr><th style="width:22%">维度</th><th>HTTP 中间件</th><th>RPC 拦截器</th></tr></thead>
       <tbody>
         <tr><td>所在层</td><td><code class="inline">internal/middleware</code>，注册在 handler/routes</td><td><code class="inline">internal/middleware</code> 或 rpc 包，注册在 zrpc server/client</td></tr>
@@ -307,7 +325,6 @@ s := zrpc.<span class="fn">MustNewServer</span>(c.RpcServerConf, <span class="kw
         <tr><td>注册</td><td><code class="inline">server.Use</code> / <code class="inline">rest.WithMiddlewares</code></td><td><code class="inline">WithUnaryServerInterceptor</code> / 客户端 <code class="inline">WithUnaryClientInterceptor</code></td></tr>
       </tbody>
     </table>
-  </div>
 
   </div>
 
@@ -339,5 +356,51 @@ s := zrpc.<span class="fn">MustNewServer</span>(c.RpcServerConf, <span class="kw
   go-zero middleware 目录与用法 · 配套系列：svc / config / zrpc / types / API 流程 / 服务调用 / 全局变量 / 规范 · 图文 + 代码示例
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>放哪、怎么写、怎么注册</h2><p><b>目录与写法</b></p><pre><code>service/
+└── api/
+    ├── internal/
+    │   ├── middleware/              # ✅ 推荐：自己建一个 middleware 目录
+    │   │   ├── auth.go
+    │   │   ├── logger.go
+    │   │   └── recover.go
+    │   ├── handler/                 # goctl 生成
+    │   └── svc/
+    └── user.go                      # 注册中间件的地方
+
+// middleware/auth.go
+func Auth() rest.Middleware {
+    return func(next http.HandlerFunc) http.HandlerFunc {
+        return func(w http.ResponseWriter, r *http.Request) {
+            token := r.Header.Get("Authorization")
+            if token == "" {
+                httpx.ErrorCtx(r.Context(), w, errorx.New(401, "unauthorized"))
+                return                       // ❗不调用 next 就中断了链路
+            }
+            // 校验通过后可以把信息塞进 ctx
+            ctx := context.WithValue(r.Context(), "uid", uid)
+            next(w, r.WithContext(ctx))      // 继续往下
+        }
+    }
+}</code></pre><p><b>注册方式</b></p><pre><code>// user.go —— 注册
+server := rest.MustNewServer(c.RestConf)
+
+// 1) 全局中间件：对所有路由生效
+server.Use(middleware.Recover())     // 注意：注册顺序 = 外层到内层
+server.Use(middleware.Logger())
+server.Use(middleware.Auth())
+
+// 2) 路由级中间件：只对该路由组生效
+server.AddRoutes(
+    []rest.Route{
+        {Method: http.MethodGet, Path: "/user/:id", Handler: user.GetUserHandler(serverCtx)},
+    },
+    rest.WithPrefix("/api/v1"),
+    rest.WithMiddlewares([]rest.Middleware{middleware.Auth()}),   // 只给这组加
+    rest.WithJwt(c.Auth.AccessSecret),                            // go-zero 自带的 JWT
+)
+
+defer server.Stop()</code></pre><div class="table-wrap"><table><thead><tr><th>方式</th><th>作用范围</th><th>典型用途</th></tr></thead><tbody><tr><td><code>server.Use()</code></td><td><b>全部路由</b></td><td>日志、recover、链路追踪、CORS</td></tr><tr><td><code>rest.WithMiddlewares()</code></td><td>该路由组</td><td>鉴权、限流、租户隔离</td></tr><tr><td><code>rest.WithJwt()</code></td><td>该路由组</td><td>go-zero 内置 JWT 校验</td></tr><tr><td><code>rest.WithSignature()</code></td><td>该路由组</td><td>签名校验（对外接口）</td></tr></tbody></table></div><p><b>执行顺序</b>：<code>server.Use()</code> 按<b>注册顺序</b>从外到内包裹，所以 <code>Recover()</code> 要<b>第一个注册</b>才能兜住后面所有中间件的 panic。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>常见中间件清单与坑</h2><div class="table-wrap"><table><thead><tr><th>中间件</th><th>作用</th><th>注意</th></tr></thead><tbody><tr><td><b>Recover</b></td><td>捕获 panic，返回 500 而不是崩进程</td><td>必须放最外层；要记录堆栈</td></tr><tr><td><b>日志 / Trace</b></td><td>记录耗时、状态码、trace id</td><td>用 <code>logx.WithContext(ctx)</code> 带上 trace</td></tr><tr><td><b>鉴权 / JWT</b></td><td>校验身份</td><td>白名单要显式排除登录/健康检查</td></tr><tr><td><b>限流</b></td><td>保护服务</td><td>go-zero 自带 <code>PeriodLimit</code> / <code>TokenLimit</code>；按 key 维度限</td></tr><tr><td><b>超时</b></td><td>限制单次请求时长</td><td>配合 ctx 传递，别只在 handler 层做</td></tr><tr><td><b>CORS</b></td><td>跨域</td><td>生产环境<b>不要</b>用 <code>*</code>，显式列域名</td></tr><tr><td><b>参数校验</b></td><td>统一入参校验</td><td>放在 logic 入口更常见，中间件适合做通用规则</td></tr></tbody></table></div><ul><li><b>不调用 next 就等于中断链路</b>：这是中间件里最容易写错的一点，也是鉴权中间件的实现基础。</li><li><b>别在中间件里做重 IO</b>：它跑在每个请求的关键路径上，一次远程校验就会拖慢整条链路。</li><li><b>中间件里的 panic</b>：如果 Recover 不在最外层，中间件自己 panic 就没有人兜。</li><li><b>修改响应要用包装的 ResponseWriter</b>：想记录响应体/状态码需要自己包一层，直接读不到。</li><li><b>ctx 要传递</b>：中间件里往 ctx 塞的东西，要用 <code>r.WithContext(ctx)</code> 传下去才生效。</li></ul><details><summary>go-zero 有没有专门的 http 目录？</summary><p>没有强约定。HTTP 层的东西都在 <code>internal/</code> 下，middleware 目录通常是自己建的——这是项目约定而非框架要求，团队统一即可。</p></details><details><summary>全局和路由级中间件能叠加吗？</summary><p>能，都会生效，执行顺序是「全局在外、路由级在内」。鉴权这类建议放路由级，避免给登录接口和健康检查也加上鉴权。</p></details><details><summary>中间件里能拿到路由参数吗？</summary><p>可以，通过 <code>httpx.PathVar</code> 或从 <code>r</code> 里解析；但更常见的做法是在 logic 里拿，中间件只做与业务无关的横切逻辑。</p></details></div></section>
 </body>
 </html>

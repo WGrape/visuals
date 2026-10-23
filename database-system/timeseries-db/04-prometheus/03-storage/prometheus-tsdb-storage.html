@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prometheus TSDB 存储：Head Block、WAL 与 Compaction</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Prometheus TSDB 存储：Head Block、WAL 与 Compaction</h1>
+  <p>时间分块 + 不可变 block 的设计动机、内存到底被谁吃掉、长周期查询为什么贵、保留期的四种做法</p>
+  <span class="tag">TSDB</span><span class="tag">Head Block</span><span class="tag">WAL</span><span class="tag">Compaction</span><span class="tag">retention</span><span class="tag">remote_write</span>
+</header>
+<nav>
+  <a href="#path">① 写路径</a>
+  <a href="#mem">② 内存去哪了</a>
+  <a href="#query">③ 读路径</a>
+  <a href="#retention">④ 保留与长期存储</a>
+  <a href="#disk">⑤ 运维要点</a>
+</nav>
+<main>
+<section id="path">
+<h2><span class="n">01</span>写路径：从抓取到落盘</h2>
+<div class="fig">
+<svg width="880" height="390" viewBox="0 0 880 390">
+  <text x="440" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">Prometheus 本地 TSDB：Head Block → 持久化 Block → Compaction</text>
+
+  <!-- 写入 -->
+  <rect x="30" y="48" width="150" height="52" rx="9" fill="#171b26" stroke="#7ee787"/>
+  <text x="105" y="70" text-anchor="middle" font-size="11.5" font-weight="700" fill="#7ee787">抓取到的样本</text>
+  <text x="105" y="88" text-anchor="middle" font-size="10" fill="#94a3b8">scrape</text>
+
+  <!-- Head -->
+  <rect x="220" y="44" width="220" height="86" rx="10" fill="#1f2433" stroke="#6ea8fe" stroke-width="1.5"/>
+  <text x="330" y="68" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6ea8fe">Head Block（内存中）</text>
+  <text x="330" y="88" text-anchor="middle" font-size="10.5" fill="#94a3b8">保存最近一段时间的样本</text>
+  <text x="330" y="106" text-anchor="middle" font-size="10.5" fill="#94a3b8">含倒排索引、可按 label 查询</text>
+  <text x="330" y="124" text-anchor="middle" font-size="10.5" fill="#f0a868">查询最近数据走这里</text>
+
+  <!-- WAL -->
+  <rect x="220" y="168" width="220" height="60" rx="9" fill="#171b26" stroke="#ff7b72"/>
+  <text x="330" y="192" text-anchor="middle" font-size="12" font-weight="700" fill="#ff7b72">WAL（预写日志）</text>
+  <text x="330" y="211" text-anchor="middle" font-size="10.5" fill="#94a3b8">崩溃后用它重建 head，防丢数据</text>
+
+  <g stroke="#7ee787" stroke-width="1.6" fill="none" marker-end="url(#g1)">
+    <path d="M180,74 L216,74"/>
+    <path d="M300,130 L300,166"/>
+  </g>
+  <defs><marker id="g1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#7ee787"/></marker></defs>
+
+  <!-- 持久化 block -->
+  <text x="480" y="70" font-size="11.5" font-weight="700" fill="#56d4dd">持久化 Block（每 2 小时切一个，不可变）</text>
+  <g>
+    <rect x="480" y="80" width="180" height="46" rx="7" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="570" y="100" text-anchor="middle" font-size="11" fill="#56d4dd">Block T1</text>
+    <text x="570" y="118" text-anchor="middle" font-size="10" fill="#94a3b8">chunks + index + meta</text>
+
+    <rect x="678" y="80" width="180" height="46" rx="7" fill="#1f2433" stroke="#56d4dd"/>
+    <text x="768" y="100" text-anchor="middle" font-size="11" fill="#56d4dd">Block T2</text>
+    <text x="768" y="118" text-anchor="middle" font-size="10" fill="#94a3b8">（只读，mmap 访问）</text>
+  </g>
+  <path d="M440,86 L476,86" fill="none" stroke="#56d4dd" stroke-width="1.6" marker-end="url(#c1)"/>
+  <defs><marker id="c1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#56d4dd"/></marker></defs>
+  <text x="446" y="76" font-size="9.5" fill="#94a3b8">每 2h 落盘</text>
+
+  <!-- compaction -->
+  <rect x="500" y="180" width="340" height="60" rx="9" fill="#171b26" stroke="#d2a8ff"/>
+  <text x="670" y="204" text-anchor="middle" font-size="12" font-weight="700" fill="#d2a8ff">后台 Compaction（合并）</text>
+  <text x="670" y="223" text-anchor="middle" font-size="10.5" fill="#94a3b8">多个小 block → 更大的 block，并删除已过期数据</text>
+  <g stroke="#d2a8ff" stroke-width="1.3" fill="none" marker-end="url(#p1)">
+    <path d="M570,126 L570,178"/><path d="M768,126 L768,178"/>
+  </g>
+  <defs><marker id="p1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#d2a8ff"/></marker></defs>
+
+  <rect x="500" y="262" width="340" height="46" rx="7" fill="#1f2433" stroke="#d2a8ff"/>
+  <text x="670" y="284" text-anchor="middle" font-size="11" fill="#d2a8ff">合并后的大 Block（跨度更长、索引更小）</text>
+  <text x="670" y="300" text-anchor="middle" font-size="10" fill="#94a3b8">查询跨 block 时按时间范围裁剪，只加载命中的</text>
+  <path d="M670,240 L670,258" fill="none" stroke="#d2a8ff" stroke-width="1.6" marker-end="url(#p1)"/>
+
+  <!-- 三点说明 -->
+  <rect x="30" y="260" width="440" height="118" rx="9" fill="#171b26" stroke="#2b3142"/>
+  <text x="46" y="282" font-size="11.5" font-weight="700" fill="#e2e8f0">三个必须知道的性质</text>
+  <text x="46" y="303" font-size="10.5" fill="#94a3b8">1. Block 一旦写满就是<text font-weight="700">不可变</text>的，靠 mmap 只读访问，所以查询很稳</text>
+  <text x="46" y="322" font-size="10.5" fill="#94a3b8">2. Head 在内存里+WAL 落盘，崩溃重启靠重放 WAL 恢复</text>
+  <text x="46" y="341" font-size="10.5" fill="#94a3b8">3. 查询会同时读 Head 和若干 Block，跨的时间越长，代价越大</text>
+  <text x="46" y="362" font-size="10.5" fill="#ff7b72">→ 所以「查最近 1 小时」和「查最近 30 天」的成本完全不是一个量级</text>
+</svg>
+<div class="cap">写路径：样本先进内存 Head 并追加 WAL；每 2 小时把 Head 落成一个不可变 Block；后台再把这些 Block 合并成更大的 Block。</div>
+</div>
+<ol>
+  <li><strong>抓取 → Head Block</strong>：样本先进内存中的 head block，同时建立倒排索引（label → 时间线列表）。</li>
+  <li><strong>追加 WAL</strong>：同一份样本追加写入预写日志，用于崩溃恢复。这是写放大的来源之一，也是为什么 Prometheus 的磁盘 IO 模式是「顺序小写 + 周期性大块」。</li>
+  <li><strong>每 2 小时切块</strong>：head 中的数据达到时间跨度阈值后，被压缩成一个不可变的 block 目录（包含 chunks、index、meta.json、tombstones）。<strong>2 小时是常见的默认块跨度，属于实现细节，不同版本可能调整。</strong></li>
+  <li><strong>后台 Compaction</strong>：把多个相邻小 block 合并成更大的 block，同时清理被删除的数据和超过保留期的数据。</li>
+</ol>
+<div class="lead warn"><strong>为什么是「不可变 block + 合并」而不是原地更新？</strong>因为时序数据的删除永远是「整段时间一起删」（保留期到期），而不是「删某一条」。按时间分块后，删一个 block 就是删一个目录，代价极低；如果原地更新，就要做代价高昂的随机删除和空间回收。</div>
+
+</section>
+
+<section id="mem">
+<h2><span class="n">02</span>内存去哪了：基数才是内存杀手</h2>
+
+<div class="lead bad"><strong>不要按「存了多少数据点」估算 Prometheus 内存，要按「有多少条活跃时间线」估算。</strong>每条活跃时间线在 head block 里都要维护索引条目和最近样本，成本是<strong>每条线固定开销 × 活跃线数</strong>，与样本总量关系不大。这就是为什么加一个高基数 label 会让内存暴涨。</div>
+<table>
+  <tr><th>因素</th><th>对内存的影响</th><th>控制手段</th></tr>
+  <tr><td>活跃时间线数</td><td><strong>主导因素</strong>，近似线性</td><td>控制 label 基数；用 <code>sample_limit</code> 类的配置限制单个目标的样本数</td></tr>
+  <tr><td>head block 覆盖的时间跨度</td><td>跨度越长，内存中数据越多</td><td>由块跨度（2h）决定，通常不该改</td></tr>
+  <tr><td>抓取间隔</td><td>间隔越短，同样跨度内样本越多</td><td>非核心指标拉长到 30s/60s</td></tr>
+  <tr><td>WAL 与 checkpoint</td><td>崩溃恢复需要保留的日志量</td><td>由实现自动管理，关注磁盘水位即可</td></tr>
+</table>
+
+</section>
+
+<section id="query">
+<h2><span class="n">03</span>读路径：为什么长周期查询会拖垮实例</h2>
+
+<ul>
+  <li>查询按时间范围<strong>裁剪 block</strong>：只加载时间区间有交集的 block，未命中的直接跳过。这是分块带来的最大好处。</li>
+  <li>近期数据走 head（内存），历史数据走 block（mmap 读盘）。<strong>跨 head + 多个 block 的查询需要合并结果</strong>，代价随覆盖的 block 数增长。</li>
+  <li>block 经过 compaction 合并后数量减少，长周期查询会变快——这就是 compaction 除了省空间之外的第二个价值。</li>
+  <li>但<strong>加载的 chunk 数和解压的样本数才是主要成本</strong>：查 30 天 × 1000 条时间线 = 需要解压海量样本，比查 1 小时贵几个数量级。</li>
+</ul>
+<div class="lead ok"><strong>实践结论</strong>：仪表盘默认时间范围要短（1h/6h），长周期分析交给 recording rule 预聚合后的指标，或者直接查远端存储。不要让 Grafana 变量允许用户随意把范围拉到 30 天。</div>
+
+</section>
+
+<section id="retention">
+<h2><span class="n">04</span>保留期与长期存储</h2>
+
+<table>
+  <tr><th>方案</th><th>做法</th><th>优点</th><th>代价</th></tr>
+  <tr><td>调大本地保留期</td><td>启动时配置 <code>--storage.tsdb.retention.time</code></td><td>零组件、查询最快</td><td>单机容量与内存受限；长周期查询变慢；单点故障丢历史</td></tr>
+  <tr><td>remote_write 到远端</td><td>Prometheus 边写本地边转发样本</td><td>本地保持轻量，历史集中存；可跨集群聚合</td><td>多一个组件；要处理队列堆积与丢数监控</td></tr>
+  <tr><td>降采样（recording rule）</td><td>把细粒度指标预聚合成 5m/1h 粒度长期保存</td><td>存储量下降一两个数量级</td><td>丢掉原始细节；规则要维护</td></tr>
+  <tr><td>联邦（federation）</td><td>上层 Prometheus 拉取下层的聚合结果</td><td>层级清晰，适合多集群</td><td>只能拉聚合后指标，不能拉原始序列</td></tr>
+</table>
+<div class="lead warn"><strong>remote_write 必须监控它自己。</strong>远端存储挂掉或网络拥塞时，Prometheus 会把样本堆在内存队列里，堆满后开始丢数据。<strong>一定要对 <code>prometheus_remote_storage_* </code>系列指标（队列长度、失败率、落后程度）设告警</strong>，否则远端静默丢数你可能很久都不知道。具体指标名以你版本的文档为准。</div>
+
+</section>
+
+<section id="disk">
+<h2><span class="n">05</span>磁盘与运维要点</h2>
+
+<ol>
+  <li><strong>磁盘容量 ≈ 每秒样本数 × 每样本字节 × 保留秒数</strong>。先估算 <code>rate(prometheus_tsdb_head_samples_appended_total)</code> 再乘保留期，别拍脑袋。</li>
+  <li><strong>用 SSD</strong>。虽然 WAL 是顺序写，但查询时要随机读大量 chunk，机械盘会成为瓶颈。</li>
+  <li><strong>不要放在会被外部清理的目录</strong>。有人把数据目录挂到临时卷上，重启就没了。</li>
+  <li><strong>Prometheus 自身要被监控</strong>：至少关注目标存活（<code>up</code>）、抓取耗时、TSDB 的 WAL 回放与 compaction 耗时、head 里的 series 数。</li>
+  <li><strong>本地存储不是 HA 的</strong>。两台 Prometheus 抓同样的目标是常见做法（各自独立存储），但它们的查询结果可能因为抓取时刻不同而略有差异——做 HA 时要注意这个「双写不一致」。</li>
+</ol>
+<div class="lead bad"><strong>默认值与路径相关提示</strong>：块跨度（2h）、默认保留期、数据目录位置、compaction 并发等参数的具体默认值随版本变化。<strong>请以你部署版本的官方文档为准。</strong></div>
+
+</section>
+
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Prometheus TSDB 的结构与参数</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>默认值 / 说明</th><th>要点</th></tr></thead><tbody><tr><td><b>Block</b></td><td>每 <b>2 小时</b>一个块</td><td>也支持按 <code>--storage.tsdb.max-block-duration</code> 改</td></tr><tr><td><b>Head Block</b></td><td>最近 2 小时（在内存 + WAL）</td><td>查询最新的数据走这里</td></tr><tr><td><b>Chunk</b></td><td>每个 series 每 <b>2 小时</b>内的样本</td><td>默认最多 <b>120 个样本</b>后开新 chunk</td></tr><tr><td><b>WAL</b></td><td>写前日志，防重启丢失</td><td>每 <b>2 小时</b>压缩一次（checkpoint）</td></tr><tr><td><b>Compaction</b></td><td>把多个 block 合并</td><td>合并后 block 变大，查询更快</td></tr><tr><td><b>保留期</b></td><td><b>15 天</b>（<code>--storage.tsdb.retention.time</code>）</td><td>也可按大小 <code>retention.size</code></td></tr><tr><td>单样本磁盘</td><td>约 <b>1~2 字节</b>（压缩后）</td><td>这是 Prometheus 存储高效的关键</td></tr><tr><td><code>scrape_interval</code></td><td><b>15s</b> 或 30s</td><td>影响数据量与精度</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>容量估算</th><th>公式</th><th>例子</th></tr></thead><tbody><tr><td>每秒样本数</td><td><code>series 数 / scrape_interval</code></td><td>100 万 series / 15s ≈ <b>6.7 万</b> 样本/秒</td></tr><tr><td>每天磁盘</td><td>样本/秒 × <b>1.7 字节</b> × 86400</td><td>6.7 万 × 1.7 × 86400 ≈ <b>9.8 GB/天</b></td></tr><tr><td>15 天保留</td><td>× 15</td><td>约 <b>147 GB</b></td></tr><tr><td>内存占用</td><td>约 <b>series 数 × 3~8 KB</b></td><td>100 万 series 约 <b>3~8 GB</b></td></tr></tbody></table></div><p><b>每样本 1.7 字节是怎么来的</b>：Prometheus 用的是 <b>delta-of-delta 编码</b>+ XOR 压缩。时间戳用 delta-of-delta（大多数样本间隔固定，delta 的 delta 是 0，一个比特就能表示）；值用 XOR（相邻值接近，XOR 后高位全 0）。两者结合让每个样本平均只占 <b>1.7 字节</b>——而原始存储需要 <b>16 字节</b>（8 字节时间戳 + 8 字节 float64），压缩比约 <b>9 倍</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>配置与命令</h2><pre><code># 启动参数
+prometheus \
+  --storage.tsdb.path=/data/prometheus \
+  --storage.tsdb.retention.time=15d \        # 保留期（默认 15 天）
+  --storage.tsdb.retention.size=500GB \      # 或按大小限制
+  --storage.tsdb.max-block-duration=2h \     # block 时长
+  --storage.tsdb.wal-compression \           # 开启 WAL 压缩（省 30~50%，2.11+）
+  --config.file=prometheus.yml
+
+# 注意：retention 修改需要重启；且 &lt;b&gt;不能同时设 time 和 size 的严格限制&lt;/b&gt;
+# 实际行为：先到哪个限制就用哪个
+
+# 查看存储使用情况
+du -sh /data/prometheus/*
+ls /data/prometheus/01HXXXX/          # 每个 block 一个目录
+#   chunks/  存实际数据
+#   index    倒排索引（label -&gt; series）
+#   meta.json block 元信息（时间范围、series 数）
+#   tombstones 删除标记
+
+# 查询 TSDB 状态
+curl 'localhost:9090/api/v1/status/tsdb' | jq
+# 返回：headStats（numSeries, chunkCount, minTime, maxTime）
+#       seriesCountByMetricName / labelValueCountByLabelName（找基数大的）</code></pre><pre><code># 基数爆炸排查（Prometheus 最常见的运维问题）
+# 1) 找出 series 数最多的指标
+topk(10, count by (__name__)({__name__=~".+"}))
+
+# 2) 找出基数最大的 label
+topk(10, count(count by (instance)({__name__=~".+"})))
+
+# 3) 查看总 series 数
+prometheus_tsdb_head_series        # Head block 里的 series 数
+prometheus_tsdb_head_samples_appended_total
+
+# 4) 单个指标占多少 series
+prometheus_tsdb_symbol_table_size_bytes
+# 或用 API
+curl 'localhost:9090/api/v1/label/__name__/values' | jq 'length'
+
+# 限制基数（Prometheus 2.x 的配置）
+# scrape_configs 里：
+#   metric_relabel_configs:
+#   - source_labels: [url]
+#     action: drop                  # 直接丢弃高基数指标
+#   - source_labels: [user_id]
+#     action: labeldrop             # 删掉高基数 label</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>磁盘涨太快</td><td>series 基数爆炸 / 保留期太长</td><td>删高基数 label；缩短保留；或用 Thanos/Mimir 长期存储</td></tr><tr><td>内存占用高</td><td>series 数太多（head block 在内存）</td><td>减少 series；加大内存；或分片</td></tr><tr><td>查询慢（查长期数据）</td><td>block 太多未 compaction</td><td>等待自动 compaction；或用 Recording Rules 预聚合</td></tr><tr><td>重启后数据丢失</td><td>WAL 没刷 / 异常关闭</td><td>正常关闭；检查 WAL 目录权限</td></tr><tr><td>启动很慢</td><td>WAL 回放（数据量大时几分钟）</td><td>正常现象；避免频繁重启</td></tr><tr><td><code>out of order sample</code></td><td>同一 series 写入了更旧的时间戳</td><td>检查 exporter；多实例推同一 series</td></tr><tr><td>保留期改了没生效</td><td>需要重启</td><td>改配置后重启 Prometheus</td></tr></tbody></table></div><p class="muted"><b>容量规划的经验值</b>：每百万 series（15s 抓取）约需 <b>10 GB/天磁盘 + 5 GB 内存</b>。如果 series 数超过 <b>1000 万</b>，单机 Prometheus 就不合适了，要考虑 <b>Thanos / VictoriaMetrics / Mimir</b> 这类分布式方案。</p></div></section>
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 / Prometheus ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

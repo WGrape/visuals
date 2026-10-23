@@ -58,6 +58,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -350,5 +368,70 @@
   go-zero svc 目录结构规范 · 系列教程之一 · 与 svc 深度解析 / 初始化 / ctx 传递专题互补
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>svc 目录文件清单与职责</h2><p><code>svc</code> 是 go-zero 的<b>依赖注入容器</b>：把配置、DB、Redis、RPC 客户端等「全局单例」集中创建，再通过 <code>ServiceContext</code> 传给各层 logic。</p><div class="table-wrap"><table><thead><tr><th>文件</th><th>职责</th><th>是否必需</th></tr></thead><tbody><tr><td><code>servicecontext.go</code></td><td>定义 <code>ServiceContext</code> 结构体 + <code>NewServiceContext(c)</code> 构造函数</td><td><b>必需</b></td></tr><tr><td><code>config.go</code>（通常在 etc 或 internal/config）</td><td>配置结构体（yaml 的 Go 映射）</td><td>必需</td></tr><tr><td>自定义的 <code>*.go</code></td><td>额外的依赖（MQ producer、第三方 client、cache）</td><td>按需</td></tr></tbody></table></div><p><b>ServiceContext 典型写法</b></p><pre><code>// internal/svc/servicecontext.go（goctl 生成后的典型形态）
+type ServiceContext struct {
+    Config       config.Config
+    UserModel    model.UserModel       // DB 模型（已带缓存）
+    OrderModel   model.OrderModel
+    Redis        *redis.Redis          // redis.NewRedis(c.Redis)
+    UserRpc      userclient.User       // RPC 客户端（zrpc）
+    Producer     *kafka.Producer       // 自己加的 MQ
+}
+
+func NewServiceContext(c config.Config) *ServiceContext {
+    conn := sqlx.NewMysql(c.Mysql.DataSource)
+    rds := redis.MustNewRedis(c.RedisConf)
+    return &amp;ServiceContext{
+        Config:     c,
+        UserModel:  model.NewUserModel(conn, c.CacheConf),   // 第二参数是缓存配置
+        Redis:      rds,
+        UserRpc:    userclient.NewUser(zrpc.MustNewClient(c.UserRpc)),
+    }
+}
+
+// 在 logic 里使用（构造函数已注入，不需要全局变量）
+func (l *GetUserLogic) GetUser(req *types.GetReq) (*types.GetResp, error) {
+    u, err := l.svcCtx.UserModel.FindOne(l.ctx, req.Id)
+    if err != nil { return nil, err }
+    return &amp;types.GetResp{Name: u.Name}, nil
+}</code></pre><p><b>goctl 生成命令</b></p><pre><code># 用 goctl 生成 svc 与 logic（.api 驱动）
+goctl api go -api user.api -dir .
+#   internal/svc/servicecontext.go      &lt;- 骨架在这里
+#   internal/logic/*.go                 &lt;- logic 已持有 svcCtx
+#   internal/handler/*.go               &lt;- handler 持有 svcCtx
+
+# rpc 项目
+goctl rpc protoc user.proto --go_out=. --go-grpc_out=. --zrpc_out=.
+#   internal/svc/servicecontext.go 同上
+
+# 生成后要做的事：把 DB/RPC/Redis 的初始化补进 NewServiceContext</code></pre><p class="muted">设计要点：① <code>ServiceContext</code> 里的字段都是<b>进程级单例</b>（连接池、客户端），不要放请求级状态；② 它只负责<b>创建和持有</b>，业务逻辑一律在 logic 层；③ 新增依赖时改这一处即可，所有 logic 自动可用——这就是它替代全局变量的价值（可测试、可替换）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>配置映射与排障清单</h2><p><b>配置映射</b></p><pre><code># etc/user-api.yaml
+Name: user-api
+Host: 0.0.0.0
+Port: 8888
+Mysql:
+  DataSource: root:pwd@tcp(127.0.0.1:3306)/demo?charset=utf8mb4&amp;parseTime=true
+CacheConf:
+  - Host: 127.0.0.1:6379
+    Type: node
+    Pass: ""
+RedisConf:
+  Host: 127.0.0.1:6379
+  Type: node
+UserRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: user.rpc
+
+# internal/config/config.go（字段要跟 yaml 对应，tag 用 json 或 默认）
+type Config struct {
+    rest.RestConf          // 内嵌：自带 Host/Port/Timeout/Log 等
+    Mysql    struct{ DataSource string }
+    CacheConf cache.ClusterConf
+    RedisConf redis.RedisConf
+    UserRpc  zrpc.RpcClientConf
+}</code></pre><div class="table-wrap"><table><thead><tr><th>问题</th><th>原因</th><th>解法</th></tr></thead><tbody><tr><td>配置改了不生效</td><td>yaml 字段名与结构体 tag 不匹配</td><td>go-zero 用 <b>严格匹配</b>，会报错；检查大小写与嵌套层级</td></tr><tr><td><code>CacheConf</code> 配了但没走缓存</td><td>model 生成时没带 <code>-c</code></td><td><code>goctl model mysql ddl -src x.sql -dir . -c</code>（<code>-c</code> = 带缓存）</td></tr><tr><td>RPC 连不上</td><td>etcd key 不一致 / 服务没注册</td><td><code>etcdctl get user.rpc --prefix</code> 看有没有注册上</td></tr><tr><td>数据库连接池打满</td><td>默认 <code>maxOpenConns</code> 未调</td><td>在 DataSource 后加参数或改 <code>sqlx.NewMysql</code> 的配置</td></tr><tr><td>svc 里塞了太多东西</td><td>职责扩散</td><td>MQ/第三方 client 可以单独封装包，svc 只持有句柄</td></tr></tbody></table></div><details><summary>ServiceContext 和全局变量有什么区别？</summary><p>本质都是单例，但 ServiceContext 是<b>显式注入</b>：logic 的构造函数接收它，测试时可以传入一个假的实现。全局变量是隐式依赖，测试要替换只能改全局状态，容易互相污染。另外 ServiceContext 的创建时机明确（启动时一次），生命周期清晰，不会出现「用到时还没初始化」的问题。</p></details><details><summary>多个服务需要共享同一份 svc 怎么办？</summary><p>不要共享——每个服务有自己的 <code>ServiceContext</code> 和自己的配置。共享会导致：① 一个服务不需要的依赖也被初始化；② 配置耦合，改一个影响全部；③ 部署无法独立。正确做法是<b>抽公共包</b>（如 <code>pkg/mysqlx</code>、<code>pkg/cachex</code>），各服务的 svc 各自调用这些包去创建自己的实例。</p></details><details><summary>怎么在测试里构造 ServiceContext？</summary><p>直接调 <code>svc.NewServiceContext(cfg)</code> 并传入测试配置（指向测试库/testcontainer）。如果依赖了外部 RPC，把 <code>ServiceContext</code> 里的字段改成<b>接口类型</b>而不是具体类型，测试时就能注入 mock。这也是「依赖注入」相对全局变量最大的实际收益。</p></details></div></section>
 </body>
 </html>

@@ -40,6 +40,24 @@ footer{ text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .dim{ opacity:.35; }
 .hl{ stroke:var(--accent2) !important; stroke-width:3 !important; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -213,6 +231,47 @@ footer{ text-align:center; color:var(--muted); padding:30px; font-size:13px; }
   <div class="qa"><div class="qa-q">Q4：cache/persist 与 checkpoint 有什么区别？</div><div class="qa-a">cache/persist 把 RDD 缓存在内存或磁盘，<strong>仍保留血缘</strong>，用于加速重复使用的同一血缘数据，Executor 挂掉会失效并触发重算；checkpoint 把 RDD 物化到可靠存储（HDFS）并<strong>切断血缘</strong>，用于打断超长血缘、提升容错与避免重复重算，但写代价更高。实践中常先 persist 再 checkpoint 以兼顾性能与安全。</div></div>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Spark 核心概念与执行模型</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>关键特性</th></tr></thead><tbody><tr><td><b>RDD</b></td><td>弹性分布式数据集</td><td><b>不可变</b>、分区、可重算（血统）</td></tr><tr><td><b>DataFrame/Dataset</b></td><td>带 schema 的结构化抽象</td><td><strong>Catalyst 优化器</strong>，比 RDD 快</td></tr><tr><td><b>Job</b></td><td>一个 action 触发一个 job</td><td>—</td></tr><tr><td><b>Stage</b></td><td>按 <b>shuffle</b> 边界切分</td><td>窄依赖可流水线，宽依赖切分</td></tr><tr><td><b>Task</b></td><td>一个分区上的一个计算</td><td><strong>并行度 = 分区数</strong></td></tr><tr><td><b>血统（Lineage）</b></td><td>记录变换过程用于恢复</td><td>容错无需复制数据</td></tr></tbody></table></div><p><b>为什么 DataFrame 比 RDD 快</b>：RDD 只记录<strong>函数闭包</strong>，优化器看不见数据语义，无法优化；DataFrame 有 <strong>schema + Catalyst 优化器</strong>，能做谓词下推、列裁剪、常量折叠、代码生成（Tungsten）。同样逻辑，DataFrame 常比 RDD 快 <strong>2~10 倍</strong>，且内存占用更低。所以<strong>新代码一律用 DataFrame API，不要用 RDD</strong>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>关键参数与并行度</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>调优建议</th></tr></thead><tbody><tr><td><code>spark.sql.shuffle.partitions</code></td><td><b>200</b></td><td><b>最常调</b>；数据量大时设 <b>400~2000</b></td></tr><tr><td><code>spark.executor.memory</code></td><td>1g</td><td>4~8g 常见</td></tr><tr><td><code>spark.executor.cores</code></td><td>1</td><td><b>2~5</b>；超过 5 会导致 HDFS 吞吐下降</td></tr><tr><td><code>spark.executor.memoryOverhead</code></td><td>max(384m, 10%)</td><td>堆外不足会<strong>被 YARN kill</strong></td></tr><tr><td><code>spark.default.parallelism</code></td><td>集群核数</td><td>RDD 操作的默认分区数</td></tr><tr><td><code>spark.sql.adaptive.enabled</code></td><td>false</td><td><strong>强烈建议开启</strong>（AQE）</td></tr></tbody></table></div><p><b>关键配置</b></p><pre><code># 并行度的经验公式
+#   目标分区数 ≈ 总核数 × 2~4
+#   单分区大小建议 128 MB（与 HDFS 块对齐）
+#   例：1 TB 数据 → 约 8000 个分区
+
+spark-submit \
+  --master yarn --deploy-mode cluster \
+  --executor-memory 8g --executor-cores 4 --num-executors 25 \
+  --conf spark.sql.shuffle.partitions=1000 \
+  --conf spark.sql.adaptive.enabled=true \        # AQE：自动合并小分区、处理倾斜
+  --conf spark.sql.adaptive.skewJoin.enabled=true \
+  --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+  app.jar
+
+# AQE（自适应查询执行，3.0+）能自动做三件事：
+#   1) 合并 shuffle 后的小分区（解决小文件问题）
+#   2) 倾斜 join 自动拆分（解决数据倾斜）
+#   3) 运行时切换 join 策略
+# &lt;strong&gt;开启 AQE 通常无需其他调优就能获得明显提升&lt;/strong&gt;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>数据倾斜：识别与处理</h2><p><b>症状</b>：绝大多数 task 几秒完成，<strong>个别 task 跑几十分钟</strong>，或者报 OOM。</p><p><b>倾斜处理</b></p><pre><code># 识别：看 Spark UI 的 Stage 详情
+#   task 耗时分布极不均匀（75% 分位 3 秒，max 30 分钟）→ 倾斜
+#   或某个 task 的 Shuffle Read 是其他的几百倍
+
+# 处理 1：加盐（salting）——把热点 key 打散
+import pyspark.sql.functions as F
+df = df.withColumn("salt", F.concat(F.col("key"), F.lit("_"),
+                   (F.rand() * 10).cast("int")))      # 拆成 10 份
+# 先按 salt 聚合，再去盐二次聚合
+
+# 处理 2：广播 join（小表直接广播，避免 shuffle）
+from pyspark.sql.functions import broadcast
+result = big_df.join(broadcast(small_df), "key")
+# 适用：小表 &lt; &lt;strong&gt;broadcastThreshold（默认 10 MB）&lt;/strong&gt;
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", 50 * 1024 * 1024)  # 调到 50 MB
+
+# 处理 3：开启 AQE 的倾斜处理（最简单）
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")</code></pre><div class="table-wrap"><table><thead><tr><th>方案</th><th>适用</th><th>代价</th></tr></thead><tbody><tr><td><b>加盐</b></td><td>聚合类倾斜（group by / join）</td><td>需两步聚合，逻辑复杂</td></tr><tr><td><b>广播 join</b></td><td><strong>一侧表很小</strong></td><td>小表要能放进 executor 内存</td></tr><tr><td><b>AQE</b></td><td><b>通用，首选</b></td><td>需 Spark 3.0+</td></tr><tr><td><b>提高分区数</b></td><td>倾斜不严重</td><td>只是缓解，不根治</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：Executor 数量与并行度怎么配？</summary><p>A：<strong>并行度 = 分区数，不是 executor 数</strong>。Executor 提供的是执行槽位（cores），若分区数远小于总核数，核会闲置。经验：分区数 ≈ 总核数 × 2~4。单 executor 的 <code>cores</code> 建议 <strong>2~5</strong>——超过 5 时，单个 JVM 内的多线程会争抢 HDFS 连接与 GC 资源，吞吐反而下降。</p></details><details><summary>Q：为什么我的 Spark 作业 90% 的时间花在 GC 上？</summary><p>A：典型原因是<strong>数据都堆在 JVM 堆里</strong>（用了 RDD 或缓存了大量对象）。三种解法——① 改用 <strong>DataFrame</strong>（Tungsten 用堆外内存 + 二进制格式，对象开销极小）；② 减少 <code>cache/persist</code>，或改用 <code>MEMORY_AND_DISK_SER</code>（序列化后存，体积小但读取要反序列化）；③ 调大 executor 内存或改用 G1GC。最根本的是 ①。</p></details><details><summary>Q：<code>shuffle.partitions=200</code> 什么时候要改？</summary><p>A：<strong>几乎总是要改</strong>。200 是通用默认值，但——数据量小时（几百 MB）200 个分区会产生大量小文件，应调<strong>小</strong>到 20~50；数据量大时（TB 级）200 个分区意味着单分区几 GB，会 OOM 或极慢，应调<strong>大</strong>到 1000~5000。判据是<strong>单分区目标 128 MB</strong>：分区数 = 总数据量 / 128 MB。开 AQE 后可以让引擎自动合并小分区，容错性更好。</p></details><details><summary>Q：Spark 比 Hive 快在哪？</summary><p>A：核心是<strong>内存计算 + DAG 调度</strong>。Hive 把每个 MR 作业的中间结果<strong>落盘</strong>，多个作业串联时 IO 开销巨大；Spark 把整个 DAG 放在内存里，中间结果能复用就不落盘，只在 shuffle 时写盘。此外 Spark 有<strong>线程级</strong>的任务调度（MR 是进程级，启动开销大）与 Catalyst 优化。典型提速 <b>3~10 倍</b>，但<strong>数据量远超内存时优势会缩小</strong>（都要落盘）。</p></details></div></section>
 <footer>© 2026 Visuals · 大数据系统</footer>
 <script>
 (function(){

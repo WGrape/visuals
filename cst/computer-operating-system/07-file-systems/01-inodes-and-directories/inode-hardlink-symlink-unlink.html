@@ -11,6 +11,39 @@
 <section class="panel"><h2>打开的文件还能读吗</h2><p>进程打开文件得到文件描述符后，内核持有打开文件对象与底层 inode 的引用。此时另一个进程把最后一个名字 unlink 掉，路径查找已找不到它，但已打开的文件描述符一般仍可读写原文件。磁盘空间可能直到最后一个描述符关闭才释放。日志服务删除巨大日志文件却磁盘未下降，常见原因就是进程还握着句柄；需要让服务重新打开日志或关闭句柄，而不是反复删除路径。</p><p>`rename` 修改目录项映射，常用于在同一文件系统内切换名字。已有文件描述符仍引用原来的打开文件对象，新路径解析则可能落到新 inode。读取者若需要“始终看到同一版本”，应明确是先打开文件后持续读，还是每次从路径重新打开。两者对热更新的体验不同。</p></section>
 <section class="panel"><h2>手推一张状态表</h2><p>起点 inode 41、链接计数 1、打开句柄 0。创建 `archive.txt` 后计数 2。进程 P 打开 `report.txt`，句柄 1；删除 `report.txt`，计数 1、P 仍可读；删除 `archive.txt`，计数 0，但 P 仍可读；P 关闭句柄后，文件系统才有机会回收 inode 和块。若此时另有符号链接 `current → report.txt`，它早在 `report.txt` 删除时就已悬空，与 inode 41 是否仍被 P 打开无关。</p><p>删除目录项前应确认操作的是链接自身还是链接目标。许多命令会跟随符号链接读取内容，但删除符号链接通常删除的是链接对象；误用递归工具和路径尾斜杠可能改变语义，生产脚本应使用测试目录验证。</p></section>
 <section class="panel"><h2>常见考点与排障</h2><p>“硬链接数归零后立刻释放磁盘”少了打开句柄条件；“软链接是同一 inode 的第二个名字”混淆了路径内容与 inode 指向；“文件名就在 inode 里”忽略了目录项；“同名文件一定是同一文件”忽略了重命名和不同挂载点。这些错误都可以用目录项、inode、打开对象三层图反驳。</p><p>排查磁盘占用时同时看路径可见文件与被删除但仍打开的句柄；排查部署切换时看软链接目标是否使用相对路径、是否跨文件系统以及进程是否缓存了旧句柄。练习：`a` 和 `b` 是硬链接，`c` 是指向 `a` 的软链接。删除 `a` 后，谁仍能读到数据？为什么？</p></section>
+<section class="panel" data-dry-goods><h2>硬链接与符号链接的逐项对照</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th>硬链接（hard link）</th><th>符号链接（symlink）</th></tr></thead><tbody><tr><td>本质</td><td>同一个 inode 的第二个目录项</td><td>独立 inode，内容存目标路径字符串</td></tr><tr><td>inode 号</td><td><b>相同</b></td><td>不同（有自己的 inode）</td></tr><tr><td>跨文件系统</td><td>不支持</td><td>支持</td></tr><tr><td>链接目录</td><td>通常禁止（避免环路）</td><td>可以</td></tr><tr><td>目标删除后</td><td>数据仍在（link count 减 1）</td><td>变成悬空链接（dangling）</td></tr><tr><td><code>ls -l</code> 第二列</td><td>累加到 inode 的 link count</td><td>始终为 1</td></tr><tr><td>典型大小</td><td>0（不占额外数据块）</td><td>等于路径字符串长度（≤ 60 字节可存于 inode 内，即 fast symlink）</td></tr></tbody></table></div><p>关键机制：<b>unlink 删除的是目录项，不是数据</b>。只有当 inode 的 link count 归零、且没有进程持有该文件描述符时，数据块才会被真正释放。</p></section><section class="panel"><h2>ext4/XFS 的 inode 容量参数</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>典型默认值</th><th>含义</th></tr></thead><tbody><tr><td>inode size</td><td>256 字节（ext4，早期 128）</td><td>扩展属性与纳秒时间戳需要更大 inode</td></tr><tr><td>inode_ratio / bytes-per-inode</td><td>16384（每 16 KB 一个 inode）</td><td>决定格式化时能创建的 inode 总数</td></tr><tr><td>inode 总数</td><td><code>分区大小 / 16 KB</code></td><td>10 GB 分区约 61 万个 inode</td></tr><tr><td><code>df -i</code></td><td>看 IUse%</td><td>inode 用尽时即使有空间也无法新建文件</td></tr></tbody></table></div><p class="muted">经典故障：<code>No space left on device</code> 但 <code>df -h</code> 显示还有空间——几乎总是 inode 耗尽（海量小文件），用 <code>df -i</code> 确认。</p></section>
+<section class="panel"><h2>可执行的诊断命令</h2><p><b>命令</b></p><pre><code># 看 inode 号与链接数
+ls -i file.txt
+stat file.txt          # Inode / Links / Size / Blocks
+
+# 建链接
+ln file.txt hard.txt              # 硬链接：Links 变 2，Inode 相同
+ln -s /abs/path/file.txt soft.txt # 软链接：独立 inode，大小=路径长度
+
+# 反查：由 inode 号找所有硬链接
+find /mount/point -inum 12345678
+
+# 悬空链接检测
+find /path -xtype l
+
+# inode 使用情况
+df -i /mount/point
+tune2fs -l /dev/sdXN | grep -E "Inode count|Inode size|Block count"
+
+# 已删除但仍被进程占用的文件（空间不释放的元凶）
+lsof +L1
+lsof | grep deleted</code></pre><p><b>复现</b></p><pre><code># 复现"删了文件但磁盘没释放"
+python - &lt;&lt;'PY'
+import os
+f = open("/tmp/big.bin", "wb")
+f.write(b"x" * 200_000_000)      # 200 MB
+# 此时 rm /tmp/big.bin，df 显示空间未释放，因为进程还持有 fd
+# lsof | grep deleted 能看到 (deleted) 标记
+PY
+# 处理：重启或让进程关闭 fd；紧急时 truncate 该 fd
+: &gt; /proc/&lt;PID&gt;/fd/&lt;FD&gt;</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>磁盘有空间却报 No space left</td><td>inode 耗尽（海量小文件）</td><td><code>df -i</code> 确认；清理小文件或重新格式化调大 inode 数</td></tr><tr><td>删除大文件后空间未释放</td><td>进程仍持有已删除文件的 fd</td><td><code>lsof +L1</code> 找到进程，重启或 truncate 其 fd</td></tr><tr><td>软链接失效</td><td>目标被移动或删除</td><td>用绝对路径建链接；<code>find -xtype l</code> 定期清理悬空链接</td></tr><tr><td>硬链接改了一处，另一处也变</td><td>这是正常行为：同一 inode</td><td>需要独立副本就用 <code>cp</code></td></tr><tr><td>无法对目录建硬链接</td><td>内核禁止（防止目录环路）</td><td>用 <code>ln -s</code> 或 <code>mount --bind</code></td></tr><tr><td>mv 很快，跨分区却很慢</td><td>同分区 mv 只改目录项；跨分区要复制数据</td><td>大目录跨分区移动评估数据量与耗时</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么删除一个文件后磁盘空间没有释放？</summary><p>因为 unlink 只删除目录项。只要还有进程持有该文件的打开文件描述符，inode 与数据块就不会释放。<code>lsof +L1</code> 能列出被删除但仍占用的文件，重启进程或 truncate 对应 fd 才会真正释放。</p></details><details><summary>硬链接和拷贝有什么区别？</summary><p>硬链接是同一个 inode 的第二个名字，共享同一份数据块，改一处处处可见，不额外占空间；拷贝生成新的 inode 与新的数据块，两份互不影响，占用翻倍。</p></details><details><summary>符号链接能跨文件系统，硬链接为什么不能？</summary><p>硬链接必须在同一个 inode 编号空间内引用 inode，而 inode 号只在本文件系统内唯一。跨文件系统无法保证唯一性，因此内核限制硬链接不能跨设备。符号链接只存路径字符串，与目标 inode 无关，所以可以跨。</p></details><details><summary>为什么一般不允许对目录建硬链接？</summary><p>会破坏目录树的树形结构：目录的 <code>..</code> 项与硬链接组合会形成环路，导致遍历工具死循环、fsck 无法判定。内核仅允许 <code>.</code> 和 <code>..</code> 这类由系统维护的特殊链接。</p></details><details><summary>如何判断两个路径是不是同一个文件？</summary><p>看 inode 号与设备号：<code>stat</code> 输出的 Inode 与 Device 都相同，就是同一个文件（硬链接）。只比较路径字符串或文件名会被软链接和挂载点骗过。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>a 与 b 是硬链接，c 指向路径 a。删除 a 后，b 和 c 各会怎样？</summary><p>b 仍通过同一 inode 读到数据；c 保存的目标路径 a 已不存在，因而悬空。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/linux-filesystem.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

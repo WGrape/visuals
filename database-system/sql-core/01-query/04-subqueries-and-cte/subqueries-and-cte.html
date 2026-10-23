@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -258,6 +276,47 @@ SELECT ...;</code></pre>
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>子查询与 CTE 的行为差异</h2><div class="table-wrap"><table><thead><tr><th>形式</th><th>执行方式</th><th>注意</th></tr></thead><tbody><tr><td><b>标量子查询</b></td><td>返回单值，可用于 SELECT 列表</td><td>返回多行会报错；可用 LIMIT 1 兜底</td></tr><tr><td><b>IN 子查询</b></td><td>半连接</td><td><b>NULL 陷阱</b>：<code>NOT IN</code> 遇到 NULL 返回空！</td></tr><tr><td><b>EXISTS</b></td><td>半连接，找到即停</td><td>通常比 IN 快；<b>且不受 NULL 影响</b></td></tr><tr><td><b>派生表</b>（FROM 子查询）</td><td>先执行再被外层引用</td><td>MySQL 5.7 前会物化，之后可能合并</td></tr><tr><td><b>CTE（WITH）</b></td><td>命名的临时结果集</td><td>可读性最好；但执行方式因库而异</td></tr><tr><td><b>递归 CTE</b></td><td><code>WITH RECURSIVE</code></td><td>处理树形/层级结构</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>库 / 版本</th><th>CTE 的处理</th><th>影响</th></tr></thead><tbody><tr><td><b>PG 12+</b></td><td>默认<b>内联</b>（可被优化器展开）</td><td>可用 <code>MATERIALIZED</code> 强制物化</td></tr><tr><td><b>PG &lt;12</b></td><td>总是<b>物化</b></td><td>CTE 会切断优化，可能很慢</td></tr><tr><td><b>MySQL 8.0</b></td><td>可合并也可物化（优化器选）</td><td>可用 hint 控制</td></tr><tr><td><b>SQL Server</b></td><td>通常内联</td><td>—</td></tr><tr><td><b>ClickHouse</b></td><td>CTE 是<b>文本替换</b>（会重复计算）</td><td><b>引用多次会算多次</b>，很坑</td></tr></tbody></table></div><p><b>NOT IN 的 NULL 陷阱</b>：<code>SELECT * FROM a WHERE id NOT IN (SELECT id FROM b)</code>——如果 <code>b.id</code> 里有 NULL，整个查询<b>返回空集</b>。因为 <code>x NOT IN (1, NULL)</code> 展开是 <code>x&lt;&gt;1 AND x&lt;&gt;NULL</code>，后者是 UNKNOWN，整体即为假。<b>解决：用 NOT EXISTS，或加 <code>WHERE id IS NOT NULL</code>。</b></p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>写法对照与优化</h2><pre><code>-- ❌ NOT IN 的 NULL 陷阱
+SELECT * FROM orders
+WHERE user_id NOT IN (SELECT user_id FROM blacklist);
+-- 若 blacklist.user_id 有 NULL，结果为空！
+
+-- ✅ 方案 1：NOT EXISTS（推荐，语义正确且通常更快）
+SELECT * FROM orders o
+WHERE NOT EXISTS (SELECT 1 FROM blacklist b WHERE b.user_id = o.user_id);
+
+-- ✅ 方案 2：过滤掉 NULL
+SELECT * FROM orders
+WHERE user_id NOT IN (SELECT user_id FROM blacklist WHERE user_id IS NOT NULL);
+
+-- ✅ 方案 3：LEFT JOIN + IS NULL
+SELECT o.* FROM orders o
+LEFT JOIN blacklist b ON o.user_id = b.user_id
+WHERE b.user_id IS NULL;</code></pre><pre><code>-- 递归 CTE：查组织层级
+WITH RECURSIVE org AS (
+    SELECT id, name, parent_id, 1 AS level
+    FROM dept WHERE parent_id IS NULL        -- 锚点：根节点
+    UNION ALL
+    SELECT d.id, d.name, d.parent_id, o.level + 1
+    FROM dept d JOIN org o ON d.parent_id = o.id   -- 递归：子节点
+)
+SELECT * FROM org ORDER BY level, id;
+-- 必须：UNION ALL（不是 UNION）；递归部分必须引用 CTE 自身
+-- 死循环防护：加 depth 限制 或 MySQL 的 cte_max_recursion_depth（默认 1000）
+
+-- CTE 的物化控制（PG 12+）
+WITH c AS MATERIALIZED (SELECT ...) SELECT ...;      -- 强制物化
+WITH c AS NOT MATERIALIZED (SELECT ...) SELECT ...;  -- 强制内联
+-- 何时用 MATERIALIZED：CTE 被引用多次且计算昂贵时（物化一次复用）
+-- 何时用 NOT MATERIALIZED：CTE 结果大但外层有强过滤（内联后能下推过滤）
+
+-- ClickHouse 的坑：CTE 会被当成文本替换
+WITH x AS (SELECT ... FROM big_table)
+SELECT count() FROM x UNION ALL SELECT sum(v) FROM x;
+-- big_table 会被扫&lt;b&gt;两次&lt;/b&gt;！要用临时表或物化视图代替</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>NOT IN 结果为空</td><td>子查询里有 NULL</td><td>换 NOT EXISTS；或加 IS NOT NULL 过滤</td></tr><tr><td>标量子查询报错</td><td>返回了多行</td><td>加 LIMIT 1；或改用 JOIN</td></tr><tr><td>CTE 查询很慢（PG &lt;12）</td><td>CTE 被强制物化，无法下推过滤</td><td>升级 PG 12+；或改写成派生表/内联 SQL</td></tr><tr><td>ClickHouse 里 CTE 很慢</td><td>被引用几次就算几次</td><td>改临时表或物化视图</td></tr><tr><td>递归 CTE 死循环</td><td>数据有环 或 没设深度限制</td><td>加 level 上限；检查数据是否有环</td></tr><tr><td>相关子查询很慢</td><td>外层每一行都执行一次子查询</td><td>改写成 JOIN；或确认子查询有索引</td></tr><tr><td>子查询没走索引</td><td>类型不匹配（如字符串 vs 数字）</td><td>统一类型；隐式转换会让索引失效</td></tr></tbody></table></div><p class="muted"><b>EXISTS vs IN 的选择</b>：子查询<b>结果集大</b>时用 EXISTS（找到即停）；结果集<b>很小</b>时用 IN（可以做成常量列表）。但更重要的是 <b>EXISTS 不受 NULL 影响</b>，语义更安全，所以实践中更推荐 EXISTS。</p></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 子查询与 CTE ·

@@ -16,6 +16,42 @@
 <section class="panel" data-depth-note><h2>延迟预算的一个估算</h2><p>若一次跨地域往返约 80 毫秒，事务路径中串行出现两次远端往返，单是网络下界就可能接近 160 毫秒，还未算排队、磁盘和冲突。这个估算不能代替实测，却能帮助发现“要求跨洲强一致写 P99 小于 20 毫秒”一类不合理目标。接着用追踪拆分客户端到协调节点、协调到参与分片、复制确认和应用处理时间。若产品支持近端读，也要注明陈旧程度与读后写语义。把延迟、故障域和数据驻留要求放在同一张决策表，才能解释为何选择某种副本布局。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>还应按业务时间段分开测试：白天读流量高，夜间批处理写入高，最优副本位置可能不同。若读服务允许陈旧数据，要给出最大可接受滞后和实测滞后分布；“最终一致”四个字不足以支撑支付或库存决策。布局方案应附上故障切换后的容量与延迟数据。</p></section>
 <section class="panel" data-final-case><h2>补充判断</h2><p>复盘一次跨地域慢请求时，最好同时保留客户端、协调节点和分片节点的时间戳，并校准时钟。只在客户端看到 300 毫秒，无法判断延迟来自网络、排队还是锁等待；分段追踪可以把布局问题与容量问题分开。</p></section>
+<section class="panel" data-dry-goods><h2>数据局部性与跨地域的代价</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>延迟</th><th>说明</th></tr></thead><tbody><tr><td>L1 缓存</td><td><b>~1 ns</b></td><td>CPU 内</td></tr><tr><td>L2/L3 缓存</td><td><b>4~40 ns</b></td><td>—</td></tr><tr><td>内存访问</td><td><b>~100 ns</b></td><td>比 L1 慢 <b>100 倍</b></td></tr><tr><td>SSD 随机读</td><td><b>~100 µs</b></td><td>比内存慢 <b>1000 倍</b></td></tr><tr><td>同机房网络</td><td><b>0.2~1 ms</b></td><td>—</td></tr><tr><td>同城跨 AZ</td><td><b>1~3 ms</b></td><td>物理距离 10~100km</td></tr><tr><td>跨省（北京-上海）</td><td><b>20~30 ms</b></td><td>—</td></tr><tr><td>跨国（中美）</td><td><b>150~250 ms</b></td><td>光速限制：地球半周约 67ms（单向）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>优化手段</th><th>做法</th><th>效果</th></tr></thead><tbody><tr><td><b>数据本地性</b></td><td>把计算调度到数据所在节点</td><td>Spark/Hadoop 的核心思想</td></tr><tr><td><b>单元化</b></td><td>按用户分片，读写收敛在单元内</td><td>跨地域多活的基础</td></tr><tr><td><b>读本地副本</b></td><td>就近读取（follower read）</td><td>延迟从 30ms 降到 1ms</td></tr><tr><td><b>缓存</b></td><td>热数据放本地</td><td>消除跨地域调用</td></tr><tr><td><b>异步复制</b></td><td>跨地域只做异步同步</td><td>写入不等待远程确认</td></tr></tbody></table></div><p><b>跨地域事务为什么慢</b>：一个 2PC 事务需要 <b>4 次跨地域往返</b>。北京↔上海 30ms RTT 下就是 <b>120ms</b> 的纯网络开销。如果这个事务还要读 3 次数据，就是 <b>7 次往返 = 210ms</b>。<b>结论：跨地域部署必须让事务收敛在单地域内</b>，这也是单元化架构的根本出发点。</p></section><section class="panel"><h2>实操配置</h2><pre><code>// TiDB：Placement Rules 控制数据放置
+// 让某个表的 leader 固定在特定区域（ follower read 就近读）
+ALTER TABLE orders ALTER PARTITION p_beijing
+  ALTER PLACEMENT POLICY ROLE=leader REPLICAS=1;
+
+CREATE PLACEMENT POLICY beijing_policy
+  PRIMARY_REGION="bj" FOLLOWERS=2;
+ALTER TABLE orders PLACEMENT POLICY=beijing_policy;
+
+// 就近读（follower read）
+SET tidb_replica_read = 'closest-replicas';   // 读最近的副本
+// 或 'leader'（默认，强一致）/ 'follower'（任意 follower）
+
+// 查看 Region 分布
+SHOW TABLE orders REGIONS;
+// 看每个 Region 的 leader 在哪台机器上，判断分布是否均衡</code></pre><pre><code>-- CockroachDB：区域配置（多地域的标准做法）
+-- 1) 给节点打区域标签
+-- cockroach start --locality=region=us-east-1,zone=us-east-1a
+
+-- 2) 设置数据库的主区域
+ALTER DATABASE app SET PRIMARY REGION "us-east-1";
+ALTER DATABASE app ADD REGION "us-west-1";
+
+-- 3) 表级的数据归位（GLOBAL / REGIONAL / REGIONAL BY ROW）
+ALTER TABLE users SET LOCALITY REGIONAL BY ROW;
+-- 效果：每行数据根据 crdb_region 列的值，自动放在对应区域
+--      该区域的用户读写都在本地，延迟从 60ms 降到 2ms
+
+ALTER TABLE config SET LOCALITY GLOBAL;
+-- GLOBAL 表：所有区域都有完整副本，读本地（快），写需要跨地域共识（慢）
+-- 适合「读多写极少」的字典表
+
+-- 4) 查看数据的实际位置
+SHOW RANGES FROM TABLE users;
+SELECT crdb_region, count(*) FROM users GROUP BY 1;</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>跨地域查询很慢</td><td>每次调用都要跨地域</td><td>单元化；读本地副本；缓存</td></tr><tr><td>数据没在预期的区域</td><td>没配置 placement / locality</td><td>显式设置数据归位规则</td></tr><tr><td>写入延迟高</td><td>跨地域同步复制（Quorum）</td><td>关键写入收敛到单地域；跨地域用异步</td></tr><tr><td>读到了旧数据</td><td>读了异步复制的副本</td><td>需要强一致就读 leader；或接受秒级延迟</td></tr><tr><td>某个地域特别慢</td><td>Region 分布不均</td><td>检查数据分布；调整 placement</td></tr><tr><td>切换主地域后很慢</td><td>数据没跟着迁移</td><td>执行数据归位；注意迁移本身要时间</td></tr></tbody></table></div><p class="muted"><b>最实用的原则</b>：<b>让数据靠近访问它的人，而不是让人靠近数据</b>。跨地域多活的正确做法不是「所有数据 everywhere」，而是「按用户分片，各自的数据在自己区域」——这就是单元化。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>在用户附近加只读副本，能保证强一致写也变快吗？</summary><p>不能。写入仍受主副本、复制确认和跨分片协调路径约束。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/distributed-rdbms-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

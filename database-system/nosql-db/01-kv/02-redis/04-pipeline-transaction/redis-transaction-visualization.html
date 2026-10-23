@@ -641,6 +641,24 @@
             font-weight: bold;
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -965,6 +983,54 @@ balance_a = GET account:a      <span class="comment"># 获取余额</span>
 <span class="comment">-- 锁机制保证并发安全</span></code></pre>
             </div>
         </section>
+<section class="comparison-section" data-dry-goods><div class="x-dry"><h2>Pipeline 与事务的量化收益</h2><p><b>核心差异</b>：Pipeline 是<strong>批量发送省网络往返</strong>；事务是<strong>保证一组命令的原子执行</strong>。两者正交，可同时使用。</p><div class="table-wrap"><table><thead><tr><th>方式</th><th>RTT 次数（N 条命令）</th><th>原子性</th><th>耗时示例（N=100，RTT=0.5ms）</th></tr></thead><tbody><tr><td><b>逐条发送</b></td><td><b>N</b></td><td>无</td><td><b>50 ms</b></td></tr><tr><td><b>Pipeline</b></td><td><b>1</b></td><td><strong>无</strong></td><td><b>约 1 ms</b>（快 <b>50 倍</b>）</td></tr><tr><td><b>MULTI/EXEC</b></td><td>N+2</td><td><b>有</b></td><td>约 51 ms</td></tr><tr><td><b>Pipeline + 事务</b></td><td><b>1</b></td><td><b>有</b></td><td>约 1 ms</td></tr></tbody></table></div><p><b>Pipeline 用法</b></p><pre><code># Pipeline 示例（Python redis-py）
+pipe = r.pipeline()
+for i in range(1000):
+    pipe.set(f"k:{i}", i)
+pipe.execute()          # 一次网络往返，1000 条命令
+
+# 关键参数：批次大小
+#   太小 → 省不了 RTT；太大 → 单次响应太大，阻塞 Redis
+#   &lt;strong&gt;建议每批 100~1000 条&lt;/strong&gt;，或控制单批响应 &lt; 10 MB
+
+# 注意：pipeline 默认&lt;strong&gt;开启事务&lt;/strong&gt;（redis-py 的 pipeline(transaction=True)）
+# 若只需批量不需要原子性，用 transaction=False 可略微减少开销</code></pre><p class="muted"><b>Pipeline 不保证原子性</b>：它只是把多条命令打包发送，Redis 仍<strong>逐条执行</strong>，期间可能插入其他客户端的命令。需要原子性必须配合 <code>MULTI/EXEC</code> 或 Lua 脚本。</p></div></section>
+<section class="comparison-section" ><div class="x-dry"><h2>MULTI/EXEC 与 WATCH 的语义</h2><div class="table-wrap"><table><thead><tr><th>命令</th><th>作用</th><th>说明</th></tr></thead><tbody><tr><td><code>MULTI</code></td><td>开启事务</td><td>后续命令<strong>入队不执行</strong></td></tr><tr><td><code>EXEC</code></td><td>执行队列中的命令</td><td>要么全执行要么全不执行</td></tr><tr><td><code>DISCARD</code></td><td>放弃事务</td><td>清空队列</td></tr><tr><td><code>WATCH</code></td><td><strong>乐观锁</strong>，监视 key</td><td>key 被改则 EXEC 返回 nil</td></tr></tbody></table></div><p><b>事务与乐观锁</b></p><pre><code># 乐观锁实现“检查再设置”（CAS）
+WATCH balance          # 1) 监视
+val = GET balance      # 2) 读取
+MULTI                  # 3) 开启事务
+SET balance val - 100  # 4) 基于读到值计算
+EXEC                   # 5) 执行；若 balance 被其他客户端改过，返回 nil
+
+# 客户端必须处理 EXEC 返回 nil 的情况 → 重试
+# 典型重试上限 3~5 次，超过则放弃或改用 Lua 脚本
+
+# Lua 脚本：把“检查+设置”变成服务端原子操作，无需重试
+# EVAL "if redis.call('get',KEYS[1]) &gt;= ARGV[1] then
+#         return redis.call('decrby',KEYS[1],ARGV[1])
+#       else return -1 end" 1 balance 100</code></pre><p><b>Redis 事务的两个重要限制</b>：</p><ul><li><strong>没有回滚</strong>：语法错误（入队时就发现）会整体不执行；但<strong>运行时错误</strong>（如对字符串执行 <code>INCR</code>）只会让该条失败，<strong>其余命令照常执行</strong>。这与关系型数据库的事务语义完全不同，是最容易误解的地方。</li><li><strong>事务内的读看不到事务内的写</strong>：<code>MULTI</code> 后的命令只入队，<code>GET</code> 返回的是入队前的状态，无法基于前面的写结果做判断。要做“读-判断-写”必须用 <strong>Lua 脚本</strong>。</li></ul></div></section>
+<section class="comparison-section" ><div class="x-dry"><h2>Lua 脚本：真正的原子方案</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th>MULTI/EXEC</th><th><b>Lua 脚本</b></th></tr></thead><tbody><tr><td>原子性</td><td>有</td><td><b>有</b>（整脚本独占执行）</td></tr><tr><td>能否读后判断</td><td><b>不能</b></td><td><b>能</b></td></tr><tr><td>网络往返</td><td>多次</td><td><strong>1 次</strong></td></tr><tr><td>复用</td><td>每次重发</td><td><code>EVALSHA</code> 用哈希复用</td></tr><tr><td>调试</td><td>简单</td><td><b>较难</b></td></tr></tbody></table></div><p><b>Lua 限流器</b></p><pre><code># 限流器（令牌桶）——经典 Lua 用例
+# KEYS[1]=桶的key  ARGV[1]=容量  ARGV[2]=每秒补充  ARGV[3]=当前时间戳
+local cap = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(b[1]) or cap
+local ts = tonumber(b[2]) or now
+tokens = math.min(cap, tokens + (now - ts) * rate)   # 按时间补充
+if tokens &lt; 1 then return 0 end                       # 令牌不足
+redis.call('HMSET', KEYS[1], 'tokens', tokens - 1, 'ts', now)
+return 1
+
+# 执行：EVAL script 1 rate:user:1 10 5 1699999999
+# 复用：先 SCRIPT LOAD 得到 sha，之后 EVALSHA sha ...
+
+# 三条硬规则：
+#   1) 脚本必须&lt;strong&gt;短小&lt;/strong&gt;——执行期间 Redis 单线程被独占，慢脚本会阻塞全部请求
+#   2) &lt;strong&gt;禁止长时间循环&lt;/strong&gt;（如 KEYS * 后遍历），会触发 busy script 错误
+#   3) key 必须通过 KEYS[] 传入，不能硬编码（集群模式下会路由错误）</code></pre></div></section>
+<section class="comparison-section" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：Pipeline 到底能快多少？</summary><p>A：取决于 <strong>RTT 与命令执行时间的比例</strong>。同机房 RTT 约 0.2~0.5 ms，单条命令执行约 10~50 μs——所以每条命令的 RTT 开销是执行时间的 <strong>10~50 倍</strong>。批量 100 条能省掉 99 次往返，收益接近 <strong>10~50 倍</strong>。但如果命令本身很慢（如大 key 操作），Pipeline 的收益就有限，瓶颈在执行而不在网络。</p></details><details><summary>Q：为什么 Redis 事务不支持回滚？</summary><p>A：这是<strong>设计取舍</strong>。Redis 作者认为：事务失败只可能是<strong>编程错误</strong>（如类型用错），这类错误应在开发期发现，而不是靠运行时回滚掩盖。保持简单让 Redis 实现极轻——不需要 undo log、不需要 MVCC。这个设计在生产很少造成问题，因为正确使用下运行时错误几乎不会发生。<strong>但你必须知道这一点</strong>，别把它当关系型事务用。</p></details><details><summary>Q：Lua 脚本执行太久会怎样？</summary><p>A：Redis 会判定为 <strong>busy script</strong>。默认超过 <strong>5 秒</strong>（<code>lua-time-limit</code>）后，Redis 不再自动终止脚本（因为脚本可能有副作用），但会<strong>开始接受 <code>SCRIPT KILL</code> 和 <code>SHUTDOWN NOSAVE</code> 命令</strong>，其他命令全部阻塞。所以必须写短脚本。若已卡住，用 <code>SCRIPT KILL</code>（未执行写操作时可用）；若已写入，只能 <code>SHUTDOWN NOSAVE</code>——这是运维噩梦，务必避免。</p></details><details><summary>Q：集群模式下事务还能用吗？</summary><p>A：<strong>有限制</strong>。事务与 Lua 脚本要求所有涉及的 key 在<strong>同一个 hash slot</strong>，否则报 <code>CROSSSLOT Keys in request don't hash to the same slot</code>。处理办法是用 <strong>hash tag</strong>：把相关的 key 写成 <code>{user1}:balance</code>、<code>{user1}:orders</code>，Redis 只对 <code>{}</code> 内的部分计算 slot，从而保证它们落在同一槽位。这是集群下使用多 key 操作的标准做法。</p></details></div></section>
+
     </div>
 
     <script>

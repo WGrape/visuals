@@ -11,6 +11,44 @@
 <section class="panel"><h2>车牌算例说明证据边界</h2><p>原始低清车牌只有几个模糊亮点，模型输出看起来像“B8”，另一模型输出“88”。若原输入无法区分这两种可能，任何超分结果都不能独立作为车牌真实字符的证据。用高清真值不存在的现场图片做演示时，更应保留原图、模型版本和处理参数，明确标注“增强图含推断细节”。在司法取证、医疗影像或安全审查场景，未经独立核验的生成细节不能替代原始记录。</p><p>可以把低清图与不同方法的输出并排展示，让审核者看到结果对方法的敏感性；若方法一变字符就变，更不能声称“恢复了原文”。业务可以用多帧证据、其他摄像头或原始高分辨率采集补充事实。</p></section>
 <section class="panel"><h2>多帧超分为何有机会也有风险</h2><p>视频的相邻帧可能从稍微不同角度观察同一细节，运动对齐后有机会提供单帧没有的信息。但遮挡、快速运动或光流估计错误会产生重影和闪烁；生成器也可能把某帧虚构的纹理传播到后续帧。多帧输出要同时测单帧质量和时间稳定性。若源视频已强压缩，每帧伪影也可能随运动变化，跨帧融合不一定可靠。</p><p>工程上应保留每帧时间戳与运动对齐置信度，不能把来自未来帧的内容误认为当前帧本来就可观察。实时场景还要考虑等待未来帧带来的延迟。</p></section>
 <section class="panel"><h2>一套真实验收流程</h2><p>准备三类数据：人工下采样且有高清真值的成对集、真实设备采集但有更好参考拍摄的集、只有低清原图的实际生产集。先比较双三次基线与多个模型在合成集上的 PSNR/SSIM，再做人评与下游 OCR/检测对照；对无真值生产集只报告视觉和任务结果，不伪称计算了真实重建误差。抽查高风险样本的文字、脸部、细线和规则结构，标注任何新出现但原图无法支持的细节。</p><p>发布时记录模型版本、缩放倍数、是否使用生成式先验和原图保存策略。若输出进入自动决策链，设置人工复核或拒绝条件；以用户任务正确率而不是单张宣传图的锐利程度判定改进。</p></section>
+<section class="panel" data-dry-goods><h2>退化模型：超分成败的关键</h2><p>超分是<strong>病态逆问题</strong>——一张低清图对应无数张可能的高清图。训练时用的<strong>退化方式</strong>决定了模型认为“什么样的低清图该还原成什么”。</p><div class="table-wrap"><table><thead><tr><th>退化类型</th><th>做法</th><th>代表方法</th><th>适用</th></tr></thead><tbody><tr><td><b>双三次下采样</b></td><td>理想数学下采样</td><td>SRCNN、EDSR</td><td><b>仅学术</b>，与真实不符</td></tr><tr><td><b>模糊 + 下采样 + 噪声</b></td><td>模拟镜头与压缩</td><td><b>RealESRGAN</b>、BSRGAN</td><td><b>真实场景</b></td></tr><tr><td><b>盲退化</b></td><td><strong>随机组合多种退化</strong></td><td>Real-ESRGAN、BSRGAN</td><td>未知退化源</td></tr><tr><td><b>多次压缩</b></td><td>模拟 JPEG 二次压缩</td><td>专门针对网络图片</td><td>社交媒体图</td></tr></tbody></table></div><p><b>退化建模</b></p><pre><code># RealESRGAN 的退化流程（高阶退化建模）
+# 一阶退化：
+#   1) 模糊（各向同性/异性高斯核，核大小随机 7~21）
+#   2) 下采样（最近邻/双线性/双三次，scale 随机）
+#   3) 噪声（高斯噪声 σ∈[1,30]，或泊松噪声）
+#   4) JPEG 压缩（质量因子 30~95）
+# 二阶退化：对上述结果&lt;strong&gt;再做一遍&lt;/strong&gt;（含 sinc 滤波器模拟振铃）
+#
+# 关键参数（realesrgan 配置）：
+#   resize_prob:   [0.2, 0.7, 0.1]   # 上采样/下采样/保持
+#   resize_range:  [0.15, 1.5]
+#   gray_noise_prob: 0.4
+#   jpeg_range:    [30, 95]
+#   &lt;strong&gt;second_blur_prob: 0.8&lt;/strong&gt;  # 二阶退化概率，这是泛化的关键</code></pre><p class="muted"><b>为什么真实超分必须用复杂退化</b>：只训练双三次下采样的模型，遇到真实照片（带模糊、噪声、压缩）会<strong>把噪声和压缩伪影当成纹理去<strong>增强</strong>，产生难看的涂抹或振铃。这是<strong>学术指标高但实际难看</strong>的根本原因。</p></section><section class="panel"><h2>保真度与感知质量的权衡</h2><div class="table-wrap"><table><thead><tr><th>目标</th><th>优化函数</th><th>PSNR/SSIM</th><th>视觉观感</th></tr></thead><tbody><tr><td><b>保真优先</b></td><td><b>L1/L2 重建损失</b></td><td><b>高</b></td><td><strong>偏平滑，缺细节</strong></td></tr><tr><td><b>感知优先</b></td><td>感知损失 + <b>GAN 对抗</b></td><td>下降</td><td><b>细节丰富，更真实</b></td></tr><tr><td><b>折中</b></td><td>重建 + 感知 + 对抗加权</td><td>中等</td><td>中等偏好</td></tr></tbody></table></div><p><b>核心矛盾</b>：PSNR 高的图<strong>往往更模糊</strong>（因为 L2 损失的最优解是所有可能高清图的<strong>均值</strong>，而均值是模糊的）；感知质量高的图 PSNR 会下降（生成了细节，但与真值像素不完全一致）。这是<strong>Pixel 空间指标与人类感知的根本错位</strong>。</p><div class="table-wrap"><table><thead><tr><th>指标</th><th>衡量什么</th><th>局限</th></tr></thead><tbody><tr><td><b>PSNR</b></td><td>像素级误差（dB，越高越好）</td><td><strong>与观感弱相关</strong>，偏好模糊</td></tr><tr><td><b>SSIM</b></td><td>结构相似性</td><td>比 PSNR 好，仍偏像素</td></tr><tr><td><b>LPIPS</b></td><td><strong>学习感知距离</strong>（越低越好）</td><td><b>与人类判断相关性好</b></td></tr><tr><td><b>FID / KID</b></td><td>分布距离</td><td>需大量样本</td></tr><tr><td><b>NIQE / BRISQUE</b></td><td><strong>无参考</strong>质量评估</td><td>绝对数值不可靠，<strong>仅适合同数据集内比较</strong></td></tr></tbody></table></div><p><b>LPIPS 评测</b></p><pre><code># LPIPS 计算（与人类感知最相关）
+import lpips
+loss_fn = lpips.LPIPS(net='alex')     # 或 'vgg'（更准但慢）
+d = loss_fn(img_sr, img_hr)           # 越接近 0 越像
+# 判读：&lt; 0.1 通常肉眼难辨；&gt; 0.3 差异明显
+
+# 注意：LPIPS 需要图片归一化到 [-1, 1]
+# 且两张图必须&lt;strong&gt;分辨率一致&lt;/strong&gt;才能比较</code></pre></section>
+<section class="panel"><h2>超分幻觉：生成式方法的风险</h2><p><strong>生成式超分（GAN/Diffusion）会“脑补”不存在的细节</strong>——人脸上的皱纹、文字笔画、纹理图案都可能被凭空创造。</p><div class="table-wrap"><table><thead><tr><th>场景</th><th>风险</th><th>建议</th></tr></thead><tbody><tr><td><b>人像</b></td><td><strong>五官被改变</strong>（不像本人了）</td><td>用人脸专用模型 + 身份相似度校验</td></tr><tr><td><b>文字/文档</b></td><td><strong>字符被篡改</strong>（最危险）</td><td><b>禁用生成式</b>，用保守的重建模型</td></tr><tr><td><b>医学/遥感</b></td><td><strong>凭空出现病灶或地物</strong></td><td><b>禁用，或必须专家复核</b></td></tr><tr><td><b>自然风景</b></td><td>风险低（无“正确答案”）</td><td>生成式效果更好</td></tr></tbody></table></div><p><b>判据很清晰</b>：<strong>内容是否具有「客观正确性」</strong>。风景、插画没有唯一答案，脑补无害甚至有益；文档、医学影像、法证图像有唯一正确答案，任何脑补都是<strong>伪造证据</strong>。后者只能用保守方法（或低放大倍数）。</p><p><b>保真校验</b></p><pre><code># 保真度校验：超分前后的结构一致性
+import cv2, numpy as np
+
+def fidelity_check(lr_img, sr_img, scale=4):
+    # 把超分结果&lt;strong&gt;再降采样&lt;/strong&gt;回原尺寸，与输入比对
+    back = cv2.resize(sr_img, (lr_img.shape[1], lr_img.shape[0]),
+                      interpolation=cv2.INTER_AREA)
+    # 若模型“脑补”了内容，降采样后与原图差异会变大
+    diff = np.abs(back.astype(float) - lr_img.astype(float)).mean()
+    psnr = 10 * np.log10(255**2 / (diff**2 + 1e-8))
+    return psnr
+
+# 判读（这个“循环一致性”指标很有用）：
+#   psnr &gt; 30 dB → 与输入高度一致，没有明显脑补 ✓
+#   psnr &lt; 25 dB → &lt;strong&gt;模型改了原图内容，存在幻觉风险&lt;/strong&gt; ✗
+# 注意：此指标对“合理的细节增强”也会惩罚，需结合场景判断</code></pre></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：4 倍超分和 2 倍超分差多少？</summary><p>A：<strong>差距远大于线性的 2 倍</strong>。4× 意味着要凭空补全 <strong>15/16 = 94%</strong> 的像素，2× 只需补 75%。信息缺失程度不同，4× 的不确定性呈指数上升。实践建议：<strong>能 2× 就别 4×</strong>；必须大倍数时<strong>分步做</strong>（2× 再 2×），每步的不确定性更可控，效果通常优于一步 4×。</p></details><details><summary>Q：为什么 RealESRGAN 处理真实照片比 EDSR 好？</summary><p>A：因为<strong>退化模型匹配</strong>。EDSR 只见过理想的双三次下采样，遇到真实的模糊+噪声+压缩，输入分布与训练时完全不同，模型会误判。RealESRGAN 用<strong>高阶随机退化</strong>训练，覆盖了真实图片的退化组合，所以泛化好。这印证了一条通用原则：<strong>逆问题的性能上限由“你对退化过程的建模准确度”决定</strong>，而不是网络结构。</p></details><details><summary>Q：超分后文字变了怎么办？</summary><p>A：<strong>换方法，不要调参数</strong>。生成式超分会重写笔画，这是原理性缺陷。三种替代——① 用<strong>保守的重建式模型</strong>（L1 训练、无 GAN）；② <strong>先用 OCR 识别文字，超分后把识别到的正确文字以矢量方式重绘</strong>（这是文档增强的标准做法）；③ 如果原图是 PDF/矢量，<strong>直接矢量化</strong>而不是位图超分。关键是：文字场景绝不能用感知优先的生成模型。</p></details><details><summary>Q：怎么判断超分结果好不好？</summary><p>A：<strong>分场景用不同方法</strong>。有真值时：同时看 PSNR/SSIM（保真）与 LPIPS（感知），<strong>两者要结合看</strong>——只看 PSNR 会选到模糊的模型，只看 LPIPS 会选到瞎编的。无真值时（真实场景）：用 <strong>NIQE/BRISQUE 无参考指标</strong>做同数据集内的横向比较，<strong>但不要信绝对数值</strong>；同时必须<strong>目视检查文字与人脸</strong>这两类最容易出问题的区域。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>模型把模糊车牌变成清晰的“B8”，能只凭增强图确认真实车牌就是 B8 吗？</summary><p>不能。低清输入可能无法区分其他字符，增强像素含模型推断；需保留原图并用独立证据核对。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="image-super-resolution.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

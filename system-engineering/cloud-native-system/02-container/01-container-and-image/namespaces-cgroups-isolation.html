@@ -8,6 +8,85 @@
 <section class="panel"><h2>一次资源限制如何表现</h2><p>假设容器设置 1 GiB 内存上限，应用进程不断分配内存。cgroup 会统计相关进程的用量，到达限制时可能触发内存回收或 OOM 处理；容器中的进程被杀死，并不等于整台机器没有空闲内存。排查时要同时看容器 memory.current、上限、OOM 计数和宿主机整体内存。CPU 限额则可能使进程被节流，表现为尾延迟上升，却不一定是代码执行量变多。</p><div class="table-wrap"><table><thead><tr><th>机制</th><th>回答的问题</th><th>典型误判</th></tr></thead><tbody><tr><td>PID namespace</td><td>进程能看见哪些 PID</td><td>容器内 PID 1 等于宿主机 PID 1</td></tr><tr><td>Mount namespace</td><td>看到哪些挂载点</td><td>镜像只读就没有任何可写路径</td></tr><tr><td>Cgroup</td><td>资源能用多少</td><td>限制内存等于预留内存</td></tr><tr><td>Capabilities / seccomp</td><td>允许哪些特权操作与系统调用</td><td>容器默认就完全安全</td></tr></tbody></table></div></section>
 <section class="panel"><h2>隔离不是完整安全承诺</h2><p>共享内核意味着内核漏洞、过宽的 capabilities、特权容器和可写宿主机挂载都可能扩大影响。容器内以 root 运行也不等于拥有宿主机全部 root 权限，但如果加上特权模式或危险挂载，边界会明显改变。可逐项减小权限：使用非 root 用户、只读根文件系统、删除不需要的 capabilities、限制系统调用、避免挂载宿主机敏感路径，并保持内核与运行时更新。</p><p>安全配置还要与功能验证一起做。例如应用需要绑定低端口、创建网络设备或使用特定系统调用，应明确它需要哪项能力；不能为了让程序运行直接赋予 privileged。rootless 容器能降低某些宿主机权限风险，但网络、存储和性能行为可能不同，需按工作负载测试。</p></section>
 <section class="panel"><h2>从现象定位到机制</h2><ol><li>容器看不到宿主机某进程：检查 PID namespace，而不是认定进程不存在。</li><li>容器被 OOM 杀死而宿主机尚有内存：检查 cgroup 限额、页缓存统计和应用峰值。</li><li>服务只能在容器内访问：核对 network namespace、监听地址、端口映射与防火墙。</li><li>容器执行系统调用被拒绝：检查 seccomp、capabilities 和权限，而不是只修改镜像层。</li></ol><p>练习：容器内命令显示进程号 1，宿主机显示为 42617；应用随后在 1 GiB 限额处被 OOM 杀死。分别指出是哪两种机制解释这些现象，并说出你会查看的两类证据。</p></section>
-<section class="panel"><h2>资源限制与调度请求不能混淆</h2><p>在编排平台里，资源 request 常影响调度器把工作负载放到哪里，limit 则约束运行时可用上限；二者语义不同。CPU limit 过低可能产生 cgroup throttling，让应用在低平均 CPU 下仍有高尾延迟。内存 limit 过低会带来 OOM；只调高 limit 而不理解内存泄漏，则可能让节点更快耗尽。排查时应同时观察节点剩余资源、容器 cgroup 计数和应用内存曲线。</p><p>命名空间隔离也不是网络可达性的完整解释。容器有独立网络视图，但从宿主机到容器通常还经过虚拟网卡、路由、端口映射或 CNI；服务监听 127.0.0.1 与监听容器接口地址的行为不同。诊断“端口明明在监听却访问不到”时，应从容器内监听地址、容器网络接口、宿主机映射和外部防火墙逐层验证。</p></section><section class="panel"><h2>自检</h2><details><summary>镜像层、namespace 和 cgroup 能互相替代吗？</summary><p>不能。镜像提供文件内容，namespace 控制视图，cgroup 管理资源用量。</p></details><details><summary>为什么 privileged 容器会显著扩大风险？</summary><p>它允许更多特权操作并削弱默认隔离，容易让应用触达宿主机资源。</p></details></section>
+<section class="panel"><h2>资源限制与调度请求不能混淆</h2><p>在编排平台里，资源 request 常影响调度器把工作负载放到哪里，limit 则约束运行时可用上限；二者语义不同。CPU limit 过低可能产生 cgroup throttling，让应用在低平均 CPU 下仍有高尾延迟。内存 limit 过低会带来 OOM；只调高 limit 而不理解内存泄漏，则可能让节点更快耗尽。排查时应同时观察节点剩余资源、容器 cgroup 计数和应用内存曲线。</p><p>命名空间隔离也不是网络可达性的完整解释。容器有独立网络视图，但从宿主机到容器通常还经过虚拟网卡、路由、端口映射或 CNI；服务监听 127.0.0.1 与监听容器接口地址的行为不同。诊断“端口明明在监听却访问不到”时，应从容器内监听地址、容器网络接口、宿主机映射和外部防火墙逐层验证。</p></section><section class="panel" data-dry-goods><h2>8 种 Namespace：容器隔离的基石</h2><div class="table-wrap"><table><thead><tr><th>Namespace</th><th>隔离内容</th><th>内核版本</th><th>典型现象</th></tr></thead><tbody><tr><td><b>mnt</b></td><td><b>挂载点</b>（文件系统视图）</td><td>2.4.19</td><td>容器内看不到宿主机的 mount</td></tr><tr><td><b>pid</b></td><td><b>进程号</b></td><td>2.6.24</td><td>容器内 PID 从 1 开始</td></tr><tr><td><b>net</b></td><td><b>网络栈</b>（网卡、路由、端口）</td><td>2.6.29</td><td>容器有独立的 IP 和端口空间</td></tr><tr><td><b>ipc</b></td><td>System V IPC、消息队列</td><td>2.6.19</td><td>共享内存隔离</td></tr><tr><td><b>uts</b></td><td><b>主机名与域名</b></td><td>2.6.19</td><td>容器可有自己的 hostname</td></tr><tr><td><b>user</b></td><td><b>用户与组 ID 映射</b></td><td>3.8</td><td><b>容器内 root ≠ 宿主机 root</b></td></tr><tr><td><b>cgroup</b></td><td>cgroup 根目录视图</td><td>4.6</td><td>容器内看不到宿主机的 cgroup</td></tr><tr><td><b>time</b></td><td>系统时间（CLOCK_MONOTONIC 等）</td><td>5.6</td><td>可独立设置时间</td></tr></tbody></table></div><p><b>namespace 实操</b></p><pre><code># 查看进程属于哪些 namespace（每条 [402653xxxx] 就是一个 ns）
+ls -l /proc/$$/ns
+# lrwxrwxrwx 1 root root 0 cgroup -&gt; 'cgroup:[4026531835]'
+# lrwxrwxrwx 1 root root 0 ipc    -&gt; 'ipc:[4026531839]'
+# lrwxrwxrwx 1 root root 0 mnt    -&gt; 'mnt:[4026531840]'
+# lrwxrwxrwx 1 root root 0 net    -&gt; 'net:[4026531957]'
+# lrwxrwxrwx 1 root root 0 pid    -&gt; 'pid:[4026531836]'
+# lrwxrwxrwx 1 root root 0 user   -&gt; 'user:[4026531837]'
+# lrwxrwxrwx 1 root root 0 uts    -&gt; 'uts:[4026531838]'
+
+# 两个进程如果在同一个 namespace，inode 号相同 -&gt; 可以看到对方
+# 这就是容器隔离的本质：让进程看不到/摸不到外面的资源
+
+# 手动创建 namespace（理解原理的最佳方式）
+unshare --mount --uts --ipc --net --pid --fork --user --map-root-user bash
+# 进入后：
+hostname container-demo          # 改主机名不影响宿主机（uts ns）
+echo $$                          # PID 是 1（pid ns）
+ip addr                          # 只有 lo（net ns）
+mount -t tmpfs tmpfs /mnt        # 挂载不影响宿主机（mnt ns）
+
+# 进入已存在容器的 namespace（排查神器）
+nsenter -t &lt;pid&gt; -n ip addr      # 进入网络 ns 看 IP
+nsenter -t &lt;pid&gt; -m -u -i -n -p bash   # 全进入</code></pre><p class="muted"><b>docker exec 的本质</b>就是 <code>nsenter</code>——找到容器 init 进程的 PID，然后 <code>setns()</code> 加入它的各个 namespace。理解这一点，能让你在没有 docker 命令时也能排查容器网络问题（<code>nsenter -t PID -n</code> + tcpdump）。</p></section><section class="panel"><h2>cgroup：限制资源用量</h2><div class="table-wrap"><table><thead><tr><th>子系统</th><th>限制什么</th><th>关键文件 / 参数</th></tr></thead><tbody><tr><td><b>cpu</b></td><td>CPU 时间份额</td><td><code>cpu.cfs_quota_us</code> / <code>cpu.cfs_period_us</code></td></tr><tr><td><b>cpuset</b></td><td>能用哪几个核</td><td><code>cpuset.cpus</code></td></tr><tr><td><b>memory</b></td><td><b>内存上限</b></td><td><code>memory.max</code>（v2）</td></tr><tr><td><b>blkio / io</b></td><td>磁盘 IO 带宽</td><td><code>io.max</code>（v2）</td></tr><tr><td><b>pids</b></td><td>进程数上限</td><td><code>pids.max</code>（防 fork 炸弹）</td></tr><tr><td><b>net_cls / net_prio</b></td><td>网络带宽与优先级</td><td>配合 tc 使用</td></tr><tr><td><b>devices</b></td><td>能访问哪些设备</td><td><code>devices.allow</code></td></tr></tbody></table></div><p><b>CPU 限制怎么算</b>：<code>cpu.cfs_period_us</code> 默认 <b>100000 μs（100 ms）</b>，<code>cpu.cfs_quota_us</code> 设为 <b>50000</b> 表示每 100 ms 只能用 50 ms = <b>0.5 核</b>；设为 <b>200000</b> 就是 <b>2 核</b>。公式：<code>核数 = quota / period</code>。</p><p><b>cgroup 实操</b></p><pre><code># 手动用 cgroup v2 限制内存（理解原理）
+mkdir -p /sys/fs/cgroup/demo
+echo "100M" &gt; /sys/fs/cgroup/demo/memory.max       # 限制 100MB
+echo "50000" &gt; /sys/fs/cgroup/demo/cpu.max          # 格式: "quota period" -&gt; 0.5 核
+echo $$ &gt; /sys/fs/cgroup/demo/cgroup.procs          # 把当前 shell 加进去
+
+# Docker 等价命令
+docker run -d \
+  --memory=1g \                    # 硬限制 1GB（超过会被 OOM kill）
+  --memory-reservation=750m \      # 软限制，内存紧张时才生效
+  --cpus=1.5 \                     # 最多 1.5 核
+  --cpu-shares=512 \               # 相对权重（默认 1024，只在竞争时生效）
+  --cpuset-cpus="0-3" \            # 绑定核 0-3
+  --pids-limit=100 \               # 最多 100 个进程
+  --blkio-weight=500 \
+  myapp
+
+# ⚠️ 关键提醒：JVM 在容器里的内存问题
+#   Java 8u191 之前，JVM 不认识 cgroup 限制，会按&lt;b&gt;宿主机内存&lt;/b&gt;算堆大小
+#   -&gt; 容器限 1GB，JVM 却申请了 4GB 堆 -&gt; 被 OOM kill
+#   解决：
+#     -XX:+UseContainerSupport           （8u191+ 默认开启）
+#     -XX:MaxRAMPercentage=75.0          # 用容器内存的 75% 作为堆
+#   Java 11+ 默认就支持容器，但建议显式设 MaxRAMPercentage
+
+# 看容器实际被限制了多少（在容器内执行）
+cat /sys/fs/cgroup/memory.max
+cat /sys/fs/cgroup/cpu.max</code></pre><p class="muted"><b>容器内看内存的两个陷阱</b>：① <code>free</code> 命令在容器里显示的是<b>宿主机的内存</b>（它读 /proc/meminfo，没被隔离）——要看限制请读 <code>/sys/fs/cgroup/memory.max</code>；② 超过 memory 限制时，进程会被 <b>OOM kill</b>，表现为容器<b>退出码 137</b>（128 + SIGKILL 9），这是最常见的容器“无故重启”原因。</p></section>
+<section class="panel"><h2>容器 vs 虚拟机：隔离强度对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>容器</b></th><th><b>虚拟机</b></th></tr></thead><tbody><tr><td>隔离级别</td><td><b>内核共享</b>，靠 namespace 隔离视图</td><td><b>硬件级</b>，独立内核</td></tr><tr><td>启动时间</td><td><b>毫秒 – 秒</b></td><td><b>秒 – 分钟</b></td></tr><tr><td>内存开销</td><td><b>几乎为零</b>（就是进程）</td><td><b>每个 VM 几百 MB 起</b></td></tr><tr><td>密度</td><td><b>高</b>（单机可跑几百个）</td><td>低（几十个）</td></tr><tr><td>安全性</td><td><b>较弱</b>（内核漏洞影响全部）</td><td><b>强</b></td></tr><tr><td>性能</td><td><b>接近原生</b></td><td>有虚拟化开销（约 5 – 15%）</td></tr></tbody></table></div><p><b>关键区别</b>：容器<b>共享宿主机内核</b>——所以 namespace 隔离的是“<b>视图</b>”（看不到），而不是“<b>资源</b>”（内核仍是同一个）。这意味着<b>内核漏洞可以穿透所有容器</b>，这也是为什么公有云的多租户场景要用 <b>Kata Containers / gVisor</b>（给容器套一层轻量 VM 或用户态内核）来加强隔离。</p><p><b>容器安全加固</b></p><pre><code># 容器逃逸的风险点（安全检查清单）
+# ① 特权模式：几乎等于宿主机 root
+docker run --privileged ...        # ❌ 生产环境绝对禁止
+
+# ② 挂载 docker.sock：能控制宿主机上的所有容器
+docker run -v /var/run/docker.sock:/var/run/docker.sock ...  # ❌ 极度危险
+
+# ③ 挂载宿主机根目录
+docker run -v /:/host ...          # ❌ 可读写宿主机任意文件
+
+# ④ 危险的 capability
+docker run --cap-add=SYS_ADMIN ... # ❌ 接近特权
+docker run --cap-add=SYS_PTRACE ...# ❌ 可 ptrace 其他进程
+
+# ✅ 安全加固的正确做法
+docker run \
+  --user 1000:1000 \                  # 不用 root 运行
+  --read-only \                       # 根文件系统只读
+  --cap-drop=ALL \                    # 去掉所有 capability
+  --cap-add=NET_BIND_SERVICE \        # 只加需要的（绑定 80 端口）
+  --security-opt=no-new-privileges \  # 禁止提权（setuid 无效）
+  --security-opt=seccomp=default.json \
+  --tmpfs /tmp:rw,size=100m \         # 可写目录用 tmpfs
+  myapp
+
+# 检查容器是否安全
+docker inspect &lt;id&gt; | jq '.[] | {Privileged, CapAdd, Binds}'</code></pre></section>
+<section class="panel"><h2>深入自检</h2><details><summary>容器里的 root 和宿主机的 root 是同一个吗？</summary><p>取决于有没有开 <b>user namespace</b>。<b>默认情况下不是</b>——容器内的 root（uid 0）在没有 user ns 时<b>就是宿主机的 uid 0</b>，只是被 capability 限制了能力（不能完全为所欲为）。开启 user ns 后（<code>--userns-remap</code> 或 rootless 模式），容器内的 uid 0 会被<b>映射</b>到宿主机的普通用户（如 uid 100000），此时即使逃逸出来也只是个普通用户，<b>安全性大幅提升</b>。生产建议：<b>开启 userns-remap 或直接用 rootless 容器</b>。</p></details><details><summary>为什么容器里的进程在宿主机上能看到？</summary><p>因为 <b>pid namespace 是嵌套的</b>——宿主机（父 ns）能看到所有子 ns 的进程，而容器（子 ns）看不到父 ns 的。所以你在宿主机 <code>ps aux</code> 能看到容器进程（PID 是宿主机的真实 PID），而容器内 <code>ps</code> 只看到自己的（PID 从 1 开始）。这个<b>单向可见性</b>正是隔离的实现方式。实用技巧：在宿主机找到容器进程的真实 PID，就能用 <code>nsenter -t PID -n</code> 进入它的网络命名空间排查。</p></details><details><summary>cgroup v1 和 v2 有什么区别？</summary><p>核心区别：① <b>v1 是多个独立层级</b>（memory、cpu 各挂各的），一个进程可以属于多个层级，导致<b>资源管理混乱</b>；<b>v2 是统一层级</b>（一棵树），所有控制器在一起，语义清晰；② v2 支持<b>压力感知（PSI）</b>——能直接看“CPU/内存有多紧张”，这对调度和自愈很有用；③ v2 的文件名更规范（<code>memory.max</code> 而非 <code>memory.limit_in_bytes</code>）。<b>Kubernetes 1.25+ 已默认使用 cgroup v2</b>，新系统（systemd 250+）也已切换。迁移时主要注意监控脚本的路径变化。</p></details><details><summary>容器网络是怎么实现的？</summary><p>三层：① <b>network namespace</b>——每个容器有独立的网络栈（自己的网卡、路由表、iptables）；② <b>veth pair</b>——一对虚拟网卡，一端在容器 ns（<code>eth0</code>），一端在宿主机 ns（挂到网桥上），像一根“虚拟网线”；③ <b>网桥 + NAT</b>——宿主机上的 <code>docker0</code>（或 CNI 插件的 <code>cni0</code>）把各容器的 veth 连起来，再通过 iptables NAT 访问外网。跨主机通信则有 <b>VXLAN 隧道</b>（Flannel）、<b>BGP 路由</b>（Calico）等方案。排查命令：<code>ip netns list</code>、<code>brctl show</code>、<code>nsenter -t PID -n tcpdump</code>。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>镜像层、namespace 和 cgroup 能互相替代吗？</summary><p>不能。镜像提供文件内容，namespace 控制视图，cgroup 管理资源用量。</p></details><details><summary>为什么 privileged 容器会显著扩大风险？</summary><p>它允许更多特权操作并削弱默认隔离，容易让应用触达宿主机资源。</p></details></section>
 <footer>继续阅读：<a href="container-image-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

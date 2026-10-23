@@ -56,6 +56,24 @@
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
     svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="topbar"><a href="../../index.html" class="logo">☁️ 分布式系统</a><a href="../../index.html" class="back">← 返回分布式系统</a></div>
@@ -219,6 +237,23 @@
     <div class="info-box purple"><span class="info-icon">🔥</span><div class="info-body"><strong>必考题：</strong>"Raft 怎么保证已提交的日志不会丢？"——靠 <strong>Leader 完整性 + 选举限制（新 Leader 必须含全部已提交日志）</strong>，所以新 Leader 上任后只会追加、不会覆盖已提交的 entry。</div></div>
   </section>
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>关键参数与流程</h2><div class="table-wrap"><table><thead><tr><th>参数 / 机制</th><th>典型值 / 说明</th></tr></thead><tbody><tr><td><b>心跳间隔</b></td><td>通常 100ms 级别（etcd 默认 100ms）</td></tr><tr><td><b>选举超时</b></td><td>150~300ms 随机区间的<b>下限</b>（etcd 默认 1000ms）</td><td><b>必须远大于心跳间隔</b>，通常是 10 倍</td></tr><tr><td><b>随机化</b></td><td>选举超时随机化是为了避免多个节点同时发起选举导致分裂投票</td></tr><tr><td><b>复制确认</b></td><td>多数派（N/2+1）确认后提交；3 节点容忍 1 失败，5 节点容忍 2 失败</td></tr><tr><td><b>日志匹配</b></td><td>AppendEntries 带 <code>prevLogIndex/prevLogTerm</code> 做一致性检查，不匹配则回退</td></tr><tr><td><b>任期（term）</b></td><td>单调递增的逻辑时钟，用于识别过期 leader</td></tr><tr><td><b>安全性限制</b></td><td>leader 只能提交<b>当前任期</b>内有多数派复制的日志（不能靠计数提交旧任期日志）</td></tr></tbody></table></div><p><b>参数与开销</b></p><pre><code>节点数 -&gt; 容错能力（选举与写入都需要多数派）：
+  1 节点：容忍 0 失败（无容错）
+  3 节点：容忍 1 失败   &lt;- 最常用
+  5 节点：容忍 2 失败
+  7 节点：容忍 3 失败
+  ⚠ 偶数节点没有意义：4 节点和 3 节点都只容忍 1 失败，但写入需要 3 个确认，更慢
+
+复制一次写入的网络开销：
+  1 个 RTT（leader -&gt; 多数派确认）+ 1 次磁盘持久化
+  =&gt; 跨地域部署时，写入延迟 ≈ 到多数派的 RTT + fsync 时间
+  =&gt; 这就是为什么跨地域 Raft 集群写入很慢：把 leader 放在多数派所在地域能显著降低延迟
+
+日志压缩：
+  快照（snapshot）+ 日志截断，避免日志无限增长
+  触发条件常按日志条数（如 10000 条）或大小（如 100MB）</code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>排障清单</h2><ul><li><b>频繁重新选举</b>：通常是网络延迟或磁盘慢导致心跳超时。看 leader 变更次数指标。</li><li><b>写入变慢</b>：检查 follower 的磁盘 fsync 耗时——Raft 要求多数派持久化，任何一个慢节点都会拖慢整体（这就是为什么慢盘危害很大）。</li><li><b>日志追赶</b>：落后太多的 follower 要走快照传输而不是逐条补，代价是一次大数据传输。</li><li><b>脑裂不会发生</b>：Raft 靠任期 + 多数派保证同一任期只有一个 leader。但旧 leader 可能在不知情的情况下继续服务一小段时间，客户端要靠<b>任期校验</b>识别。</li><li><b>读请求的坑</b>：直接读 leader 的本地状态可能读到未提交数据，需要 ReadIndex 或 Lease Read 才能保证线性一致。</li><li><b>成员变更</b>：用 joint consensus 或单节点变更，直接切换配置可能产生两个多数派。</li></ul><details><summary>Raft 和 Paxos 有什么区别？</summary><p>核心保证相同（一致性），Raft 的主要贡献是<b>可理解性</b>：把问题拆成 leader 选举、日志复制、安全性三个子问题，并引入强 leader 简化流程。</p></details><details><summary>为什么选举超时要随机化？</summary><p>避免多个 follower 同时超时同时发起选举，导致选票被瓜分、无人获得多数派。随机化让某个节点大概率先发起并成功。</p></details><details><summary>3 节点挂了 2 个还能用吗？</summary><p>不能。多数派是 2，剩 1 个节点无法选举也无法提交写入，集群变为不可用——这是为了<b>保证一致性而牺牲可用性</b>（CAP 里的 CP）。</p></details></div></section>
 <footer>分布式系统 · Raft 日志复制 — 复制状态机与一致性 | 面试核心图解</footer>
 <script>
   const observer = new IntersectionObserver((entries) => { entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); }); }, { threshold: 0.08 });

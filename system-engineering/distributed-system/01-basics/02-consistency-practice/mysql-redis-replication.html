@@ -718,6 +718,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -1325,5 +1343,79 @@
             document.getElementById('redis-log').innerHTML = '<div class="log-entry"><span class="log-time">[系统]</span> Redis 主从复制演示已重置</div>';
         }
     </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>binlog 三种格式：决定了你能不能可靠同步</h2><div class="table-wrap"><table><thead><tr><th>格式</th><th>记录内容</th><th>优点</th><th>致命坑</th></tr></thead><tbody><tr><td><b>STATEMENT</b></td><td>原始 SQL 语句</td><td>日志小</td><td><code>NOW()</code>、<code>UUID()</code>、<code>LIMIT</code> 无 ORDER BY 会<b>主从不一致</b></td></tr><tr><td><b>ROW</b></td><td>每行变更前后的<b>完整镜像</b></td><td><b>绝对一致</b>，可解析出精确字段</td><td>日志大（改 100 万行就 100 万条）</td></tr><tr><td><b>MIXED</b></td><td>一般 STATEMENT，不安全时切 ROW</td><td>折中</td><td>行为不完全可预测</td></tr></tbody></table></div><p><b>必须设 ROW</b>：MySQL <b>5.7.7 起 binlog_format 的默认值就是 ROW</b>，正是因为这个原因。做 Canal / Debezium 同步时，若还是 STATEMENT 会直接解析失败或数据错乱。</p><p><b>MySQL 侧必需配置</b></p><pre><code># 确认当前格式（必须是 ROW）
+mysql -e "SELECT @@binlog_format, @@binlog_row_image, @@server_id;"
+
+# 运行时动态改（不用重启）
+SET GLOBAL binlog_format = 'ROW';
+
+# 永久生效 my.cnf
+[mysqld]
+server_id        = 1001        # 必须全局唯一，否则复制会乱
+log_bin          = mysql-bin
+binlog_format    = ROW
+binlog_row_image = FULL        # FULL=前后镜像全记; MINIMAL=只记变化列(省空间但Canal需注意)
+expire_logs_days = 7           # 别让 binlog 撑爆磁盘
+
+# 授权 Canal / Debezium 用的账号
+CREATE USER 'canal'@'%' IDENTIFIED BY 'secret';
+GRANT SELECT, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'canal'@'%';</code></pre><p class="muted"><code>binlog_row_image=FULL</code> 是 Canal 的推荐配置；<code>MINIMAL</code> 虽然省空间，但同步端拿不到完整行镜像，更新缓存时会缺字段。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Canal 原理与延迟量化</h2><p><b>Canal 伪装成 MySQL 的从库</b>：向 master 发送 <code>COM_REGISTER_SLAVE</code> + <code>COM_BINLOG_DUMP</code>，master 就把 binlog 当成给从库那样推过来。它本身不写 MySQL，对主库几乎无侵入。</p><div class="table-wrap"><table><thead><tr><th>延迟环节</th><th>典型耗时</th><th>优化手段</th></tr></thead><tbody><tr><td>主库 binlog 落盘</td><td>1 – 5 ms</td><td><code>sync_binlog=1</code>（安全）vs <code>1000</code>（快）</td></tr><tr><td>网络传输到 Canal</td><td><b>1 – 10 ms</b>（同机房）</td><td>同机房部署，别跨地域</td></tr><tr><td>Canal 解析 binlog</td><td>1 – 5 ms</td><td>调大 <code>canal.instance.parser.parallelBufferSize</code></td></tr><tr><td>投递到 MQ</td><td>1 – 20 ms</td><td>批量投递，<code>batchSize=1000</code></td></tr><tr><td>消费端写缓存</td><td>1 – 5 ms</td><td>pipeline 批量写 Redis</td></tr><tr><td><b>端到端合计</b></td><td><b>50 – 500 ms</b></td><td>超过 1 s 就该告警</td></tr></tbody></table></div><p><b>Canal 配置与批量消费</b></p><pre><code># Canal 关键配置（conf/example/instance.properties）
+canal.instance.master.address      = 127.0.0.1:3306
+canal.instance.dbUsername          = canal
+canal.instance.dbPassword          = secret
+canal.instance.filter.regex        = shop\\..*     # 只订阅需要的库表
+canal.instance.parser.parallel     = true            # 并行解析，提速明显
+
+# 消费端：批量 + pipeline 写 Redis（单条写会把延迟放大 10 倍）
+def on_batch(events):
+    pipe = redis.pipeline(transaction=False)
+    for e in events:
+        if e.type == 'UPDATE' or e.type == 'INSERT':
+            pipe.set('row:%d' % e.pk, json.dumps(e.after), ex=3600)
+        elif e.type == 'DELETE':
+            pipe.delete('row:%d' % e.pk)
+    pipe.execute()          # 一次 RTT 完成整批
+
+# Redis 侧观测同步延迟（用探针记录）
+redis-cli --latency-history -i 5</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>缓存与数据库一致性：四条主流方案怎么选</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>流程</th><th>一致性</th><th>适用场景</th></tr></thead><tbody><tr><td><b>Cache Aside（推荐）</b></td><td>读：命中返回，未命中查 DB 回写；写：<b>更新 DB → 删除缓存</b></td><td>最终一致，窗口 &lt;100 ms</td><td><b>99% 场景的默认选择</b></td></tr><tr><td>延迟双删</td><td>删缓存 → 更新 DB → <b>sleep 500 ms</b> → 再删</td><td>更强，但仍非绝对</td><td>对一致性要求高的读多写少</td></tr><tr><td><b>binlog 订阅（Canal）</b></td><td>业务只写 DB，Canal 异步删/更新缓存</td><td>最终一致，与业务<b>解耦</b></td><td><b>推荐</b>：大厂标准做法</td></tr><tr><td>Write/Read Through</td><td>应用只碰缓存，缓存自己管 DB</td><td>强（同步写）</td><td>实现复杂，少见于业务层</td></tr></tbody></table></div><p><b>为什么是“删缓存”而不是“更新缓存”</b>：① 更新缓存可能白算（写完没人读）；② 并发下两个更新请求可能乱序，导致缓存里是<b>旧值</b>；删除则天然幂等，下次读自动回填新值。这是面试高频题，也是线上最常见的误用。</p><p><b>延迟双删实现</b></p><pre><code># 延迟双删的参考实现（Go）
+func UpdateRow(ctx context.Context, id int64, val string) error {
+    rdb.Del(ctx, cacheKey(id))                  // ① 先删一次
+    if err := db.Exec("UPDATE t SET v=? WHERE id=?", val, id); err != nil {
+        return err
+    }
+    // ② 延迟后再删：覆盖“删缓存后、DB 更新前”被读请求回填的脏数据
+    time.AfterFunc(500*time.Millisecond, func() {
+        rdb.Del(context.Background(), cacheKey(id))
+    })
+    return nil
+}
+
+# 为什么 sleep 500ms？——要大于「一次读请求(查DB+写缓存)」的耗时
+# 典型读耗时 10-50ms，取 500ms 有充足余量</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>缓存雪崩 / 击穿 / 穿透：三个不同的病</h2><div class="table-wrap"><table><thead><tr><th>问题</th><th>成因</th><th>解法（带具体数值）</th></tr></thead><tbody><tr><td><b>雪崩</b></td><td><b>大批 key 同时过期</b>，请求全打到 DB</td><td>TTL 加<b>随机抖动</b>：<code>base + rand(0, 300s)</code></td></tr><tr><td><b>击穿</b></td><td><b>单个热点 key</b> 过期，瞬时并发全查 DB</td><td><b>互斥锁重建</b>（singleflight）或<b>逻辑过期</b>（永不过期 + 后台刷新）</td></tr><tr><td><b>穿透</b></td><td>查询<b>根本不存在</b>的 key（恶意攻击）</td><td><b>布隆过滤器</b>前置 + 空值缓存（TTL <b>60 s</b>，别太长）</td></tr></tbody></table></div><p><b>防击穿 / 防穿透代码</b></p><pre><code># Go: singleflight 防击穿（同一 key 只有一个请求真正查 DB）
+import "golang.org/x/sync/singleflight"
+
+var g singleflight.Group
+
+func Get(ctx context.Context, id int64) (string, error) {
+    v, err, _ := g.Do(strconv.FormatInt(id, 10), func() (interface{}, error) {
+        // 只有第一个进来的 goroutine 会执行这里
+        s, err := rdb.Get(ctx, cacheKey(id)).Result()
+        if err == nil { return s, nil }
+        row, err := queryDB(id)          // 回源
+        if err != nil { return "", err }
+        rdb.Set(ctx, cacheKey(id), row, time.Hour+time.Duration(rand.Intn(300))*time.Second)
+        return row, nil
+    })
+    return v.(string), err
+}
+
+# 布隆过滤器防穿透（Redis 模块）
+redis-cli BF.RESERVE userfilter 0.001 1000000   # 误判率 0.1%，容量 100 万
+redis-cli BF.EXISTS  userfilter 12345            # 0=一定不存在 -&gt; 直接返回</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>先删缓存还是先更新数据库？</summary><p><b>先更新 DB，再删缓存</b>。反过来（先删缓存再更新 DB）有个致命窗口：删完缓存后、DB 还没更新完时，一个读请求会<b>把旧值回填进缓存</b>，之后永远是脏的。而“先 DB 后删”的最坏情况只是短暂读到旧值，且删缓存失败还能重试补偿。</p></details><details><summary>删缓存失败了怎么办？</summary><p>三级兜底：① <b>同步重试 1 次</b>（多数是网络抖动）；② 失败则<b>写消息队列异步重试</b>，带最大重试次数（如 3 次）和指数退避；③ 终极方案是 <b>binlog 订阅补偿</b>——Canal 直接看 DB 的真实变更，不依赖业务代码是否执行成功，这是大厂的标准答案。</p></details><details><summary>热点 key（比如顶流明星的微博）怎么处理？</summary><p>三层：① <b>本地缓存</b>（进程内，10 s TTL），挡掉 90% 请求；② Redis 分片时把热点<b>复制到多个 key</b> （如 <code>hot:1</code> ~ <code>hot:10</code>），随机读一个分散压力；③ 开启 Redis 的 <b>客户端缓存（client-side caching / tracking）</b>，服务端主动通知失效。</p></details><details><summary>Redis 主从切换时会丢数据，缓存场景要不要紧？</summary><p>缓存场景<b>不要紧</b>：丢了下次回源重建即可，这正是缓存和存储的差别。但如果用 Redis 做<b>分布式锁</b>或<b>去重表</b>就可能出问题——主从异步复制会在切换时丢锁，这就是 Redlock 争论的起点。结论：<b>锁和去重不要用普通主从 Redis</b>。</p></details></div></section>
 </body>
 </html>

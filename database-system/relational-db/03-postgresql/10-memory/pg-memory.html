@@ -67,6 +67,26 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,35 +96,88 @@
   <p>shared_buffers / work_mem / maintenance_work_mem / effective_cache_size 该怎么配。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#m1">内存区域</a><a href="#m2">work_mem 陷阱</a><a href="#m3">参数建议</a><a href="#m4">OS 缓存</a></nav>
+  <nav class="toc"><a href="#s1">① 内存全景图</a><a href="#s2">② shared_buffers：为什么官方建议 25%</a><a href="#s3">③ work_mem：最危险的旋钮</a><a href="#s4">④ maintenance_work_mem 与维护操作</a><a href="#s5">⑤ 常见问法</a></nav>
   <main class="content">
-<section id="m1"><h2>① 主要内存区域</h2>
-<ul>
-  <li><strong>shared_buffers</strong>：数据页缓存（默认 128MB）；专用数据库服务器可从物理内存约 25% 起步，再按负载调整。</li>
-  <li><strong>wal_buffers</strong>：WAL 缓冲（默认 16MB 以内）。</li>
-  <li><strong>work_mem</strong>：<b>每个算子、每个连接</b>的排序/哈希内存。</li>
-  <li><strong>maintenance_work_mem</strong>：VACUUM / CREATE INDEX 等维护操作内存。</li>
-  <li><strong>effective_cache_size</strong>：告诉优化器“OS + 共享缓存一共多大”，仅影响计划选择。</li>
-</ul>
+<section id="s1"><h2>① 内存全景图</h2>
+
+<div class="grid3">
+<div class="card3"><h4>shared_buffers</h4><p><strong>全局共享</strong>的数据页缓存，所有后端进程共用</p></div>
+<div class="card3"><h4>wal_buffers</h4><p>WAL 写盘前的缓冲，通常很小（几 MB）</p></div>
+<div class="card3"><h4>work_mem</h4><p><strong>每操作</strong>的排序/哈希内存，最容易配错</p></div>
+<div class="card3"><h4>maintenance_work_mem</h4><p>VACUUM、CREATE INDEX 等维护操作的内存</p></div>
+<div class="card3"><h4>temp_buffers</h4><p>临时表专用，会话本地</p></div>
+<div class="card3"><h4>effective_cache_size</h4><p><strong>不分配内存</strong>，只是给优化器的提示值</p></div>
+<div class="card3"><h4>autovacuum_work_mem</h4><p>autovacuum worker 专用（默认 -1，用 maintenance_work_mem）</p></div>
+<div class="card3"><h4>OS 页缓存</h4><p>PG 之外的一层缓存，与 shared_buffers 形成<strong>双缓存</strong></p></div>
+</div>
+
 </section>
-<section id="m2"><h2>② work_mem 的隐藏陷阱</h2>
-<p><code>work_mem</code> 不是“每连接总量”，而是 <strong>每个排序/哈希节点</strong>。一条复杂查询可能含多个排序节点，且并发连接并行执行——总内存可达 <code>work_mem × 节点数 × 连接数</code>。设太大 + 高并发 = OOM。</p>
-<div class="callout warn"><b>经验：</b>高并发实例 work_mem 设 4~16MB；需要大排序的批处理单独 <code>SET work_mem='256MB'</code> 会话级调大。</div>
-</section>
-<section id="m3"><h2>③ 参数建议（示例，16GB 实例）</h2>
+<section id="s2"><h2>② shared_buffers：为什么官方建议 25%</h2>
+
+<p>与 MySQL 的 Buffer Pool 不同，PG <strong>同时依赖 OS 页缓存</strong>：数据文件既可能在 shared_buffers 中，也可能在 OS 缓存中，形成<strong>两级缓存</strong>。</p>
 <table>
-  <tr><th>参数</th><th>建议值</th></tr>
-  <tr><td>shared_buffers</td><td>4GB（约 25% RAM，示例起点）</td></tr>
-  <tr><td>effective_cache_size</td><td>12GB</td></tr>
-  <tr><td>work_mem</td><td>8~16MB</td></tr>
-  <tr><td>maintenance_work_mem</td><td>512MB~1GB</td></tr>
-  <tr><td>wal_buffers</td><td>16MB</td></tr>
+<tr><th>设得太小</th><th>设得太大</th></tr>
+<tr><td>命中率低，频繁磁盘读</td><td>挤压 OS 缓存，<strong>总体命中率反而下降</strong></td></tr>
+<tr><td>写操作更快落盘（脏页少）</td><td><strong>检查点时要刷的脏页更多</strong>，IO 尖峰更猛</td></tr>
+<tr><td>—</td><td>启动更慢（需要预热/初始化大块内存）</td></tr>
 </table>
+<pre><code>-- 观察缓存命中率（应 &gt; 99%）
+SELECT datname,
+       round(blks_hit * 100.0 / GREATEST(blks_hit + blks_read, 1), 2) AS hit_pct,
+       blks_hit, blks_read
+FROM pg_stat_database WHERE datname = current_database();
+
+-- 观察各表的缓冲使用
+SELECT c.relname, count(*) AS buffers
+FROM pg_buffercache b JOIN pg_class c ON c.relfilenode = b.relfilenode
+GROUP BY 1 ORDER BY 2 DESC LIMIT 10;   -- 需 CREATE EXTENSION pg_buffercache</code></pre>
+<div class="callout tip"><b>调优方法：</b>先看命中率，若已达 99%+ 就<strong>不必再加</strong>（加了收益甚微，反而增加检查点压力）。若明显偏低，再结合内存总量逐步上调，每次 25% → 40% 观察效果。<strong>不要照搬 MySQL 的「内存 70%」经验。</strong></div>
+
 </section>
-<section id="m4"><h2>④ OS 页缓存</h2>
-<p>PG 数据文件也会被 OS 页缓存，因此 <code>shared_buffers</code> 不必占满内存。<code>effective_cache_size</code> 是规划器对可用缓存容量的估计，应结合共享缓存、可用于数据库文件的 OS 缓存和其他进程占用设置；它本身不分配内存。</p>
+<section id="s3"><h2>③ work_mem：最危险的旋钮</h2>
+
+<div class="callout warn"><b>核心事实：work_mem 是「每个排序 / 哈希操作」的上限，不是每连接或每查询的上限。</b>一个查询可能含多个排序节点，并行查询还会乘以 worker 数。</div>
+<pre><code>-- 危险估算示例
+-- work_mem = 256MB，并发 100，每查询平均 3 个排序/哈希节点
+-- → 理论峰值 = 256MB × 3 × 100 = 76.8 GB  （远超物理内存！）
+
+-- 正确做法：全局保守 + 会话级放开
+-- postgresql.conf
+work_mem = 16MB
+
+-- 报表/批处理会话
+SET work_mem = '256MB';
+-- 或只对某条语句：SET LOCAL work_mem = '256MB'; （事务内生效）</code></pre>
+<p>当内存不够时会<strong>写临时文件</strong>，可通过以下方式观察：</p>
+<pre><code>-- 开启临时文件日志（超过 log_temp_files 就记录）
+log_temp_files = 0        -- 记录所有临时文件
+-- 日志中出现：temporary file: path "base/pgsql_tmp/xxx", size 12345678
+
+-- 查看当前临时文件使用
+SELECT * FROM pg_stat_database WHERE temp_files &gt; 0;</code></pre>
+
 </section>
-</main>
+<section id="s4"><h2>④ maintenance_work_mem 与维护操作</h2>
+
+<p>用于 <strong>VACUUM、CREATE INDEX、ALTER TABLE ADD PRIMARY KEY、REINDEX</strong>。默认 64MB，对大表往往偏小。</p>
+<pre><code>-- 临时调大以加速建索引（会话级，不影响其他连接）
+SET maintenance_work_mem = '2GB';
+CREATE INDEX CONCURRENTLY idx_big ON big_table (col);
+
+-- autovacuum 专用
+autovacuum_work_mem = -1        -- 默认 -1：使用 maintenance_work_mem
+                                -- 设为具体值可为 autovacuum 单独限制</code></pre>
+<div class="callout note"><b>建索引的加速技巧：</b>① 调大 <code>maintenance_work_mem</code>（通常能到 1~4GB）；② 调大 <code>max_parallel_maintenance_workers</code>（PG 11+ 支持并行建 B-tree 索引）；③ 事后再把参数调回。<strong>注意：CREATE INDEX CONCURRENTLY 不能并行，且失败会留下 INVALID 索引，需检查并 <code>DROP</code> 后重建。</strong></div>
+
+</section>
+<section id="s5"><h2>⑤ 常见问法</h2>
+<div class="qa"><b>Q：PG 的内存参数该怎么整体规划？</b><p>A：推荐顺序：① <strong>shared_buffers = 内存的 25%</strong>（留出空间给 OS 缓存）；② <strong>effective_cache_size = 50%~75%</strong>（只是提示值，不占内存）；③ <strong>work_mem 保守起步（8~32MB）</strong>，用 <code>log_temp_files</code> 观察是否需要针对会话调大；④ <strong>maintenance_work_mem</strong> 可设较大（512MB~数 GB），仅在维护操作时使用；⑤ 最后按「worker 数 × work_mem + shared_buffers」核算峰值，避免 OOM。<strong>核心原则：共享内存给足，会话内存保守按需放开。</strong></p></div>
+<div class="qa"><b>Q：为什么 PG 不把内存都给 shared_buffers？</b><p>A：因为 PG 依赖<strong>操作系统的页缓存</strong>，两者构成<strong>双缓存</strong>：数据可能在 OS 缓存里而不在 shared_buffers 里，反之亦然。若把 shared_buffers 设得过大，会<strong>挤压 OS 缓存</strong>，整体命中率反而下降；同时<strong>检查点需要刷的脏页更多</strong>，造成更猛的 IO 尖峰。这与 MySQL InnoDB 的 Buffer Pool（自己管理、几乎独占）策略不同，因此<strong>不能照搬「内存 70% 给缓存」的 MySQL 经验</strong>。</p></div>
+<div class="qa"><b>Q：怎么判断 work_mem 是否够用？</b><p>A：三个信号：① <strong>EXPLAIN (ANALYZE)</strong> 中排序/哈希节点出现 <code>external merge Disk: xxx kB</code> 或 Hash Join 出现 <code>Batches: N</code>（N&gt;1）——说明已落盘；② <strong>日志中出现 temporary file</strong>（需设 <code>log_temp_files = 0</code>）；③ <code>pg_stat_database.temp_files / temp_bytes</code> 持续增长。<strong>处理：不要盲目全局调大，而是对产生临时文件的<strong>具体会话</strong>单独 <code>SET work_mem</code>。</strong></p></div>
+<div class="qa"><b>Q：effective_cache_size 会影响性能吗？</b><p>A：会，但<strong>不通过分配内存</strong>——它只作为<strong>优化器的提示</strong>，用于估算「索引扫描的页是否大概率在缓存中」，从而影响<strong>索引扫描 vs 全表扫描</strong>的选择。设得太小，优化器会高估索引的 IO 代价而<strong>错误地选择全表扫描</strong>；设得过大则可能过度偏好索引。<strong>建议设为 OS 可用缓存的估计值（内存的 50%~75%），它零成本，设错只影响计划选择。</strong></p></div>
+<div class="qa"><b>Q：出现 OOM 或内存暴涨，怎么排查？</b><p>A：按顺序：① 检查 <code>work_mem × 排序节点数 × 并发数 × 并行 worker</code> 的理论峰值；② 用 <code>EXPLAIN (ANALYZE, BUFFERS)</code> 看是否有大量临时文件；③ 查询 <code>pg_stat_activity</code> 找长时间运行的大查询；④ 检查<strong>连接数</strong>（每个后端进程自身也有内存开销，几千连接会吃掉几 GB）；⑤ 检查 <code>shared_buffers</code> 与 <code>max_connections</code> 的组合是否过大；⑥ 临时表与游标（<code>temp_buffers</code>）。<strong>防护：用连接池限制后端连接数、给关键会话设 <code>statement_timeout</code>、必要时用 cgroup 限制实例总内存。</strong></p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

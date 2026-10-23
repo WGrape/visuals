@@ -8,6 +8,47 @@
 <section class="panel"><h2>一个多租户检索例子</h2><p>用户 A 问“上季度续约条款”，检索必须同时满足 tenant=A、access=allowed、language=zh，然后按向量相似度排序。若 A 只有全库 0.1% 的文档，全局近邻前 100 名里可能几乎没有 A 的文档。先取全局前 100 再过滤，不等价于在 A 的可见集合里找前 10。正确查询应把过滤条件纳入检索过程，并在应用层复核权限。</p><div class="table-wrap"><table><thead><tr><th>路径</th><th>优点</th><th>风险</th></tr></thead><tbody><tr><td>全局 ANN 后过滤</td><td>实现直观</td><td>稀有过滤条件下召回不足</td></tr><tr><td>先过滤再精确算距离</td><td>候选很少时结果完整</td><td>候选很多时成本可能高</td></tr><tr><td>索引辅助过滤 ANN</td><td>平衡候选缩小与近似搜索</td><td>依赖 payload 索引与规划效果</td></tr></tbody></table></div></section>
 <section class="panel"><h2>Payload 索引该建在哪里</h2><p>常用等值、范围或地理过滤字段可以按 Qdrant 支持的类型建立 payload 索引，让规划器更快判断符合条件的点数。并非所有字段都值得索引：索引会占用存储和内存，也带来更新成本。先分析线上查询里真正高频的过滤字段和组合，再为它们建立索引。tenant_id、时间、状态等字段要保证写入类型一致，否则字符串“10”与数值 10 可能产生不同过滤结果。</p><p>向量更新、payload 更新和删除也会影响索引与搜索可见性。批量导入后立刻查询，需按一致性与等待参数确认数据是否已经可检索；不同部署与版本细节应以当前文档为准。应用侧应把权限过滤视为必要的安全约束，即便向量检索返回异常，也不能把未经授权的 point 直接送给模型。</p></section>
 <section class="panel"><h2>怎样测过滤召回率</h2><ol><li>从真实查询中抽取宽过滤、窄过滤和多条件组合样本，记录各自候选集合大小。</li><li>对小样本使用精确搜索作为参考结果，比较 ANN 返回的前 K 命中率与排序差异。</li><li>同时测 P50/P95 延迟、payload 索引内存和更新吞吐，不能只看单次搜索速度。</li><li>为租户隔离准备负向测试：跨租户 point 即使向量极相近，也不得进入候选和最终上下文。</li></ol><p>练习：全库一百万文档，租户 A 有 300 篇，查询先取全局最近 50 篇再做 tenant 过滤。解释为什么可能返回 0 条，并给出一个精确参考实验来量化漏召回。</p></section>
-<section class="panel"><h2>权限过滤不能只靠召回模型</h2><p>相似度模型学习的是语义距离，并不知道用户能否查看一份文档。权限必须作为硬条件，在查询请求中带上当前租户和访问范围；应用收到结果后还应按权威权限源复核，防止索引更新延迟或配置错误泄漏数据。把权限信息仅写进文档正文、期待向量模型“理解不能返回”，不是访问控制。</p><p>衡量过滤效果时同时记录候选集大小。一个 tenant 有 10 篇文档，精确扫描可能已经足够快；另一个 tenant 有千万篇，则需要索引和 ANN 协同。若只在平均租户上压测，会低估最小租户的漏召回和最大租户的扫描压力。建立宽、中、窄三档过滤样本，并为每档报告 Recall@K、P95 延迟、索引内存和更新后的可见性延迟，才能做可靠选型。</p></section><section class="panel"><h2>结果解释</h2><p>在小候选集合中，相似度分数的差异可能很小。应用不应把第一个结果直接当成事实；仍需展示来源、更新时间和权限范围，并在生成回答时保留可核对引用。过滤决定“能看什么”，向量排序决定“先看什么”，职责必须分清。</p></section><section class="panel"><h2>自检</h2><details><summary>“先取全局 topK，再过滤”与“过滤后取 topK”是否等价？</summary><p>通常不等价。符合条件的近邻可能排在全局 topK 之外。</p></details><details><summary>为什么 payload 索引不是越多越好？</summary><p>索引占用资源并增加更新成本，应服务真实高频过滤条件。</p></details></section>
+<section class="panel"><h2>权限过滤不能只靠召回模型</h2><p>相似度模型学习的是语义距离，并不知道用户能否查看一份文档。权限必须作为硬条件，在查询请求中带上当前租户和访问范围；应用收到结果后还应按权威权限源复核，防止索引更新延迟或配置错误泄漏数据。把权限信息仅写进文档正文、期待向量模型“理解不能返回”，不是访问控制。</p><p>衡量过滤效果时同时记录候选集大小。一个 tenant 有 10 篇文档，精确扫描可能已经足够快；另一个 tenant 有千万篇，则需要索引和 ANN 协同。若只在平均租户上压测，会低估最小租户的漏召回和最大租户的扫描压力。建立宽、中、窄三档过滤样本，并为每档报告 Recall@K、P95 延迟、索引内存和更新后的可见性延迟，才能做可靠选型。</p></section><section class="panel"><h2>结果解释</h2><p>在小候选集合中，相似度分数的差异可能很小。应用不应把第一个结果直接当成事实；仍需展示来源、更新时间和权限范围，并在生成回答时保留可核对引用。过滤决定“能看什么”，向量排序决定“先看什么”，职责必须分清。</p></section><section class="panel" data-dry-goods><h2>过滤与向量检索的三种结合方式</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>做法</th><th>召回质量</th><th>适用场景</th></tr></thead><tbody><tr><td><b>后置过滤</b></td><td>先 ANN 取 top-k×N 再过滤</td><td><b>高</b>（不损失召回）</td><td>过滤比例 &lt; 50%，最常用</td></tr><tr><td><b>前置过滤</b></td><td>先按条件筛出候选集再检索</td><td>取决于候选集是否覆盖</td><td>过滤极严（&lt; 5%）</td></tr><tr><td><b>混合/图内过滤</b></td><td>HNSW 遍历时跳过不匹配点</td><td>中等，可能漏</td><td>过滤比例 50%~95%</td></tr></tbody></table></div><p><b>核心矛盾</b>：过滤比例越高，ANN 图遍历越容易被“截断”——HNSW 沿边走时遇到大量不匹配节点，提前耗尽候选队列，导致<strong>召回率断崖下跌</strong>。这是纯向量库做过滤检索的最大陷阱。</p><p><b>带过滤的检索</b></p><pre><code>from qdrant_client import QdrantClient, models
+
+client = QdrantClient("localhost", port=6333)
+
+# 关键参数：hnsw_ef 决定候选队列宽度，过滤越严越要调大
+client.search(
+    collection_name="docs",
+    query_vector=vec,
+    query_filter=models.Filter(
+        must=[models.FieldCondition(key="tenant_id",
+              match=models.MatchValue(value="t_001"))]
+    ),
+    limit=10,
+    search_params=models.SearchParams(hnsw_ef=512),  # 默认 128，严过滤时提到 256~1024
+)</code></pre></section><section class="panel"><h2>payload 索引：过滤性能的分水岭</h2><p>不过滤的 payload 字段会<strong>逐条反序列化比对</strong>，在百万级上是秒级；建索引后降到毫秒级。</p><div class="table-wrap"><table><thead><tr><th>字段类型</th><th>应建索引类型</th><th>说明</th></tr></thead><tbody><tr><td>精确值（字符串/ID）</td><td><b>keyword</b></td><td>等值匹配，最常用</td></tr><tr><td>整数/浮点数</td><td><b>integer / float</b></td><td>支持范围查询</td></tr><tr><td>布尔</td><td><b>bool</b></td><td>开销极小</td></tr><tr><td>地理位置</td><td><b>geo</b></td><td>支持半径/多边形</td></tr><tr><td>数组/多值</td><td><b>keyword</b>（自动多值）</td><td>任一命中即算匹配</td></tr><tr><td>全文</td><td><b>text</b></td><td>分词匹配，慎用（开销大）</td></tr></tbody></table></div><p><b>建索引</b></p><pre><code># 创建 payload 索引（必须先建，否则过滤走全扫）
+client.create_payload_index("docs", "tenant_id",
+                            field_schema=models.PayloadSchemaType.KEYWORD)
+client.create_payload_index("docs", "created_at",
+                            field_schema=models.PayloadSchemaType.INTEGER)
+
+# 验证：查看集合信息里的 indexed_vectors_count 与 segments
+info = client.get_collection("docs")
+print(info.payload_schema)      # 确认索引已建立
+
+# 常见坑：先写入再建索引是允许的，但建索引期间会锁段，
+# 大集合建议在业务低峰执行，或一开始就规划好字段</code></pre><p class="muted">判据：<strong>凡是出现在过滤条件里的字段都必须建索引</strong>。宁可多建——keyword 索引的内存开销远小于一次全表扫描的代价。</p></section>
+<section class="panel"><h2>召回率实测与调优</h2><p><b>召回率测量</b></p><pre><code># 用暴力检索当真值，测 ANN+过滤的真实召回率
+def recall_at_k(client, vec, flt, k=10, ef=128):
+    truth = client.search("docs", vec, query_filter=flt, limit=k,
+                          search_params=models.SearchParams(exact=True))  # 暴力
+    ann = client.search("docs", vec, query_filter=flt, limit=k,
+                        search_params=models.SearchParams(hnsw_ef=ef))
+    t = {str(p.id) for p in truth}
+    a = {str(p.id) for p in ann}
+    return len(t &amp; a) / len(t)
+
+# 扫不同 ef 找拐点
+for ef in [64, 128, 256, 512, 1024]:
+    print(ef, round(recall_at_k(client, vec, flt, 10, ef), 3),
+          client.search.__name__)   # 实际要额外计时</code></pre><div class="table-wrap"><table><thead><tr><th>过滤比例</th><th>建议 hnsw_ef</th><th>预期召回</th></tr></thead><tbody><tr><td>&lt; 20%</td><td>128（默认）</td><td>&gt; 0.95</td></tr><tr><td>20%~50%</td><td><b>256</b></td><td>&gt; 0.95</td></tr><tr><td>50%~80%</td><td><b>512</b></td><td>0.90~0.95</td></tr><tr><td>&gt; 80%</td><td><b>1024+</b> 或改用前置过滤</td><td>需实测，可能仍偏低</td></tr></tbody></table></div><p><b>ef 与延迟是线性关系</b>：ef 翻倍，检索耗时近似翻倍。所以调优目标是<strong>找到满足召回要求的最小 ef</strong>，而不是一味调大。</p></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：为什么加了过滤后召回率突然掉到 60%？</summary><p>A：HNSW 图遍历时，大量邻居被过滤条件排除，候选队列提前耗尽，搜索被困在局部区域。三个递进的处理办法——① 调大 <code>hnsw_ef</code>（最直接）；② 提高 <code>m</code>（图连接度，需重建索引）；③ 过滤极严时改用<strong>前置过滤 + 暴力</strong>：先按条件筛出小候选集，再在小集合上精确检索。</p></details><details><summary>Q：payload 存多大合适？</summary><p>A：payload 默认存磁盘但过滤时会被读入内存，过大会拖慢检索。经验是<strong>单条 payload 控制在几 KB 内</strong>，且不要把长文本原文塞进 payload——只存用于过滤的字段和少量展示字段，原文留在主库用 ID 关联。</p></details><details><summary>Q：多租户场景怎么隔离最干净？</summary><p>A：两种方案。<strong>按租户分 collection</strong>：隔离彻底、过滤零开销，但租户多时 collection 数量爆炸，每个都有最小内存开销。<strong>单 collection + tenant_id 过滤</strong>：运维简单，但必须建 keyword 索引且调大 ef。判据是租户数量与单租户数据量——<strong>租户少且每户数据大 → 分 collection；租户多且每户数据小 → 单 collection + 过滤</strong>。</p></details><details><summary>Q：<code>exact=True</code> 和 ANN 结果不一致，能信哪个？</summary><p>A：<code>exact=True</code> 是<strong>暴力全扫</strong>，结果就是真值，用它做基准测召回是对的。但它不适合线上（O(n) 复杂度）。若两者差距过大（召回 &lt; 0.9），说明 ANN 参数需要调，或者数据分布/维度有问题（高维且聚类明显时 HNSW 表现会下降）。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>“先取全局 topK，再过滤”与“过滤后取 topK”是否等价？</summary><p>通常不等价。符合条件的近邻可能排在全局 topK 之外。</p></details><details><summary>为什么 payload 索引不是越多越好？</summary><p>索引占用资源并增加更新成本，应服务真实高频过滤条件。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/qdrant-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

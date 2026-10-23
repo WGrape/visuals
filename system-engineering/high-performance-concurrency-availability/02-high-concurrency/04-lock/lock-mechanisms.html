@@ -696,6 +696,24 @@
             50% { transform: scale(1.1); }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="bg-animation"></div>
@@ -1171,7 +1189,55 @@
     <!-- Toast 提示 -->
     <div class="toast" id="toast"></div>
 
-    <footer>
+    
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>各种锁的开销与适用</h2><div class="table-wrap"><table><thead><tr><th>锁类型</th><th>机制</th><th>无竞争开销</th><th>适用场景</th></tr></thead><tbody><tr><td><b>互斥锁 mutex</b></td><td>抢不到就<b>阻塞</b>（陷入内核 futex 等待）</td><td>约 <b>20 ns</b>（用户态原子操作）</td><td><b>通用首选</b>，临界区较长时</td></tr><tr><td><b>自旋锁 spinlock</b></td><td>抢不到就<b>循环重试</b>（占着 CPU）</td><td>约 <b>10 ns</b></td><td>临界区<b>极短</b>（几十条指令）且多核</td></tr><tr><td><b>读写锁 RWLock</b></td><td>读共享、写独占</td><td>比 mutex 略高</td><td><b>读远多于写</b>（如配置缓存）</td></tr><tr><td><b>乐观锁 / CAS</b></td><td>先算，提交时检查版本</td><td>最低（纯原子操作）</td><td>冲突概率低时</td></tr><tr><td><b>无锁（lock-free）</b></td><td>CAS 循环实现的数据结构</td><td>低但实现复杂</td><td>极致性能场景（如 Disruptor）</td></tr><tr><td><b>偏向锁 / 轻量级锁</b></td><td>JVM 的锁升级优化</td><td>最低（几乎为零）</td><td><b>单线程反复进入</b>同一同步块</td></tr></tbody></table></div><p><b>关键数字</b>：无竞争的 mutex 加锁/解锁约 <b>20 ns</b>；一旦发生竞争，需要陷入内核 + 上下文切换，开销跳到 <b>1–10 μs</b>（慢 <b>50–500 倍</b>）。所以锁优化的核心不是“换更快的锁”，而是<b>减少竞争</b>：缩小临界区、降低锁粒度、分片、或者干脆去掉共享。</p><p><b>锁优化代码</b></p><pre><code>// Go 的 sync.Mutex 实现要点（理解开销来源）
+// 1) 先做一次 CAS 快速路径（无竞争时约 20ns，纯用户态）
+// 2) 失败后自旋若干次（期望锁很快释放，避免上下文切换）
+// 3) 仍失败则通过 runtime_Semacquire 挂起（进入内核，开销 μs 级）
+// 4) 饥饿模式：等待超过 1ms 的 goroutine 会进入饥饿模式，
+//    直接把锁交给等待最久的那个（防止新来的 goroutine 一直抢到）
+
+// 降低竞争的四种实用手段：
+// ① 缩小临界区：只锁真正共享的部分
+mu.Lock()
+counter++
+mu.Unlock()          // 不要在锁内做 IO、RPC、耗时计算
+
+// ② 分片（sharding）：把一把锁拆成 N 把
+const shards = 64
+type ShardedMap struct {
+    mus [shards]sync.Mutex
+    m   [shards]map[string]int
+}
+func (s *ShardedMap) Set(k string, v int) {
+    i := hash(k) % shards
+    s.mus[i].Lock(); defer s.mus[i].Unlock()
+    s.m[i][k] = v
+}
+
+// ③ 用原子操作替代简单计数
+atomic.AddInt64(&amp;counter, 1)     // 约 5-10ns，无锁
+
+// ④ 线程本地累加，最后合并（彻底消除共享）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>死锁、排查与选型</h2><p><b>死锁的四个必要条件</b>（破坏任意一个即可避免）：① <b>互斥</b>（资源独占）② <b>持有并等待</b> ③ <b>不可抢占</b> ④ <b>循环等待</b>。工程上最有效的是破坏第 ④ 条——<b>给所有锁编号，按顺序获取</b>。</p><div class="table-wrap"><table><thead><tr><th>排查手段</th><th>命令/工具</th><th>说明</th></tr></thead><tbody><tr><td>Go 死锁/竞争</td><td><code>go run -race</code></td><td>race detector 能发现数据竞争</td></tr><tr><td>Go 协程栈</td><td><code>curl :/debug/pprof/goroutine?debug=2</code></td><td>看哪些 goroutine 卡在锁上</td></tr><tr><td>Java 线程栈</td><td><code>jstack &lt;pid&gt;</code></td><td>找 <code>BLOCKED</code> 状态与 waiting to lock</td></tr><tr><td>Java 死锁检测</td><td><code>jstack</code> 会自动报告</td><td>输出里明确写 Found one Java-level deadlock</td></tr><tr><td>Linux 锁竞争</td><td><code>perf lock</code>、<code>perf sched</code></td><td>看锁等待与调度延迟</td></tr><tr><td>MySQL 死锁</td><td><code>SHOW ENGINE INNODB STATUS</code></td><td>LATEST DETECTED DEADLOCK 段</td></tr></tbody></table></div><ul><li><b>按场景选型</b>：临界区有 IO/耗时操作 → mutex（自旋是浪费 CPU）；临界区只有几条指令且 CPU 核数够 → 自旋更快；读占 95% 以上 → 读写锁；只是简单计数 → 原子操作（不要上锁）；需要尝试获取 → <code>TryLock</code>（带超时，避免无限等待）。</li><li><b>锁粒度不是越细越好</b>：拆得太细会增加锁的数量与获取次数，总开销可能反而上升，且更容易出错。合理做法是按<b>数据的实际访问模式</b>划分（如按用户 ID、按商品 ID 分片），而不是机械地每个字段一把锁。</li><li><b>读写锁的写饥饿</b>：读锁持续被获取时，写锁可能永远拿不到。Go 的 <code>RWMutex</code> 有写优先机制（新来的读者会被阻塞），Java 的 <code>StampedLock</code> 提供乐观读。</li><li><b>别忘了锁的公平性</b>：非公平锁吞吐高但可能饿死某些线程；公平锁保证顺序但吞吐低（多一次排队）。Go 的 Mutex 通过饥饿模式在两者间自适应。</li><li><b>排障顺序</b>：① 确认是锁竞争还是真的慢（看 CPU 是否空闲但吞吐上不去）；② 抓栈看阻塞在哪把锁；③ 看临界区里有没有 IO/RPC；④ 用 race detector 确认有没有数据竞争；⑤ 用 pprof/火焰图定位热点锁。</li></ul><details><summary>为什么加了锁反而更慢了？</summary><p>三种可能：① 临界区太大（锁内做了 IO/RPC/耗时计算），串行化比例过高；② 锁粒度太粗，本可并行的操作被串行；③ 竞争太激烈，大量时间花在上下文切换上（20 ns → 几 μs）。用 pprof 看 <code>sync.Mutex</code> 的 contention 时间就能确认。</p></details><details><summary>能不用锁吗？</summary><p>能的路径：① 无共享（每线程/协程独立数据，最后合并）；② 不可变对象（只读就不需锁）；③ 原子操作（简单计数/标志位）；④ 消息传递（Go 的 channel、Actor 模型）；⑤ 无锁数据结构（CAS 循环）。<b>“不共享”永远比“共享后加锁”快。</b></p></details></div></section>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>锁选型速查表：粒度、死锁、超时间</h2><p>选锁其实只回答三个问题：<b>锁的粒度多大</b>、<b>会不会死锁谁来处理</b>、<b>持锁者崩了怎么办</b>。</p><div class="table-wrap"><table><thead><tr><th>锁</th><th>粒度</th><th>死锁处理</th><th>持锁者崩溃</th></tr></thead><tbody><tr><td>MySQL <code>SELECT ... FOR UPDATE</code></td><td>行（命中索引）/ 表（没命中索引）</td><td>InnoDB <b>主动检测</b>并回滚代价小的事务</td><td>事务回滚自动释放</td></tr><tr><td>MySQL 间隙锁 / next-key</td><td>索引记录 + 间隙</td><td>RR 隔离级别下自动加，<b>最容易造成死锁</b></td><td>同上</td></tr><tr><td>Redis <code>SET NX PX</code></td><td>单个 key（自行设计）</td><td><b>不检测</b>，靠过期时间兜底</td><td>靠 <b>PX 过期</b>自动释放</td></tr><tr><td>Redlock</td><td>多实例多数派</td><td>不检测</td><td>靠过期时间</td></tr><tr><td>ZooKeeper / etcd 临时顺序节点</td><td>节点路径</td><td>不检测，靠 session 超时</td><td><b>session 断开即删</b>，最可靠</td></tr><tr><td>Java <code>synchronized</code> / AQS</td><td>对象 / 线程</td><td><b>不检测</b>（不可中断、无超时）</td><td>线程结束释放</td></tr><tr><td>Java <code>ReentrantLock</code></td><td>线程</td><td><code>tryLock(timeout)</code> 可放弃</td><td>需 <code>finally unlock()</code></td></tr><tr><td>Go <code>sync.Mutex</code></td><td>goroutine</td><td><b>不检测</b>，且<b>不可重入</b></td><td>需 <code>defer Unlock()</code></td></tr></tbody></table></div><p><b>MySQL / Redis 锁的可执行诊断与操作</b></p><pre><code># MySQL：看当前谁在等锁、等谁
+SELECT * FROM performance_schema.data_locks\G
+SELECT * FROM performance_schema.data_lock_waits\G
+SHOW ENGINE INNODB STATUS\G      # 看 LATEST DETECTED DEADLOCK 段
+
+# 锁等待超时参数
+SHOW VARIABLES LIKE 'innodb_lock_wait_timeout';   # 默认 50 秒
+SET GLOBAL innodb_lock_wait_timeout = 10;         # 交易类建议降到 5~10
+SHOW VARIABLES LIKE 'innodb_deadlock_detect';     # ON = 开启主动检测
+
+# Redis 分布式锁：加锁 + 释放（释放必须校验 value，否则会误删别人的锁）
+SET lock:order:123 &lt;uuid&gt; NX PX 30000
+# 释放用 Lua 保证原子性
+if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end
+return 0</code></pre><p class="muted">Redlock 的争议点：它依赖「时钟基本同步」。若发生 GC STW 或时钟跳变导致锁在业务逻辑未跑完时过期，就出现<b>两个客户端同时持锁</b>。Martin Kleppmann 与 antirez 的著名争论结论是：对正确性要求极高的场景用 <b>etcd/ZooKeeper 的 fencing token</b>（单调递增序号，资源侧拒绝旧 token），而不是纯靠超时。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>锁问题排障清单</h2><ul><li><b>先确认是不是锁</b>：<code>show processlist</code> 里大量 <code>Sending data</code>/<code>updating</code> + 同一行 → 是锁等待，不是慢查询。</li><li><b>没走索引 = 锁全表</b>：<code>FOR UPDATE</code> 的 WHERE 条件必须命中索引，否则退化为表锁（用 <code>EXPLAIN</code> 确认 <code>type=ref/range</code>）。</li><li><b>缩短事务</b>：把 RPC、发消息、写日志挪到事务外。事务里一次远程调用 = 锁时间从 5ms 变 200ms，吞吐掉 40 倍。</li><li><b>固定加锁顺序</b>：多表/多行更新约定统一顺序（如按 id 升序），这是消除死锁最有效的手段。</li><li><b>Redis 锁必须有过期时间</b>，且过期时间要<b>大于</b>业务最大执行时间的 2~3 倍，或者用 watchdog 续期（Redisson 的 <code>lockWatchdogTimeout</code> 默认 30s，每 10s 续一次）。</li><li><b>Go 的坑</b>：<code>sync.Mutex</code> 不可重入，同一 goroutine 二次 Lock 直接死锁；也<b>不能复制</b>已使用的 Mutex（要用 <code>go vet</code> 拦）。</li><li><b>乐观锁替代</b>：高并发低冲突场景用版本号 <code>UPDATE ... SET stock=stock-1, ver=ver+1 WHERE id=? AND ver=?</code>，用影响行数判断是否抢到，冲突再重试。</li></ul><details><summary>悲观锁和乐观锁怎么选？</summary><p>看<b>冲突概率 × 冲突代价</b>。冲突概率 &gt;20% 或临界区很重（涉及 IO）→ 悲观锁；冲突少、临界区只是算一下 → 乐观锁（CAS/版本号）。库存秒杀这种高冲突场景，实际做法往往是<b>把锁前移到 Redis 预扣减</b>，DB 层用乐观锁做最终一致。</p></details><details><summary>为什么 RR 下间隙锁这么容易死锁？</summary><p>间隙锁锁的是「不存在的记录区间」，两个事务分别在不同区间插入后又要插入对方的区间，就会互相等待。典型是 <code>INSERT ... ON DUPLICATE KEY UPDATE</code> 和 <code>SELECT FOR UPDATE</code> 混用。解法：改成 RC + <code>binlog_format=ROW</code>（RC 下没有间隙锁），或把并发插入改成<b>单线程队列</b>。</p></details><details><summary>分布式锁过期了但业务还没跑完怎么办？</summary><p>这是分布式锁的核心难题，没有完美解。三种务实做法：① 续期（watchdog，线程活着就一直续）；② fencing token（资源侧校验，拒绝过期请求）；③ 把业务做成<b>幂等 + 可重入</b>，即使重复执行也没副作用。生产上①②③通常一起上。</p></details></div></section>
+<footer>
         <p>💡 提示：点击各卡片中的按钮，观察线程状态变化和资源的锁定效果</p>
         <p style="margin-top: 8px;">高并发系统设计核心在于选择合适的同步机制</p>
     </footer>

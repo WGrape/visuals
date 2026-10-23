@@ -11,6 +11,46 @@
 <section class="panel"><h2>AP 从排序而来</h2><p>假设一张或多张图共标注 3 个真实行人，模型按分数从高到低给出预测：第 1 个匹配一名真实行人，记 TP；第 2 个没有匹配，记 FP；第 3 个匹配另一名尚未匹配的行人，记 TP。处理到第 1 个时 precision=1/1、recall=1/3；到第 2 个时 precision=1/2、recall 仍为 1/3；到第 3 个时 precision=2/3、recall=2/3。继续降低分数门槛会增加召回，也可能带来更多 FP，得到一条 precision–recall 曲线。AP 概括这条曲线，具体插值与积分规则依评测协议。</p><p>一个真实目标通常只能匹配一个预测；后续重复框即使位置很准，也可能算 FP。IoU 匹配阈值越高，对定位要求越严格；AP@0.50 和更严格阈值下的 AP 不可混作同一指标。</p></section>
 <section class="panel"><h2>mAP 的口径必须写全</h2><p>mAP 常表示多个类别 AP 的平均，但不同基准还可能在多个 IoU 阈值上平均。例如 COCO 常报告从 0.50 到 0.95 的多阈值平均，以及 AP50、AP75 和按目标大小分组的结果。只写“mAP=0.6”无法判断类别集合、IoU 阈值、置信度筛选、最大检测数和目标尺寸规则。小目标漏检与大目标重复框可能需要不同改进方向。</p><p>若数据集只有大量容易的白天街景，而上线有夜景和遮挡，整体 mAP 高也不能证明真实场景稳定。应按光照、尺寸、遮挡、设备和地域拆分评估，并查看漏检与误报样本。</p></section>
 <section class="panel"><h2>一次标注与坐标排障</h2><p>模型输出框经图像缩放后全部偏右，先确认输入是否使用了 letterbox 补边、模型坐标是否归一化到 [0,1]、后处理是否正确减去补边并按原图比例放大。然后随机选样本把真实框与预测框叠在原图上，检查坐标、类别和分数。若 IoU 很低但视觉位置接近，可能是坐标格式、整数取整或标注边界规则不一致。</p><p>改 NMS 阈值前保存同一批候选原始输出，在固定验证集上比较 AP、每图预测数和漏检类型。不能只在一张图上挑出最好看的阈值就上线。</p></section>
+<section class="panel" data-dry-goods><h2>IoU / NMS / AP 的计算与阈值</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>公式 / 阈值</th><th>要点</th></tr></thead><tbody><tr><td>IoU</td><td><code>交集面积 / 并集面积</code></td><td>0~1。判正负样本常用 <b>0.5</b>（VOC）或 <b>0.5:0.95</b>（COCO）</td></tr><tr><td>正样本判定</td><td>IoU ≥ 0.5 且类别一致</td><td>COCO 还按面积分 small/medium/large</td></tr><tr><td>NMS IoU 阈值</td><td>常用 <b>0.5</b>（0.6~0.7 用于密集场景）</td><td>阈值越高保留的框越多，召回高但误检多</td></tr><tr><td>Soft-NMS 高斯sigma</td><td>0.5</td><td>不硬删框而是衰减分数，密集场景 mAP 常 <b>+1~2 点</b></td></tr><tr><td>置信度阈值</td><td>0.001（算 mAP 时）/ 0.25~0.5（部署时）</td><td>算 mAP 要极低阈值以画出完整 PR 曲线</td></tr><tr><td>AP（VOC）</td><td>11 点插值 PR 曲线均值</td><td>recall ∈ {0, 0.1, ..., 1}</td></tr><tr><td>AP（COCO）</td><td>101 点插值，IoU 0.5:0.05:0.95 取平均</td><td>比 VOC 严格，数值通常 <b>低 10~20 点</b></td></tr><tr><td>mAP</td><td>各类别 AP 的算术平均</td><td>COCO 的 mAP 默认指 mAP@[.5:.95]</td></tr></tbody></table></div><p><b>手算 IoU</b>：框 A=(0,0,10,10)、框 B=(5,5,15,15)（x1,y1,x2,y2）。交集 = (5,5)-(10,10) = 5×5 = <b>25</b>；面积各 100；并集 = 100+100-25 = <b>175</b>；<code>IoU = 25/175 ≈ 0.143</code>。两个框看着重叠不少，IoU 却只有 0.14——这是 <b>IoU 对偏移很敏感</b>的直观例子，也是后来引入 GIoU/DIoU/CIoU 的原因。</p></section><section class="panel"><h2>可执行代码</h2><pre><code>import numpy as np
+
+def iou(box, boxes):
+    """box:(4,) boxes:(N,4) 均为 x1,y1,x2,y2"""
+    ix1 = np.maximum(box[0], boxes[:, 0])
+    iy1 = np.maximum(box[1], boxes[:, 1])
+    ix2 = np.minimum(box[2], boxes[:, 2])
+    iy2 = np.minimum(box[3], boxes[:, 3])
+    inter = np.maximum(0, ix2 - ix1) * np.maximum(0, iy2 - iy1)
+    area_b = (box[2]-box[0]) * (box[3]-box[1])
+    area_s = (boxes[:,2]-boxes[:,0]) * (boxes[:,3]-boxes[:,1])
+    union = area_b + area_s - inter
+    return inter / np.maximum(union, 1e-6)      # 防除零
+
+def nms(dets, scores, thr=0.5):
+    order = scores.argsort()[::-1]              # 分数从高到低
+    keep = []
+    while order.size &gt; 0:
+        i = order[0]; keep.append(i)
+        if order.size == 1: break
+        rest = order[1:]
+        ov = iou(dets[i], dets[rest])
+        order = rest[ov &lt;= thr]                 # 只保留重叠不超阈值的
+    return keep</code></pre><pre><code># Soft-NMS（高斯惩罚）：不删框，按重叠度衰减分数
+def soft_nms(dets, scores, sigma=0.5, thr=0.001):
+    dets, scores = dets.copy(), scores.copy()
+    keep = []
+    for _ in range(len(scores)):
+        if scores.size == 0: break
+        i = int(np.argmax(scores)); keep.append(i)
+        ov = iou(dets[i], np.delete(dets, i, axis=0))
+        idx = np.delete(np.arange(len(scores)), i)
+        scores[idx] *= np.exp(-(ov ** 2) / sigma)   # 重叠越大衰减越狠
+        scores[i] = -1
+        drop = idx[scores[idx] &lt; thr]
+        dets = np.delete(dets, drop, axis=0)
+        scores = np.delete(scores, drop)
+    return keep</code></pre></section>
+<section class="panel"><h2>AP 手算与常见坑</h2><p><b>手算 AP（VOC 11 点）</b>：假设一张图 5 个预测框，按分数排序后累计 TP/FP：</p><div class="table-wrap"><table><thead><tr><th>#</th><th>分数</th><th>IoU</th><th>判定</th><th>累计TP</th><th>Precision</th><th>Recall</th></tr></thead><tbody><tr><td>1</td><td>0.95</td><td>0.85</td><td>TP</td><td>1</td><td>1.00</td><td>0.20</td></tr><tr><td>2</td><td>0.90</td><td>0.60</td><td>TP</td><td>2</td><td>1.00</td><td>0.40</td></tr><tr><td>3</td><td>0.80</td><td>0.30</td><td>FP</td><td>2</td><td>0.67</td><td>0.40</td></tr><tr><td>4</td><td>0.70</td><td>0.75</td><td>TP</td><td>3</td><td>0.75</td><td>0.60</td></tr><tr><td>5</td><td>0.60</td><td>0.20</td><td>FP</td><td>3</td><td>0.60</td><td>0.60</td></tr></tbody></table></div><ul><li>真实框共 5 个（Recall 分母=5），只召回 3 个 → 最大 Recall 0.6。</li><li>11 点插值：对每个 recall 阈值 r，取 <b>recall ≥ r 时的最大 precision</b>，再取平均。</li><li><b>坑 1</b>：一个真实框只能被一个预测框匹配（其余同框预测算 FP），这是 NMS 存在的前提。</li><li><b>坑 2</b>：算 mAP 时置信度阈值要设很低（0.001），设成 0.5 会让 PR 曲线残缺、AP 虚高。</li><li><b>坑 3</b>：COCO 的 mAP@0.5 与 mAP@[.5:.95] 差别很大，论文对比必须指明是哪一个。</li></ul></section>
+<section class="panel"><h2>深入自检</h2><details><summary>IoU 阈值取 0.5 合理吗？</summary><p>VOC 传统是 0.5，但 IoU=0.5 的框定位其实很松。COCO 用 0.5:0.05:0.95 的 10 档平均，对定位精度敏感得多。做高精度定位（如工业检测）应直接看 mAP@0.75 或 mAP@[.5:.95]。</p></details><details><summary>NMS 阈值调高会怎样？</summary><p>保留更多框 → 召回升高、误检也升高。密集人群场景常用 0.6~0.7；一般场景 0.5；若同类物体天然贴近（如货架商品），0.5 会误删，需调低到 0.3~0.4。</p></details><details><summary>Soft-NMS 一定比 NMS 好吗？</summary><p>不一定。Soft-NMS 在<b>密集重叠</b>场景（行人、车辆）能涨 1~2 点 mAP，但在稀疏场景几乎无差别，且多一个 sigma 超参要调、推理略慢。</p></details><details><summary>为什么我的 mAP 很高但线上效果差？</summary><p>常见原因：① 验证集与线上分布不一致；② 看的是 mAP@0.5 而线上需要 0.75 的定位精度；③ 没做 NMS 或线上阈值/阈值与评测时不一致；④ 小目标 AP 被大目标拉高的 mAP 掩盖了——要分开看 small/medium/large。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>两个框 IoU 很高，就能断言它们一定对应同一真实物体吗？</summary><p>不能。相邻或遮挡的两个不同物体也可能有高度重叠的预测框，应结合类别、标注与任务评估。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="object-detection.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

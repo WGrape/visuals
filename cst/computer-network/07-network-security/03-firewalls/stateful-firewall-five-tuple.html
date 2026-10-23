@@ -11,6 +11,31 @@
 <section class="panel"><h2>规则顺序与最小权限</h2><p>防火墙规则通常有优先级或顺序，较早命中的规则可能决定结果。先写“允许所有内网到任何位置”，后写“禁止访问管理网段”若被前者覆盖，后者形同虚设。应按来源、目的、端口与协议定义最小业务范围，并在末尾使用清晰的默认拒绝策略。变更前模拟允许流和应拒绝流，核对命中计数和日志。</p><p>“目的端口 443”仅表示该流量使用 TCP/UDP 端口 443，不保证传的就是合规 HTTPS；恶意程序也可借用同一端口。高层内容检查需要额外的应用层网关或代理，并有 TLS 终止和隐私边界。网络 ACL 是必要基础，但不是应用鉴权替代品。</p></section>
 <section class="panel"><h2>故障表现与观测</h2><p>连接超时时，在客户端、F1、F2 和服务器侧各抓同一五元组及时间窗：客户端有没有发 SYN、哪个设备接收、服务器是否回 SYN-ACK、回包经过哪台设备。若防火墙有拒绝日志，记录规则 ID、接口和连接状态；若没有拒绝日志，也可能是路由或更前一跳丢包。ICMP 能通不证明 TCP 443 可通，TCP 443 通也不证明 HTTP 业务正常。</p><p>状态表满时，新连接可能失败而已有连接继续服务；超时过短时，空闲长连接可能在恢复发送时被丢。看连接表占用、建连失败、状态老化和设备 CPU，比只看总带宽更能定位这类问题。</p></section>
 <section class="panel"><h2>变更验收与安全复盘</h2><p>新增服务放行时先列出客户网段、服务地址、协议和端口、双向流量是否经同一设备，再写最小规则。验收必须同时测试合法访问、应拒绝的源、服务端回程和设备故障切换。对临时规则记录到期时间与负责人，避免故障排查时留下长期“any-any”放行。</p><p>复盘事故时区分“规则未允许”“已有规则却未命中”“回程绕过状态设备”“应用主动拒绝”四种原因。它们对应不同修复动作，不能都归结为“防火墙开个端口”。</p></section>
+<section class="panel" data-dry-goods><h2>五元组与连接状态</h2><div class="table-wrap"><table><thead><tr><th>状态</th><th>含义</th><th>典型报文</th></tr></thead><tbody><tr><td><b>NEW</b></td><td>新连接的第一个包</td><td>TCP SYN（或 UDP 首包）</td></tr><tr><td><b>ESTABLISHED</b></td><td>已有双向流量的连接</td><td>连接建立后的数据包</td></tr><tr><td><b>RELATED</b></td><td>与已有连接<b>相关</b>的新连接</td><td>FTP 数据连接、ICMP 错误</td></tr><tr><td><b>INVALID</b></td><td>无法识别/不合法</td><td>乱序包、异常标志组合</td></tr><tr><td><b>UNTRACKED</b></td><td>被 NOTRACK 跳过</td><td>raw 表指定</td></tr></tbody></table></div><p><b>有状态防火墙的核心</b>：只需放行 <b>NEW</b>（首包），后续双向流量由 <b>ESTABLISHED</b> 自动放行。这比无状态防火墙（要手工配正反两个方向）既安全又简单。</p><p><b>有状态防火墙配置</b></p><pre><code># 经典有状态规则集
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A INPUT -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+iptables -P INPUT DROP          # 默认拒绝（白名单模型）
+
+# 查看连接跟踪状态
+conntrack -L
+conntrack -L --state ESTABLISHED | wc -l
+cat /proc/net/nf_conntrack | head
+
+# 按五元组精确放行
+iptables -A INPUT -s 10.0.0.5 -d 10.0.0.1 -p tcp --dport 3306 -j ACCEPT
+
+# 限速防扫描（同一 IP 新建连接速率）
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW \
+  -m recent --set --name ssh
+iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW \
+  -m recent --update --seconds 60 --hitcount 4 --name ssh -j DROP
+
+# nftables 等价写法
+nft add rule inet filter input ct state established,related accept
+nft add rule inet filter input ct state invalid drop</code></pre></section><section class="panel"><h2>常见坑与排障</h2><ul><li><b>规则顺序至关重要</b>：iptables 按链中顺序<b>自上而下</b>匹配，命中即停止。<code>-A</code> 追加在末尾，若前面有 ACCEPT ALL 就永远轮不到。<b>先放通 ESTABLISHED，再放具体服务，最后默认拒绝。</b></li><li><b>改规则别把自己锁在外面</b>：远程改 SSH 相关规则时，先确认已有 ESTABLISHED 放行，或用 <code>iptables-apply</code>（改后 10 s 内不确认就自动回滚）。</li><li><b>INVALID 丢包要谨慎</b>：某些合法但不常见的报文（如乱序/重传）会被判为 INVALID。生产上可以先只计数不丢弃，确认无影响再 DROP。</li><li><b>UDP 的“连接”是虚拟的</b>：UDP 无状态，conntrack 靠“首包 + 双向流量”模拟连接，超时较短（30 s 单向 / 180 s 双向）。高频短 UDP（如 DNS）会产生大量表项。</li><li><b>RELATED 依赖 ALG/helper</b>：FTP 主动模式的数据连接需要 <code>nf_conntrack_ftp</code> 模块才能识别为 RELATED。现代做法是<b>改用被动模式 FTP 或 SFTP</b>，不依赖 ALG。</li><li><b>排障顺序</b>：① <code>iptables -L -nv</code> 看规则命中计数（pkts/bytes 为 0 说明没匹配到）；② <code>conntrack -L</code> 看连接是否建立；③ 抓包确认包是否到达；④ 检查默认策略（<code>-P</code>）与规则顺序。</li><li><b>性能注意</b>：规则是线性匹配，几千条规则会显著拖慢。用 <code>ipset</code>（哈希集合）替代大量同类规则，把 O(n) 变 O(1)。</li></ul><details><summary>为什么放行了自己的端口还是不通？</summary><p>检查三处：① 默认策略是 DROP 但没有放行 ESTABLISHED（回包被拦）；② 规则顺序（前面有更宽的规则拦截或后面的规则没轮到）；③ <code>-A INPUT</code> 只管入站，若本机转发还要 <code>FORWARD</code> 链和 <code>ip_forward=1</code>。</p></details><details><summary>有状态防火墙能防 DDoS 吗？</summary><p>能防一部分（如伪造源的连接耗尽攻击，因为 NEW 包要建 conntrack），但对<b>大流量拥塞型</b>攻击无能为力——流量已经把带宽打满了，防火墙在后面也无济于事。那需要上游清洗/Anycast。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>出站流量已被 F1 放行，回包经 F2 返回，为什么仍可能连接超时？</summary><p>F2 可能没有看到建连请求，也没有对应状态表项，于是将 SYN-ACK 视为未建立连接而丢弃。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../01-common-attacks/network-attacks.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

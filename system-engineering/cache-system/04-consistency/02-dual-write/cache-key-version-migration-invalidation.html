@@ -11,6 +11,47 @@
 <section class="panel"><h2>缓存雪崩与回源预算</h2><p>上线时几百万个 v2 键都是冷的，如果所有流量瞬间切换，新版每次都打数据库，可能把后端压垮。可以灰度新读路径、按热点集合预热、限制每秒回源并为热点 miss 合并并发构建。预热也需基于数据库当前版本，并设置随机化 TTL，避免所有预热键同时到期。观测除命中率外还要看回源 QPS、数据库 P99、缓存写入量和旧键内存占用。</p><p>不要为追求 100% 命中率把过期旧值无限续命。若商品价格用于支付，结算环节应再次从权威数据确认价格与库存；展示层可容忍短暂陈旧，交易正确性不能完全委托给缓存。</p></section>
 <section class="panel"><h2>回滚时的选择</h2><p>新版上线后若发现 v2 格式有 bug，旧代码回滚可能仍可读取 v1；但若迁移过程中已经停写 v1，回滚后 v1 可能陈旧。回滚方案可选择“旧版从数据库重新构建 v1”或“在迁移窗口双重失效、必要时双写”，并明确数据库查询容量。不能只看应用镜像可回滚，忽略缓存状态与消息消费者版本。</p><p>回滚演练应在 v2 已经运行一段时间、v1 键已有部分过期的状态下做，检查价格更新是否准确、回源是否可承受以及旧解析器是否遇到新格式。安全清理旧键时优先使用有范围的扫描和渐进删除，避免一次性阻塞或误删相似前缀。</p></section>
 <section class="panel"><h2>验收一条完整时间线</h2><p>建立商品 42，v1 价格 100；发布兼容版和 v2 版，确认两格式独立；把数据库价格改为 90，检查两种应用都不会长期读出 100；让 v2 首次冷启动，观察回源峰值；再回滚一部分实例，检查旧路径仍能正确构建。最后按清理策略统计旧键数量与占用，不把临时迁移负担变成永久内存泄漏。</p><p>监控最好按 schema 版本分别记录命中、反序列化失败、值缺字段、回源和写入；若只看总命中率，新旧版本问题会互相掩盖。版本迁移的成功标准是结构兼容、数据新鲜度与容量三者都在约定范围。</p></section>
+<section class="panel" data-dry-goods><h2>Key 设计的规范与陷阱</h2><div class="table-wrap"><table><thead><tr><th>原则</th><th>好例子</th><th>坏例子</th><th>原因</th></tr></thead><tbody><tr><td><b>业务前缀</b></td><td><code>order:detail:123</code></td><td><code>123</code></td><td>不同类型 key 冲突</td></tr><tr><td><b>含版本</b></td><td><code>v2:user:profile:88</code></td><td><code>user:88</code></td><td>结构变更时无法平滑迁移</td></tr><tr><td><b>长度可控</b></td><td>&lt; <b>100 字节</b></td><td>把整个 SQL 当 key</td><td>内存与网络开销</td></tr><tr><td><b>不含易变值</b></td><td><code>product:1001</code></td><td><code>product:1001:ts:1699...</code></td><td><strong>每次都是新 key，命中率为 0</strong></td></tr><tr><td><b>用冒号分层</b></td><td><code>app:entity:id:field</code></td><td><code>app_entity_id_field</code></td><td>可读性 + 便于批量扫描</td></tr></tbody></table></div><p><b>最隐蔽的坑</b>：key 里带了<strong>时间戳、随机数、用户 IP</strong> 等易变值。结果是每次请求都是新 key，缓存永不命中，而且<strong>旧 key 还会堆积占满内存</strong>直到 LRU 淘汰。排查方法：看 <code>INFO keyspace</code> 的 key 总数是否持续增长且不回落。</p></section><section class="panel"><h2>版本化迁移：无缝切换结构</h2><p>当缓存值的<strong>结构</strong>要变（如 JSON 加字段、序列化方式从 JSON 换 Protobuf），不能简单地全量删除——那会造成缓存击穿。</p><p><b>版本化迁移</b></p><pre><code># 版本化 key 的平滑迁移流程
+# v1: order:detail:123        （旧结构）
+# v2: v2:order:detail:123     （新结构）
+
+def get_order(oid):
+    # 1) 先读新版本
+    v = redis.get(f"v2:order:detail:{oid}")
+    if v is not None:
+        return deserialize_v2(v)
+    # 2) 新版本没有，尝试读旧版本并转换
+    old = redis.get(f"order:detail:{oid}")
+    if old is not None:
+        obj = deserialize_v1(old)
+        redis.setex(f"v2:order:detail:{oid}", ttl, serialize_v2(obj))
+        return obj
+    # 3) 都没有，查库并写新版本
+    obj = db.query(oid)
+    redis.setex(f"v2:order:detail:{oid}", ttl, serialize_v2(obj))
+    return obj
+
+# 迁移期结束后，一次性清理 v1（用 SCAN 而非 KEYS！）
+#   redis-cli --scan --pattern 'order:detail:*' | xargs -L 1000 redis-cli DEL</code></pre><div class="table-wrap"><table><thead><tr><th>步骤</th><th>动作</th><th>风险</th></tr></thead><tbody><tr><td>1. 双写</td><td>新代码同时写 v1 与 v2</td><td>写入开销翻倍（短暂）</td></tr><tr><td>2. 双读</td><td>先读 v2，miss 则读 v1 并回填</td><td>逻辑复杂度上升</td></tr><tr><td>3. 观察</td><td>确认 v2 命中率达标（&gt; 90%）</td><td>命中率低说明有问题</td></tr><tr><td>4. 停写 v1</td><td>去掉 v1 的写入</td><td>回滚需重新双写</td></tr><tr><td>5. 清理 v1</td><td><strong>用 SCAN 分批删</strong>，限速</td><td>直接 <code>KEYS</code> 会阻塞</td></tr></tbody></table></div><p class="muted"><b>绝对不要用 <code>KEYS</code> 命令</b>：它是 O(N) 且<strong>阻塞单线程</strong>，百万 key 时会卡住整个 Redis 数秒。批量删除一律用 <code>SCAN</code> + 分批（每批 1000 个），并控制速率。</p></section>
+<section class="panel"><h2>批量失效的三种方案</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td><b>按前缀扫描</b></td><td><code>SCAN</code> 匹配后逐批删</td><td>无需额外结构</td><td><b>慢</b>，百万级要分钟级</td></tr><tr><td><b>标签集</b></td><td>每个标签维护一个 Set 存所有 key</td><td><b>秒级批量失效</b></td><td>Set 本身占内存，需维护</td></tr><tr><td><b>版本号前缀</b></td><td>key 里嵌版本号，换版本即全失效</td><td><strong>零成本瞬间失效</strong></td><td>只能整体失效，无法精细</td></tr></tbody></table></div><p><b>标签集实现</b></p><pre><code># 方案 2：标签集实现（适合按维度批量失效，如“某商家所有商品”）
+def set_with_tag(key, val, tags, ttl=3600):
+    pipe = redis.pipeline()
+    pipe.setex(key, ttl, val)
+    for t in tags:
+        pipe.sadd(f"tag:{t}", key)          # 记录该标签下的所有 key
+        pipe.expire(f"tag:{t}", ttl + 86400)  # 标签集比数据多活一天
+    pipe.execute()
+
+def invalidate_tag(tag):
+    keys = redis.smembers(f"tag:{tag}")
+    if keys:
+        for i in range(0, len(keys), 1000):    # 分批删，避免大命令阻塞
+            redis.delete(*list(keys)[i:i+1000])
+    redis.delete(f"tag:{tag}")
+
+# 权衡：标签集让失效从 O(N 全库扫描) 降到 O(该标签下的 key 数)
+# 代价是每个 key 要维护额外的 Set 成员，内存约增加 10~20%</code></pre></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：缓存命中率低，怎么定位是哪些 key 造成的？</summary><p>A：三步——① 开<strong>命中率监控</strong>（<code>INFO stats</code> 的 <code>keyspace_hits/misses</code>）；② 用 <code>redis-cli --hotkeys</code>（需开启 <code>maxmemory-policy=allkeys-lfu</code>）或 <code>MONITOR</code> 采样看访问模式；③ 重点查<strong>是否 key 里嵌了易变值</strong>（时间戳、随机数）。这类问题占命中率低成因的大半，而且从代码看很难发现，必须看实际 key 内容。</p></details><details><summary>Q：大 key 删除会阻塞吗？</summary><p>A：<strong>会</strong>。<code>DEL</code> 一个百万元素的集合需要释放大量内存，耗时可达<strong>数十毫秒到秒级</strong>，期间整个 Redis 阻塞。Redis 4.0+ 用 <code>UNLINK</code>（异步删除，后台线程回收内存）替代；4.0 以下只能<strong>分批删</strong>（如 <code>HSCAN</code> 每次删 100 个）。另外要注意<strong>过期删除也可能产生尖刺</strong>——大量 key 同时过期时，Redis 的主动过期扫描会占用 CPU。</p></details><details><summary>Q：缓存版本迁移时，新旧代码同时在跑怎么办？</summary><p>A：这就是必须<strong>双写双读</strong>的原因。灰度期间新旧实例并存，新实例写 v2 也能读 v1，旧实例只认 v1——只要保证<strong>新实例写数据时两套都写</strong>，就不会出现一半数据在新一半在旧、互相读不到的情况。迁移完成后先停旧实例的写入，观察 v2 命中率稳定后再清理 v1。回滚也很简单：把读顺序换回先 v1 即可。</p></details><details><summary>Q：key 太多导致内存满了，优先删哪些？</summary><p>A：先看<strong>淘汰策略</strong>。<code>noeviction</code>（默认）会直接报错，生产应设为 <code>allkeys-lru</code>（对所有 key 做 LRU）或 <code>volatile-lru</code>（只对设了 TTL 的）。然后用 <code>redis-cli --bigkeys</code> 找大 key，用 <code>INFO keyspace</code> 找 key 数最多的库。另外检查<strong>是否有该设 TTL 却没设的 key</strong>——永久 key 累积是最常见的内存泄漏来源，应当建立规范：缓存 key 一律带 TTL。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>把 key 从 product:v1:42 改成 product:v2:42，能自动保证新价格不会读到旧值吗？</summary><p>不能。schema 命名空间只隔离格式；价格更新仍需覆盖所有活跃读路径的失效和回填策略。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="dual-write-consistency.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

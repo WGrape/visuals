@@ -55,6 +55,24 @@
   .diagram { background: var(--gray-50); border-radius: var(--radius); padding: 20px; margin: 16px 0; text-align: center; }
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -235,5 +253,74 @@ Etcd:
   go-zero 微服务实战 &nbsp;|&nbsp; 同系列：基础能力 / 规范 / RPC / 命令
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>部署配置与关键参数</h2><div class="table-wrap"><table><thead><tr><th>配置项</th><th>位置</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><code>Host/Port</code></td><td>yaml</td><td><b>0.0.0.0:8888</b></td><td>监听地址</td></tr><tr><td><code>Timeout</code></td><td>yaml</td><td><b>3000 ms</b></td><td><strong>处理超时，必须按业务调</strong></td></tr><tr><td><code>MaxConns</code></td><td>yaml</td><td><b>10000</b></td><td>最大并发连接</td></tr><tr><td><code>MaxBytes</code></td><td>yaml</td><td><b>1 MB</b></td><td>单请求体积上限</td></tr><tr><td><code>Mode</code></td><td>yaml</td><td><code>procs</code></td><td><code>dev/test/procs</code>；<strong>生产用 procs</strong></td></tr><tr><td><code>Log.Mode</code></td><td>yaml</td><td><code>file</code></td><td><code>console/file/volume</code></td></tr><tr><td><code>Prometheus</code></td><td>yaml</td><td>关闭</td><td>配 <code>Host/Port/Path</code> 开启</td></tr><tr><td><code>Telemetry</code></td><td>yaml</td><td>关闭</td><td>链路追踪，需 Jaeger/OTLP</td></tr></tbody></table></div><p><b>生产配置</b></p><pre><code># etc/*.yaml 生产级配置
+Name: order-api
+Host: 0.0.0.0
+Port: 8888
+Timeout: 3000
+MaxConns: 10000
+MaxBytes: 1048576
+Mode: procs                      # 生产模式
+
+Log:
+  Mode: file
+  Path: /var/log/order
+  Level: info
+  KeepDays: 7                    # 日志保留天数，避免打满磁盘
+  Compress: true
+
+Prometheus:
+  Host: 0.0.0.0
+  Port: 9091
+  Path: /metrics
+
+Telemetry:
+  Name: order-api
+  Endpoint: http://jaeger:14268/api/traces
+  Sampler: 0.1                   # 采样率 10%，高流量必调</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>优雅退出与滚动更新</h2><p><b>优雅退出的关键</b>：收到 SIGTERM 后<strong>先摘流量、再等存量请求处理完、最后退出</strong>，否则滚动更新会产生 502。</p><p><b>优雅退出</b></p><pre><code>// go-zero 已内置优雅退出，但需配合 K8s 配置
+// 1) 服务需处理 SIGTERM（go-zero 的 MustNewServer 已处理）
+// 2) K8s 侧必须给足退出时间
+
+// main.go 里确保阻塞等待
+func main() {
+    flag.Parse()
+    var c config.Config
+    conf.MustLoad(*configFile, &amp;c)
+    ctx := svc.NewServiceContext(c)
+    server := rest.MustNewServer(c.RestConf)
+    defer server.Stop()          // 确保退出时清理
+    handler.RegisterHandlers(server, ctx)
+    fmt.Printf("Starting server at %s:%d...\n", c.Host, c.Port)
+    server.Start()
+}</code></pre><p><b>K8s 配置</b></p><pre><code># K8s Deployment 必须配合的配置
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  minReadySeconds: 10            # 就绪后观察 10 秒再认为可用
+  strategy:
+    rollingUpdate:
+      maxSurge: 1                # 最多多起 1 个
+      maxUnavailable: 0          # &lt;strong&gt;不允许不可用&lt;/strong&gt;，保证无缝
+  template:
+    spec:
+      terminationGracePeriodSeconds: 60   # 退出宽限期，必须 &gt; 最长请求耗时
+      containers:
+      - name: order-api
+        lifecycle:
+          preStop:                        # 先 sleep 让注册中心摘流量
+            exec:
+              command: ["sh", "-c", "sleep 15"]
+        readinessProbe:                   # 就绪探针决定是否被加到负载均衡
+          httpGet: { path: /health, port: 8888 }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:                    # 存活探针决定是否重启
+          httpGet: { path: /health, port: 8888 }
+          initialDelaySeconds: 15
+          periodSeconds: 10</code></pre><p class="muted"><b>preStop sleep 是必需的</b>：K8s 发送 SIGTERM 与从 endpoints 摘除是<strong>并行</strong>的，服务可能已经退出但负载均衡还在转发。sleep 15 秒让摘流量先完成，能彻底消除滚动更新时的 502。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>服务注册与健康检查</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>作用</th><th>关键参数</th></tr></thead><tbody><tr><td><b>就绪探针</b></td><td>决定<strong>是否接收流量</strong></td><td><code>initialDelaySeconds</code>、<code>failureThreshold</code></td></tr><tr><td><b>存活探针</b></td><td>决定是否<strong>重启容器</strong></td><td>失败 <b>3 次</b>触发重启</td></tr><tr><td><b>启动探针</b></td><td>慢启动保护（1.16+）</td><td><code>failureThreshold × periodSeconds</code> 是最长启动时间</td></tr><tr><td><b>服务注册</b></td><td>etcd/K8s DNS</td><td><strong>TTL 心跳</strong>，go-zero 默认自动</td></tr></tbody></table></div><p><b>探针的三条铁律</b>：</p><ul><li><strong>就绪探针不要依赖下游</strong>：如果 DB 挂了导致就绪探针失败，所有实例被摘流量 → 雪崩。就绪探针只检查<strong>自身是否可服务</strong>。</li><li><strong>存活探针要保守</strong>：过于敏感会导致频繁重启，重启期间不可用。设好 <code>failureThreshold: 3</code> 与足够的 <code>periodSeconds</code>。</li><li><strong>三个探针用不同端点或不同语义</strong>：至少存活探针要比就绪探针宽松，避免“有点慢就被重启”的连锁反应。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：滚动更新时出现 502 怎么解决？</summary><p>A：三个必配项——① <strong>preStop sleep</strong>（让注册中心先摘流量，通常 10~15 秒）；② <strong>terminationGracePeriodSeconds</strong> 要大于最长请求耗时（默认 30 秒，慢接口要调大）；③ <strong>maxUnavailable: 0</strong> 保证始终有可用实例。三者缺一都可能产生 502。另外要确认应用<strong>正确处理 SIGTERM</strong>——若进程收到信号立即退出，再长的宽限期也没用。</p></details><details><summary>Q：服务上线后 CPU 突然打满，怎么定位？</summary><p>A：Go 的利器是 <strong>pprof</strong>。三步——① 开启 <code>net/http/pprof</code>（<code>import _ &quot;net/http/pprof&quot;</code>）；② 抓 CPU profile：<code>go tool pprof http://host:port/debug/pprof/profile?seconds=30</code>；③ 用 <code>top</code> 与 <code>web</code> 命令看热点函数。注意<strong>要在问题发生时抓</strong>，事后抓不到。另配 <code>go tool pprof -http</code> 生成火焰图最直观。go-zero 可直接在配置里开启 pprof 端口。</p></details><details><summary>Q：日志把磁盘打满了怎么办？</summary><p>A：三层防护——① <strong>日志轮转</strong>：go-zero 的 <code>KeepDays</code> + <code>Compress</code>（压缩后体积约降 90%）；② <strong>容器层面限制</strong>：用 <code>emptyDir</code> 或日志采集到集中存储，不落本地盘；③ <strong>降级日志级别</strong>：生产用 <code>info</code>，排查时才临时开 <code>debug</code>。最重要的一条是<strong>不要在热路径打日志</strong>——高频循环里的一条 log 可能每秒产生几 MB。</p></details><details><summary>Q：多个服务的配置怎么统一管理？</summary><p>A：三种递进方案——① <strong>ConfigMap</strong>：最简单，但改配置要重启（或重新挂载）；② <strong>配置中心</strong>（Nacos/Apollo/etcd）：支持热更新，go-zero 可通过自定义 <code>conf.MustLoad</code> 接入；③ <strong>环境变量 + 模板</strong>：K8s 里最常见，镜像不变、靠环境变量区分环境。判据是<strong>是否需要热更新</strong>——只有频繁调整的开关类配置才值得上配置中心，数据库连接等稳定配置用 ConfigMap 足够。</p></details></div></section>
 </body>
 </html>

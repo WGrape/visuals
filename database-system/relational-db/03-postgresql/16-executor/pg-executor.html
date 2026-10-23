@@ -67,6 +67,26 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,30 +96,123 @@
   <p>火山模型（迭代器）、计划节点类型，以及 Parallel / Gather 并行执行。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#x1">火山模型</a><a href="#x2">节点类型</a><a href="#x3">并行查询</a><a href="#x4">JIT</a></nav>
+  <nav class="toc"><a href="#s1">① 火山模型（Volcano / Iterator）</a><a href="#s2">② 常见执行节点</a><a href="#s3">③ JIT 编译</a><a href="#s4">④ 并行执行与内存</a><a href="#s5">⑤ 常见问法</a></nav>
   <main class="content">
-<section id="x1"><h2>① 火山模型（Iterator）</h2>
-<p>执行器把计划树当成 <strong>拉取式（pull）迭代器</strong>：上层节点反复调用下层节点的 <code>ExecProcNode()</code> 获取“下一条元组”。每个节点实现 <code>Init / Exec / Done</code>。简单、统一，但每条元组一次函数调用开销大。</p>
+<section id="s1"><h2>① 火山模型（Volcano / Iterator）</h2>
+
+<p>PG 的执行器采用经典的<strong>火山模型</strong>：每个计划节点实现统一的迭代器接口，父节点通过 <code>next()</code> 向子节点<strong>拉取一行</strong>，逐层向上，直到顶层。</p>
+<pre><code>简化伪代码：
+ExecProcNode(node):
+    return node-&gt;ExecProcNode(node)      # 多态调用
+
+# 例如 NestLoop 的 next()：
+#   1. 从左子节点取一行（outer tuple）
+#   2. 用该行的连接键去右子节点取匹配行（inner tuple）
+#   3. 返回组合后的结果行；右子节点耗尽则回到步骤 1</code></pre>
+<figure class="fig">
+<svg viewBox="0 0 700 180" role="img" aria-label="火山模型与向量化对比">
+  <text x="170" y="22" fill="#e6edf3" font-size="12" text-anchor="middle">火山模型：一次一行（tuple-at-a-time）</text>
+  <rect x="60" y="40" width="220" height="40" rx="6" fill="rgba(188,140,255,.16)" stroke="#bc8cff"/>
+  <text x="170" y="65" fill="#e6edf3" font-size="12" text-anchor="middle">Limit</text>
+  <rect x="60" y="90" width="220" height="40" rx="6" fill="rgba(210,153,34,.16)" stroke="#d29922"/>
+  <text x="170" y="115" fill="#e6edf3" font-size="12" text-anchor="middle">Hash Join</text>
+  <rect x="60" y="140" width="100" height="30" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="110" y="160" fill="#e6edf3" font-size="11" text-anchor="middle">Seq Scan A</text>
+  <rect x="180" y="140" width="100" height="30" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="230" y="160" fill="#e6edf3" font-size="11" text-anchor="middle">Seq Scan B</text>
+  <text x="170" y="14" fill="#8b949e" font-size="10" text-anchor="middle">自顶向下 pull，每次 next() 返回一行</text>
+  <text x="510" y="22" fill="#e6edf3" font-size="12" text-anchor="middle">向量化：一次一批（batch）</text>
+  <rect x="400" y="40" width="220" height="40" rx="6" fill="rgba(188,140,255,.16)" stroke="#bc8cff"/>
+  <text x="510" y="65" fill="#e6edf3" font-size="12" text-anchor="middle">Limit</text>
+  <rect x="400" y="90" width="220" height="40" rx="6" fill="rgba(210,153,34,.16)" stroke="#d29922"/>
+  <text x="510" y="115" fill="#e6edf3" font-size="12" text-anchor="middle">Hash Join（批量）</text>
+  <rect x="400" y="140" width="100" height="30" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="450" y="160" fill="#e6edf3" font-size="11" text-anchor="middle">Scan（批）</text>
+  <rect x="520" y="140" width="100" height="30" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="570" y="160" fill="#e6edf3" font-size="11" text-anchor="middle">Scan（批）</text>
+  <text x="510" y="14" fill="#8b949e" font-size="10" text-anchor="middle">每次返回一批行，函数调用开销被摊薄</text>
+</svg>
+<figcaption>火山模型逐行处理（简单通用但函数调用多）；向量化按批处理（PG 正在逐步引入）</figcaption>
+</figure>
+<div class="grid3">
+<div class="card3"><h4>优点</h4><p>实现简单、通用性强、内存占用小（不需要物化中间结果）、天然支持 LIMIT 提前终止</p></div>
+<div class="card3"><h4>缺点</h4><p><strong>每行都要多次函数调用</strong>（虚函数调用开销）、无法充分利用 CPU 流水与 SIMD</p></div>
+<div class="card3"><h4>缓解</h4><p><strong>表达式 JIT 编译</strong>（PG 11+）：把 WHERE/聚合中的表达式编译成本地代码，复杂分析查询可提速 10%~30%</p></div>
+<div class="card3"><h4>趋势</h4><p>PG 正在推进<strong>向量化执行</strong>与列存（如 pg_analytics、ParadeDB 等生态项目）</p></div>
+</div>
+
 </section>
-<section id="x2"><h2>② 主要节点类型</h2>
+<section id="s2"><h2>② 常见执行节点</h2>
+
 <table>
-  <tr><th>类别</th><th>节点</th></tr>
-  <tr><td>扫描</td><td>Seq Scan / Index Scan / Bitmap Heap Scan / TID Scan</td></tr>
-  <tr><td>连接</td><td>Nested Loop / Hash Join / Merge Join</td></tr>
-  <tr><td>聚合</td><td>Agg（hash/sorted）/ GroupAggregate</td></tr>
-  <tr><td>排序</td><td>Sort / Unique / Limit</td></tr>
-  <tr><td>物化</td><td>Materialize / CTE Scan</td></tr>
+<tr><th>节点</th><th>作用</th><th>观察要点</th></tr>
+<tr><td>Seq Scan</td><td>顺序扫描全表</td><td>rows 实际返回、filter 过滤了多少行</td></tr>
+<tr><td>Index Scan / Index Only Scan</td><td>索引定位（后者不回表）</td><td>Index Only 需要 VM 已设置（VACUUM）</td></tr>
+<tr><td>Bitmap Index/Heap Scan</td><td>位图收集后按物理顺序回表</td><td>Recheck Cond（位图有损时需重查）</td></tr>
+<tr><td>Nested Loop</td><td>嵌套循环，内外表逐行匹配</td><td><strong>loops</strong> 很大说明内表被扫了很多次</td></tr>
+<tr><td>Hash Join / Hash</td><td>小表建哈希表，大表探测</td><td><strong>Batches&gt;1 表示落盘</strong></td></tr>
+<tr><td>Merge Join</td><td>两侧有序后归并</td><td>若前面有 Sort 节点，排序代价要算进去</td></tr>
+<tr><td>Aggregate / HashAggregate / GroupAggregate</td><td>聚合</td><td>HashAgg 也要看是否落盘</td></tr>
+<tr><td>Sort</td><td>排序</td><td><strong>external merge Disk</strong> 表示用了临时文件</td></tr>
+<tr><td>Gather / Gather Merge</td><td>并行查询的汇总节点</td><td>worker 数与数据倾斜</td></tr>
+<tr><td>Materialize / CTE Scan</td><td>物化中间结果</td><td>重复扫描时有用，但会占内存</td></tr>
 </table>
+<pre><code>EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+SELECT o.status, count(*) FROM orders o
+WHERE o.created_at &gt;= '2026-10-01' GROUP BY o.status;
+
+-- 典型输出
+-- HashAggregate  (actual time=.. rows=5 loops=1)
+--   Group Key: o.status
+--   Batches: 1  Memory Usage: 24kB
+--   -&gt;  Seq Scan on orders o (actual rows=120000 loops=1)
+--        Filter: (created_at &gt;= '2026-10-01'::date)
+--        Rows Removed by Filter: 880000    ← 过滤掉了 88 万行</code></pre>
+<div class="callout tip"><b><code>Rows Removed by Filter</code> 是重要信号</b>：它显示<strong>扫描了但被过滤掉的行数</strong>。若该值远大于返回行数，说明<strong>扫描范围过大</strong>——应考虑加索引或加更精确的条件来减少扫描量。</div>
+
 </section>
-<section id="x3"><h2>③ 并行查询</h2>
-<p>大查询可并行：<code>Gather</code> 节点把工作分发给多个 <strong>Parallel Worker</strong>，各自做 Parallel Seq Scan / Parallel Hash，再汇总。受 <code>max_parallel_workers</code>、表大小阈值控制。</p>
-<pre><code>SET max_parallel_workers_per_gather = 4;
-EXPLAIN SELECT count(*) FROM big_table;  -- 出现 Gather / Parallel Seq Scan</code></pre>
+<section id="s3"><h2>③ JIT 编译</h2>
+
+<pre><code>-- 相关参数
+SHOW jit;                       -- on（PG 11+ 默认开启，但只在代价够高时触发）
+SHOW jit_above_cost;            -- 100000：代价超过此值才考虑 JIT
+SHOW jit_inline_above_cost;     -- 500000
+SHOW jit_optimize_above_cost;   -- 500000
+SHOW jit_provider;              -- llvmjit
+
+-- 观察是否用了 JIT
+EXPLAIN (ANALYZE) SELECT ...;
+-- 计划后出现：JIT: Functions: 12, Options: Inlining true, Optimization true...</code></pre>
+<div class="grid3">
+<div class="card3"><h4>什么场景有用</h4><p><strong>复杂分析型查询</strong>：大量表达式计算、聚合、多列 WHERE——可提速 10%~30%</p></div>
+<div class="card3"><h4>什么场景有害</h4><p><strong>短小 OLTP 查询</strong>：编译开销（毫秒级）可能超过省下的时间</p></div>
+<div class="card3"><h4>调优</h4><p>OLAP 库调低 <code>jit_above_cost</code>；OLTP 库可直接 <code>SET jit = off</code></p></div>
+<div class="card3"><h4>依赖</h4><p>需要安装 LLVM 与 <code>postgresql-llvmjit</code> 包，某些发行版默认未装</p></div>
+</div>
+
 </section>
-<section id="x4"><h2>④ JIT 编译</h2>
-<p>PG 11+ 支持 LLVM JIT，把表达式求值、元组变形编译成机器码，在大扫描/多表达式查询中显著降低 CPU 开销（<code>jit=on</code>）。</p>
+<section id="s4"><h2>④ 并行执行与内存</h2>
+
+<p>并行查询由 <strong>leader + worker</strong> 组成：<code>Gather</code> 节点负责汇总。每个 worker 是独立进程，<strong>独占一份 work_mem</strong>。</p>
+<pre><code>-- 计划中的并行
+-- Gather  (cost=.. rows=..) (actual time=.. rows=..)
+--   Workers Planned: 2
+--   Workers Launched: 2
+--   -&gt;  Parallel Seq Scan on big_table
+--        Filter: (...)
+--        Rows Removed by Filter: ...</code></pre>
+<div class="callout warn"><b>内存核算：</b>并行查询的总内存 ≈ <strong>worker 数 × work_mem × 排序/哈希节点数</strong>。因此<strong>调大并行度必须同步评估内存</strong>，否则容易 OOM 或大量落盘。<strong>OLTP 高并发场景建议把 <code>max_parallel_workers_per_gather</code> 调到 0~2</strong>，把资源让给并发请求。</div>
+
 </section>
-</main>
+<section id="s5"><h2>⑤ 常见问法</h2>
+<div class="qa"><b>Q：什么是火山模型？有什么优缺点？</b><p>A：火山模型（Volcano/Iterator Model）中，每个执行节点实现统一接口，父节点通过 <code>next()</code> <strong>逐行</strong>向子节点拉取数据。<strong>优点</strong>：实现简单通用、内存占用小（不需物化中间结果）、天然支持 <strong>LIMIT 提前终止</strong>（取够就停）、易于组合各种算子；<strong>缺点</strong>：<strong>每行都要经过多次虚函数调用</strong>，函数调用与解释执行的开销大，无法充分利用 CPU 流水与 SIMD。<strong>缓解</strong>：PG 11+ 引入<strong>表达式 JIT 编译</strong>，把 WHERE/聚合中的表达式编译成本地机器码，复杂分析查询可提速 10%~30%。</p></div>
+<div class="qa"><b>Q：EXPLAIN 里 loops 很大说明什么？</b><p>A：<code>loops</code> 表示该节点<strong>被父节点重复执行的次数</strong>，典型出现在 <strong>Nested Loop 的内侧节点</strong>：外表每返回一行，内表就要重新扫描一次。<strong>判断方法</strong>：节点的<strong>实际总耗时 = actual time × loops</strong>。若 loops 达到几千上万，即使单次很快，总代价也很可观。<strong>对策</strong>：① 给内表的连接键<strong>建索引</strong>（把内表扫描变成索引查找）；② 让优化器改用 <strong>Hash Join</strong>（调大 work_mem 或补统计信息使其估算正确）；③ 减少外表返回的行数（先过滤）。</p></div>
+<div class="qa"><b>Q：JIT 对查询有帮助吗？什么时候该关？</b><p>A：<strong>有帮助的场景</strong>：<strong>复杂分析型查询</strong>——涉及大量表达式计算、聚合、多列 WHERE 条件，JIT 把表达式编译成本地代码，通常可提速 <strong>10%~30%</strong>。<strong>该关的场景</strong>：<strong>短小 OLTP 查询</strong>（毫秒级），因为 JIT <strong>编译本身有毫秒级开销</strong>，可能超过省下的时间；此外若未安装 LLVM 支持，JIT 不可用。<strong>调优：OLAP 库调低 <code>jit_above_cost</code> 让更多查询受益；OLTP 库直接 <code>SET jit = off</code>。</strong></p></div>
+<div class="qa"><b>Q：并行查询是怎么执行的？内存怎么估？</b><p>A：由 <strong>leader 进程 + 若干 worker 进程</strong>协作：计划中出现 <code>Gather</code> / <code>Gather Merge</code> 节点，worker 并行扫描/聚合，结果汇总到 leader。每个 worker 是<strong>独立进程，各自独占一份 work_mem</strong>。<strong>内存估算</strong>：总内存 ≈ <strong>worker 数 × work_mem × 排序/哈希节点数</strong>，因此<strong>提高并行度必须同步评估内存</strong>，否则会 OOM 或大量落盘。<strong>调优：OLAP 场景调大 <code>max_parallel_workers_per_gather</code>（4~8）；OLTP 高并发场景调到 0~2，把资源让给并发请求。</strong></p></div>
+<div class="qa"><b>Q：Rows Removed by Filter 很大说明什么？</b><p>A：它表示<strong>扫描到但被 WHERE 条件过滤掉的行数</strong>。若远大于最终返回行数（如扫 100 万行只返回 1000 行），说明<strong>扫描范围过大、过滤效率低下</strong>。<strong>对策</strong>：① 建<strong>更精准的索引</strong>，让过滤条件下推到索引层；② 增加更精确的查询条件；③ 若是<strong>部分索引</strong>的适用场景（如只查 status='pending'），可建部分索引大幅缩小扫描量；④ 考虑<strong>分区表</strong>，让查询只扫相关分区；⑤ 若过滤列与物理顺序相关，<strong>BRIN</strong> 索引也能显著减少扫描。</p></div>
+<div class="qa"><b>Q：执行器和优化器是怎么配合的？</b><p>A：<strong>分工</strong>：优化器（Planner）<strong>只负责选择计划</strong>——枚举路径、估算代价、输出一棵计划树（由 Scan/Join/Aggregate/Sort 等节点组成）；执行器（Executor）<strong>负责按计划取数</strong>——以火山模型从根节点递归调用 <code>next()</code>，各节点按需向下拉取。<strong>关键点：执行器不做优化决策</strong>，它<strong>忠实执行</strong>优化器选出的计划。因此<strong>「执行慢」的根因通常在计划</strong>（扫描方式、JOIN 顺序、是否落盘），而不是执行器本身——排查时应先看 <code>EXPLAIN (ANALYZE)</code> 找出代价最高的节点。</p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

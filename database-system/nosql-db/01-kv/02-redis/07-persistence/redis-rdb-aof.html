@@ -540,6 +540,24 @@
     .arrow { width: 28px; }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -1127,5 +1145,32 @@
   });
 </script>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 三种持久化怎么选</h2><p>先把结论钉死：<b>生产环境几乎总是「RDB + AOF 混合」</b>。RDB 负责快速恢复和冷备，AOF 负责把丢失窗口压到 1 秒内。只开 RDB 会丢最后一次快照之后的所有写；只开 AOF 恢复慢、文件大、历史版本管理麻烦。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>丢失窗口</th><th>恢复速度</th><th>文件体积</th><th>适用场景</th></tr></thead><tbody><tr><td><b>只开 RDB</b></td><td>最后一次快照之后全部（分钟级）</td><td><b>最快</b>（直接 mmap 加载）</td><td>最小（二进制压缩）</td><td>缓存、可重建数据、从库</td></tr><tr><td><b>只开 AOF</b></td><td><code>appendfsync</code> 决定（≤1s）</td><td>慢（重放所有写命令）</td><td>最大（文本命令）</td><td>几乎不单独用</td></tr><tr><td><b>RDB + AOF（推荐）</b></td><td>≤1 秒</td><td>快（AOF 头部是 RDB 格式）</td><td>中</td><td><b>有持久化要求的生产环境</b></td></tr><tr><td><b>全关</b></td><td>全部丢失</td><td>—</td><td>0</td><td>纯缓存，且能容忍冷启动</td></tr></tbody></table></div><ul><li>判定口诀：<b>数据能不能重建</b>。能重建（缓存、会话、排行榜）→ RDB 就够，甚至全关换性能；不能重建（订单、余额、配额）→ 必须 AOF 且 <code>appendfsync everysec</code>。</li><li><b>混合持久化的关键开关</b>是 <code>aof-use-rdb-preamble yes</code>（Redis 4.0+，默认开）。开启后 <code>BGREWRITEAOF</code> 生成的文件<b>前半段是 RDB 二进制、后半段是增量 AOF 命令</b>，兼顾体积和恢复速度。</li><li>不要指望 Redis 持久化替代数据库。它解决的是「进程重启不丢」，不解决「误删、逻辑错误、机房故障」——后者靠从库 + 异地备份。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数与命令（可直接照抄）</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>建议</th><th>说明</th></tr></thead><tbody><tr><td><code>save</code></td><td><code>3600 1 / 300 100 / 60 10000</code></td><td><code>save 900 1</code> 或按需放宽</td><td>多条是「或」关系，任意一条满足就触发 BGSAVE；写空字符串 <code>save ""</code> 即关闭 RDB</td></tr><tr><td><code>stop-writes-on-bgsave-error</code></td><td>yes</td><td><b>改成 no</b>（配监控）</td><td>保持 yes 时快照失败会让 Redis 拒绝所有写，很多线上事故源于此</td></tr><tr><td><code>rdbcompression</code></td><td>yes</td><td>yes</td><td>LZF 压缩，CPU 换体积；字符串值大时收益明显</td></tr><tr><td><code>appendonly</code></td><td>no</td><td><b>yes</b></td><td>开启 AOF</td></tr><tr><td><code>appendfsync</code></td><td>everysec</td><td><b>everysec</b></td><td><code>always</code> 每次写都 fsync（最安全但吞吐掉一半）；<code>no</code> 交给 OS（可能丢 30 秒）</td></tr><tr><td><code>auto-aof-rewrite-percentage</code></td><td>100</td><td>100~200</td><td>相对上次 rewrite 后体积的增长百分比</td></tr><tr><td><code>auto-aof-rewrite-min-size</code></td><td>64mb</td><td>1gb~4gb</td><td>太小会导致小实例频繁 rewrite</td></tr><tr><td><code>aof-use-rdb-preamble</code></td><td>yes</td><td>yes</td><td>混合格式，Redis 4.0+ 默认开</td></tr><tr><td><code>no-appendfsync-on-rewrite</code></td><td>no</td><td>yes（有从库时）</td><td>rewrite 期间不 fsync，避免与主进程争磁盘 IO，代价是该期间最多丢更多数据</td></tr></tbody></table></div><p><b>运维命令</b></p><pre><code># —— 运行时观察 ——
+redis-cli info persistence | grep -E 'rdb_last_bgsave|aof_enabled|aof_last_bgrewrite|aof_rewrite_in_progress|rdb_changes_since'
+#   rdb_last_bgsave_status:ok          &lt;-- 必须是 ok，err 说明磁盘/权限/内存问题
+#   rdb_changes_since_last_save:12345  &lt;-- 距上次快照的写次数，用于估算 RDB 丢失量
+#   aof_rewrite_in_progress:0          &lt;-- 为 1 说明正在 rewrite，磁盘 IO 会升高
+#   aof_last_bgrewrite_status:ok
+
+redis-cli info stats | grep -E 'latest_fork_usec'
+#   latest_fork_usec:12345             &lt;-- 上次 fork 耗时(微秒)。&gt;100000(100ms) 就该警惕
+
+# —— 手动触发 ——
+redis-cli bgsave                 # 后台快照（主进程不阻塞）
+redis-cli bgrewriteaof           # 后台 AOF 重写
+redis-cli config set appendonly yes    # 在线开启 AOF（7.0 前需先改配置再重启才持久）
+
+# —— 修复损坏的 AOF ——
+cp appendonlydir/appendonly.aof.1.incr.aof /tmp/backup.aof    # 先备份！
+redis-check-aof --fix appendonlydir/appendonly.aof.1.incr.aof
+#   原理：从尾部往前找，截断最后一条不完整/非法的命令，最多丢一条写
+
+# —— 恢复演练（必须定期做）——
+# 1) 停实例  2) 把 RDB/AOF 放到 dir 指定目录  3) 启动  4) dbsize 核对
+redis-cli --stat                 # 观察恢复期间的 keys 增长</code></pre><p class="muted">Redis 7.0 起 AOF 从单文件改为 <b>appendonlydir/</b> 多文件（base + incr + manifest），排查时别再只找 <code>appendonly.aof</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b>写请求突然全部报错 MISCONF Redis is configured to save RDB snapshots...</b> → 快照失败后 <code>stop-writes-on-bgsave-error yes</code> 触发写保护。先 <code>config set stop-writes-on-bgsave-error no</code> 恢复服务，再去查真实原因（磁盘满 / 权限 / fork 失败）。</li><li><b>fork 耗时高、延迟尖刺</b> → <code>latest_fork_usec</code> 大于 100ms 就要处理。常见原因：开了 Transparent Huge Pages（THP，会把 fork 成本放大数倍，必须关）、实例内存过大（单实例建议 ≤10GB 以便快速 fork）、虚拟机内存超售。</li><li><b>BGSAVE 期间内存突然翻倍</b> → 这是 <b>copy-on-write</b> 的正常代价：写越密集，父子进程共享的页被复制得越多。峰值最坏可达 2 倍。所以 Redis 内存上限要按 <b>maxmemory ≤ 物理内存的一半</b> 来设，留出 fork 余量。</li><li><b>磁盘被 AOF 撑满</b> → 先看是不是 rewrite 没触发（<code>auto-aof-rewrite-min-size</code> 设太大，或 <code>appendfsync</code> 压力导致 rewrite 排队）。紧急处理：手动 <code>bgrewriteaof</code> + 清理，长期要加磁盘告警（≥80%）。</li><li><b>重启后数据比预期少</b> → 检查是否<b>开着 AOF 却用 RDB 文件恢复</b>：只要 <code>appendonly yes</code>，Redis 启动时<b>只认 AOF</b>，会忽略 dump.rdb。反过来同理。这是最常见的「数据变少」原因。</li><li><b>AOF 文件损坏无法启动</b> → 用 <code>redis-check-aof --fix</code> 截断修复，最多丢最后一条命令。修复前务必备份。</li><li><b>从库全量同步（RDB 传输）把主库拖垮</b> → 加大 <code>repl-backlog-size</code>（默认 1MB 太小，生产建议 128MB+），避免短暂断开就触发全量同步。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>两句话讲清底层：<b>RDB 是某一时刻的内存快照</b>（fork + COW，子进程写新文件）；<b>AOF 是写命令的追加日志</b>（先执行命令再记日志，重启时重放）。两者对性能的影响点完全不同。</p><div class="table-wrap"><table><thead><tr><th>维度</th><th>RDB</th><th>AOF</th></tr></thead><tbody><tr><td>代价发生在哪</td><td><b>周期性</b>：fork（阻塞主线程，与内存大小成正比）+ 子进程写盘</td><td><b>持续</b>：每次写的 <code>write(2)</code> + 每秒一次 <code>fsync</code></td></tr><tr><td>对延迟的影响</td><td>偶发尖刺（fork 期间）</td><td>持续小开销；<code>always</code> 时吞吐可掉 50%</td></tr><tr><td>代价随什么增长</td><td>随<b>内存大小</b>增长</td><td>随<b>写 QPS</b> 增长</td></tr><tr><td>文件增长</td><td>恒定（就是内存大小）</td><td>持续增长，靠 rewrite 压缩</td></tr><tr><td>最坏丢失</td><td>最后一次 save 之后全部</td><td><code>everysec</code> 时 ≤1 秒</td></tr></tbody></table></div><details><summary>为什么 <code>appendfsync everysec</code> 是最优解？</summary><p>因为它把「安全」和「性能」的冲突点放在了最合适的位置。<code>always</code> 每次写都 fsync，把 Redis 的吞吐压到接近磁盘 IOPS（通常掉 50% 以上）；<code>no</code> 完全交给 OS，页缓存回刷周期可能 30 秒，断电就丢 30 秒数据。<code>everysec</code> 是后台线程每秒一次 fsync：<b>最多丢 1 秒</b>，而 fsync 的开销被摊到后台线程，主线程几乎无感。所以它是几乎所有生产配置的默认值。注意「最多丢 1 秒」的前提是 <b>Redis 进程崩溃</b>而不是<b>fsync 本身失败</b>——后者 Redis 会主动报错。</p></details><details><summary>AOF 为什么需要 rewrite？不 rewrite 会怎样？</summary><p>因为 AOF 是<b>追加</b>的，对同一个 key 写 100 次就记 100 条命令，但恢复时只需要最后一条。文件会无限膨胀（一个计数器 key 可以让 AOF 涨到几十 GB 而实际数据只有几 KB），恢复时要重放所有命令，可能要几十分钟。rewrite 的做法是<b>读取当前内存中的值，用最少的命令重建一份等价的 AOF</b>（同一 key 只写一条），文件立刻缩小一个数量级。rewrite 由子进程完成，不阻塞主进程。触发条件是「当前体积比上次 rewrite 后增长了 <code>auto-aof-rewrite-percentage</code>%」且「体积超过 <code>auto-aof-rewrite-min-size</code>」。</p></details><details><summary>fork 到底阻塞多久？为什么 THP 是坑？</summary><p>fork 本身要<b>复制页表</b>，耗时与<b>内存大小</b>成正比（不是与数据量）：经验值约 <b>每 GB 内存 10~20ms</b>（物理机），所以 10GB 实例 fork 一次约 100~200ms——这段时间 Redis <b>完全不响应</b>。开启 Transparent Huge Pages（THP，Linux 默认 often 开启）后，页变大但<b>页表项和 COW 粒度变粗</b>，fork 耗时和 COW 复制量都会显著上升，实测可放大 2~5 倍。所以 Redis 官方明确要求 <code>echo never > /sys/kernel/mm/transparent_hugepage/enabled</code>。另外 Xen 等虚拟化平台 fork 更慢，这也是建议单实例内存控制在 10GB 以内的原因。</p></details><details><summary>既然有持久化，为什么还要从库和备份？</summary><p>因为持久化只解决「进程重启」，不解决另外三类问题：① <b>误操作</b>——<code>FLUSHALL</code> 会被 AOF 忠实记录并重放，恢复后依然是空的；② <b>逻辑错误</b>——代码 bug 写坏了数据，AOF 里也是坏数据；③ <b>主机/机房故障</b>——本地磁盘一起没。正确做法是「持久化（防重启）+ 从库（防单机故障，最好是跨机架）+ 定期 RDB 冷备到对象存储并保留 7~30 天（防误删和逻辑错误，可回滚到历史时点）」三层。只做一层都不能称为「数据安全」。</p></details></div></section>
 </body>
 </html>

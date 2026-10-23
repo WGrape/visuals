@@ -265,6 +265,24 @@
     border-bottom: 1px dashed var(--highlight);
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -573,6 +591,54 @@
 
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>分片数怎么算（有公式，别拍脑袋）</h2><p><b>容量规划</b></p><pre><code>经验公式：
+  主分片数 ≈ ceil(预计数据总量(GB) / 单分片目标容量(GB))
+
+单分片目标容量：
+  搜索场景    20 ~ 40 GB   （常见建议上限 50GB）
+  日志/时序   50 ~ 100 GB  （写入密集、查询简单时可放宽）
+  总 shard 数上限经验值：每 GB 堆内存 ≤ 20 个分片
+
+例：预计 600 GB 搜索数据
+  600 / 30 = 20 个主分片
+  若 3 个数据节点、每节点 8GB 堆（共 24GB）：20 个主分片 &lt;&lt; 24*20=480，很安全
+
+反例（典型事故）：
+  每天建一个索引、默认 5 分片 1 副本、单索引只有 200MB
+  -&gt; 一年 365 * 5 * 2 = 3650 个分片，每个只有几十 MB
+  -&gt; 堆被元数据吃光，集群越来越慢，最终 OOM</code></pre><div class="table-wrap"><table><thead><tr><th>参数 / 事实</th><th>说明</th></tr></thead><tbody><tr><td><b>number_of_shards</b></td><td><b>创建后不可修改</b>（除非 shrink/split/reindex）</td></tr><tr><td><b>number_of_replicas</b></td><td><b>可随时修改</b>，立即生效</td></tr><tr><td>默认（7.x）</td><td>1 主 1 副本；8.x 起默认副本仍为 1，且默认开启安全</td></tr><tr><td>分片 = Lucene index</td><td>每个分片都是一个完整的 Lucene 索引，有独立的段文件、缓存和文件句柄</td></tr><tr><td>副本作用</td><td>高可用 + 提升<b>读</b>吞吐；<b>不提升写吞吐</b>（写要同步到所有副本）</td></tr><tr><td><b>_routing</b></td><td>指定路由键可把相同租户/用户的数据固定打到同一分片，实现路由级剪枝</td></tr><tr><td>堆内存建议</td><td><b>不超过 31GB</b>（超过后 JVM 压缩指针失效，可用内存反而变少），且不超过物理内存的一半</td></tr></tbody></table></div><p><b>副本数怎么定</b>：1 个副本可容忍 1 个节点故障，是最常见配置；读多写少且要求更高可用时设 2；<b>批量导入期间先设 0</b>，导入完再改回来，这是最有效的一招。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>常用命令清单</h2><p><b>运维命令</b></p><pre><code># 建索引时就定好分片（之后主分片改不了）
+PUT /orders
+{
+  "settings": {
+    "number_of_shards": 6,
+    "number_of_replicas": 1,
+    "refresh_interval": "30s",          # 写入密集时调大，减少段生成
+    "translog.durability": "async",     # 批量导入时可用，牺牲一点安全性
+    "translog.sync_interval": "10s"
+  }
+}
+
+# 批量导入三板斧：副本设 0 + 刷新间隔调大 + 批量大小 5~15MB
+PUT /orders/_settings { "number_of_replicas": 0, "refresh_interval": "-1" }
+# ... 导入 ...
+PUT /orders/_settings { "number_of_replicas": 1, "refresh_interval": "30s" }
+
+# 查看分片分布与健康
+GET _cat/shards/orders?v
+GET _cat/allocation?v
+GET _cluster/health?level=indices
+
+# 分片未分配：一定要用它看原因，别猜
+GET _cluster/allocation/explain
+{ "index": "orders", "shard": 0, "primary": true }
+
+# 缩容分片数（必须是原分片数的因子，且索引要先只读）
+POST /orders/_shrink/orders_v2   { "settings": { "index.number_of_shards": 2 } }
+
+# 磁盘水位导致的只读：先恢复分配再清理
+PUT _cluster/settings { "transient": { "cluster.routing.allocation.disk.threshold_enabled": false } }</code></pre></div></section>
 <footer>
   交互演示 | Elasticsearch Shards &amp; Replicas Explained
 </footer>

@@ -15,6 +15,32 @@ GROUP BY GROUPING SETS ((region, product), (region), ());</code></pre>
 <section class="panel"><h2>边界与误区</h2><p>SQL 方言对 GROUPING、ROLLUP 和结果排序有差异。多个分组层级可能增加计算与输出行数，报表展示仍需显式 ORDER BY。</p></section>
 <section class="panel"><h2>性能与正确性的核对顺序</h2><p>先用少量输入行手算每个层级的总和和输出行数，再执行 SQL 比较；若业务允许 source product 为 NULL，要加一条真实 NULL 样本检查展示标签。GROUPING SETS 的结果可能在同一个地区出现明细、小计与全局汇总，图表层如果简单再次 SUM，容易重复计数。因此应把层级标志作为数据的一部分传给展示层，禁止把不同层级混在一组中二次汇总。</p><p>生产数据上还要看分组基数与内存需求。多个维度组合可能生成大量聚合桶；先估计各组合的唯一键数，再看执行计划是否溢写磁盘。若报表频繁查询同一层级，可评估物化汇总，但要定义刷新延迟与源数据更正策略，避免用户看到不同层级的数字彼此对不上。</p></section>
 <section class="panel" data-depth-note><h2>把层级作为明确字段传给前端</h2><p>汇总结果最好增加一个可解释的层级标志，例如“明细”“地区小计”“全局总计”，而不是仅靠哪些列为 NULL 猜测。这样源数据真的含 NULL 时仍可正确展示，也能防止前端把三个层级再次混合求和。报表导出时要决定小计是否计入筛选后的分页；如果只在当前页重新合计，数字可能与全量总计不符。对物化汇总还要记录刷新时间：明细实时更新、小计延迟十分钟，用户看到的层级数字可能暂时不一致，需要在页面或 API 中标明。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：什么时候该用 GROUPING SETS</h2><p>一句话判据：<b>一次扫描，出多个不同粒度的汇总行</b>。当你需要的小计维度彼此不是包含关系（既不是 ROLLUP 那种逐级上卷，也不是 CUBE 那种全组合）时，就该用它。</p><div class="table-wrap"><table><thead><tr><th>写法</th><th>产生的分组</th><th>适用场景</th><th>扫描次数</th></tr></thead><tbody><tr><td><code>GROUP BY GROUPING SETS ((a),(b),())</code></td><td>a 小计 / b 小计 / 全表总计</td><td>维度平级、只要指定几种</td><td>1 次</td></tr><tr><td><code>GROUP BY ROLLUP (a,b)</code></td><td>(a,b) / (a) / ()</td><td>维度有层级，逐级上卷</td><td>1 次</td></tr><tr><td><code>GROUP BY CUBE (a,b)</code></td><td>(a,b) / (a) / (b) / ()</td><td>所有维度组合都要</td><td>1 次</td></tr><tr><td><code>UNION ALL</code> 多个 GROUP BY</td><td>手工指定</td><td>老版本数据库兼容写法</td><td>N 次（每个分支一次）</td></tr></tbody></table></div><ul><li>识别信号一：报表要「分地区小计 + 分品类小计 + 一个总计」，但地区与品类没有层级关系 → GROUPING SETS。</li><li>识别信号二：你现在写了 3 个 UNION ALL，每个只是 GROUP BY 不同 → 改成 GROUPING SETS，扫描次数从 3 降到 1。</li><li>识别信号三：只用 ROLLUP 却要删掉中间层级 → 不要硬凑，直接用 GROUPING SETS 枚举。</li></ul></section><section class="panel"><h2>第二层 · 参数·命令·量化：语法、支持度与区分 NULL 的关键函数</h2><p>核心难点只有一个：<b>小计行的汇总列是 NULL，但原始数据的 NULL 也是 NULL</b>——必须用 <code>GROUPING()</code> 区分。</p><p><b>GROUPING SETS 标准写法与 GROUPING() 用法</b></p><pre><code>-- 标准写法：一次扫描出三种粒度
+SELECT
+  region,
+  category,
+  SUM(amount)          AS total,
+  GROUPING(region)     AS g_region,   -- 该列被小计聚合掉 = 1，否则 0
+  GROUPING(category)   AS g_category
+FROM sales
+GROUP BY GROUPING SETS ((region), (category), ())
+ORDER BY g_region, g_category, region, category;
+
+-- 把「小计产生的 NULL」替换成可读标签
+SELECT
+  CASE WHEN GROUPING(region)   = 1 THEN 'ALL' ELSE region   END AS region,
+  CASE WHEN GROUPING(category) = 1 THEN 'ALL' ELSE category END AS category,
+  SUM(amount) AS total
+FROM sales
+GROUP BY GROUPING SETS ((region), (category), ())
+ORDER BY region, category;</code></pre><div class="table-wrap"><table><thead><tr><th>数据库</th><th>是否支持 GROUPING SETS</th><th>备注</th></tr></thead><tbody><tr><td>PostgreSQL 9.5+</td><td>✅ 完整支持</td><td>支持 <code>GROUPING SETS / ROLLUP / CUBE / GROUPING()</code></td></tr><tr><td>Oracle 9i+</td><td>✅ 完整支持</td><td><code>GROUPING_ID()</code> 可用，可一次算出分组编号</td></tr><tr><td>SQL Server 2008+</td><td>✅ 完整支持</td><td>写法相同</td></tr><tr><td>MySQL 5.7 / 8.0</td><td>❌ 不支持</td><td>只有 <code>WITH ROLLUP</code>；多维度小计要写 UNION ALL</td></tr><tr><td>Hive 0.10+ / Spark SQL</td><td>✅ 支持</td><td>配合 <code>GROUPING__ID</code>（注意是双下划线）</td></tr><tr><td>ClickHouse</td><td>⚠️ 部分</td><td>用 <code>WITH ROLLUP / WITH CUBE / WITH TOTALS</code> 代替</td></tr></tbody></table></div><p class="muted">量化口径：GROUPING SETS 相对 N 个 UNION ALL，<b>逻辑读次数约为 1/N</b>（同一份基表只扫一次）；但当分组数很多时，单次扫描的内存占用会上升，需留意 <code>work_mem</code>。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界：最容易出错的四个地方</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>怎么查 / 怎么办</th></tr></thead><tbody><tr><td>小计行和真 NULL 行混在一起分不清</td><td>直接用 <code>IS NULL</code> 判断分组列</td><td>改用 <code>GROUPING(col) = 1</code> 判断；MySQL 无此函数，需自己加标记列</td></tr><tr><td>结果行数比预期多</td><td>GROUPING SETS 会为每个分组各出一批行</td><td>先单独跑 <code>SELECT COUNT(*) FROM (各分组行数)</code> 加总核对</td></tr><tr><td>ORDER BY 后小计行位置乱跑</td><td>NULL 的排序位置各库不同（PG 默认 NULL 最大，MySQL 最小）</td><td>显式写 <code>ORDER BY GROUPING(region), region</code>，或 <code>NULLS LAST</code></td></tr><tr><td>加了 WHERE 后小计消失</td><td>WHERE 在聚合前过滤，HAVING 在聚合后过滤</td><td>过滤明细用 WHERE；过滤小计行用 HAVING 或外层再包一层</td></tr></tbody></table></div><ul><li><b>排查顺序：</b>先看行数对不对 → 再看 NULL 是真 NULL 还是小计 → 再核对 ORDER BY → 最后看过滤条件放错层。</li><li><b>边界一：</b>GROUPING SETS 里写 <code>()</code> 表示「全表总计」，别漏。</li><li><b>边界二：</b>一个 <code>GROUPING SETS</code> 里最多分组数受数据库限制（Oracle 上限 4096 列组合），超过要拆查询。</li><li><b>边界三：</b>与 <code>DISTINCT</code>、窗口函数混用时先跑小样本验证语义。</li></ul><p><b>行数核对</b></p><pre><code>-- 快速核对：各分组分别有多少行，加总应等于 GROUPING SETS 的总行数
+SELECT 'region' AS g, COUNT(*) FROM (SELECT region FROM sales GROUP BY region) t
+UNION ALL
+SELECT 'category', COUNT(*) FROM (SELECT category FROM sales GROUP BY category) t
+UNION ALL
+SELECT 'total', 1;</code></pre></section>
+<section class="panel"><h2>第四层 · 原理与取舍：为什么它比 UNION ALL 好，代价是什么</h2><p>本质：<b>UNION ALL 是每个分支各扫一次基表；GROUPING SETS 只扫一次，在聚合阶段把同一行投放到多个分组</b>。优化器实现上通常有两种做法——</p><div class="table-wrap"><table><thead><tr><th>实现方式</th><th>做法</th><th>优点</th><th>代价</th></tr></thead><tbody><tr><td>多次扫描 + 合并</td><td>内部展开成多个聚合再 UNION</td><td>实现简单，老优化器就能做</td><td>收益有限，主要省 SQL 书写</td></tr><tr><td>单次扫描 + 多分组投放</td><td>一行数据同时写入多个分组的聚合状态</td><td>I/O 与 CPU 显著下降</td><td>需要同时维护 N 组聚合状态，内存上升</td></tr></tbody></table></div><details><summary>为什么有了 ROLLUP 还要 GROUPING SETS？</summary><p>ROLLUP 只能表达「有层级的上卷」(a,b) → (a) → ()。当维度是平级的、或者你只要其中几种组合时，ROLLUP 会多出不需要的中间层级，只能靠外层过滤——那不如直接枚举 GROUPING SETS。</p></details><details><summary>MySQL 上怎么替代？</summary><p>MySQL 8.0 只有 WITH ROLLUP。要「多粒度小计」就老老实实写 UNION ALL，或者把结果在应用层拼装；也可以先 GROUP BY 到一张汇总宽表（明细已经聚合过一次）再在汇总表上做多次查询，成本会低很多。</p></details><details><summary>代价是什么，什么时候不该用？</summary><p>分组数越多，单次扫描要维护的聚合状态越多。如果分组数超过十几组、且基表极大，内存可能成为瓶颈。这种情况下可以拆成两三个 GROUPING SETS 分别跑，反而更稳。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>汇总行的 product 为 NULL，能断定原始 product 没有值吗？</summary><p>不能。它可能只是该汇总层级未按 product 分组；可用 GROUPING(product) 等标志区分。</p></details></section>
 <footer>继续阅读：<a href="group-by-and-aggregation.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

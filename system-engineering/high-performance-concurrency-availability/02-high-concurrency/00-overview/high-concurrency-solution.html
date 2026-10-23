@@ -311,6 +311,24 @@
             .topbar { padding:0 .8rem; gap:.8rem; }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -1006,5 +1024,42 @@ window.addEventListener('resize', () => {
 });
 </script>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>分层防护：每一层能扛多少、代价是什么</h2><p>高并发不是某一层的银弹，而是<b>把压力逐层削掉</b>。每一层都有明确的量级上限和代价，照着这张表做容量规划。</p><div class="table-wrap"><table><thead><tr><th>层</th><th>手段</th><th>能扛的量级（单机/单实例）</th><th>代价</th></tr></thead><tbody><tr><td>DNS / CDN</td><td>静态资源全部下沉 + 边缘缓存</td><td><b>TB 级</b>流量，命中率 90%+ 时源站只剩 10%</td><td>缓存失效策略复杂；动态内容不能缓存</td></tr><tr><td>L4/L7 网关</td><td>负载均衡 + TLS 卸载 + 限流</td><td>Nginx 数十万 CPS；Envoy 数万 RPS</td><td>单点风险（需 Keepalived/ECMP）</td></tr><tr><td>限流</td><td>令牌桶 / 漏桶 / 滑动窗口</td><td>单机 QPS 万级（Redis+Lua 可到 5~10 万）</td><td>拒绝请求 = 损失，阈值需压测定</td></tr><tr><td>应用无状态化</td><td>Session 外置到 Redis；实例可随意扩</td><td>水平扩展，理论上无上限</td><td>Redis 成为新瓶颈，需集群</td></tr><tr><td>本地缓存</td><td>Caffeine / BigCache，命中率 80%+</td><td><b>百万 QPS 级</b>（无网络开销）</td><td>一致性差；堆内存压力、GC</td></tr><tr><td>分布式缓存</td><td>Redis 集群（单分片 ~10 万 QPS）</td><td>分片后几十万~百万 QPS</td><td>网络 RTT 0.5~1ms；热点 key 需拆分</td></tr><tr><td>连接池 / 池化</td><td>DB 连接、HTTP 连接、goroutine 池</td><td>减少 90% 建连开销</td><td>池大小设错会雪崩</td></tr><tr><td>异步化 / 削峰</td><td>MQ 堆积 + 消费者匀速消费</td><td><b>Kafka 单分区万级 TPS</b>，堆积能力近乎无限</td><td>链路变长、一致性变弱</td></tr><tr><td>分库分表</td><td>按 user_id 取模 / 一致性哈希</td><td>单表建议 &lt;2000 万行 / &lt;20GB</td><td>跨片 JOIN、分布式事务难</td></tr><tr><td>读写分离</td><td>主写从读 + 半同步</td><td>读能力 ×N（N=从库数）</td><td>主从延迟（通常 10~100ms）</td></tr></tbody></table></div><p><b>压测与容量探测命令</b></p><pre><code># 压测：先测单机上限，再谈容量规划
+wrk -t8 -c200 -d30s --latency http://10.0.0.1:8080/api/order
+#   -t 线程数(≈CPU核数)  -c 并发连接  -d 时长  --latency 输出延迟分布
+
+# 找到拐点：并发逐步加大，看 QPS 何时不再涨、P99 何时陡升
+for c in 50 100 200 400 800; do
+  echo "c=$c"; wrk -t8 -c$c -d10s http://10.0.0.1:8080/api/order | grep 'Requests/sec'
+done
+
+# Redis 实测上限
+redis-benchmark -t get,set -n 100000 -c 50 -P 16    # -P 流水线，看吞吐上限
+redis-cli --latency -h 10.0.0.2                      # 看基线 RTT
+
+# MySQL 看连接与锁
+SHOW STATUS LIKE 'Threads_running';      # &gt;CPU核数 说明已经在排队
+SHOW VARIABLES LIKE 'max_connections';   # 默认 151，高并发下要调
+SHOW STATUS LIKE 'Max_used_connections'; # 峰值，用于反推池大小</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>容量估算：一个能直接套的公式</h2><p>做方案时先算三件事：<b>峰值 QPS</b>、<b>单机能扛多少</b>、<b>要多少机器</b>。下面是从日活推 QPS 的标准套路。</p><p><b>容量估算与池大小公式</b></p><pre><code># 1) 峰值 QPS（二八法则 + 峰值系数）
+QPS = DAU x 人均请求数 x 0.8 / (有效秒数) x 峰值系数
+# 例：DAU 500 万，人均 20 次请求，活跃时段 4 小时(14400s)，峰值系数 3
+#   = 5e6 x 20 x 0.8 / 14400 x 3 ≈ 16667 QPS
+
+# 2) 单机容量（压测得出，不要猜）
+#   4C8G + Go 服务 + 简单查 Redis：约 3000~5000 QPS（P99 &lt; 100ms）
+#   4C8G + Java Spring + 查 DB：   约 800~1500 QPS
+
+# 3) 机器数 = 峰值QPS / 单机容量 / 冗余系数
+#   16667 / 3000 / 0.7 ≈ 8 台（冗余系数 0.7 = 留 30% 余量）
+
+# 4) 存储容量
+#   日增量 = 日活 x 人均条数 x 单条大小
+#   5e6 x 2 x 1KB = 10 GB/天 -&gt; 一年 3.6 TB（再加 30% 索引与碎片 ≈ 4.7 TB）
+
+# 5) 连接池大小（不是越大越好！）
+#   HikariCP 经验公式：connections = CPU核数 x 2 + 磁盘数
+#   8 核 SSD -&gt; 约 16~20 个连接。开 200 个只会让 MySQL 上下文切换爆炸</code></pre><div class="table-wrap"><table><thead><tr><th>反模式</th><th>为什么错</th><th>正确做法</th></tr></thead><tbody><tr><td>连接池开得很大</td><td>MySQL 每个连接一个线程，上下文切换 + 锁竞争，吞吐反降</td><td>按 <code>核数×2+磁盘数</code>，配合压测微调</td></tr><tr><td>无限流直接扛</td><td>没有拒绝机制，过载后全量超时，等于全挂</td><td>网关层限流 + 应用层熔断 + 客户端退避重试</td></tr><tr><td>缓存无过期时间</td><td>内存打满 → OOM 或大量淘汰</td><td>必须设 TTL，且 TTL <b>加随机抖动</b>防雪崩</td></tr><tr><td>大促全量预热</td><td>瞬间把 DB 打垮</td><td>低峰期分批预热 + 灰度放量</td></tr><tr><td>只用 Redis 不用本地缓存</td><td>每次都要 0.5~1ms 网络 RTT</td><td>热点数据本地缓存 + 短 TTL（1~5s）+ 消息失效</td></tr><tr><td>同步调用链太长</td><td>总延迟 = 各段之和，任一环超时全链路超时</td><td>非关键路径异步化，设独立超时（每段 &lt; 总预算/N）</td></tr></tbody></table></div><details><summary>限流阈值到底设多少？</summary><p>不要用「估计」，用<b>压测拐点 × 0.7</b>。压测时逐步加并发，找到 QPS 不再线性增长、P99 开始陡升的那个点，取它前面的值再打七折。另外要做<b>区分来源</b>的限流：重要接口留高配额，批量/导出类接口给很低配额。</p></details><details><summary>缓存三大问题怎么一起防？</summary><p>穿透（查不存在的 key）→ <b>布隆过滤器</b>或缓存空值+短 TTL；击穿（热点 key 过期瞬间）→ <b>互斥重建</b>（单飞）或逻辑过期；雪崩（大批 key 同时过期）→ <b>TTL 加随机抖动</b>（如 base + random(0, base*0.3)）+ 多级缓存兜底。</p></details><details><summary>削峰填谷会不会让用户体验变差？</summary><p>会，所以要<b>区分业务</b>：下单、支付这种强一致实时链路不进 MQ（或进 MQ 但同步等结果）；发券、通知、积分、日志这些可以异步。真正的最优解常常是<b>同步走轻量校验 + 异步走完整流程</b>：先占位返回「处理中」，后台消费完再通知。</p></details></div></section>
 </body>
 </html>

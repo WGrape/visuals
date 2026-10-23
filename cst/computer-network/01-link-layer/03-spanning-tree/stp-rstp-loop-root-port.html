@@ -11,6 +11,24 @@
 <section class="panel"><h2>RSTP 与收敛</h2><p>经典 STP 的端口状态转换可能较慢；RSTP 使用更明确的端口角色、点对点协商和快速切换机制，在合适拓扑下可更快收敛。快并不代表零丢包，连接重选期间仍可能有短暂丢帧和 MAC 表变化。边缘端口接终端时可快速进入转发，但必须避免把连接其他交换机的端口误当作边缘端口，否则可能绕过必要的环路防护。</p><p>BPDU Guard 等保护可在边缘端口收到 BPDU 时采取阻断动作，防止用户私接交换设备改变拓扑。具体行为和恢复方式依设备配置，生产前要演练。链路聚合把多条物理线视作逻辑连接，是另一种冗余和增带宽手段，不可把多根平行线简单当作免环路的理由。</p></section>
 <section class="panel"><h2>观察与排障</h2><p>先定位哪个 VLAN 或实例出现问题，查看根桥 ID、各交换机根端口、指定端口和被丢弃端口。对照实际物理拓扑，检查是否有未登记的新线、端口误配为边缘、BPDU 被过滤或链路聚合两端配置不一致。MAC 表中同一 MAC 在端口间高频漂移，是追踪环路的线索，但虚拟机迁移也会造成短暂漂移，需看持续时间和广播量。</p><p>有环路风险时优先按既定应急方案隔离可疑链路，保留日志与接口计数，然后恢复稳定拓扑。修复后要测试单点链路故障与回切，确认备份路径确实启用且收敛时间符合业务容忍度。只看拓扑图“还有一条线”不能证明它能承载目标 VLAN。</p></section>
 <section class="panel"><h2>与三层环路的区别</h2><p>IP 层的错误路由也会形成循环，但 IP TTL/Hop Limit 会在每跳减少，最终丢弃；二层广播帧没有同等机制。路由协议、最长前缀和生成树处理的是不同层的环路。大规模网络常通过三层边界缩小二层广播域，减少生成树故障范围，但跨网段通信需要路由与访问控制。</p><p>练习：画出 S1、S2、S3 的三角形，为 S1 设最低桥优先级，标出两个根端口和一个可能的备用端口。再删掉一条链路，说明流量如何恢复以及哪些指标能证明恢复成功。</p></section>
+<section class="panel" data-dry-goods><h2>STP 的关键参数与端口角色</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td>网桥优先级</td><td><b>32768</b>（步长 4096）</td><td>值小者当选根桥；通常手动设 4096/8192</td></tr><tr><td>Hello Time</td><td><b>2 s</b></td><td>BPDU 发送间隔</td></tr><tr><td>Forward Delay</td><td><b>15 s</b></td><td>Listening/Learning 各停留 15 s</td></tr><tr><td>Max Age</td><td><b>20 s</b></td><td>BPDU 多久没收到认为失效</td></tr><tr><td>收敛时间（802.1D）</td><td><b>30 – 50 s</b></td><td>Max Age 20 + Forward Delay 15×2</td></tr><tr><td>收敛时间（RSTP 802.1w）</td><td><b>1 – 2 s</b>（甚至更快）</td><td>靠 proposal/agreement 握手</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>端口角色（RSTP）</th><th>含义</th><th>每台设备上的数量</th></tr></thead><tbody><tr><td>Root Port</td><td>去往根桥<b>最优</b>的端口（每台非根桥<b>恰好一个</b>）</td><td>1</td></tr><tr><td>Designated Port</td><td>每个网段上负责转发的端口（该段到根桥最优）</td><td>每段 1 个</td></tr><tr><td>Alternate Port</td><td>根端口的备份（从别的路径去根桥）</td><td>0+</td></tr><tr><td>Backup Port</td><td>指定端口的备份（同一网段的冗余）</td><td>0+</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>链路带宽</th><th>STP cost（旧 802.1D）</th><th>RSTP cost（802.1w）</th></tr></thead><tbody><tr><td>10 Mbps</td><td>100</td><td>2,000,000</td></tr><tr><td>100 Mbps</td><td><b>19</b></td><td>200,000</td></tr><tr><td>1 Gbps</td><td><b>4</b></td><td>20,000</td></tr><tr><td>10 Gbps</td><td><b>2</b></td><td>2,000</td></tr><tr><td>100 Gbps</td><td>—</td><td>200</td></tr></tbody></table></div><p><b>根桥选举</b>：全网选<b>桥 ID 最小</b>的交换机（桥 ID = 优先级 + MAC，先比优先级再比 MAC）。然后每台设备选出根端口、每个网段选出指定端口，其余端口<b>阻塞（Blocking）</b>→ 逻辑上打破环路。</p><p><b>STP 排查</b></p><pre><code># Linux bridge 上查看 STP
+brctl showstp br0
+ip -d link show br0 | grep -i stp
+cat /sys/class/net/br0/bridge/stp_state
+
+# 开启/关闭 STP
+ip link set br0 type bridge stp_state 1
+
+# 看根桥与端口角色（需要 mstpd 或 brctl）
+brctl showstp br0 | grep -E 'bridge id|designated root|state|port id'
+# state 字段：disabled/blocking/listening/learning/forwarding
+
+# 抓 BPDU（目的 MAC 01:80:c2:00:00:00）
+tcpdump -i eth0 -nn -e 'ether dst 01:80:c2:00:00:00'
+
+# 交换机侧（Cisco）常用加固
+# spanning-tree portfast default              # 接入端口立即转发（跳过 30s）
+# spanning-tree bpduguard enable              # 收到 BPDU 就关端口（防私接交换机）</code></pre></section><section class="panel"><h2>收敛、加固与故障</h2><ul><li><b>PortFast（边缘端口）</b>：接 PC/服务器的端口不会形成环路，应配 PortFast 让它<b>立即进入转发</b>，避免开机后等 30 s 才能联网（DHCP 超时的经典原因）。</li><li><b>BPDU Guard</b>：PortFast 端口一旦收到 BPDU 就<b>关闭端口</b>，防止员工私接交换机形成环路。生产接入层必备。</li><li><b>Root Guard / Loop Guard</b>：Root Guard 防止下级设备抢根桥（不接受更优的 BPDU）；Loop Guard 防止单向链路故障导致端口误转发形成环路。</li><li><b>为什么会有 30 秒不通</b>：802.1D STP 的 Listening→Learning→Forwarding 各 15 s，加上 Max Age 20 s。接 PC 的口一定要 PortFast；服务器/虚拟机迁移场景用 RSTP/MSTP。</li><li><b>MSTP（802.1s）</b>：把多个 VLAN 映射到少数几个 STP 实例，避免“每 VLAN 一棵树”带来的资源消耗与收敛慢。配置时<b>全网 region 名、revision、VLAN-实例映射必须完全一致</b>，否则会被当作不同区域。</li><li><b>排障顺序</b>：① 确认根桥是不是你期望的那台（<code>brctl showstp</code> 看 designated root）；② 看各端口角色和状态（有没有该转发的被 block）；③ 抓 BPDU 确认是否收到；④ 检查是否有单向链路（光模块只坏一个方向）→ Loop Guard。</li></ul><details><summary>为什么交换机上有些口灯亮着但不通？</summary><p>很可能是被 STP 阻塞（Blocking/Discarding）了。这是 STP 防环的正常行为，不是故障——去 <code>brctl showstp</code> 看端口状态确认。如果本该转发却被阻塞，检查 cost/优先级配置。</p></details><details><summary>关掉 STP 会怎样？</summary><p>有冗余链路时会产生二层环路，广播帧被无限复制 → <b>广播风暴</b>，几秒内全网瘫痪（CPU 100%、丢包 100%）。除非确认物理上绝无环路，否则<b>不要关 STP</b>。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>二层环路为什么比普通 IP 路由环路更容易形成广播风暴？</summary><p>以太网广播帧没有 IP TTL 那样的逐跳寿命，交换机又会在广播域内复制帧，环路可使副本持续增长。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../00-overview/ethernet-frame-switch-learning.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

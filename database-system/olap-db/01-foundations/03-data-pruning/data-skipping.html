@@ -17,6 +17,39 @@
 <section class="panel" data-depth-note><h2>让排序键服务主要工作负载</h2><p>按时间排序可帮助时间范围查询跳过无关块，按客户排序则可能改善客户级查询；两者未必能同时达到最优。选排序或聚簇键前，统计真实查询的过滤列、时间范围、扫描字节和频率，再评估写入合并成本。若高频查询总是按日期加地区过滤，可测试两种键顺序并比较块值域；键的前缀顺序常影响跳过效果。数据增长后还要复测，因为初期小表全部可缓存时，任何布局看起来都很快。调优结论应基于稳定的数据规模和代表性并发。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>在索引或排序优化前，先确认查询真正只需要哪些列。SELECT * 会让列式系统读取、解压许多无关列，掩盖分区和块跳过带来的收益。把返回字段限定为图表所需列，并记录网络传输字节，才能区分“扫描变少”与“结果发送变少”两种改善。</p></section>
 <section class="panel" data-final-case><h2>补充判断</h2><p>如果查询过滤条件高度选择性却仍慢，还要检查结果集是否很大。数据跳过只减少读取，不能消除返回百万行的网络和客户端渲染成本；分页、预聚合或改变产品交互可能比继续加索引更有效。</p></section>
+<section class="panel" data-dry-goods><h2>数据裁剪手段与效果</h2><div class="table-wrap"><table><thead><tr><th>手段</th><th>原理</th><th>典型裁剪率 / 适用</th></tr></thead><tbody><tr><td><b>分区（Partition）</b></td><td>按日期/地区分成子目录</td><td>按分区键查询可裁掉 <b>90%+</b> 数据；<b>最有效</b></td></tr><tr><td><b>Min-Max 索引（Zone Map）</b></td><td>每块记录列的最小最大值</td><td>有序数据裁剪率 <b>90%+</b>；无序数据几乎无效</td></tr><tr><td><b>排序键 / 聚簇</b></td><td>让相关数据物理相邻</td><td>是 min-max 生效的<b>前提</b></td></tr><tr><td><b>布隆过滤器</b></td><td>判断某值是否<b>不在</b>块内</td><td>高基数的等值查询；有 <b>1%</b> 假阳性（不会漏判）</td></tr><tr><td><b>二级索引 / 跳数索引</b></td><td>额外索引结构</td><td>ClickHouse 的 <code>skip index</code>；有存储与写入开销</td></tr><tr><td><b>列裁剪</b></td><td>只读需要的列</td><td>列存天然优势，宽表查询快 <b>5~20×</b></td></tr><tr><td><b>物化视图 / 预聚合</b></td><td>预先算好</td><td>固定维度查询快 <b>10~100×</b>；牺牲灵活性</td></tr><tr><td><b>粗粒度索引（Granule）</b></td><td>ClickHouse 默认 <b>8192 行</b> 一个 granule</td><td>索引只记录 granule 级信息</td></tr></tbody></table></div><p><b>为什么排序键是核心</b>：min-max 索引的裁剪能力完全取决于数据是否<b>局部有序</b>。若按 <code>ORDER BY (date, user_id)</code> 存储，查 <code>date='2026-10-22'</code> 能精确定位到连续区间；若不排序，同一个 date 散落在所有块里，每个块的 min-max 都覆盖全范围，<b>一块都裁不掉</b>。</p></section><section class="panel"><h2>ClickHouse / Doris 实操</h2><pre><code>-- ClickHouse：建表时指定分区与排序键（最关键的两个决定）
+CREATE TABLE events (
+    date      Date,
+    user_id   UInt64,
+    event     LowCardinality(String),
+    amount    Decimal(18,2)
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(date)        -- 按月分区，便于按 TTL 整月删除
+ORDER BY (date, user_id, event)    -- 排序键决定 min-max 的裁剪能力
+SETTINGS index_granularity = 8192; -- 默认 8192 行一个 granule
+
+-- 查看一次查询到底读了多少数据（裁剪效果的直接证据）
+SELECT query_duration_ms, read_rows, read_bytes,
+       read_bytes / 1024 / 1024 AS read_mb, result_rows
+FROM system.query_log
+WHERE type = 'QueryFinish' ORDER BY event_time DESC LIMIT 5;
+-- read_rows 远小于 total_rows 说明裁剪生效；接近全表说明没裁掉</code></pre><pre><code>-- ClickHouse：跳数索引（针对非主键列）
+ALTER TABLE events ADD INDEX idx_amount amount TYPE minmax GRANULARITY 4;
+ALTER TABLE events MATERIALIZE INDEX idx_amount;   -- 对存量数据生效
+
+-- set 型索引适合高基数值的等值过滤
+ALTER TABLE events ADD INDEX idx_user user_id TYPE set(0) GRANULARITY 4;
+-- bloom_filter 适合 LIKE / IN
+ALTER TABLE events ADD INDEX idx_event event TYPE bloom_filter(0.01) GRANULARITY 4;
+
+-- Doris/StarRocks：前缀索引 + Bitmap/BloomFilter
+CREATE TABLE t (
+  dt DATE, k1 VARCHAR(20), k2 INT, v BIGINT SUM
+) AGGREGATE KEY(dt, k1, k2)          -- 前 36 字节自动成为前缀索引
+DISTRIBUTED BY HASH(k1) BUCKETS 10
+PROPERTIES ("replication_num" = "3");
+ALTER TABLE t SET ("bloom_filter_columns" = "k2");</code></pre></section>
+<section class="panel"><h2>裁剪失效排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>加了索引但没变快</td><td>排序键不含查询条件列；或数据无序</td><td>把高频过滤列放进 <code>ORDER BY</code> 的<b>前面</b></td></tr><tr><td>查询仍扫全表</td><td>条件上用了函数（<code>toDate(ts)='...'</code>）</td><td><b>改成对常量的范围条件</b>：<code>ts &gt;= '2026-10-22' AND ts &lt; '2026-10-23'</code></td></tr><tr><td>min-max 不起作用</td><td>该列与排序键无关，值随机分布</td><td>改排序键；或为该列建 skip index</td></tr><tr><td>分区裁剪没生效</td><td>分区键与查询条件不一致</td><td>查询条件要直接命中分区键；避免对分区键做函数变换</td></tr><tr><td>分区太多反而慢</td><td>分区数几千上万，元数据开销大</td><td>按<b>月</b>而不是按天分区；单表分区数控制在百级</td></tr><tr><td>小文件太多</td><td>每批写入都生成新 part</td><td>批量写入（单次 ≥ 1万行）；或定期 <code>OPTIMIZE TABLE ... FINAL</code></td></tr><tr><td>读的字节数远大于结果</td><td>没做列裁剪（用了 <code>SELECT *</code>）</td><td><b>只查需要的列</b>，列存下这一条能差 10 倍</td></tr></tbody></table></div><p class="muted"><b>判断标准</b>：看 <code>read_rows / total_rows</code>。好的裁剪应该 &lt; 1%；如果这个比例是 100%，说明所有裁剪手段都没生效，先查排序键和查询条件的写法。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>为什么给 WHERE 条件加了索引，查询仍可能扫描大量数据？</summary><p>数据块值域可能高度重叠，或谓词无法利用该索引；需要核对布局、计划和实际扫描字节。</p></details></section>
 <footer>继续阅读：<a href="../02-columnar-and-vectorized/columnar-storage.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

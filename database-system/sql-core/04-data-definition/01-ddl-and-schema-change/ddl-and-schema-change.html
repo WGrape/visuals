@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -159,6 +177,52 @@ ALTER TABLE t ADD COLUMN c INT DEFAULT 0;   -- 已有行的值从字典取，不
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>DDL 算法与锁行为（MySQL）</h2><div class="table-wrap"><table><thead><tr><th>操作</th><th>算法</th><th>是否锁表</th><th>说明</th></tr></thead><tbody><tr><td><b>加字段</b></td><td><code>INSTANT</code>（8.0.12+）</td><td><b>不锁</b></td><td>仅改元数据，<strong>秒级完成</strong></td></tr><tr><td><b>加字段</b>（老版本）</td><td><code>INPLACE</code></td><td>短暂 MDL 锁</td><td>需重建表，大表很慢</td></tr><tr><td><b>加索引</b></td><td><code>INPLACE</code></td><td>允许并发 DML</td><td>需扫描全表建索引</td></tr><tr><td><b>改字段类型</b></td><td><code>COPY</code></td><td><b>锁表</b></td><td>需重建整表，最危险</td></tr><tr><td><b>删字段</b></td><td><code>INPLACE</code></td><td>短暂 MDL 锁</td><td>8.0 也支持 INSTANT</td></tr><tr><td><b>改字段顺序</b></td><td><code>COPY</code></td><td><b>锁表</b></td><td>无实际意义，别做</td></tr></tbody></table></div><p><b>DDL 算法</b></p><pre><code>-- 显式指定算法，避免优化器选错
+ALTER TABLE orders ADD COLUMN remark VARCHAR(200), ALGORITHM=INSTANT;
+ALTER TABLE orders ADD INDEX idx_user (user_id), ALGORITHM=INPLACE, LOCK=NONE;
+
+-- ALGORITHM: DEFAULT / INSTANT / INPLACE / COPY
+-- LOCK:      DEFAULT / NONE / SHARED / EXCLUSIVE
+-- 指定 ALGORITHM=INSTANT 时若不支持会&lt;strong&gt;直接报错&lt;/strong&gt;（而不是退化成 COPY）
+--   这反而是好事：避免你以为秒级完成，实际锁表几小时
+
+-- 检查 DDL 进度（8.0）
+SELECT * FROM performance_schema.events_stages_current
+WHERE event_name LIKE 'stage/innodb/alter%';</code></pre><p class="muted"><b>MDL 锁（元数据锁）是 DDL 最危险的陷阱</b>：即使 DDL 本身不锁表，它也要<strong>先拿到 MDL 写锁</strong>。若此时有一个<strong>长事务</strong>持有读锁，DDL 会一直等待，且<strong>后续所有查询都会被这个 DDL 阻塞</strong>（MDL 是公平的，后来的要排队）——这就是“一个慢查询导致全表不可访问”的经典故障。所以执行 DDL 前必须先检查有无长事务。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>大表变更的安全流程</h2><div class="table-wrap"><table><thead><tr><th>步骤</th><th>动作</th><th>工具/命令</th></tr></thead><tbody><tr><td>1. 检查长事务</td><td>确认无超过 <b>10 秒</b>的事务</td><td><code>information_schema.innodb_trx</code></td></tr><tr><td>2. 检查磁盘</td><td>剩余空间 &gt; <b>表大小 × 1.5</b></td><td><code>df -h</code></td></tr><tr><td>3. 选工具</td><td>大表用在线变更工具</td><td><b>gh-ost / pt-osc</b></td></tr><tr><td>4. 限速</td><td>控制对主库的影响</td><td><code>--max-load / --chunk-size</code></td></tr><tr><td>5. 观察延迟</td><td>从库延迟不超阈值</td><td><code>Seconds_Behind_Master</code></td></tr><tr><td>6. 切换</td><td>原子 rename</td><td>工具自动完成</td></tr></tbody></table></div><p><b>在线变更工具</b></p><pre><code># gh-ost：通过解析 binlog 同步增量，无需触发器
+gh-ost \
+  --alter="ADD COLUMN remark VARCHAR(200)" \
+  --database=mydb --table=orders \
+  --host=127.0.0.1 --user=gh --password=xxx \
+  --max-load=Threads_running=50 \      # 主库压力大时自动暂停
+  --critical-load=Threads_running=100 \
+  --chunk-size=1000 \                   # 每批拷贝行数
+  --throttle-flag-file=/tmp/ghost.pause \  # 创建该文件即暂停
+  --execute
+
+# pt-online-schema-change：基于触发器
+pt-online-schema-change \
+  --alter "ADD INDEX idx_user (user_id)" \
+  D=mydb,t=orders \
+  --chunk-size=1000 --max-load=Threads_running=50 \
+  --execute
+
+# 两者对比：
+#   gh-ost    ：无触发器（对主库影响小），依赖 binlog（需 ROW 格式）
+#   pt-osc    ：用触发器（增加主库写入负担），但适用性更广</code></pre><p><b>为什么不能直接 ALTER 大表</b>：即使 8.0 的 INPLACE，<strong>建索引仍要全表扫描</strong>，亿级表可能耗时小时级，期间锁等待与复制延迟都不可控。在线变更工具把操作拆成<strong>可限速、可暂停、可回滚</strong>的小批次，是生产唯一可接受的方案。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>字段类型变更的兼容性</h2><div class="table-wrap"><table><thead><tr><th>变更</th><th>安全性</th><th>说明</th></tr></thead><tbody><tr><td><b>VARCHAR(50) → VARCHAR(100)</b></td><td><b>安全</b></td><td>仅改元数据，INSTANT</td></tr><tr><td><b>VARCHAR(100) → VARCHAR(50)</b></td><td><b>危险</b></td><td>超长数据会被<strong>截断</strong>（严格模式报错）</td></tr><tr><td><b>INT → BIGINT</b></td><td>需重建</td><td>扩大方向安全，但要评估耗时</td></tr><tr><td><b>BIGINT → INT</b></td><td><b>危险</b></td><td><strong>溢出</strong>，超出范围报错</td></tr><tr><td><b>NOT NULL → NULL</b></td><td>安全</td><td>约束放宽</td></tr><tr><td><b>NULL → NOT NULL</b></td><td><b>危险</b></td><td>存量 NULL 会导致失败</td></tr><tr><td><b>改字符集</b></td><td><b>危险</b></td><td>可能导致<strong>索引失效与乱码</strong></td></tr></tbody></table></div><p><b>安全加字段流程</b></p><pre><code>-- 安全的“加非空字段”流程（避免锁表太久）
+-- 1) 先加可空字段（INSTANT，秒级）
+ALTER TABLE orders ADD COLUMN status TINYINT DEFAULT NULL, ALGORITHM=INSTANT;
+-- 2) 分批回填（控制事务大小，避免长事务与主从延迟）
+UPDATE orders SET status = 1 WHERE status IS NULL AND id BETWEEN 1 AND 10000;
+--   循环推进，每批 1 万行，批间 sleep 控制速率
+-- 3) 最后改约束（此时无 NULL，瞬间完成）
+ALTER TABLE orders MODIFY COLUMN status TINYINT NOT NULL DEFAULT 1, ALGORITHM=INPLACE;
+
+-- 关键：不要一步到位 ADD COLUMN ... NOT NULL DEFAULT 1
+--       老版本会重建整表并锁表</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：为什么一个 SELECT 慢查询会导致 ALTER 卡住，然后全表不可用？</summary><p>A：这是 <strong>MDL 锁队列</strong>问题。慢查询持有 MDL 读锁 → ALTER 申请 MDL 写锁被阻塞 → <strong>后续所有 SELECT 申请读锁时发现有写锁在等待，也必须排队</strong>（MySQL 的 MDL 是公平队列，防止写锁饿死）。于是整个表的访问全部卡死。解法：① 执行 DDL 前查 <code>innodb_trx</code> 确认无长事务；② 给 DDL 设 <code>lock_wait_timeout</code>（如 10 秒），拿不到就放弃而不是无限等。</p></details><details><summary>Q：加索引会锁表吗？</summary><p>A：<strong>MySQL 5.6+ 的 InnoDB 在线加索引（<code>ALGORITHM=INPLACE, LOCK=NONE</code>）允许并发读写</strong>，不会锁表。但它仍要<strong>扫描全表构建索引树</strong>，会消耗大量 IO 与 CPU，并产生大量 redo/undo 日志，可能导致<strong>主从延迟</strong>。所以大表加索引仍建议在低峰执行，或用在线变更工具限速。</p></details><details><summary>Q：gh-ost 和 pt-osc 选哪个？</summary><p>A：优先 <strong>gh-ost</strong>。原因是它<strong>不用触发器</strong>——pt-osc 在原表上建三个触发器（INSERT/UPDATE/DELETE），会显著增加主库写入开销，且触发器本身有各种限制（如原表已有触发器就不行）。gh-ost 通过<strong>伪装成从库读取 binlog</strong>来同步增量变更，对主库影响小得多。前提是需要 binlog 为 <strong>ROW 格式</strong>且 <code>binlog_row_image=FULL</code>。</p></details><details><summary>Q：删字段有什么风险？</summary><p>A：两个——① <strong>应用没改完就删</strong>：只要还有一个服务在 SELECT 该字段，就会立即报错（这是最常踩的，务必先全量灰度确认无引用）；② <strong>磁盘空间不释放</strong>：InnoDB 删除字段后，<strong>已分配的表空间不会自动归还操作系统</strong>（需要 <code>OPTIMIZE TABLE</code> 重建，而这又会锁表）。所以生产上更常见的做法是<strong>先改名（标记为废弃）观察一段时间，确认无影响后再真正删除</strong>。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / DDL 与变更 ·

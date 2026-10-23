@@ -15,6 +15,45 @@
 <section class="panel"><h2>隔离级别与应用重试</h2><p>原子提交解决“两项要么都生效”，隔离级别处理“并发事务彼此能看到什么”。两个转账同时读取余额 100、都打算扣 80，即便每笔交易内部都原子提交，若没有合适的冲突检测或序列化约束，也可能破坏余额不为负的业务不变量。实现可能让其中一笔等待、失败或自动重试；应用必须知道重试会不会重放外部副作用，例如发送短信或调用支付网关。</p><p>长事务持有锁或旧版本更久，可能加大冲突、阻塞清理与放大存储。把用户交互或慢外部 API 放在数据库事务中尤其危险。可把事务缩小到必要读写，并在外部效果上使用业务幂等键与补偿流程。数据亲和布局可减少跨分片，但不能取代正确的并发控制。</p><p>阅读具体 NewSQL 产品文档时应逐项核对：默认隔离级别、客户端重试契约、事务超时、跨地域提交路径、只读事务语义以及故障后的未决事务恢复方式。“支持分布式事务”本身不足以回答这些问题。</p></section>
 <section class="panel" data-depth-note><h2>如何追踪一次未决交易</h2><p>给每笔业务请求分配稳定的幂等键和追踪 ID，日志记录事务开始、涉及的分片、提交尝试、最终决定及客户端应答。若客户端超时，先按键查询已提交结果；没有结果时再按产品支持的语义安全重试。服务端也要避免把数据库自动重试与外部副作用混在同一个不可分辨的闭包中：事务重放一次，发送短信或调用支付接口可能执行两次。故障演练可故意在提交前、提交后应答前断开连接，核对最终余额和外部效果各只发生一次。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>还要验证唯一约束和外键等数据库约束在跨分片场景下的实际支持范围。业务若依赖“同一幂等键只存在一条订单”，应把键设计成可被数据库可靠约束或用明确的冲突处理流程。没有持久约束，应用进程重启后仅靠内存去重无法防止重复交易。</p></section>
+<section class="panel" data-dry-goods><h2>分布式事务的参数与代价</h2><div class="table-wrap"><table><thead><tr><th>概念 / 参数</th><th>数值</th><th>说明</th></tr></thead><tbody><tr><td>2PC 提交延迟</td><td><b>2~4 个 RTT</b></td><td>Prepare + Commit 各一轮；跨地域时是几十~上百 ms</td></tr><tr><td>Percolator（TiDB）提交</td><td><b>2 个 RTT + 1 次写</b></td><td>Prewrite + Commit；<b>乐观事务</b></td></tr><tr><td>TiDB 乐观事务冲突</td><td>写冲突在 <b>Prewrite</b> 阶段才发现</td><td>冲突严重时不如悲观事务</td></tr><tr><td>TiDB 悲观事务</td><td>加悲观锁，类似 2PC</td><td>冲突多的场景更好，代价是锁开销</td></tr><tr><td>CRDB 事务重试</td><td><code>RETRY_SERIALIZABLE</code></td><td>40001 错误码需客户端重试</td></tr><tr><td>CRDB Range 分裂阈值</td><td><b>512 MiB</b> 默认</td><td>Range 是调度与复制的最小单位</td></tr><tr><td>TiDB Region 分裂阈值</td><td><b>96 MiB</b> 默认</td><td>超过后分裂；<code>region-split-size</code> 可调</td></tr><tr><td>隔离级别</td><td>SI（快照隔离）为主</td><td>TiDB/CRDB 都宣称 Serializable，实为 SSI/可串行化快照</td></tr><tr><td><code>tidb_txn_mode</code></td><td>pessimistic（3.0.8+ 默认）</td><td>可设 optimistic 提性能</td></tr></tbody></table></div><p><b>分布式事务的延迟构成</b>：跨地域部署时最要命。假设北京↔上海 RTT <b>30ms</b>，一个 2PC 事务至少 4 次跨地域往返 = <b>120ms</b>，还没算本地执行。这就是为什么<b>跨地域多活要把事务限制在单地域内</b>，用异步复制做地域间同步。</p></section><section class="panel"><h2>重试与冲突处理代码</h2><pre><code>// TiDB：乐观事务冲突后重试（客户端必须自己做）
+func updateWithRetry(db *sql.DB, id int64) error {
+    const maxRetry = 3
+    for i := 0; i &lt; maxRetry; i++ {
+        tx, err := db.Begin()
+        if err != nil { return err }
+        var bal int64
+        if err = tx.QueryRow("SELECT balance FROM acct WHERE id=? FOR UPDATE", id).Scan(&amp;bal); err != nil {
+            tx.Rollback(); return err
+        }
+        if _, err = tx.Exec("UPDATE acct SET balance=? WHERE id=?", bal-100, id); err != nil {
+            tx.Rollback(); return err
+        }
+        if err = tx.Commit(); err != nil {
+            tx.Rollback()
+            // 9007 = 写冲突（Write conflict）；8022 = 提交时 key 已被修改
+            if strings.Contains(err.Error(), "9007") || strings.Contains(err.Error(), "8022") {
+                time.Sleep(time.Duration(100*(i+1)) * time.Millisecond)   // 退避
+                continue
+            }
+            return err
+        }
+        return nil
+    }
+    return errors.New("retry exhausted")
+}</code></pre><pre><code>-- CockroachDB：40001 是序列化冲突，客户端必须重试
+-- 方式 1：客户端重试（推荐，控制精确）
+-- 伪码：捕获 SQLSTATE 40001 -&gt; 退避后重放整个事务
+
+-- 方式 2：让数据库自动重试（简单但有条件）
+BEGIN; SET TRANSACTION AS OF SYSTEM TIME '-5s';  -- 或在会话级
+SET retry_serializable = on;                      -- 让 CRDB 自动重试整个事务体
+-- 限制：事务必须是「全包含」的单条或多条语句，不能依赖客户端逻辑状态
+
+-- 关键：幂等性。重试 = 重放，所以事务必须幂等
+-- 用 UPSERT 而不是 INSERT，用 INSERT ... ON CONFLICT DO NOTHING 做幂等写入
+INSERT INTO orders(id, amt) VALUES (123, 100)
+ON CONFLICT (id) DO UPDATE SET amt = excluded.amt;</code></pre></section>
+<section class="panel"><h2>分布式事务排障</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>写冲突频繁（TiDB 9007）</td><td>热点行被并发写</td><td>改悲观事务；或拆分热点（如把计数器打散成 N 行再汇总）</td></tr><tr><td>事务延迟高</td><td>跨地域 / 2PC 轮次多</td><td>把事务收敛到单地域；用异步复制做跨地域同步</td></tr><tr><td><code>40001</code> 序列化冲突多</td><td>读写冲突（SI 下的写偏斜）</td><td>客户端实现退避重试；或把读改成 <code>SELECT FOR UPDATE</code> 强制走锁</td></tr><tr><td>锁等待超时</td><td>长事务占着锁</td><td>拆小事务；设置 <code>innodb_lock_wait_timeout</code> 或 TiDB 的 <code>tidb_lock_wait_timeout</code></td></tr><tr><td>热点 Region 打爆单节点</td><td>自增主键 / 时间戳单调递增</td><td>TiDB 用 <code>SHARD_ROW_ID_BITS</code> 打散；或用 UUID/雪花 ID</td></tr><tr><td>大事务失败</td><td>超过事务大小限制（TiDB 默认 <b>10 万条 / 100MB</b>）</td><td>分批提交；或调 <code>tidb_dml_batch_size</code></td></tr><tr><td>读不到自己刚写的</td><td>读取的是旧快照 / 读了 follower</td><td>用 <code>SELECT ... FOR UPDATE</code>（读最新）；或 <code>tidb_snapshot</code> 显式指定</td></tr></tbody></table></div><ul><li><b>重试必须幂等</b>：网络超时后无法判断事务是否提交成功，重放可能重复执行。所以写入要用 UPSERT、带业务流水号做去重。</li><li><b>退避策略</b>：指数退避 + 抖动（如 <code>100ms × 2^n ± 20%</code>），否则大量冲突请求会同时重试，形成重试风暴。</li></ul></section>
 <section class="panel"><h2>自检</h2><details><summary>Raft 已复制 A 分片的扣款，是否意味着转账事务已提交？</summary><p>不意味着。B 分片和跨分片提交决定仍须满足该数据库的事务协议。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/distributed-rdbms-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

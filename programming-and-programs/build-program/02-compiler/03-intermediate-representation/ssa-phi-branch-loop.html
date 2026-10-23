@@ -11,6 +11,47 @@
 <section class="panel"><h2>SSA 怎样帮助优化</h2><p>在 if/else 的例子里，若编译器已证明 flag 恒为真，假分支不可达，x₃ 的 φ 可化为 x₁，后续常量传播得到 10；若 x₃ 从未被使用，相关纯计算可被死代码删除。SSA 的 use-def 链让优化器快速定位所有使用点。全局值编号和公共子表达式消除也受益于定义关系明确。</p><p>但有副作用的调用、内存写入和可能抛异常的指令不能仅因“返回值没被用到”就删掉。SSA 命名是一种表示法，合法优化仍须尊重语言语义、溢出规则和别名关系。</p></section>
 <section class="panel"><h2>φ 最终怎样变成机器动作</h2><p>CPU 通常没有直接叫 φ 的通用指令。编译器在降低 SSA 时按控制流边插入并行拷贝：从真分支到合流时把 x₁ 放到目标位置，从假分支到合流时把 x₂ 放到目标位置。有时两条分支最终恰好分配到同一个寄存器，拷贝可被消去；有时需要临时寄存器避免两次交换赋值互相覆盖。关键边拆分可为边上拷贝提供明确位置，不能随便把拷贝放在合流块入口，因为到达时已经丢失“从哪条前驱来”的独立执行点。</p><p>寄存器分配、指令选择和机器码生成会继续改变表示，因此看编译器 IR 与最终汇编时，要用控制流与数据依赖对应，而非期待每个 φ 一定有一条同名机器指令。</p></section>
 <section class="panel"><h2>一次错误定位</h2><p>若编译后 flag=false 时仍打印 10，先检查合流块 φ 的前驱顺序是否与控制流边一致，再看边上拷贝是否被放错位置。若循环只跑一次，核对回边输入是否取到了更新后的 i₂，而不是进入循环前的 i₀。对每条进入合流的边各设计一个测试，结合编译器输出的 IR 和执行结果定位。仅看源代码通常看不出改名或降低阶段的错误。</p><p>学习时可自己把两段短伪代码画成基本块，给每个赋值标号，合流处逐前驱列输入，再逆向把 φ 降成拷贝。能同时说清“值来自哪条边”和“何时执行”，就抓住了 SSA 的核心。</p></section>
+<section class="panel" data-dry-goods><h2>φ 节点的插入规则</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>定义</th><th>作用</th></tr></thead><tbody><tr><td>SSA</td><td>每个变量只被赋值一次</td><td>简化数据流分析、便于常量传播与寄存器分配</td></tr><tr><td>φ（phi）节点</td><td>在控制流汇聚点按前驱块选择值</td><td>让“不同路径赋不同值”仍满足单赋值</td></tr><tr><td>支配（dominate）</td><td>从入口到 B 必经 A，则 A 支配 B</td><td>决定变量定义能否覆盖某点</td></tr><tr><td>支配边界（DF）</td><td>刚好不再由 A 支配、但前驱被 A 支配的块</td><td><b>φ 必须插在支配边界上</b></td></tr><tr><td>迭代支配边界</td><td>对新插入的 φ 继续求 DF，直到不动点</td><td>处理嵌套分支与循环</td></tr></tbody></table></div><p>一句话规则：<b>变量 v 在块 B 中被定义，就在 DF({B}) 的每个块开头插入 φ</b>；插入 φ 相当于在该块定义了新版本，因此要迭代直到不再新增。</p></section><section class="panel"><h2>分支与循环的 φ 手算示例</h2><p><b>分支</b></p><pre><code>; if (c) { x = 1 } else { x = 2 } ; use(x)
+entry:
+  br i1 %c, label %then, label %else
+then:
+  br label %merge          ; x = 1
+else:
+  br label %merge          ; x = 2
+merge:
+  %x = phi i32 [ 1, %then ], [ 2, %else ]     ; 按前驱选值
+  call void @use(i32 %x)</code></pre><p><b>循环</b></p><pre><code>; for (int i = 0; i &lt; n; i++) sum += a[i];
+entry:
+  br label %loop
+loop:
+  %i   = phi i32 [ 0, %entry ], [ %i.next, %loop ]      ; 归纳变量
+  %sum = phi i32 [ 0, %entry ], [ %sum.next, %loop ]    ; 累加器
+  %a.i = getelementptr i32, ptr %a, i32 %i
+  %v   = load i32, ptr %a.i
+  %sum.next = add i32 %sum, %v
+  %i.next   = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+exit:
+  ret i32 %sum.next</code></pre><ul><li>循环头<b>一定</b>有 φ：循环变量与累加器都要区分“进入前”和“上一轮结束”两个来源。</li><li>φ 的操作数顺序与<b>前驱块列表一一对应</b>，写错顺序就会取错值。</li><li>多个前驱给出同一值时可合并：<code>phi [1, %A], [1, %B]</code> 可化简为常量 1。</li></ul></section>
+<section class="panel"><h2>生成与查看 LLVM IR</h2><p><b>命令</b></p><pre><code># 带优化的 IR（能看到 phi 与 mem2reg 后的形态）
+clang -O1 -S -emit-llvm example.c -o example.ll
+grep -n "phi" example.ll
+
+# 未优化时是 alloca + load/store（还没构造 SSA）
+clang -O0 -S -emit-llvm example.c -o o0.ll
+#   %x = alloca i32        &lt;- 变量在内存里
+#   store i32 1, ptr %x
+
+# 手动跑 mem2reg（把 alloca 提升为 SSA 寄存器，自动插入 phi）
+opt -passes=mem2reg o0.ll -S -o ssa.ll
+#   提升后 alloca 消失，出现 phi 节点
+
+# 看控制流图与支配关系（直观理解 DF）
+opt -passes=dot-cfg ssa.ll -disable-output &amp;&amp; dot -Tpng cfg.main.dot -o cfg.png
+opt -passes='print&lt;dom-frontier&gt;' -disable-output ssa.ll</code></pre><div class="table-wrap"><table><thead><tr><th>查看内容</th><th>命令</th><th>你会看到</th></tr></thead><tbody><tr><td>SSA 形态的 IR</td><td><code>clang -O1 -S -emit-llvm</code></td><td>%x = phi ...</td></tr><tr><td>未提升的 alloca</td><td><code>clang -O0 -S -emit-llvm</code></td><td>alloca/store/load</td></tr><tr><td>mem2reg 效果</td><td><code>opt -passes=mem2reg</code></td><td>alloca 消失、出现 phi</td></tr><tr><td>支配边界</td><td><code>opt -passes='print&lt;dom-frontier&gt;'</code></td><td>每个块的 DF 集合 = φ 插入位置</td></tr></tbody></table></div></section>
+<section class="panel"><h2>常见错误与排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>IR 里全是 alloca/load/store</td><td>未跑 mem2reg（-O0）</td><td>加 -O1 或跑 <code>opt -passes=mem2reg</code></td></tr><tr><td>phi 操作数与前驱不匹配</td><td>改了 CFG 没同步更新 phi</td><td>新增前驱时同步添加对应操作数</td></tr><tr><td>循环变量取值不对</td><td>循环头的 phi 少了回边来源</td><td>检查是否有 [init, entry] 与 [next, loop] 两项</td></tr><tr><td>优化后结果错误</td><td>phi 被错误地常量折叠/合并</td><td>确认各前驱的值是否真的相同</td></tr><tr><td>SSA 破坏后未重建</td><td>手工改 IR 引入了多次赋值</td><td>跑 <code>opt -passes=mem2reg</code> 重建</td></tr><tr><td>phi 出现在非块首位置</td><td>SSA 要求 phi 必须在块开头成组出现</td><td>把 phi 全部移到块首</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>φ 节点解决什么问题？</summary><p>解决控制流合并时“同一个变量有多个来源”的问题。SSA 要求每个名字只赋值一次，而 if/else 两个分支给 x 赋了不同值，于是在汇聚块插入 φ，按实际走的是哪个前驱来选择值，从而既保持单赋值又表达分支语义。</p></details><details><summary>为什么 φ 要插在支配边界而不是随便找个汇聚点？</summary><p>支配边界是“刚好需要合并”的最小集合：插入更少会漏掉某些路径的值，插入更多会产生无用 φ（增加寄存器压力与编译时间）。迭代支配边界算法给出的正是最小且充分的插入点集合。</p></details><details><summary>为什么循环头的 φ 至少有两个操作数？</summary><p>因为循环头有两类前驱：进入循环的那一次（初始值，来自 entry）和从循环体回边回来的那一次（上一轮的结果）。归纳变量与累加器都要用 φ 区分这两个来源，否则无法表达“第一次用初值、之后用上一轮”。</p></details><details><summary>SSA 形式对优化有什么实际好处？</summary><p>单赋值让定义-使用链（def-use）直接可见：常量传播、死代码删除、全局值编号、寄存器分配（把 SSA 的虚拟寄存器映射到物理寄存器）都大幅简化。这也是 LLVM 等现代编译器把 SSA 作为核心 IR 形态的原因。</p></details><details><summary>手写/修改 LLVM IR 时最容易犯什么错？</summary><p>三类：① 改动控制流后忘记给新前驱补 φ 操作数；② φ 不在块首成组出现；③ 破坏单赋值后没重建 SSA。预防办法是改完立即跑 <code>opt -passes=mem2reg</code> 与 <code>llvm-as</code> 验证器（<code>opt -passes=verify</code>）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>φ(x₁,x₂) 是否表示运行时把两个分支都执行，然后对两个值做函数运算？</summary><p>不是。只有一条控制流边实际到达合流块，φ 选择该前驱边对应的值。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="ir-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

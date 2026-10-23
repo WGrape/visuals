@@ -16,6 +16,44 @@
 两个线程计数变慢也可能来自锁争用、原子操作序、内存带宽、线程频繁迁移或 CPU 降频。可按“单线程基线—双线程相邻布局—双线程隔离布局”三组比较，并观察核心绑定和频率。若隔离布局无改善，伪共享可能不是主要瓶颈；继续看锁等待、分支、内存分配或测试框架自身开销。</h2><p>短至几微秒的实验容易被启动成本淹没。先预热，运行多轮，报告中位数和尾部分布，剔除明显的系统干扰而不是只挑最快一次。业务验证还要看端到端吞吐与延迟，因为某个循环快了不一定让用户请求变快。</p></section>
 <section class="panel"><h2>与局部性的关系
 时间局部性和空间局部性通常鼓励把常用数据放近，让同一核心反复命中缓存。伪共享提醒我们：多个核心高频写的数据若挤在同一行，空间靠近反而增加一致性流量。布局取决于访问者和读写模式，而非越紧凑越好。只读配置可以集中，独立可写状态可能需要分离。</h2><p>优化前应画出“哪个线程读写哪个字段”的矩阵。若只是读共享数据，考虑复制或不可变快照；若写同一逻辑值，需要分片累加和汇总；若写不同值但同一行，可用对齐分离。三类问题的修复并不相同。</p></section>
-<section class="panel"><h2>具体的地址判断</h2><p>假设缓存行 64 字节，计数器 A 位于地址 0x1000，计数器 B 位于 0x1008，两者落在同一行；若 B 改放到 0x1040，它们通常位于不同的行。这里的地址仅用于说明边界，真实对象可能受分配器和对齐影响。测试时打印地址或使用调试工具核对实际布局。若结构体恰好跨缓存行，某个字段甚至可能涉及两个行，因而应看实际地址范围而不只看起始地址。</p><p>多插入 56 字节填充后，内存占用会显著增加。若系统有 100 万个计数槽，额外空间可能达到数十 MB；它可能让扫描这些槽的单线程任务更慢。只有确认跨核写入频率足够高时，这个代价才值得付。报告修复结果时应列出吞吐提升与内存增加，而非只给百分比加速。</p></section><section class="panel"><h2>自检</h2><details><summary>给一个真正由两线程共同更新的计数器加填充字节，能消除争用吗？</summary><p>不能。填充只解决不同变量落在同一缓存行的伪共享；同一计数器仍有真实共享写入。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<section class="panel"><h2>具体的地址判断</h2><p>假设缓存行 64 字节，计数器 A 位于地址 0x1000，计数器 B 位于 0x1008，两者落在同一行；若 B 改放到 0x1040，它们通常位于不同的行。这里的地址仅用于说明边界，真实对象可能受分配器和对齐影响。测试时打印地址或使用调试工具核对实际布局。若结构体恰好跨缓存行，某个字段甚至可能涉及两个行，因而应看实际地址范围而不只看起始地址。</p><p>多插入 56 字节填充后，内存占用会显著增加。若系统有 100 万个计数槽，额外空间可能达到数十 MB；它可能让扫描这些槽的单线程任务更慢。只有确认跨核写入频率足够高时，这个代价才值得付。报告修复结果时应列出吞吐提升与内存增加，而非只给百分比加速。</p></section><section class="panel" data-dry-goods><h2>缓存行与延迟的硬数字</h2><div class="table-wrap"><table><thead><tr><th>层级</th><th>典型延迟</th><th>容量</th><th>说明</th></tr></thead><tbody><tr><td>寄存器</td><td><b>&lt; 1 ns</b></td><td>几百字节</td><td>最快</td></tr><tr><td><b>L1 Cache</b></td><td><b>约 1 ns</b>（3–4 cycles）</td><td>32–64 KB</td><td>每核独立</td></tr><tr><td><b>L2 Cache</b></td><td><b>约 4 ns</b>（12 cycles）</td><td>256 KB – 2 MB</td><td>每核独立</td></tr><tr><td><b>L3 Cache</b></td><td><b>约 15 – 40 ns</b></td><td>几 MB – 几十 MB</td><td><b>多核共享</b></td></tr><tr><td><b>主存</b></td><td><b>约 80 – 100 ns</b></td><td>GB 级</td><td>最慢，比 L1 慢 <b>约 100 倍</b></td></tr><tr><td>跨 NUMA 节点</td><td>约 150 – 300 ns</td><td>—</td><td>远程内存访问更慢</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>CPU</th><th>缓存行大小</th><th>备注</th></tr></thead><tbody><tr><td>x86 / x86-64（Intel、AMD）</td><td><b>64 字节</b></td><td>事实标准</td></tr><tr><td>ARM（多数）</td><td>64 字节</td><td>部分为 32 字节</td></tr><tr><td>Apple M 系列</td><td>128 字节</td><td><b>注意！</b>与 x86 不同</td></tr><tr><td>IBM POWER</td><td>128 字节</td><td>—</td></tr></tbody></table></div><p><b>伪共享的本质</b>：CPU 缓存一致性（MESI）以<b>缓存行</b>为单位。两个线程分别写两个<b>不同</b>的变量，只要它们落在<b>同一条 64 字节缓存行</b>里，就会互相使对方的缓存行失效——每次写都要重新从内存/其它核拉取，性能退化到接近内存访问速度，尽管两个变量逻辑上毫无关系。</p><p><b>填充消除伪共享</b></p><pre><code>// Go：用 padding 把两个计数器隔开（Go 1.19+ 官方提供了 CacheLinePad）
+import "sync/atomic"
+
+type PaddedCounter struct {
+    count int64
+    _     [56]byte        // 8 + 56 = 64，占满一整条缓存行
+}
+// 或使用标准库：
+// var pad [cpu.CacheLinePadSize]byte  // "internal/cpu" 不导出
+// 第三方：github.com/golang/... 自行填充即可
+
+var counters [8]PaddedCounter
+
+func worker(id int) {
+    for i := 0; i &lt; 1e7; i++ {
+        atomic.AddInt64(&amp;counters[id].count, 1)
+    }
+}
+
+// C/C++：alignas
+struct alignas(64) PaddedCounter {
+    std::atomic&lt;int64_t&gt; count;
+};
+
+// Java：@Contended（需 -XX:-RestrictContended）或手动 padding</code></pre><p class="muted"><b>真共享 vs 伪共享</b>：真共享是多线程写<b>同一个</b>变量（确实需要同步，无法靠 padding 解决）；伪共享是写<b>不同但相邻</b>的变量（纯属布局问题，padding 即可解决）。只有后者能靠填充优化。</p></section><section class="panel"><h2>实测与排查</h2><p><b>伪共享检测</b></p><pre><code># 用 perf c2c 检测伪共享（Intel 平台，最权威的工具）
+perf c2c record -- ./your_program
+perf c2c report
+# 关注 "HITM"（Hit Modified）：某核的写导致其它核的缓存行失效
+# 出现大量 HITM 且集中在相邻地址 → 高度怀疑伪共享
+
+# 用 perf 看缓存命中率
+perf stat -e cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses ./prog
+# L1-dcache-load-misses 占比高说明局部性差
+
+# 查看缓存行大小
+getconf LEVEL1_DCACHE_LINESIZE        # Linux
+sysctl -n hw.cachelinesize            # macOS
+cat /sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size</code></pre><ul><li><b>优化前先测量</b>：伪共享只在<b>高频写 + 多核</b>时才显著。单线程或只读场景完全不用管。典型受害场景：全局计数器数组、per-core 统计、并发队列的 head/tail 指针、分片锁数组。</li><li><b>优化手段按优先级</b>：① <b>让每个线程写自己的缓存行</b>（padding / 对齐）；② <b>线程本地累加</b>，最后再合并（避免共享写，效果最好）；③ 用原子操作的<b>宽松内存序</b>（relaxed）减少屏障开销。</li><li><b>结构体内字段排序也有讲究</b>：把<b>经常一起访问</b>的字段放一起（提高局部性），把<b>只读</b>和<b>频繁写</b>的字段分开（避免互相影响）。</li><li><b>不要盲目加 padding</b>：填充会让结构体变大，可能降低缓存能容纳的对象数，反而变慢。只在<b>确认是热点</b>且<b>多核竞争写</b>时才加。</li><li><b>相关优化：数据布局</b>：AoS（Array of Structs）改成 SoA（Struct of Arrays）常能大幅提升向量化与缓存利用率——遍历时只碰需要的字段。</li><li><b>排障顺序</b>：① <code>perf c2c report</code> 看 HITM 热点；② 确认热点地址是否相邻（同一缓存行）；③ 加 padding 或改本地累加；④ 复测（伪共享的修复效果通常非常显著，可能是数倍）。</li></ul><details><summary>为什么加了 padding 反而没变快？</summary><p>三种可能：① 瓶颈不在这里（先测）；② 填充后结构体过大，缓存能放的对象数减少；③ 你遇到的是<b>真共享</b>（多线程写同一变量），padding 无用，需要改成线程本地累加。</p></details><details><summary>volatile / atomic 能解决伪共享吗？</summary><p>不能。它们只保证可见性与原子性，反而因为强制刷新缓存行让伪共享<b>更明显</b>（普通变量可能被编译器优化到寄存器里，反而碰不到缓存）。伪共享是内存布局问题，只能靠布局解决。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>给一个真正由两线程共同更新的计数器加填充字节，能消除争用吗？</summary><p>不能。填充只解决不同变量落在同一缓存行的伪共享；同一计数器仍有真实共享写入。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="locality.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

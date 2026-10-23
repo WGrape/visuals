@@ -8,6 +8,88 @@
 <section class="panel"><h2>订单创建的完整时间线</h2><p>一次请求生成稳定 order_id 与 event_id。在数据库事务里插入订单和 outbox 事件，提交后立刻向用户返回订单创建成功。发布器随后读取未发布事件，按指定主题发送；消息系统确认后，再记录发送状态。用户请求无需等待消息系统在线，但下游看到事件会有可监测的延迟。若业务要求“下游同步完成才算成功”，Outbox 并不满足该需求，需要另选协调或同步协议。</p><div class="table-wrap"><table><thead><tr><th>故障点</th><th>留下的状态</th><th>恢复方式</th></tr></thead><tbody><tr><td>本地事务提交前</td><td>订单与 outbox 都没有</td><td>客户端按幂等键重试</td></tr><tr><td>提交后、发送前</td><td>订单和待发事件都存在</td><td>发布器稍后继续发送</td></tr><tr><td>发送后、标记前</td><td>事件可能被重复发送</td><td>消费者按 event_id 幂等</td></tr><tr><td>消费中途失败</td><td>消息重新投递</td><td>消费事务与去重记录一起提交</td></tr></tbody></table></div></section>
 <section class="panel"><h2>顺序、积压与清理仍要设计</h2><p>同一个订单先“创建”后“取消”，若由多个发布器并发处理，消息可能乱序到达。可按 aggregate_id 分区、记录单调版本号，消费者拒绝旧版本，或按业务键顺序发布。全局顺序通常代价很高，也未必必要；应明确需要的是“同一订单内有序”还是“所有订单全局有序”。</p><p>发布器可以轮询 outbox，也可以利用数据库变更日志 CDC。轮询实现直接，却要控制扫描索引、批量大小与锁争用；CDC 降低轮询压力，但增加日志订阅与重放运维。两种方式都要监控待发条数、最老事件年龄、重复投递率和失败重试。删除旧 outbox 行前，先确认已被可靠发布并满足审计保留要求。</p></section>
 <section class="panel"><h2>验收清单与适用边界</h2><ol><li>业务行和 outbox 行在同一数据库事务中写入，事件包含稳定 ID、业务键、类型、版本与时间。</li><li>消费者允许重复投递，幂等窗口覆盖消息重试和故障恢复周期。</li><li>发布积压达到门槛时报警，记录从业务提交到下游生效的端到端延迟。</li><li>演练发送成功但标记失败、发布器重启、消费者事务失败与消息乱序。</li></ol><p>练习：订单事件发出后发布器崩溃，重启又发送同一个 event_id。消费者怎样保证库存只扣一次？如果两个事件属于同一订单，如何识别旧版本并避免状态倒退？</p></section>
-<section class="panel"><h2>表结构与消费者去重的最小设计</h2><p>Outbox 表至少应能表示 event_id、aggregate_id、aggregate_version、event_type、payload、created_at 和发布状态；发布状态可用于重试，但不能当作消费者已经生效的证明。消费者可以建立以 event_id 为唯一键的 inbox 或处理记录，在同一个本地事务中先尝试插入去重键、再更新业务状态。重复消息碰到唯一约束后直接确认处理完成，避免再次扣库存。</p><p>事件 payload 应包含足够的业务标识与版本，但不宜无节制复制敏感数据。Schema 演进时，旧消费者可能还在运行；新增字段尽量保持向后兼容，删除字段要等待消费者升级。订单创建和取消的顺序可由 aggregate_version 检查：如果取消版本 2 先到，消费者可以暂缓、重试或依业务策略处理，不能盲目用较旧的创建事件覆盖较新状态。</p><p>Outbox 适合最终一致的跨服务传播，并不保证下游在用户响应前已经完成。若业务必须在同一请求里确认多个系统全部成功，需要明确同步协调、超时和补偿策略。把 Outbox 的“可靠发布”误称为“全链路实时原子提交”，会导致接口契约与真实行为不符。</p></section><section class="panel"><h2>自检</h2><details><summary>Outbox 是否实现了跨数据库和消息队列的严格一次提交？</summary><p>没有。它把业务写入和待发记录做成本地原子事务，发布阶段仍可能至少一次投递。</p></details><details><summary>为什么发布器发送成功后仍可能再次发送？</summary><p>发送确认与本地“已发送”标记之间可能崩溃，恢复后会重试未标记事件。</p></details></section>
+<section class="panel"><h2>表结构与消费者去重的最小设计</h2><p>Outbox 表至少应能表示 event_id、aggregate_id、aggregate_version、event_type、payload、created_at 和发布状态；发布状态可用于重试，但不能当作消费者已经生效的证明。消费者可以建立以 event_id 为唯一键的 inbox 或处理记录，在同一个本地事务中先尝试插入去重键、再更新业务状态。重复消息碰到唯一约束后直接确认处理完成，避免再次扣库存。</p><p>事件 payload 应包含足够的业务标识与版本，但不宜无节制复制敏感数据。Schema 演进时，旧消费者可能还在运行；新增字段尽量保持向后兼容，删除字段要等待消费者升级。订单创建和取消的顺序可由 aggregate_version 检查：如果取消版本 2 先到，消费者可以暂缓、重试或依业务策略处理，不能盲目用较旧的创建事件覆盖较新状态。</p><p>Outbox 适合最终一致的跨服务传播，并不保证下游在用户响应前已经完成。若业务必须在同一请求里确认多个系统全部成功，需要明确同步协调、超时和补偿策略。把 Outbox 的“可靠发布”误称为“全链路实时原子提交”，会导致接口契约与真实行为不符。</p></section><section class="panel" data-dry-goods><h2>为什么需要 Outbox：先发消息还是先写库？</h2><div class="table-wrap"><table><thead><tr><th>顺序</th><th>失败场景</th><th>后果</th></tr></thead><tbody><tr><td>先发消息 → 再写库</td><td>消息发出去了，本地事务<b>回滚</b></td><td><b>下游收到了不存在的订单</b>（幽灵消息）</td></tr><tr><td>先写库 → 再发消息</td><td>库写成功，发消息<b>崩了</b></td><td><b>下游永远不知道</b>（丢消息）</td></tr><tr><td><b>Outbox</b></td><td>消息与业务<b>同一个本地事务</b>落库</td><td>原子性由 DB 保证，之后异步投递</td></tr></tbody></table></div><p><b>Outbox 的核心洞察</b>：不要试图把“数据库”和“消息中间件”放进一个分布式事务（2PC 又慢又脆），而是<b>把消息当成一行数据写进业务库</b>，借用本地事务的 ACID。之后用一个独立的投递组件把这张表“搬运”到 MQ。</p></section><section class="panel"><h2>表结构设计与投递流程</h2><p><b>Outbox 表结构与投递 SQL</b></p><pre><code>CREATE TABLE outbox (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  aggregate_id  VARCHAR(64)  NOT NULL COMMENT '业务聚合ID，如订单号',
+  event_type    VARCHAR(128) NOT NULL COMMENT 'OrderCreated / OrderPaid',
+  payload       JSON         NOT NULL,
+  -- 投递状态：0=待投递 1=已投递 2=投递失败(待重试)
+  status        TINYINT      NOT NULL DEFAULT 0,
+  retry_count   INT          NOT NULL DEFAULT 0,
+  next_retry_at DATETIME(3)  NULL,
+  created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_polling (status, next_retry_at, id)   -- 轮询的核心索引
+) ENGINE=InnoDB;
+
+-- 业务代码：一个事务搞定，失败整体回滚
+START TRANSACTION;
+  INSERT INTO orders (...) VALUES (...);
+  INSERT INTO outbox (aggregate_id, event_type, payload)
+       VALUES ('ORD123', 'OrderCreated', '{"id":"ORD123","amt":9900}');
+COMMIT;   -- 两者要么都在，要么都不在
+
+-- 投递侧：原子地"认领"一批消息（关键：用 UPDATE 抢占，避免多实例重复发）
+UPDATE outbox SET status = 1
+ WHERE status = 0 AND (next_retry_at IS NULL OR next_retry_at &lt;= NOW(3))
+ ORDER BY id LIMIT 500;          -- 批量 500 条，一次 RTT
+-- 然后 SELECT 出这 500 条（用应用层记录 id，或先 SELECT FOR UPDATE SKIP LOCKED）
+SELECT id, event_type, payload FROM outbox WHERE status = 1 AND ... ;</code></pre><p class="muted">MySQL 8.0 推荐用 <code>SELECT ... FOR UPDATE SKIP LOCKED</code> 做多实例并发认领，比“先 UPDATE 再 SELECT”更清晰；MySQL 5.7 只能用 UPDATE 抢占法。</p></section>
+<section class="panel"><h2>三种投递方式：轮询 vs CDC vs 双写</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>延迟</th><th>侵入性</th><th>推荐度</th></tr></thead><tbody><tr><td><b>定时轮询表</b></td><td><b>50 – 500 ms</b>（轮询间隔决定）</td><td>低，实现最简单</td><td>中小规模首选</td></tr><tr><td><b>CDC（Debezium/Flink CDC）</b></td><td><b>10 – 100 ms</b></td><td><b>零侵入</b>，读 binlog</td><td><b>大规模首选</b></td></tr><tr><td>事务提交后同步发（afterCommit）</td><td>&lt;10 ms</td><td>中，且<b>进程崩了会丢</b></td><td>不推荐单独使用</td></tr></tbody></table></div><p><b>Debezium Outbox 配置</b></p><pre><code># Debezium MySQL connector 关键配置
+{
+  "name": "outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+    "database.hostname": "mysql", "database.port": "3306",
+    "database.user": "debezium", "database.password": "secret",
+    "database.server.id": "184054",
+    "database.include.list": "shop",
+    "table.include.list": "shop.outbox",
+    "snapshot.mode": "initial",              # 首次全量 + 之后增量
+    "tombstones.on.delete": "false",          # outbox 表不做物理删除
+    "transforms": "outbox",                  # 开箱即用的 Outbox 路由
+    "transforms.outbox.type":
+        "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.topic.replacement":
+        "${routedByValue}",                   # 按 event_type 路由到 topic
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.payload": "payload"
+  }
+}</code></pre><p><b>轮询参数怎么定</b>：间隔 100 ms + 批量 500 条，单实例可支撑约 <b>5000 msg/s</b>；间隔压到 50 ms、批量 1000 可到约 <b>2 万 msg/s</b>。再高就该上 CDC 了。</p></section>
+<section class="panel"><h2>投递失败怎么重试：退避策略的具体数字</h2><div class="table-wrap"><table><thead><tr><th>重试次数</th><th>间隔</th><th>累计延迟</th><th>说明</th></tr></thead><tbody><tr><td>1</td><td>1 s</td><td>1 s</td><td>网络抖动，绝大多数在这里恢复</td></tr><tr><td>2</td><td>5 s</td><td>6 s</td><td>下游短暂重启</td></tr><tr><td>3</td><td><b>30 s</b></td><td>36 s</td><td>下游较长时间不可用</td></tr><tr><td>4</td><td><b>5 min</b></td><td>≈5.5 min</td><td>疑似故障，告警介入</td></tr><tr><td>5</td><td><b>30 min</b></td><td>≈35 min</td><td>进入人工处理队列</td></tr></tbody></table></div><p>公式：<code>delay = min(base × 2^n, max_delay) × (1 + random(0, 0.1))</code>。<b>必须加随机抖动</b>（jitter 10%），否则大批消息同时重试会形成<b>重试风暴</b>，把刚恢复的下游再次打垮——这是最常见的雪崩成因。</p><p><b>退避实现与监控</b></p><pre><code># 指数退避 + 抖动（Go）
+func nextDelay(retry int) time.Duration {
+    base := 1 * time.Second
+    d := base * time.Duration(1&lt;&lt;uint(retry))      // 1s, 2s, 4s, 8s...
+    if d &gt; 30*time.Minute { d = 30 * time.Minute } // 上限
+    jitter := time.Duration(rand.Int63n(int64(d) / 10))
+    return d + jitter                              // +0~10% 抖动
+}
+
+# 死信：超过最大重试后转移，不要无限重试
+UPDATE outbox SET status = 2, next_retry_at = NULL
+ WHERE id = ? AND retry_count &gt;= 5;
+
+# 监控必须有的三个指标
+#   1) outbox 表最大滞留时间（created_at 最老的一条）-&gt; 超过 60s 告警
+#   2) status=0 的行数（积压量）-&gt; 超过 10000 告警
+#   3) status=2 的行数（死信）-&gt; 大于 0 立刻告警</code></pre></section>
+<section class="panel"><h2>消费端幂等：at-least-once + 幂等 = exactly-once</h2><p>Outbox 保证消息<b>至少发一次</b>（不丢），但重复不可避免（投递成功但 ACK 丢失时会重发）。所以消费端必须幂等，两者合起来才是“<b>有效一次</b>”。</p><div class="table-wrap"><table><thead><tr><th>幂等方案</th><th>做法</th><th>适用</th></tr></thead><tbody><tr><td><b>去重表 + 唯一键</b></td><td><code>INSERT INTO consumed(msg_id) ...</code> 利用唯一索引拦截</td><td><b>最通用、最可靠</b></td></tr><tr><td><b>业务天然幂等</b></td><td>用 <code>SET status='paid'</code> 而非 <code>status=status+1</code></td><td>状态机类，首选</td></tr><tr><td><b>乐观锁版本号</b></td><td><code>WHERE version=? </code> 更新并 +1</td><td>需要并发控制</td></tr><tr><td>Redis SETNX</td><td><code>SET msg_id 1 NX EX 86400</code></td><td>高吞吐但<b>可能丢</b>，只做辅助</td></tr></tbody></table></div><p><b>幂等消费实现</b></p><pre><code>-- 去重表方案：和业务更新放在同一个事务里
+CREATE TABLE consumed_msg (
+  msg_id    VARCHAR(128) NOT NULL,
+  topic     VARCHAR(128) NOT NULL,
+  consumed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (msg_id)                    -- 唯一键就是幂等的全部实现
+) ENGINE=InnoDB;
+
+START TRANSACTION;
+  INSERT INTO consumed_msg (msg_id, topic) VALUES ('m-12345', 'order');  -- 重复则报 1062
+  UPDATE orders SET status = 'PAID' WHERE id = 'ORD123';
+COMMIT;
+-- 若报 Duplicate entry 'm-12345' -&gt; 说明已消费过，直接 ACK 返回即可
+
+-- 定期清理（保留 7 天足够覆盖重发窗口）
+DELETE FROM consumed_msg WHERE consumed_at &lt; NOW() - INTERVAL 7 DAY;</code></pre></section>
+<section class="panel"><h2>深入自检</h2><details><summary>Outbox 表会无限膨胀吗？怎么处理？</summary><p>会。每条消息都落表，百万 QPS 下一天就是几亿行。<b>三个手段</b>：① 投递成功后<b>异步物理删除</b>（或定期 <code>DELETE WHERE status=1 AND created_at &lt; NOW()-1天</code>）；② 用 <code>TRUNCATE</code> 或<b>分区表按天 DROP PARTITION</b>（比 DELETE 快几个数量级，不产生 undo）；③ 高吞吐场景改用 <b>CDC 直接读 binlog</b>，连 outbox 表都不落（但要求 DB 开 binlog）。</p></details><details><summary>CDC 读 binlog 和轮询 outbox 表，哪个更好？</summary><p><b>中小规模用轮询</b>（实现 100 行代码，可控可观测）；<b>大规模用 CDC</b>（延迟低、不扫表、不给 DB 加轮询压力）。判断点：如果轮询的 <code>SELECT</code> 已经让 DB 有可观测的压力，或延迟要求 &lt; 100 ms，就上 CDC。注意 CDC 依赖 binlog，且 Debezium 需要额外的 Kafka Connect 集群运维。</p></details><details><summary>Outbox 能保证“发出的消息顺序”吗？</summary><p>能保证<b>单个聚合</b>（如同一个订单）内的顺序：给 outbox 表按 <code>aggregate_id</code> 分区投递，MQ 侧用同一个分区键（Kafka 的 key = aggregate_id）。但<b>跨聚合的全局顺序无法保证也不该保证</b>——那是把系统串行化了。</p></details><details><summary>为什么不用 2PC / XA 直接跨 DB 和 MQ？</summary><p>三个现实问题：① <b>性能</b>——XA 的 prepare/commit 两轮日志，吞吐掉一个数量级；② <b>可用性</b>——协调者宕机会导致资源被<b>长时间锁定</b>（悬挂事务）；③ <b>支持度</b>——很多 MQ（早期 Kafka）根本不支持 XA。Outbox 用“本地事务 + 异步投递”绕开了全部三点，代价只是多一张表。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>Outbox 是否实现了跨数据库和消息队列的严格一次提交？</summary><p>没有。它把业务写入和待发记录做成本地原子事务，发布阶段仍可能至少一次投递。</p></details><details><summary>为什么发布器发送成功后仍可能再次发送？</summary><p>发送确认与本地“已发送”标记之间可能崩溃，恢复后会重试未标记事件。</p></details></section>
 <footer>继续阅读：<a href="distributed-transaction.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

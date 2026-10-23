@@ -67,6 +67,26 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,32 +96,113 @@
   <p>Patroni / repmgr 故障切换，PgBouncer 连接池，读写分离与连接风暴。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#a1">高可用组件</a><a href="#a2">故障切换</a><a href="#a3">连接池</a><a href="#a4">读写分离</a></nav>
+  <nav class="toc"><a href="#s1">① 可用性的三个层次</a><a href="#s2">② 崩溃恢复：数据库自己能做的事</a><a href="#s3">③ 主备高可用方案</a><a href="#s4">④ 备份策略：RPO 与 RTO</a><a href="#s5">⑤ 连接池与连接治理</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="a1"><h2>① 高可用组件</h2>
-<ul>
-  <li><strong>Patroni</strong>：基于 etcd/Consul/ZooKeeper（或 raft）的模板化 HA，自动选主、故障切换、防脑裂。</li>
-  <li><strong>repmgr</strong>：轻量流复制管理 + 自动故障转移。</li>
-  <li><strong>HAProxy / PgPool-II / PgBouncer</strong>：流量路由到主/备。</li>
-</ul>
+<section id="s1"><h2>① 可用性的三个层次</h2>
+
+<div class="grid3">
+<div class="card3"><h4>单机可靠性</h4><p>WAL + 检查点保证崩溃后不丢已提交数据；但主机故障即服务中断</p></div>
+<div class="card3"><h4>主备高可用</h4><p>流复制 + 自动故障切换（Patroni/repmgr），RTO 秒~分钟级</p></div>
+<div class="card3"><h4>备份与恢复</h4><p>基础备份 + WAL 归档，支持 PITR；防误删与灾难</p></div>
+<div class="card3"><h4>只读扩展</h4><p>备库承担读流量（hot standby），提升整体吞吐</p></div>
+<div class="card3"><h4>延迟备库</h4><p>故意延后应用 WAL，用于救回人为误操作</p></div>
+<div class="card3"><h4>多活/分片</h4><p>Citus、分片中间件或应用层分库分表；复杂度显著上升</p></div>
+</div>
+<p><strong>关键认知：高可用（HA）不能替代备份。</strong>主备复制会把误删操作<strong>同步</strong>到备库，因此「防误删」必须靠 <strong>PITR 备份</strong>或<strong>延迟备库</strong>。</p>
+
 </section>
-<section id="a2"><h2>② 故障切换</h2>
-<p>主库宕机时，HA 组件在 DCS 中抢锁，把某个同步备提升为新主，更新 VIP/路由。关键是 <strong>防止脑裂</strong>（用分布式锁而非单纯超时）和 <code>fencing</code>。</p>
+<section id="s2"><h2>② 崩溃恢复：数据库自己能做的事</h2>
+
+<p>PG 启动时若发现数据目录不是「干净关闭」，会自动进入恢复：从最近的 <strong>checkpoint</strong> 开始<strong>重放 WAL</strong>，把已提交事务的修改补齐，未提交的根据 clog 判为不可见。</p>
+<pre><code># 关键参数
+checkpoint_timeout = 5min          # 检查点最大间隔
+max_wal_size = 2GB                 # 触发检查点的 WAL 软上限
+checkpoint_completion_target = 0.9 # 刷页时间占比（越大越平滑）
+full_page_writes = on              # 防部分写（torn page）
+
+-- 观察上次检查点时间
+SELECT * FROM pg_control_checkpoint();</code></pre>
+<table>
+<tr><th>参数</th><th>调大的影响</th><th>调小的影响</th></tr>
+<tr><td>checkpoint_timeout</td><td>崩溃恢复时间变长，但 IO 更平稳</td><td>恢复快，但检查点频繁、IO 抖动</td></tr>
+<tr><td>max_wal_size</td><td>同理；代价是 pg_wal 占用更多空间</td><td>检查点更频繁</td></tr>
+<tr><td>checkpoint_completion_target</td><td>刷页更平滑，减少尖峰</td><td>刷页更集中，可能造成卡顿</td></tr>
+</table>
+
 </section>
-<section id="a3"><h2>③ 连接池（必配）</h2>
-<p>PG 每连接一进程，<strong>不用连接池会被高并发打爆</strong>。<code>PgBouncer</code> 用 <code>transaction</code> 模式把应用成百上千连接收敛为少量后端连接：</p>
-<pre><code>[databases]
-app = host=pg-primary dbname=app
-[pgbouncer]
-pool_mode = transaction
-max_client_conn = 5000
-default_pool_size = 30</code></pre>
-<div class="callout warn"><b>连接风暴：</b>应用重启瞬间大量连接涌来，PgBouncer 的 <code>default_pool_size</code> 与 <code>max_client_conn</code> 是护城河；同时调大 OS <code>max_connections</code> 治标不治本。</div>
+<section id="s3"><h2>③ 主备高可用方案</h2>
+
+<table>
+<tr><th>方案</th><th>特点</th><th>适用</th></tr>
+<tr><td>手工 promote</td><td>简单，但 RTO 取决于人</td><td>非关键系统</td></tr>
+<tr><td>Patroni</td><td><strong>最主流</strong>：基于 etcd/Consul/ZK 做共识，自动选主、防脑裂、支持 pg_rewind</td><td>生产首选</td></tr>
+<tr><td>repmgr</td><td>轻量、易上手，自带 switchover/failover 命令</td><td>中小规模</td></tr>
+<tr><td>Stolon</td><td>云原生友好（keeper/sentinel/proxy）</td><td>K8s 环境</td></tr>
+<tr><td>云托管（RDS 等）</td><td>托管高可用，运维成本低</td><td>云上优先</td></tr>
+<tr><td>连接池 + VIP</td><td>配合 PgBouncer / HAProxy 做<strong>连接层 failover</strong>，让应用无感</td><td>所有方案的补充</td></tr>
+</table>
+<figure class="fig">
+<svg viewBox="0 0 700 170" role="img" aria-label="Patroni 高可用拓扑">
+  <rect x="20" y="30" width="120" height="42" rx="6" fill="rgba(88,166,255,.16)" stroke="#58a6ff"/>
+  <text x="80" y="56" fill="#e6edf3" font-size="12" text-anchor="middle">etcd 集群</text>
+  <text x="80" y="70" fill="#8b949e" font-size="10" text-anchor="middle">共识 / 选主</text>
+  <path d="M145,45 L215,45" stroke="#8b949e" stroke-dasharray="4 3"/>
+  <path d="M145,60 L215,60" stroke="#8b949e" stroke-dasharray="4 3"/>
+  <rect x="225" y="25" width="130" height="46" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="290" y="48" fill="#e6edf3" font-size="12" text-anchor="middle">Primary</text>
+  <text x="290" y="64" fill="#8b949e" font-size="10" text-anchor="middle">Patroni 管理</text>
+  <rect x="225" y="85" width="130" height="46" rx="6" fill="rgba(210,153,34,.16)" stroke="#d29922"/>
+  <text x="290" y="108" fill="#e6edf3" font-size="12" text-anchor="middle">Standby</text>
+  <text x="290" y="124" fill="#8b949e" font-size="10" text-anchor="middle">Patroni 管理</text>
+  <path d="M360,48 L430,48" stroke="#ffa657" marker-end="url(#ha1)"/>
+  <text x="395" y="40" fill="#ffa657" font-size="10" text-anchor="middle">WAL</text>
+  <rect x="440" y="55" width="120" height="42" rx="6" fill="rgba(188,140,255,.14)" stroke="#bc8cff"/>
+  <text x="500" y="78" fill="#e6edf3" font-size="12" text-anchor="middle">HAProxy</text>
+  <text x="500" y="93" fill="#8b949e" font-size="10" text-anchor="middle">读写分流</text>
+  <path d="M565,76 L625,76" stroke="#8b949e" marker-end="url(#ha1)"/>
+  <text x="655" y="80" fill="#e6edf3" font-size="12">应用</text>
+  <text x="350" y="152" fill="#8b949e" font-size="11" text-anchor="middle">Patroni 负责选主与健康检查；HAProxy/PgBouncer 负责把连接路由到当前主库</text>
+  <defs><marker id="ha1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8b949e"/></marker></defs>
+</svg>
+<figcaption>典型高可用栈：Patroni（选主）+ etcd（共识）+ HAProxy/PgBouncer（路由）</figcaption>
+</figure>
+
 </section>
-<section id="a4"><h2>④ 读写分离</h2>
-<p>读流量路由到异步备库做 <strong>读写分离</strong>；注意备库有复制延迟，强一致读仍走主。可借 PgPool-II 的 <strong>延迟感知</strong> 路由避免读到太旧的数据。</p>
+<section id="s4"><h2>④ 备份策略：RPO 与 RTO</h2>
+
+<table>
+<tr><th>方式</th><th>RPO</th><th>RTO</th><th>防误删</th></tr>
+<tr><td>pg_dump（逻辑）</td><td>备份点</td><td>长（需导入）</td><td>✅（可单表恢复）</td></tr>
+<tr><td>pg_basebackup + WAL 归档</td><td>秒级</td><td>中（需恢复+重放）</td><td>✅（PITR 到误操作前）</td></tr>
+<tr><td>流复制备库</td><td>0（同步）</td><td>短（promote）</td><td>❌（会同步误操作）</td></tr>
+<tr><td>延迟备库</td><td>—</td><td>短</td><td>✅（延迟窗口内）</td></tr>
+<tr><td>快照（LVM/云盘）</td><td>快照点</td><td>短</td><td>部分</td></tr>
+</table>
+<div class="callout warn"><b>必须演练恢复。</b>「有备份」≠「能恢复」。定期做恢复演练并计时，验证：① 备份文件完整可用；② WAL 归档链完整无断档；③ 恢复后数据一致（校验关键表行数）；④ RTO 满足 SLA。</div>
+
 </section>
-</main>
+<section id="s5"><h2>⑤ 连接池与连接治理</h2>
+
+<p>PG 是<strong>一连接一进程</strong>，连接数过多会严重拖垮性能（内存 + 上下文切换 + 快照维护）。因此<strong>连接池是必需的</strong>。</p>
+<table>
+<tr><th>方案</th><th>层级</th><th>特点</th></tr>
+<tr><td>PgBouncer</td><td>独立中间件</td><td><strong>最常用</strong>；支持 session/transaction/statement 三种池化模式</td></tr>
+<tr><td>应用层池（HikariCP 等）</td><td>应用内</td><td>简单有效，但多实例时总连接数会叠加</td></tr>
+<tr><td>pgpool-II</td><td>中间件</td><td>池化 + 读写分离 + 复制管理（功能多但也更复杂）</td></tr>
+<tr><td>Odyssey</td><td>中间件</td><td>多线程、高性能，支持更细粒度路由</td></tr>
+</table>
+<div class="callout note"><b>PgBouncer 模式选择：</b><strong>session</strong>（最兼容，连接独占直到断开）；<strong>transaction</strong>（<strong>推荐</strong>，事务结束即归还，复用率最高，但不支持预处理语句/会话级 advisory lock 的跨事务语义）；<strong>statement</strong>（最激进，<strong>不支持多语句事务</strong>，很少用）。</div>
+
+</section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：有了主从复制，还需要备份吗？</b><p>A：<strong>必须需要。</strong>复制是<strong>实时的</strong>：主库上的误删、误 UPDATE、DROP TABLE 会<strong>立刻同步到备库</strong>，主备一起「被误删」。备份（尤其 <strong>PITR</strong>）才能把数据恢复到<strong>误操作之前的时间点</strong>。<strong>三层防护</strong>：① <strong>实时备库</strong>应对主机故障（RTO 短）；② <strong>PITR 备份</strong>应对数据损坏与误操作；③ <strong>延迟备库</strong>（如延迟 1 小时）提供快速救回通道。<strong>此外，备份必须定期演练恢复，否则「有备份」只是心理安慰。</strong></p></div>
+<div class="qa"><b>Q：RPO 和 RTO 分别指什么？PG 里怎么达成？</b><p>A：<strong>RPO（恢复点目标）</strong>：最多能丢失多少数据；<strong>RTO（恢复时间目标）</strong>：多久能恢复服务。<strong>达成手段</strong>：① RPO=0 → <strong>同步复制</strong>（<code>synchronous_commit=on/remote_apply</code> + 至少一个同步备），代价是写延迟；② RPO=秒级 → 异步流复制；③ RTO 短 → 自动故障切换（Patroni）+ 连接池/VIP 让应用无感；④ RTO 长但 RPO 精确 → PITR 恢复（需基础备份 + 完整 WAL 归档）。<strong>两者要分别承诺，不能混为一谈。</strong></p></div>
+<div class="qa"><b>Q：脑裂（split-brain）是什么？怎么防？</b><p>A：指<strong>两个节点都认为自己是主库并同时接受写入</strong>，导致数据分叉且难以合并。PG 自身<strong>不提供</strong>自动选主与脑裂防护，需要外部方案：① <strong>奇数节点的分布式共识</strong>（etcd/Consul/ZooKeeper，Patroni 的做法）——只有获得多数派投票才能成为主；② <strong>fencing / STONITH</strong>：确认旧主已隔离（断网、关机、回收 VIP）后才让新主上线；③ <strong>看门狗</strong>（Linux watchdog）在失去心跳时自动重启；④ 云环境可用云厂商的<strong>互斥机制</strong>。<strong>核心原则：宁可短暂不可用，也不能出现双写。</strong></p></div>
+<div class="qa"><b>Q：PgBouncer 的三种池化模式怎么选？</b><p>A：<strong>session</strong>：客户端连接期间独占后端连接，兼容性最好，但复用率低（等同于限制总连接数）；<strong>transaction</strong>（<strong>推荐</strong>）：事务结束就归还连接，复用率最高，是绝大多数场景的选择，<strong>代价是不支持跨事务的会话状态</strong>（预处理语句、会话级 advisory lock、<code>SET</code> 的会话变量等）；<strong>statement</strong>：每条语句后归还，<strong>不支持多语句事务</strong>，几乎不用。<strong>实践：Web/OLTP 用 transaction 模式，并让应用避免依赖会话级状态（或改用 <code>SET LOCAL</code>）。</strong></p></div>
+<div class="qa"><b>Q：连接数设置多少合适？为什么不能太大？</b><p>A：<strong>实际后端连接建议控制在几十到几百</strong>，绝不要上千。原因：PG 是<strong>一连接一进程</strong>，每个后端都有独立的内存（本地缓存、Catalog 缓存、work_mem 等，通常几 MB 起步），且<strong>快照维护、锁表、VACUUM 判断</strong>的成本都随连接数（活跃事务数）增长——连接越多，Vacuum 越难回收、快照越大。<strong>实践：用 PgBouncer 把成千上万的应用连接<strong>复用</strong>到几十个后端连接上；<code>max_connections</code> 设为「峰值后端连接 + 管理预留」。</strong></p></div>
+<div class="qa"><b>Q：怎么设计一套完整的 PG 高可用方案？</b><p>A：分层设计：① <strong>数据层</strong>：1 主 + 2 备（至少一个同步备，用 <code>ANY 1</code> 避免单备故障拖死主库）；② <strong>选主层</strong>：Patroni + 3 节点 etcd（奇数、跨机架）；③ <strong>接入层</strong>：HAProxy/PgBouncer 做读写分离与健康检查路由；④ <strong>备份层</strong>：每日/每周基础备份 + 持续 WAL 归档（异地存储），并配置<strong>延迟备库</strong>；⑤ <strong>监控</strong>：复制延迟、连接数、长事务、<code>age(relfrozenxid)</code>、磁盘与 WAL 目录容量、autovacuum 状态；⑥ <strong>演练</strong>：定期做 switchover 与恢复演练并计时。<strong>外加：DDL 上线规范（lock_timeout）、慢查询治理、容量规划。</strong></p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

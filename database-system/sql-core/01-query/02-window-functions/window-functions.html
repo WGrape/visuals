@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -350,6 +368,25 @@ ORDER BY month;</code></pre>
   </div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第三层 · 排障与边界：窗口函数的坑</h2><div class="table-wrap"><table><thead><tr><th>坑</th><th>后果</th><th>正确做法</th></tr></thead><tbody><tr><td><code>ROWS</code> 与 <code>RANGE</code> 搞混</td><td><b>有重复值时结果不同</b></td><td>要「前 N 行」用 <code>ROWS</code>；要「值范围内」用 <code>RANGE</code></td></tr><tr><td>窗口函数不能写在 <code>WHERE</code> 里</td><td>语法错误</td><td>包一层子查询，在外层过滤</td></tr><tr><td><code>ORDER BY</code> 有重复值时累计和抖动</td><td>同组行的累计值不同</td><td>ORDER BY 加上唯一列（如主键）保证确定性</td></tr><tr><td>以为窗口函数会去重</td><td>行数不变</td><td>窗口函数<b>不改变行数</b>，要聚合用 GROUP BY</td></tr><tr><td>嵌套窗口函数</td><td>不允许</td><td>用子查询分层</td></tr><tr><td><code>LAG/LEAD</code> 越界</td><td>返回 NULL</td><td>用第三个参数给默认值 <code>LAG(x, 1, 0)</code></td></tr></tbody></table></div><p><b>常见坑的写法</b></p><pre><code>-- ROWS vs RANGE 的关键区别（有重复值时）
+-- ROWS: 按物理行数算（前 1 行）
+SUM(v) OVER (ORDER BY d ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+-- RANGE: 按值范围算（值 &gt;= 当前值-1 的所有行，含重复值）
+SUM(v) OVER (ORDER BY d RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)
+
+-- 正确：给 ORDER BY 加唯一列，让结果确定
+ROW_NUMBER() OVER (ORDER BY score DESC, id)   -- 加 id 打破平局
+
+-- 窗口函数结果要在外层过滤（不能写进 WHERE）
+SELECT * FROM (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY ts DESC) rn
+  FROM logins
+) t WHERE rn = 1;                              -- 每用户最新一次登录
+
+-- LAG/LEAD 的默认值
+LAG(amount, 1, 0) OVER (ORDER BY ts)           -- 越界时返回 0 而不是 NULL</code></pre><ul><li><b>排查顺序：</b>先确认 ROWS/RANGE → 再确认 ORDER BY 是否唯一 → 再看有没有把窗口函数写进 WHERE → 最后检查行数是否符合预期。</li><li><b>边界一：</b>窗口函数在 <b>GROUP BY 之后、ORDER BY 之前</b>执行，所以它看到的是分组后的结果。</li><li><b>边界二：</b><code>RANK()</code> 会跳号（1,1,3），<code>DENSE_RANK()</code> 不跳号（1,1,2），<code>ROW_NUMBER()</code> 不并列（1,2,3）——三者语义不同。</li><li><b>边界三：</b><code>NTILE(n)</code> 在不能整除时，前面的组会多分到行。</li></ul><p class="muted">支持度：MySQL 8.0+、PostgreSQL 8.4+、SQL Server 2012+、Oracle 8i+。<b>MySQL 5.7 及更早版本没有窗口函数</b>，只能用变量或自连接模拟。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：窗口函数 vs 自连接 vs 聚合</h2><p>窗口函数的价值：<b>一次扫描就能同时看到「当前行」和「同组的其它行」</b>，而不用自连接。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>扫描次数</th><th>可读性</th><th>性能</th><th>适用</th></tr></thead><tbody><tr><td><b>窗口函数</b></td><td><b>1 次</b></td><td>最好</td><td>好</td><td><b>首选</b></td></tr><tr><td>自连接 / 相关子查询</td><td><b>多次（每行一次）</b></td><td>差</td><td><b>差（O(n²) 风险）</b></td><td>老版本数据库兼容</td></tr><tr><td>先 GROUP BY 再 JOIN 回去</td><td>2 次</td><td>中</td><td>中</td><td>只需聚合值时</td></tr><tr><td>应用层算</td><td>1 次 + 应用计算</td><td>—</td><td>取决于数据量</td><td>数据量小或逻辑复杂</td></tr></tbody></table></div><details><summary>为什么 <code>ROWS</code> 和 <code>RANGE</code> 在没重复值时结果一样？</summary><p>因为「前 N 行」和「值在前 N 的范围内」在没有并列值时指向同一批行。一旦 ORDER BY 的列有重复，RANGE 会把<b>所有值相同的行</b>都算进窗口，ROWS 只算物理上的 N 行——这就是差异的来源。</p></details><details><summary>窗口函数会走索引吗？</summary><p><code>PARTITION BY + ORDER BY</code> 的列如果有<b>复合索引</b>，数据库可以省掉排序步骤，直接从有序索引读取。所以「(uid, ts)」这类复合索引对 <code>PARTITION BY uid ORDER BY ts</code> 的查询帮助很大。</p></details><details><summary>和 GROUP BY 的本质区别是什么？</summary><p>GROUP BY 会<b>压缩行数</b>（每组一行）；窗口函数<b>保持原行数</b>，只是给每行附加一个计算值。所以「既要明细又要汇总」的场景必须用窗口函数，GROUP BY 做不到。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 窗口函数 ·

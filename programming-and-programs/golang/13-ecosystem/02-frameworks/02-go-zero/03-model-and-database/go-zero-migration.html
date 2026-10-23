@@ -58,6 +58,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -301,5 +319,42 @@ alembic downgrade -1</pre>
   go-zero 系列 · 数据库迁移与 Python alembic 对比 · 与「svc 目录 / 初始化 / 建表与 Model」同属 golang 速查 · 配图与代码仅供回忆核心流程
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>迁移工具与命令（可直接上手）</h2><div class="table-wrap"><table><thead><tr><th>工具</th><th>风格</th><th>适用</th></tr></thead><tbody><tr><td><b>golang-migrate</b></td><td>SQL 文件 + 版本号，<code>up/down</code> 成对</td><td><b>最常用</b>，语言无关，CI 友好</td></tr><tr><td><b>goose</b></td><td>SQL 或 Go 函数两种写法</td><td>需要在迁移里写逻辑时</td></tr><tr><td><b>atlas</b></td><td>声明式（描述目标 schema，自动算差异）</td><td>喜欢「声明目标状态」的团队</td></tr><tr><td><b>手工 SQL + 审批</b></td><td>—</td><td>小团队、改动极少</td></tr></tbody></table></div><p><b>golang-migrate</b></p><pre><code># golang-migrate 一条龙
+migrate create -ext sql -dir ./migrations -seq add_user_status
+#   生成 000001_add_user_status.up.sql 和 .down.sql
+
+# 结构约定：{version}_{title}.up.sql / .down.sql
+#   000001_add_user_status.up.sql
+#   000001_add_user_status.down.sql
+
+# 执行 / 回滚
+migrate -path ./migrations -database "mysql://user:pass@tcp(127.0.0.1:3306)/db?multiStatements=true" up
+migrate -path ./migrations -database "..." down 1        # 回滚一步
+migrate -path ./migrations -database "..." version       # 看当前版本
+
+# 版本号脏了（迁移中途失败）时
+migrate -path ./migrations -database "..." force 1       # 强制设为版本 1，再手工修数据
+
+# 在 Go 代码里跑（或用 CLI 都行）
+#   github.com/golang-migrate/migrate/v4
+#   m, _ := migrate.New("file://migrations", dsn)
+#   m.Up()</code></pre><p><b>命名约定建议</b>：用 <code>{序号}_{动作}_{对象}</code>（如 <code>000012_add_index_orders_user_id</code>），不要写 <code>000012_update.sql</code> 这种看不出在干什么的。序号用定长 6 位，避免排序混乱。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>生产环境改表的安全清单</h2><div class="table-wrap"><table><thead><tr><th>操作</th><th>风险</th><th>安全做法</th></tr></thead><tbody><tr><td><b>大表加列</b></td><td>MySQL 5.6 前会锁全表</td><td>用 <b>gh-ost</b> / <b>pt-online-schema-change</b>；MySQL 8.0 的 <code>ALGORITHM=INSTANT</code> 只加列尾可秒级完成</td></tr><tr><td><b>加索引</b></td><td>大表建索引耗时长、占用 IO</td><td>同样走 OSC 工具；或先在从库建好再切</td></tr><tr><td><b>改列类型 / 缩窄长度</b></td><td><b>可能截断数据、不可回滚</b></td><td>先加新列 → 双写 → 回填 → 切读 → 再删旧列</td></tr><tr><td><b>删列</b></td><td>应用还在读写就会报错</td><td>「先停写 → 观察 → 再删」，不要同一版本内改代码又删列</td></tr><tr><td><b>加 NOT NULL</b></td><td>存量数据有 NULL 会失败</td><td>先加默认值 → 回填 → 再加约束</td></tr><tr><td><b>改列名</b></td><td>等价于删除+新增</td><td>能不改就不改，改名走「加新列 → 双写 → 切读 → 删旧列」四步</td></tr></tbody></table></div><ul><li><b>铁律一：迁移与应用分开部署</b>。先上「兼容新旧两种 schema 的应用」，再跑迁移，再上「只用新 schema 的应用」。也就是常说的 expand → migrate → contract 三步走。</li><li><b>铁律二：迁移必须可回滚</b>。每个 up 都要有对应的 down；不可回滚的操作（删数据）要单独走审批流程。</li><li><b>铁律三：迁移脚本进版本库，禁止手工在线上执行</b>。线上手工改过的表，下次迁移就会冲突。</li><li><b>铁律四：CI 里跑一次全量迁移 + 回滚</b>，确保脚本在空库上能从 0 跑到最新。</li><li><b>不要在应用启动时自动迁移</b>：多副本同时启动会并发改表，非常危险。</li></ul><p><b>在线改表</b></p><pre><code># MySQL 8.0 的 INSTANT / INPLACE 判断（先看值不值得冒险）
+ALTER TABLE orders ADD COLUMN status TINYINT NOT NULL DEFAULT 0, ALGORITHM=INSTANT;
+-- 支持 INSTANT 时是秒级（只改元数据）；不支持会报错，不会偷偷变慢
+
+-- 查看改动是否会重建表（8.0）
+ALTER TABLE orders MODIFY COLUMN amount BIGINT, ALGORITHM=DEFAULT, LOCK=NONE;
+
+-- gh-ost（无触发器，对主库影响小，推荐）
+gh-ost \
+  --host=127.0.0.1 --user=gh --password=xxx --database=db --table=orders \
+  --alter="ADD INDEX idx_user (user_id)" \
+  --exact-rowcount --concurrent-rowcount --default-retries=120 \
+  --critical-load="Threads_running=200" --max-load="Threads_running=50" \
+  --chunk-size=1000 --execute
+
+-- 关键参数：--critical-load 会在负载过高时自动中止，这是最重要的安全阀</code></pre><details><summary>go-zero 为什么不内置迁移？</summary><p>go-zero 的定位是不替你决定数据层的事——表结构由你掌控，框架不偷偷改表。这避免了「升级框架版本顺带改了生产表」这类事故。</p></details><details><summary>迁移文件要不要写 down？</summary><p>要。down 不只是回滚手段，更是「这个变更是否真的可撤销」的自检——写不出 down 的迁移，说明这个操作本身就该单独评审。</p></details><details><summary>怎么避免多人同时加迁移导致版本号冲突？</summary><p>合并分支后检查序号；冲突就重编号（改文件名 + 内容里的版本号）。更稳的做法是用时间戳做版本号，避免序号撞车。</p></details></div></section>
 </body>
 </html>

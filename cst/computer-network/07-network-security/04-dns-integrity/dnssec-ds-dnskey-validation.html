@@ -11,6 +11,27 @@
 <section class="panel"><h2>为什么会出现 SERVFAIL</h2><p>验证解析器若看到签名过期、签名尚未生效、DS 与 DNSKEY 不匹配、必要 DNSKEY 或 RRSIG 记录缺失，可能返回 SERVFAIL，而不是给出被认为不可信的答案。没有验证的解析器可能仍返回 A 记录，造成“某些网络能访问、某些网络不行”。此时不能简单关掉验证，先对比权威记录、父区 DS、系统时间和签名有效期。</p><p>时间错误尤其隐蔽：签名有生效与到期时间，权威服务器或验证解析器时钟异常都可能引发失败。大 DNSSEC 应答还可能触发 UDP 截断与 TCP 回退，因此需要确保 DNS TCP 通路可用。</p></section>
 <section class="panel"><h2>密钥轮换与撤销</h2><p>轮换密钥需要给缓存传播和父区 DS 更新留重叠窗口。若先删除旧 DNSKEY、旧 DS 仍被递归解析器缓存，会形成断链；若新 DS 已发布而子区尚未提供新密钥，也会失败。应规划发布、等待缓存、切换签名、更新 DS、观察验证成功率，再移除旧材料的顺序。具体 KSK/ZSK 策略依 DNS 平台而异，不能只在一个控制台点击“更新”就认为全链完成。</p><p>私钥应严密保护，DNSKEY 公钥则可公开。若签名私钥泄漏，需要按既定轮换和事件响应流程处理；继续使用被盗密钥会让攻击者伪造看似合法的记录。</p></section>
 <section class="panel"><h2>如何验证与验收</h2><p>从权威服务器查目标记录、RRSIG、DNSKEY，并从父区查 DS；再用开启验证的递归解析器查询目标名称。分别测试正常存在、无记录、密钥轮换期间和故意错误的测试区域，记录结果是可验证、不安全但可解析，还是验证失败。浏览器网页能打开只证明某条解析与 HTTPS 路径工作，不证明 DNSSEC 已开启。</p><p>运行监控应看签名到期、父区 DS 匹配、验证失败率与权威查询时延。把 DNSSEC、DoH/DoT 和 TLS 放在一张信任边界图里，才能说明每一段保护了什么。</p></section>
+<section class="panel" data-dry-goods><h2>DNSSEC 记录与信任链</h2><div class="table-wrap"><table><thead><tr><th>记录</th><th>作用</th><th>位置</th></tr></thead><tbody><tr><td><b>RRSIG</b></td><td>对一组记录的<b>数字签名</b></td><td>与被签记录同区</td></tr><tr><td><b>DNSKEY</b></td><td>区的公钥（ZSK + KSK）</td><td>区自身</td></tr><tr><td><b>DS</b></td><td>子区公钥的<b>哈希摘要</b>，由父区签名</td><td><b>父区</b>（形成信任链）</td></tr><tr><td><b>NSEC / NSEC3</b></td><td>证明某个名字<b>不存在</b>（防伪造 NXDOMAIN）</td><td>区自身</td></tr><tr><td><b>CDS / CDNSKEY</b></td><td>子区向父区提交 DS 更新</td><td>子区</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>密钥</th><th>用途</th><th>常见算法</th></tr></thead><tbody><tr><td><b>KSK</b>（密钥签名密钥）</td><td>只签 DNSKEY 集合，其哈希进父区 DS</td><td>算法 8（RSA/SHA-256）、13（ECDSA P-256）</td></tr><tr><td><b>ZSK</b>（区签名密钥）</td><td>签区内所有其它记录</td><td>同上，可更频繁轮换</td></tr></tbody></table></div><p><b>信任链（Chain of Trust）</b>：根区（预置信任锚）→ 用根的 DS 验证 <code>com.</code> 的 DNSKEY → 用 com 的 DS 验证 <code>example.com.</code> 的 DNSKEY → 用 example.com 的 ZSK 验证 A 记录的 RRSIG。<b>每一跳的 DS 都在父区</b>，所以篡改子区签名会被父区的 DS 校验发现。</p><p><b>DNSSEC 验证命令</b></p><pre><code># 查看 DNSSEC 记录
+dig example.com DNSKEY +multiline
+dig example.com DS +short
+dig example.com A +dnssec          # 看返回的 RRSIG
+dig com DS +short                  # 父区的 DS
+
+# 验证（delv 是最好的工具）
+delv example.com A
+delv +vtrace example.com A         # 显示完整信任链验证过程
+delv +root=example.com @8.8.8.8 example.com A
+
+# 用 dig 手动跟踪（看每一级是否有 ad 标志）
+dig +trace +dnssec example.com
+
+# 关键标志位
+#   flags: ... ad   → Authentic Data，验证成功（由递归服务器返回）
+#   flags: ... do   → DNSSEC OK，客户端请求了 DNSSEC
+#   没有 ad 且返回 SERVFAIL → 验证失败！
+
+# 验证失败时看 RRSIG 有效期（时间不同步会导致验证失败）
+dig example.com A +dnssec | grep -A2 RRSIG</code></pre></section><section class="panel"><h2>部署与常见故障</h2><ul><li><b>验证失败的头号原因是时钟不同步</b>：RRSIG 有明确的有效期（inception/expiration），验证方时钟偏差大会判定签名“尚未生效”或“已过期”，直接返回 SERVFAIL。<b>必须先保证 NTP 正常</b>。</li><li><b>SERVFAIL 是 DNSSEC 失败的典型表现</b>：普通解析失败是 NXDOMAIN（正常的不存在），而签名验证失败是 SERVFAIL。看到大量 SERVFAIL 优先怀疑 DNSSEC。</li><li><b>响应变大 → 触发分片与放大</b>：DNSSEC 让响应从几十字节涨到几 KB（含 RRSIG、DNSKEY），容易超过 512 字节 → 需要 EDNS0 / TCP；同时放大倍数上升（约 8–50 倍），被用于 DDoS 反射攻击。</li><li><b>NSEC 的“区枚举”问题</b>：NSEC 会列出所有存在的名字，等于把整个区公开（zone walking）。<b>NSEC3</b> 用哈希解决（但仍可能被暴力枚举，需用高迭代次数 + 加盐）。</li><li><b>密钥轮换流程</b>：先发布新密钥 → 等旧 TTL 过期 → 用新密钥签名 → 更新父区 DS → 等父区 DS 的 TTL → 撤销旧密钥。<b>顺序错了会导致全网验证失败</b>（这是 DNSSEC 部署事故的主要来源）。建议用自动化工具（如 <code>dnssec-signzone</code>、CDS/CDNSKEY 自动提交）。</li><li><b>排障顺序</b>：① <code>delv</code> 看具体哪一级失败；② 查 RRSIG 有效期与本机时钟；③ <code>dig +trace +dnssec</code> 逐级验证 DS/DNSKEY 是否匹配；④ 检查父区 DS 是否与实际 DNSKEY 一致（密钥轮换后最容易不一致）。</li></ul><details><summary>DNSSEC 能加密 DNS 查询吗？</summary><p>不能。它只提供<b>完整性与来源认证</b>（证明数据没被篡改、确实来自权威服务器），<b>不提供机密性</b>——查询内容仍是明文。要防窃听需要 DoT/DoH。两者互补，常一起部署。</p></details><details><summary>为什么有些 DNSSEC 验证失败只影响部分地区？</summary><p>通常是缓存与 TTL 问题：旧的 DS/DNSKEY 还在某些递归服务器的缓存里，而权威已经轮换。等 TTL 过期即可恢复，也说明轮换时<b>等待时间不足</b>。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>DoH 已加密，为什么还可能需要 DNSSEC？</summary><p>DoH 保护客户端到解析器的传输；DNSSEC 验证权威数据的签名链，解决的是不同信任边界。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../../04-application-layer/01-dns/dns-udp-tcp-doh-dot.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

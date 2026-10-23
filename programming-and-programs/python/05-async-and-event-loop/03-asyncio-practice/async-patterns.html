@@ -77,6 +77,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -175,5 +193,121 @@
   }, { rootMargin: '-45% 0px -50% 0px' });
   Object.keys(map).forEach(id => obs.observe(document.getElementById(id)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>六种常用并发模式（带代码骨架）</h2><div class="table-wrap"><table><thead><tr><th>模式</th><th>用途</th><th>核心 API</th></tr></thead><tbody><tr><td><b>① 扇出/汇聚</b></td><td>并发请求多个下游，等全部完成</td><td><code>gather</code> / <code>TaskGroup</code></td></tr><tr><td><b>② 限流</b></td><td>控制并发数，保护下游</td><td><code>Semaphore</code></td></tr><tr><td><b>③ 竞速</b></td><td>谁先返回用谁（多源冗余）</td><td><code>wait(FIRST_COMPLETED)</code></td></tr><tr><td><b>④ 超时兜底</b></td><td>超时后返回默认值</td><td><code>wait_for</code> + try</td></tr><tr><td><b>⑤ 生产者-消费者</b></td><td>解耦生产与消费速率</td><td><code>asyncio.Queue</code></td></tr><tr><td><b>⑥ 定期任务</b></td><td>心跳、轮询、定时刷新</td><td><code>while + sleep</code> 或调度库</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>① 扇出汇聚 + ② 限流（最常用组合）</h2><p><b>扇出 + 信号量限流</b></p><pre><code>import asyncio, aiohttp
+
+# 扇出：并发抓取 1000 个 URL，但限制同时只有 50 个在跑
+async def fetch_all(urls, concurrency=50):
+    sem = asyncio.Semaphore(concurrency)
+    timeout = aiohttp.ClientTimeout(total=10, connect=3)
+
+    async def one(session, url):
+        async with sem:                        # 进入前获取信号量
+            try:
+                async with session.get(url, timeout=timeout) as r:
+                    return url, r.status, await r.text()
+            except Exception as e:
+                return url, 0, str(e)          # 失败不中断整体
+
+    connector = aiohttp.TCPConnector(limit=concurrency, limit_per_host=10)
+    async with aiohttp.ClientSession(connector=connector) as s:
+        return await asyncio.gather(*[one(s, u) for u in urls])
+
+# 为什么并发 50？——经验值推导：
+#   目标 QPS = 并发数 / 单请求耗时
+#   单请求 200ms，想达到 250 QPS -&gt; 并发 = 250 * 0.2 = 50
+# 调太大：打挂下游 / 本机 fd 耗尽；调太小：吞吐上不去</code></pre><p><b>两个限流层次别搞混</b>：<code>Semaphore</code> 限制的是<b>同时进行的请求数</b>；<code>TCPConnector(limit=)</code> 限制的是<b>连接池大小</b>（复用连接）。两者通常设成相同值，前者防打挂下游，后者防本机资源耗尽。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>③ 竞速 + ④ 超时兜底</h2><p><b>竞速、兜底与熔断</b></p><pre><code># 竞速：同时问三个镜像源，谁先返回用谁
+async def fastest(urls):
+    tasks = {asyncio.create_task(fetch(u)): u for u in urls}
+    done, pending = await asyncio.wait(
+        tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+    for t in pending: t.cancel()          # 关键：取消落败的
+    return done.pop().result()
+
+# 超时兜底：拿不到就用缓存/默认值，绝不无限等
+async def get_with_fallback(key, default=None):
+    try:
+        return await asyncio.wait_for(remote_get(key), timeout=0.2)  # 200ms
+    except asyncio.TimeoutError:
+        return default if default is not None else local_cache.get(key)
+
+# 熔断：连续失败 N 次后直接短路（不发出请求）
+class CircuitBreaker:
+    def __init__(self, threshold=5, reset_after=30):
+        self.fails = 0; self.threshold = threshold
+        self.reset_after = reset_after; self.opened_at = None
+    async def call(self, fn, *a):
+        if self.opened_at and time.time() - self.opened_at &lt; self.reset_after:
+            raise Exception("circuit open")     # 快速失败
+        try:
+            r = await fn(*a); self.fails = 0; return r
+        except Exception:
+            self.fails += 1
+            if self.fails &gt;= self.threshold: self.opened_at = time.time()
+            raise</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>⑤ 生产者-消费者 + ⑥ 定期任务</h2><p><b>队列与定期任务</b></p><pre><code># 生产者-消费者：用 Queue 解耦（背压天然存在）
+async def crawler():
+    q = asyncio.Queue(maxsize=1000)          # 有界队列 = 背压，防止内存爆炸
+
+    async def producer():
+        for url in get_seeds():
+            await q.put(url)                 # 队列满时自动等待
+        for _ in range(WORKERS): await q.put(None)   # 毒丸：通知消费者结束
+
+    async def consumer(i):
+        while True:
+            url = await q.get()
+            if url is None: break
+            await process(url)
+            q.task_done()
+
+    await asyncio.gather(producer(), *[consumer(i) for i in range(WORKERS)])
+
+# 定期任务：注意用 sleep 而不是忙等，且要能取消
+async def heartbeat(interval=30):
+    while True:
+        try:
+            await send_heartbeat()
+        except Exception as e:
+            log.error("heartbeat failed: %s", e)
+        await asyncio.sleep(interval)        # 不要用 time.sleep！
+
+# 更精确的做法：补偿执行耗时，避免漂移
+async def periodic(interval):
+    while True:
+        t0 = asyncio.get_running_loop().time()
+        await job()
+        elapsed = asyncio.get_running_loop().time() - t0
+        await asyncio.sleep(max(0, interval - elapsed))   # 减去执行时间</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>性能调优：从 100 QPS 到 10000 QPS 的检查清单</h2><div class="table-wrap"><table><thead><tr><th>检查项</th><th>默认值 / 问题</th><th>优化后</th><th>提升</th></tr></thead><tbody><tr><td><b>串行 await</b></td><td>循环里逐个 await</td><td>gather 并发</td><td><b>10 – 100×</b></td></tr><tr><td><b>阻塞调用</b></td><td><code>requests</code>/<code>time.sleep</code></td><td><code>aiohttp</code>/<code>asyncio.sleep</code></td><td><b>决定性</b></td></tr><tr><td><b>连接未复用</b></td><td>每次新建连接（TCP+TLS 握手 ~ 100ms）</td><td><code>TCPConnector(limit=)</code> 复用</td><td><b>3 – 10×</b></td></tr><tr><td><b>并发度过低</b></td><td>默认无限或小信号量</td><td>按 <code>QPS × 耗时</code> 计算</td><td>线性提升</td></tr><tr><td><b>无超时</b></td><td>一个慢请求拖垮全部</td><td>每个调用 <code>wait_for</code></td><td>稳定性</td></tr><tr><td><b>fd 限制</b></td><td><code>ulimit -n 1024</code></td><td>调到 <b>100000</b></td><td>突破天花板</td></tr><tr><td><b>DNS 解析阻塞</b></td><td>同步 getaddrinfo</td><td>用支持 async DNS 的解析器</td><td>高并发下明显</td></tr></tbody></table></div><p><b>系统参数与压测</b></p><pre><code># 系统侧必调参数（高并发 asyncio 服务）
+ulimit -n 100000                 # 文件描述符，默认 1024 是硬瓶颈
+cat /proc/sys/net/ipv4/ip_local_port_range    # 临时端口范围，默认 28232 个
+# 若并发连接超过 3 万，需扩大：
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_tw_reuse=1            # 复用 TIME_WAIT 连接
+
+# 压测用 locust 或自己写
+import asyncio, aiohttp, time
+async def bench(url, total=10000, concurrency=200):
+    sem = asyncio.Semaphore(concurrency)
+    ok = fail = 0
+    async def one(s):
+        nonlocal ok, fail
+        async with sem:
+            try:
+                async with s.get(url) as r:
+                    await r.read()
+                    if r.status == 200: ok += 1
+                    else: fail += 1
+            except Exception: fail += 1
+    conn = aiohttp.TCPConnector(limit=concurrency)
+    t0 = time.time()
+    async with aiohttp.ClientSession(connector=conn) as s:
+        await asyncio.gather(*[one(s) for _ in range(total)])
+    dt = time.time() - t0
+    print(f"QPS={total/dt:.0f}  成功={ok} 失败={fail}")</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>Semaphore 和连接池的 limit 冲突吗？</summary><p>不冲突，但会<b>互相叠加</b>。若 <code>Semaphore(50)</code> 而 <code>TCPConnector(limit=10)</code>，实际并发只有 <b>10</b>（连接池成了瓶颈）。建议<b>两者设成相同值</b>，或者理解清楚：<code>limit</code> 是<b>总连接数</b>，<code>limit_per_host</code> 是<b>单域名连接数</b>（防止把所有连接都打给同一个 host）。抓多个域名时 <code>limit_per_host</code> 要设小一些。</p></details><details><summary>asyncio.Queue 的 maxsize 该设多大？</summary><p>原则：<b>让它成为背压阀门，而不是无底洞</b>。经验值 <code>maxsize = 消费者数 × 10 ~ 100</code>。设 0（无限）会导致生产远快于消费时<b>内存暴涨</b>；设太小（如 1）会让生产者频繁阻塞，吞吐下降。关键是要有<b>监控</b>：<code>q.qsize()</code> 持续接近 maxsize 说明消费者是瓶颈，该扩容了。</p></details><details><summary>怎么优雅关闭 asyncio 服务？</summary><p>三步：① 捕获 <code>SIGTERM</code>，设置一个 <code>stop_event</code>；② 停止接收新请求，给在途请求一个 <b>grace period</b>（通常 10 – 30 s）；③ <code>cancel()</code> 所有任务，然后 <code>await gather(*tasks, return_exceptions=True)</code> <b>等待清理逻辑跑完</b>。最后一点最容易漏——直接退出会让 <code>finally</code> 里的清理代码来不及执行。</p></details><details><summary>异步代码怎么测试？</summary><p>用 <code>pytest-asyncio</code>：给测试加 <code>@pytest.mark.asyncio</code>。三个技巧：① <b>用 <code>asyncio.sleep</code> 而非 <code>time.sleep</code></b>，测试会快很多；② 需要测超时/取消时用 <code>asyncio.wait_for</code> 包一层；③ 时间相关的逻辑<b>注入一个 clock 接口</b>，测试时替换成假时钟（而不是真等 30 秒）。另外 <code>unittest.IsolatedAsyncioTestCase</code> 是标准库自带的方案，无需额外依赖。</p></details></div></section>
 </body>
 </html>

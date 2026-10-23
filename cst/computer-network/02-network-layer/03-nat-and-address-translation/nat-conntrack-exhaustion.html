@@ -12,6 +12,29 @@
 <section class="panel"><h2>重试如何形成正反馈</h2><p>出口丢掉新连接后，客户端超时重试；如果每层代理和 SDK 都按固定间隔重试三次，原本 1 万 QPS 可能在故障中被放大成数倍新连接。新请求和重试竞争更少的状态容量，故障恶化。需要在客户端设置总截止时间、指数退避和随机抖动，在网关限额与应用侧连接池处同时控制，而不是无限放大出口设备。</p><p>重试写请求还可能重复业务副作用，NAT 故障并不会改变幂等规则。用户看到超时，要查询业务结果而不是盲目重新支付。</p></section>
 <section class="panel"><h2>缓解与容量规划</h2><p>先减少不必要连接：HTTP 持久连接、连接池、批量请求、适度空闲时间和健康的 DNS 缓存。再依据连接建立速率、平均存活时间和峰值并发估算状态需求，可用 Little 定律从到达率与平均持续时间估算平均活跃量，并加突发与故障余量。增加公网出口 IP、横向分担 NAT 网关或提高状态容量前，还要确认回程对称、日志和监控能正确追踪映射。</p><p>调短状态超时会更快回收，却可能误伤长时间空闲的正常连接；调长超时保护长连接，却占用更多表项。按 TCP/UDP 和业务类型做测试，不能一个数字覆盖所有流量。</p></section>
 <section class="panel"><h2>验收实验</h2><p>用固定请求数和连接复用率对照压测，记录新建连接每秒、状态表使用率、插入失败、端口占用、客户端超时与服务端收到的 SYN 数。模拟某些客户端无退避重试，再启用退避与连接池，比较峰值。最后断开一台 NAT 节点，验证剩余节点是否有足够状态容量和回程路径。</p><p>定位结论要说清是客户端端口不足、NAT 表项不足、出口端口不足还是服务器队列满。只有明确瓶颈资源，扩容才不会花钱却不改善用户体验。</p></section>
+<section class="panel" data-dry-goods><h2>conntrack 的关键参数与默认值</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td><code>nf_conntrack_max</code></td><td>65536（或按内存：每 16 KB 内存 1 条）</td><td>连接跟踪表最大条目</td></tr><tr><td><code>nf_conntrack_buckets</code></td><td>常为 max/4</td><td>哈希表桶数，影响查找性能</td></tr><tr><td><code>nf_conntrack_tcp_timeout_established</code></td><td><b>432000 s（5 天）</b></td><td>ESTABLISHED 连接保留时长</td></tr><tr><td><code>nf_conntrack_generic_timeout</code></td><td>600 s</td><td>未知协议</td></tr><tr><td><code>nf_conntrack_udp_timeout</code></td><td><b>30 s</b></td><td>UDP 单方向</td></tr><tr><td><code>nf_conntrack_udp_timeout_stream</code></td><td><b>180 s</b></td><td>UDP 双向“流”</td></tr><tr><td><code>nf_conntrack_tcp_timeout_time_wait</code></td><td>120 s</td><td>TIME_WAIT</td></tr><tr><td><code>nf_conntrack_tcp_timeout_close_wait</code></td><td>60 s</td><td>CLOSE_WAIT</td></tr></tbody></table></div><p><b>conntrack 排查与调优</b></p><pre><code># 当前用量 / 上限
+cat /proc/sys/net/netfilter/nf_conntrack_count
+cat /proc/sys/net/netfilter/nf_conntrack_max
+# 或
+sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max
+
+# 内核日志里的铁证
+dmesg | grep -i 'conntrack'
+# nf_conntrack: table full, dropping packet
+
+# 详细统计与条目
+conntrack -S              # 各状态计数
+conntrack -L | awk '{print $5}' | sort | uniq -c | sort -rn | head   # 按协议
+conntrack -L -d 8.8.8.8   # 看特定目的
+
+# 调优
+sysctl -w net.netfilter.nf_conntrack_max=1048576
+sysctl -w net.netfilter.nf_conntrack_buckets=262144   # 建议 = max/4
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=3600  # 从 5 天降到 1 小时
+sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=60
+
+# 不想要 conntrack 的流量：用 NOTRACK（raw 表）
+iptables -t raw -A PREROUTING -p tcp --dport 80 -j NOTRACK</code></pre><p class="muted">调 <code>nf_conntrack_max</code> 要注意内存：每条 conntrack 条目约 <b>300 字节</b>（含两个方向的 tuple 与时间戳），100 万条约 <b>300 MB</b>。同时 <code>buckets</code> 要在加载模块时或开机设置，运行中改需重新加载模块。</p></section><section class="panel"><h2>耗尽原因与防护</h2><ul><li><b>最常见的三个成因</b>：① 短连接高并发（大量 TIME_WAIT 条目，默认 120 s 才清）；② UDP 流（如 DNS、QUIC、视频）条目堆积；③ 攻击/扫描（大量半开连接）。</li><li><b>为什么 5 天的 ESTABLISHED 超时很危险</b>：一条已“死掉”但没走完关闭流程的连接（如对端断电）会占 5 天。几万条这种僵尸连接就能填满默认 65536 的表。生产建议降到 <b>1 小时以内</b>。</li><li><b>NOTRACK 的适用场景</b>：高并发无状态服务（如纯转发的 HTTP）可以在 raw 表用 <code>-j NOTRACK</code> 跳过跟踪，显著降低开销。但<b>有 NAT 规则的流量不能 NOTRACK</b>。</li><li><b>K8s 场景</b>：NodePort/LoadBalancer 都依赖 conntrack，节点上 conntrack 满是典型的“偶发 5 秒超时/连接失败”根因。可用 <code>conntrack -D</code> 应急清理（会断现有连接，慎用），并调大 max + 缩短 timeout。</li><li><b>监控</b>：把 <code>nf_conntrack_count / nf_conntrack_max</code> 做成告警指标，超过 70% 就预警。别等 dmesg 刷屏。</li><li><b>排查顺序</b>：① <code>dmesg</code> 确认是否 table full；② <code>conntrack -S</code> 看哪个状态最多；③ 按目的/协议聚合找大头；④ 调 max + 降 timeout + 必要时 NOTRACK。</li></ul><details><summary>表满了会怎样？</summary><p>内核<b>直接丢弃新包</b>（不建立新连接），已有连接不受影响。表现是“新连接建不上、老连接正常”，且 <code>dmesg</code> 里有 <code>nf_conntrack: table full, dropping packet</code>。</p></details><details><summary>为什么调大了 max 还是会满？</summary><p>可能是 timeout 太长（尤其 5 天的 ESTABLISHED），或者是持续的连接洪流（攻击/压测）。要同时降 timeout 并排查流量来源。另外 <code>buckets</code> 太小会导致哈希冲突、查找变慢，但不影响容量上限。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>出口带宽利用率很低，能排除 NAT 网关容量问题吗？</summary><p>不能。连接跟踪表、出口端口或 CPU 可能先触顶，导致新连接失败。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="cgnat-port-forward-hairpin.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

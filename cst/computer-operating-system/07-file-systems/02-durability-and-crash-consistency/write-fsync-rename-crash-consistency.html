@@ -11,6 +11,31 @@
 <section class="panel"><h2>崩溃时间线逐点看</h2><p>临时文件写入一半时崩溃：旧目标应仍在，可能留下临时垃圾。文件 fsync 完成、rename 前崩溃：旧目标仍应作为正式路径，新临时文件可能留存。rename 已返回、目录尚未 fsync 时崩溃：运行中的读者已经能见新版本，但重启后的命名持久性不能仅由 rename 返回保证。目录 fsync 成功后，才有更明确的“新路径映射已请求持久化”证据。</p><p>异常路径也要认真处理：磁盘满可能在 write、fsync 或 close 才暴露；`write` 还可能短写，需要循环直至所有字节写完。文件权限、所有者、ACL 与扩展属性是否应继承旧文件，要在替换前明确设置；否则内容正确但权限变了，也是一种发布失败。</p></section>
 <section class="panel"><h2>日志与数据库为何更复杂</h2><p>仅替换整个小配置文件时，临时文件加原子替换相对直接。数据库同时更新多个页、索引和元数据，无法用一次 rename 原子替换整个数据目录；通常需要写前日志、校验和、提交记录与恢复流程。文件系统日志主要保护自身元数据或某些数据模式，不自动保证应用的多文件业务事务。应用应根据自己的不变量设计持久化协议。</p><p>对于追加日志，还需明确刷盘批次与“成功响应”的关系：若服务先回复成功、后异步 fsync，断电可能丢失已确认记录；若每条都 fsync，延迟和吞吐会受到影响。组提交能摊薄刷盘成本，但需要告知调用方保证边界。</p></section>
 <section class="panel"><h2>怎么验证</h2><p>用测试进程循环生成有版本号和校验和的配置，反复在不同步骤模拟进程崩溃，并在可控环境里做断电级故障注入。每次重启后只接受“完整旧版或完整新版”，拒绝半份内容。记录 write、fsync、rename 和目录 fsync 的错误码，确保调用链没有吞错。普通 kill 测试主要覆盖进程崩溃，不能完全模拟电源故障。</p><p>练习：临时文件已 fsync 且 rename 已成功返回，但父目录尚未 fsync。当前进程从目标路径读到新配置，是否足以证明断电后一定还是新版？请指出可见性与耐久性的不同。</p></section>
+<section class="panel" data-dry-goods><h2>系统调用语义与持久化边界</h2><div class="table-wrap"><table><thead><tr><th>调用</th><th>保证什么</th><th>不保证什么</th><th>典型延迟量级</th></tr></thead><tbody><tr><td><code>write()</code></td><td>数据进入页缓存，后续读可见</td><td>不保证落盘，断电即丢</td><td>亚微秒（仅内存拷贝）</td></tr><tr><td><code>fsync(fd)</code></td><td>数据 + 元数据（大小、mtime）落盘</td><td>不保证父目录项落盘</td><td>NVMe 数十~数百 μs；机械盘 数 ms</td></tr><tr><td><code>fdatasync(fd)</code></td><td>数据 + 影响读取的元数据落盘</td><td>可能跳过 mtime/ctime 等</td><td>通常比 fsync 略快</td></tr><tr><td><code>rename(a,b)</code></td><td>同一文件系统内原子替换</td><td>不保证替换结果已持久化</td><td>本身只是元数据操作</td></tr><tr><td><code>fsync(dirfd)</code></td><td>把目录项（新建/改名）落盘</td><td>与文件数据无关</td><td>同 fsync 量级</td></tr><tr><td><code>O_DIRECT</code></td><td>绕过页缓存直写设备</td><td>不等于持久化，仍需同步</td><td>延迟更低但对齐要求 512B/4K</td></tr></tbody></table></div><p class="muted">核心事实：<code>write()</code> 返回成功<b>不代表数据能扛断电</b>。只有 fsync 类调用返回后，数据才在持久介质上。</p></section><section class="panel"><h2>原子替换文件的标准配方</h2><p><b>标准写法</b></p><pre><code>// 正确顺序：写临时文件 -&gt; 同步数据 -&gt; 原子改名 -&gt; 同步目录
+int fd = open("data.json.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+write(fd, buf, len);
+fsync(fd);                    // 1) 数据落盘（缺了它可能出现 0 长度或半截内容）
+close(fd);
+rename("data.json.tmp", "data.json");   // 2) 原子替换，读者只会看到旧版或新版
+int dfd = open(".", O_RDONLY | O_DIRECTORY);
+fsync(dfd);                   // 3) 把"改名"这件事本身持久化（缺了它可能回到旧文件）
+close(dfd);</code></pre><div class="table-wrap"><table><thead><tr><th>省略的步骤</th><th>断电后可能出现的现象</th><th>发生条件</th></tr></thead><tbody><tr><td>不 <code>fsync(fd)</code></td><td>新文件存在但内容为 0 或半截</td><td>页缓存未回写即断电</td></tr><tr><td>不 <code>fsync(dirfd)</code></td><td>回到旧文件（改名丢失）</td><td>目录项元数据未落盘</td></tr><tr><td>直接覆盖写（无 tmp）</td><td>读到新旧混合的内容</td><td>写入过程中崩溃，无原子性保护</td></tr><tr><td>用 <code>O_TRUNC</code> 后写</td><td>旧内容已清空、新内容未写入</td><td>截断与写入之间崩溃</td></tr></tbody></table></div><ul><li><b>顺序不能反</b>：先 fsync 文件数据，再 rename，最后 fsync 目录；反过来无法保证。</li><li><b>ext4 的 <code>auto_da_alloc</code></b> 会在截断/覆盖场景替你补一次分配落盘，但它只覆盖部分情况，不能替代显式 fsync。</li><li><b>日志模式影响</b>：<code>data=ordered</code>（默认）保证数据先于元数据提交；<code>data=writeback</code> 更快但崩溃后可能出现旧数据块。</li></ul></section>
+<section class="panel"><h2>实测与排查命令</h2><p><b>命令</b></p><pre><code># 看一个程序到底有没有真的 fsync（最常见的排查手段）
+strace -f -e trace=fsync,fdatasync,sync,write,rename -p $PID
+strace -f -e trace=fsync -o fsync.log ./your_program
+grep -c fsync fsync.log
+
+# 量化 fsync 延迟：单线程同步写，看第 99 百分位
+fio --name=fsync --ioengine=sync --rw=write --bs=4k --size=8m \
+    --fsync=1 --fdatasync=1 --runtime=30 --time_based --group_reporting
+
+# 看文件系统挂载参数（是否 nobarrier / data=writeback）
+mount | grep -E "ext4|xfs" ; tune2fs -l /dev/sdXN | grep -i "filesystem features"
+
+# 断电演练（在虚拟机里）：写一半后强制关机，再挂载检查文件完整性
+fsck -f /dev/sdXN</code></pre><div class="table-wrap"><table><thead><tr><th>观测指标</th><th>含义</th><th>经验阈值</th></tr></thead><tbody><tr><td>fsync p99 延迟</td><td>单次同步写的最坏耗时</td><td>NVMe 应 &lt; 1 ms；机械盘 5~15 ms 属正常</td></tr><tr><td><code>iostat -x</code> 的 <code>await</code></td><td>IO 平均等待（含排队）</td><td>持续 &gt; 20 ms 说明设备饱和</td></tr><tr><td><code>%util</code></td><td>设备忙碌比例</td><td>接近 100% 且 await 高 = 真瓶颈</td></tr><tr><td>strace 中 fsync 次数</td><td>写路径的持久化频率</td><td>每条记录都 fsync 会把吞吐压到很低</td></tr></tbody></table></div></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>断电后文件为空</td><td>只 write 未 fsync</td><td>按标准配方补 fsync(fd)</td></tr><tr><td>断电后回到旧版本</td><td>未 fsync 父目录</td><td>rename 后 fsync(dirfd)</td></tr><tr><td>写入吞吐极低</td><td>每条记录一次 fsync</td><td>批量写 + 组提交（group commit），或放宽到定期 fsync</td></tr><tr><td>fsync 特别慢但设备空闲</td><td>日志提交/屏障开销，或写放大</td><td>检查挂载参数是否启用屏障；换 NVMe；评估 data=writeback 的取舍</td></tr><tr><td>文件内容新旧混合</td><td>原地覆盖写被中断</td><td>改用 tmp + rename 的原子替换</td></tr><tr><td>目录里出现残留 .tmp</td><td>崩溃发生在 rename 前</td><td>启动时清理临时文件，或按固定命名约定扫描</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>write() 返回成功，数据就安全了吗？</summary><p>不安全。write 只保证数据进入内核页缓存并对后续读可见，回写时机由内核决定（通常几十秒内）。断电或内核崩溃都会丢失。必须 fsync 后才算持久化。</p></details><details><summary>为什么 rename 后还要 fsync 目录？</summary><p>rename 修改的是父目录的目录项。文件数据落盘不代表“目录里已经指向新文件”这件事落盘。若目录项未持久化，重启后可能仍然指向旧文件——表现为更新“丢了”。</p></details><details><summary>fdatasync 能完全替代 fsync 吗？</summary><p>多数场景可以更快：它只保证数据以及读取所必需的元数据（如文件大小）落盘，可能不回写 mtime/ctime。但如果你依赖时间戳或某些元数据语义，仍要用 fsync。</p></details><details><summary>数据库为什么普遍用 group commit？</summary><p>因为每次 fsync 的成本固定（NVMe 数十 μs、机械盘数 ms），若每条事务都 fsync，吞吐会被 fsync 次数锁死。把多个事务合并为一次 fsync，能把每秒事务数提升一个数量级，代价是单事务延迟略增。</p></details><details><summary>O_DIRECT 是不是就等于持久化？</summary><p>不是。O_DIRECT 绕过页缓存直接提交 IO，但 IO 完成不等于写入持久介质（设备自身还有缓存），仍需要 fsync 或 O_DSYNC 之类手段确认落盘。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>rename 已返回且当前能读到新版，是否就保证断电重启后仍是新版？</summary><p>不能。可见性与持久化不同；还需要按平台语义同步父目录并检查错误。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/linux-filesystem.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

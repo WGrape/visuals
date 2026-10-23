@@ -11,6 +11,40 @@
 <section class="panel"><h2>重试边界和退避</h2><p>显式序列化失败后，从事务最开始重试，不要只重放最后一条 UPDATE：先前 SELECT 的值已经可能失效。重试次数要有限，加入随机退避避免大量客户端在热点键上同步再次相撞。若每秒 1000 个请求都争同一行，重试只会放大冲突与排队；需要队列化、库存分片或更合适的业务限流。无条件无限重试可能让用户端一直等待，也会推高数据库负载。</p><p>事务提交后才应给用户“成功”结果；如果响应前连接断开，客户端用 request_id 查询已落库结果。查询暂时无记录并不总等于先前事务已失败：还要考虑未完成事务、异步可见性与查询副本延迟。可设计服务端查询状态接口，返回进行中、成功、失败，并对超时状态做最终核对。</p></section>
 <section class="panel"><h2>可观测性与演练</h2><p>记录 request_id、事务尝试次数、冲突原因、最终提交 ID、涉及分片数及外部效果 ID。业务监控分别统计冲突重试率、未知提交率、重复键命中率与库存负数等不变量。若只统计 HTTP 200，可能掩盖两次扣款后只返回一次成功。压测应故意让多个请求同时抢最后一张券，再在 COMMIT 响应前注入断线，核对领取记录恰好一条。</p><p>跨分片事务还可能因更多网络往返而扩大冲突窗口。优先按业务键布局相关数据，减少不必要的跨分片写入；但数据亲和不能替代事务与幂等设计。真正的验收标准是，在超时、重试和节点故障组合下，库存与领取记录仍满足“库存 + 已领取数量 = 初始数量”等约束。</p></section>
 <section class="panel"><h2>容易混淆的结论</h2><p>“可串行化”描述已提交事务的并发结果，不表示每笔都必然一次成功；应用通常仍要处理事务冲突。“幂等”描述重复提交同一业务请求的外部效果，不等于数据库自动识别两个不同 request_id 是同一意图。“超时”描述客户端没有及时收到答案，不等于服务端未执行。把这三句话放在同一张故障时间线上，才能写出正确重试流程。</p><p>练习：T1 提交响应丢失，客户端查询 request_id 已有一条成功记录；此时该返回什么？若查询明确显示事务因序列化冲突回滚，又应从哪一步开始重试？分别写出数据库状态和用户可见结果。</p></section>
+<section class="panel" data-dry-goods><h2>隔离级别与异常对照</h2><div class="table-wrap"><table><thead><tr><th>级别</th><th>脏读</th><th>不可重复读</th><th>幻读</th><th>写偏斜（write skew）</th></tr></thead><tbody><tr><td>Read Uncommitted</td><td>可能</td><td>可能</td><td>可能</td><td>可能</td></tr><tr><td>Read Committed</td><td>不会</td><td>可能</td><td>可能</td><td>可能</td></tr><tr><td>Repeatable Read</td><td>不会</td><td>不会</td><td>可能（InnoDB 用 next-key lock 基本避免）</td><td>可能</td></tr><tr><td>Snapshot Isolation</td><td>不会</td><td>不会</td><td>不会</td><td><b>可能</b></td></tr><tr><td>Serializable</td><td>不会</td><td>不会</td><td>不会</td><td>不会</td></tr></tbody></table></div><p class="muted">关键认知：<b>Snapshot Isolation 不等于 Serializable</b>。SI 允许写偏斜（两个事务各自读同一状态、写不同对象，合起来破坏约束），只有 Serializable 能排除它。</p></section><section class="panel"><h2>各库的报错码与重试信号</h2><div class="table-wrap"><table><thead><tr><th>数据库</th><th>冲突/重试错误</th><th>含义</th></tr></thead><tbody><tr><td>PostgreSQL（SSI）</td><td><code>40001 serialization_failure</code></td><td>可安全重试</td></tr><tr><td>CockroachDB</td><td><code>40001</code>（RETRY_SERIALIZABLE）</td><td>可安全重试</td></tr><tr><td>TiDB（乐观事务）</td><td><code>9007 Write conflict</code></td><td>需重试</td></tr><tr><td>TiDB（悲观事务）</td><td><code>1213 Deadlock</code> / 锁等待超时</td><td>死锁需重试</td></tr><tr><td>MySQL/InnoDB</td><td><code>1213</code> 死锁、<code>1205</code> 锁等待超时</td><td>需重试</td></tr><tr><td>MySQL/InnoDB</td><td><code>1213</code> 之外的 <code>1049/1146</code> 等</td><td><b>不可</b>重试（语法/对象错误）</td></tr></tbody></table></div><p>重试铁律：<b>只有明确标识为可重试的错误码才重试</b>，且重试的整个事务必须重新执行（不能只重发最后一条语句），同时事务要幂等（否则重试会产生副作用）。</p></section>
+<section class="panel"><h2>重试代码模板</h2><p><b>重试模板</b></p><pre><code>import time, random
+
+RETRYABLE = {"40001", "9007", "1213", "1205", "RETRY_SERIALIZABLE", "SERIALIZATION_FAILURE"}
+
+def run_txn(fn, max_retries=5):
+    """fn 必须是完整事务闭包：重试时整体重跑，而不是补发最后一条语句。"""
+    for attempt in range(max_retries):
+        try:
+            with db.transaction() as tx:
+                result = fn(tx)          # 整个事务逻辑
+            return result
+        except DBError as e:
+            if e.sqlstate not in RETRYABLE and e.code not in RETRYABLE:
+                raise                     # 非可重试错误直接抛
+            if attempt == max_retries - 1:
+                raise
+            # 指数退避 + 抖动，避免重试风暴
+            time.sleep(min(0.05 * (2 ** attempt), 1.0) * (0.8 + 0.4 * random.random()))
+
+# 5 次重试的等待上限约 0.05+0.1+0.2+0.4+0.8 = 1.55s（含抖动）</code></pre><p><b>幂等写法</b></p><pre><code>-- 幂等是重试的前提：更新用条件约束，插入用唯一键
+UPDATE accounts SET balance = balance - 100
+ WHERE id = 1 AND balance &gt;= 100;        -- affected rows=0 表示余额不足，重试也安全
+
+INSERT INTO transfers (biz_key, from_id, to_id, amount)
+VALUES ('t:20260311:001', 1, 2, 100)
+ON DUPLICATE KEY UPDATE biz_key = biz_key;   -- 重复插入无副作用
+
+-- MySQL 看死锁详情（排障必看）
+SHOW ENGINE INNODB STATUS\G      -- LATEST DETECTED DEADLOCK 段
+--   看两个事务各自持有什么锁、等什么锁，据此调整加锁顺序</code></pre></section>
+<section class="panel"><h2>降低冲突的工程手段</h2><div class="table-wrap"><table><thead><tr><th>手段</th><th>做法</th><th>代价</th></tr></thead><tbody><tr><td>统一加锁顺序</td><td>所有事务按同一顺序访问行（如先 id 小的）</td><td>需要规范与 review</td></tr><tr><td>缩小事务范围</td><td>事务内不做远程调用、不做大查询</td><td>需要重构</td></tr><tr><td>降低隔离级别 + 显式锁</td><td>RC + <code>SELECT ... FOR UPDATE</code></td><td>需要正确识别临界区</td></tr><tr><td>乐观重试 + 幂等</td><td>冲突即重试整体事务</td><td>需要幂等设计与退避</td></tr><tr><td>拆分热点行</td><td>把单行计数器拆成多行随机更新</td><td>读取时需求总和</td></tr><tr><td>缩短持锁时间</td><td>先读后算，最后才写</td><td>需要调整代码顺序</td></tr></tbody></table></div></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>40001 / 9007 频繁出现</td><td>并发写同一批行</td><td>缩小事务；统一加锁顺序；加大退避</td></tr><tr><td>死锁 1213 高发</td><td>不同事务加锁顺序相反</td><td>统一访问顺序；缩短事务</td></tr><tr><td>锁等待超时 1205</td><td>长事务持锁过久</td><td>拆分事务；设置合理 <code>innodb_lock_wait_timeout</code>（默认 50s）</td></tr><tr><td>重试后出现重复数据</td><td>事务不幂等</td><td>加唯一键/条件更新；重试整体事务</td></tr><tr><td>重试风暴</td><td>固定间隔同步重试</td><td>指数退避 + 抖动 + 熔断</td></tr><tr><td>只读事务也报冲突</td><td>SSI 会跟踪读依赖（PostgreSQL）</td><td>明确声明只读事务；缩短读事务范围</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>Snapshot Isolation 为什么不能防止写偏斜？</summary><p>因为 SI 下两个事务可以基于<b>同一个快照</b>各自读取、再写<b>不同</b>的对象，写写不冲突所以都能提交，但合起来破坏了一个跨对象的约束（例如两个医生同时请假导致无人值班）。Serializable（SSI 或 2PL）会检测这种读写依赖环并中止其中一个。</p></details><details><summary>哪些错误可以安全重试？</summary><p>明确标识为序列化失败/死锁/锁等待超时的错误（PostgreSQL 与 CRDB 的 40001、TiDB 的 9007、MySQL 的 1213 与 1205）。语法错误、约束违反、权限错误都不能靠重试解决。判断依据是错误码，而不是错误文本。</p></details><details><summary>重试时为什么要重跑整个事务？</summary><p>因为冲突意味着该事务读到的版本已失效，只补发最后一条语句会让前面的读与后面的写不一致，产生错误结果。正确做法是回滚后从头重跑整个事务逻辑，并配合幂等设计保证重复执行无副作用。</p></details><details><summary>幂等和重试是什么关系？</summary><p>幂等是重试安全的前提：若事务包含非幂等操作（如插入无唯一键的记录、发送外部消息），重试会产生重复副作用。因此重试必须与唯一键/条件更新/事务消息（Outbox）配合，让「执行 N 次」与「执行 1 次」结果相同。</p></details><details><summary>如何降低序列化冲突的发生率？</summary><p>四类：① 缩短事务（不在事务内做远程调用与大查询）；② 统一加锁顺序（避免死锁）；③ 拆分热点（单行计数器拆多行）；④ 合理选择隔离级别与显式锁（RC + FOR UPDATE 往往比全局 SERIALIZABLE 更可控）。同时保留退避重试作为兜底。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>客户端在 COMMIT 后超时，能否直接认定事务已经回滚并用新请求键再扣一次？</summary><p>不能。提交决定可能已经持久化但应答丢失；先用原请求键查询并确认结果。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="distributed-sql-transactions.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

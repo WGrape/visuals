@@ -11,6 +11,28 @@
 <section class="panel"><h2>失效时发生什么</h2><p>链路 A 物理断开后，LACP 或接口状态应把它从活动成员移除，原本映射到 A 的流量重新分配到 B。B 只有 1G 容量，若原来总流量接近 2G，切换成功仍会发生拥塞和延迟上升。冗余保证有路径，不保证故障后容量不降。业务验收要同时测连通性与故障后的峰值负载。</p><p>成员口恢复时，哈希映射可能再次变化，部分流短时间乱序或丢包。应用重试、TCP 重传和队列抖动应纳入切换时延统计。若上联交换机本身故障，两根线都接它时仍一起中断；跨设备聚合需要交换机支持相应多机箱技术，并按特定拓扑配置。</p></section>
 <section class="panel"><h2>与 STP 的关系</h2><p>LACP 把多个物理端口作为一个逻辑连接交给上层网络，STP 则在更大二层拓扑中防止环路。它们可同时存在，但 LACP 不能代替整个网络的 STP，STP 也不会自动把两条独立链路的带宽相加。若把一端聚合、一端不聚合，STP 观察到的拓扑可能与预期不同。设计时画清逻辑链路和物理成员，不要只画两根线。</p><p>VLAN Trunk 可以承载在聚合接口上，需保证成员配置一致。某 VLAN 只在一根成员口允许，会产生哈希相关的间歇性故障：某些流通、某些流不通。排查要按成员口检查 VLAN 和错误计数。</p></section>
 <section class="panel"><h2>验收方法</h2><p>先在两端核对聚合组、活动成员、协议状态和 VLAN 配置；用多条并发流测试总吞吐，再用单条流验证其上限。分别断开 A 和 B，检查持续连通、恢复时间与故障后延迟。若总吞吐低，查看每根线利用率和哈希字段；若单流低于 1G，再查网卡、CPU、磁盘与对端限速。</p><p>运行中修改聚合算法或成员口会改变现有连接分布，应先在非高峰演练并有回滚配置。对关键业务，记录故障后只有一根线时的实际可用容量，而非只在正常双链路状态报漂亮数字。</p></section>
+<section class="panel" data-dry-goods><h2>链路聚合模式与哈希策略</h2><div class="table-wrap"><table><thead><tr><th>模式（Linux bonding）</th><th>是否需要交换机配合</th><th>说明</th></tr></thead><tbody><tr><td><b>802.3ad（LACP，mode 4）</b></td><td><b>需要</b>交换机开 LACP</td><td><b>推荐</b>：动态协商，能检测链路故障</td></tr><tr><td>balance-xor（mode 2）</td><td>需要静态聚合</td><td>按哈希选链路，不检测链路状态</td></tr><tr><td>active-backup（mode 1）</td><td><b>不需要</b></td><td>主备，只有一条活跃，故障切换</td></tr><tr><td>balance-rr（mode 0）</td><td>需要</td><td>轮询发包，<b>可能乱序</b>，很少用</td></tr><tr><td>balance-tlb / alb（mode 5/6）</td><td>不需要</td><td>按负载/ARP 自适应，出向负载均衡</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>哈希策略（xmit_hash_policy）</th><th>依据</th><th>效果</th></tr></thead><tbody><tr><td><b>layer2</b></td><td>源/目的 MAC</td><td>同一对设备只有一条链路（最差）</td></tr><tr><td><b>layer2+3</b></td><td>MAC + IP</td><td>同一对 IP 只有一条链路</td></tr><tr><td><b>layer3+4</b>（默认推荐）</td><td>IP + <b>端口</b></td><td><b>不同连接可分摊到不同链路</b>，最常用</td></tr><tr><td>encap2+3 / encap3+4</td><td>隧道内层</td><td>VXLAN/GRE 环境用（否则所有隧道流量走同一条）</td></tr></tbody></table></div><p><b>关键认知</b>：LACP 是<b>按流（flow）</b>哈希的，<b>单条 TCP 连接永远只走一条物理链路</b>。所以 2×10 G 的聚合，单个大文件传输最多只能跑 10 G；只有<b>多条并发连接</b>才能跑满 20 G。这是“聚合了但速度没变”的头号原因。</p><p><b>LACP 配置与验证</b></p><pre><code># 创建 LACP 绑定
+ip link add bond0 type bond mode 802.3ad xmit_hash_policy layer3+4
+ip link set eth0 master bond0
+ip link set eth1 master bond0
+ip link set bond0 up
+
+# 查看状态（关键文件）
+cat /proc/net/bonding/bond0
+# 看：Bonding Mode、MII Status、各 Slave 的 MII Status 与 Aggregator ID
+#     Aggregator ID 一致 = 同一个 LACP 聚合组（不一致说明协商失败）
+
+# LACP 速率（fast=1s / slow=30s）
+cat /sys/class/net/bond0/bonding/lacp_rate
+
+# 交换机侧（Cisco）
+# interface Port-channel1
+#   ...
+# interface Gi0/1
+#   channel-group 1 mode active      # active=主动发 LACP，passive=被动
+
+# 看流量分布（验证是否均衡）
+cat /proc/net/dev | grep -E 'eth0|eth1|bond0'</code></pre></section><section class="panel"><h2>故障切换与常见坑</h2><ul><li><b>LACP 速率</b>：slow（默认，30 s 发一次 LACPDU） vs fast（1 s）。要快速检测链路故障用 <b>fast</b>，两端必须一致。</li><li><b>Aggregator ID 不一致 = 协商失败</b>：常见原因是两端模式不匹配（一端 active 一端没开 LACP）、或成员口配置不一致（速率/双工/VLAN/trunk 放行不同）。交换机通常要求成员口配置完全相同才会聚合。</li><li><b>哈希不均</b>：如果流量集中在少数几个 IP:端口（如一条大流量数据库连接），layer3+4 也可能全压在一条链路上。解决：换哈希策略、增加流的数量、或改用更高带宽单链路。</li><li><b>虚拟化/隧道场景</b>：VXLAN/GRE 把所有内层流封装成同样的外层五元组 → 标准哈希全走一条链路。必须用 <code>encap3+4</code> 按内层哈希，或在叠加层做负载均衡。</li><li><b>排障顺序</b>：① <code>cat /proc/net/bonding/bond0</code> 看各 slave 是否 up 且 Aggregator ID 一致；② 看交换机侧 Port-channel 是否形成；③ 看两端速率/双工/VLAN 配置；④ 用多流压测验证是否真的分摊（<code>iperf3 -P 8</code>）。</li><li><b>验证均衡的正确方法</b>：用 <b>多条并发流</b>（<code>iperf3 -P 8</code>）而不是单条。单流测试永远只能跑满一条物理链路。</li></ul><details><summary>两条 1 G 聚合了，为什么传文件还是 1 G？</summary><p>单条 TCP 连接被哈希到固定一条物理链路。这是 LACP 的设计（保证同一流的包不乱序）。要用多线程/多连接传输（如 <code>iperf3 -P 4</code>、BT 下载、多条 scp）才能跑满聚合带宽。</p></details><details><summary>链路断了会丢包吗？</summary><p>LACP 检测到链路 down 后会把流量切到剩余链路，通常 <b>几十到几百毫秒</b>内完成（fast 模式更快）。期间的包会丢，TCP 会重传。用 <code>lacp_rate fast</code> + 交换机配合能缩短到几十毫秒。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>两根 1G 网线聚合后，单条 TCP 下载一定达到 2G 吗？</summary><p>不一定。常见哈希让一条流固定走一个成员口，单流往往仍受该口 1G 上限限制。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../03-spanning-tree/stp-rstp-loop-root-port.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

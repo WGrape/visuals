@@ -76,6 +76,24 @@
     @media (max-width: 550px) { body { padding-block-start: 18px; } header { padding-block: 30px 22px; } main { gap: 38px; } .stages, .contrast { grid-template-columns: 1fr; } .stage { padding: 15px; } }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
   <div class="page">
@@ -172,7 +190,67 @@ async def handle(job):
           <li>超时、Retry-After、重试次数与最终失败数：检查是否发生重试放大。</li>
         </ul>
       </section>
-    </main>
+    
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>为什么需要客户端侧限流</h2><p><b>核心问题</b>：服务端限流是<strong>被动的</strong>——请求已经发到了服务端，被拒绝时网络带宽和连接已经消耗了。客户端限流是<strong>主动的</strong>，从源头减少无效请求。</p><div class="table-wrap"><table><thead><tr><th>对比</th><th>服务端限流</th><th><b>客户端限流</b></th></tr></thead><tbody><tr><td><b>生效位置</b></td><td>请求到达后</td><td><strong>请求发出前</strong></td></tr><tr><td><b>资源消耗</b></td><td><strong>已消耗网络+服务端资源</strong></td><td><strong>几乎为零</strong></td></tr><tr><td><b>被拒延迟</b></td><td>1 个 RTT 后才知被拒</td><td><strong>本地立即失败</strong></td></tr><tr><td><b>能否区分用户</b></td><td>能（按 IP/token）</td><td>能（按本地策略）</td></tr></tbody></table></div><p><b>最典型的场景是重试风暴</b>：服务端抖动 → 客户端超时 → 大量重试 → 服务端压力翻倍 → 更多超时 → 雪崩。<strong>客户端必须限制重试的速率与次数</strong>，否则重试本身就是放大故障的元凶。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>重试策略的关键参数</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>推荐值</th><th>说明</th></tr></thead><tbody><tr><td><b>最大重试次数</b></td><td><b>2~3 次</b></td><td>再多只会加重故障</td></tr><tr><td><b>基础退避</b></td><td><b>100 ms</b></td><td>首次重试的等待</td></tr><tr><td><b>退避倍数</b></td><td><b>2</b>（指数退避）</td><td>100ms → 200ms → 400ms</td></tr><tr><td><b>抖动</b></td><td><strong>必须加</strong>（± 50%）</td><td><strong>否则重试会同步到达形成尖峰</strong></td></tr><tr><td><b>总超时预算</b></td><td><b>不超过原请求超时的 2 倍</b></td><td>防止重试拖长整体耗时</td></tr><tr><td><b>仅对幂等请求重试</b></td><td><strong>铁律</strong></td><td><strong>非幂等重试会造成重复扣款</strong></td></tr></tbody></table></div><p><b>重试实现</b></p><pre><code>import random, time
+
+def retry_with_backoff(fn, max_retries=3, base=0.1, budget=2.0):
+    '''指数退避 + 抖动 + 总预算控制'''
+    start = time.time()
+    last_err = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except RetryableError as e:
+            last_err = e
+            # 检查总预算：重试不能无限拖长
+            if time.time() - start &gt; budget:
+                break
+            # 指数退避 + &lt;strong&gt;全抖动&lt;/strong&gt;（关键！）
+            delay = base * (2 ** i)
+            delay = random.uniform(0, delay)      # 全抖动：0 ~ delay 之间
+            # 或对半抖动：random.uniform(delay/2, delay)
+            time.sleep(min(delay, budget - (time.time() - start)))
+    raise last_err
+
+# 为什么必须加抖动：
+#   1000 个客户端同时失败，若都等 100ms 再重试
+#   → 100ms 后&lt;strong&gt;1000 个请求同时到达&lt;/strong&gt; = 新的尖峰
+#   加抖动后，重试被摊平到 0~100ms 的窗口内</code></pre><p class="muted"><b>只对幂等请求重试</b>：GET、查询类天然幂等；POST 创建订单、支付扣款<strong>不是</strong>——第一次可能已成功只是响应丢失，重试会造成重复。解决方案是<strong>给请求带唯一幂等键</strong>（idempotency key），服务端据此去重。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>熔断：客户端的自我保护</h2><div class="table-wrap"><table><thead><tr><th>状态</th><th>行为</th><th>转换条件</th></tr></thead><tbody><tr><td><b>Closed</b></td><td>正常放行</td><td>错误率超阈值 → Open</td></tr><tr><td><b>Open</b></td><td><strong>直接失败，不发请求</strong></td><td>冷却时间到 → Half-Open</td></tr><tr><td><b>Half-Open</b></td><td><strong>放行少量试探请求</strong></td><td>试探成功 → Closed；失败 → Open</td></tr></tbody></table></div><p><b>熔断器</b></p><pre><code>class CircuitBreaker:
+    def __init__(self, threshold=0.5, min_calls=20,
+                 cooldown=30, half_open_calls=5):
+        self.threshold = threshold        # 错误率阈值，常设 50%
+        self.min_calls = min_calls        # &lt;strong&gt;最小调用数，避免少量样本误判&lt;/strong&gt;
+        self.cooldown = cooldown          # Open 状态持续时间
+        self.half_open_calls = half_open_calls
+        self.state = 'closed'
+        self.opened_at = 0
+
+    def allow(self):
+        if self.state == 'open':
+            if time.time() - self.opened_at &gt; self.cooldown:
+                self.state = 'half_open'
+                self.trials = 0
+            else:
+                return False              # &lt;strong&gt;快速失败，不发请求&lt;/strong&gt;
+        if self.state == 'half_open':
+            if self.trials &gt;= self.half_open_calls:
+                return False
+            self.trials += 1
+        return True
+
+    def record(self, ok):
+        # 统计滑动窗口内的成功率，超阈值则打开
+        ...
+
+# 关键参数经验值：
+#   threshold      0.5（50% 错误率）
+#   min_calls      20（样本太少不判断，避免 1/2 = 50% 误触发）
+#   cooldown       30 秒
+#   half_open      3~5 个试探请求</code></pre><p><b>熔断与限流的区别</b>：<strong>限流</strong>控制的是「我发出多少」（速率上限）；<strong>熔断</strong>控制的是「我还发不发」（健康度判断）。限流是常态机制，熔断是故障期的保护。两者通常<strong>同时使用</strong>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：重试次数设多少合适？</summary><p>A：<strong>2~3 次，且要配合总超时预算</strong>。重试不是越多越好——服务端故障时，大量重试会让流量放大 N 倍，把「部分抖动」变成「完全雪崩」。业界典型的故障放大案例就是重试次数设成 5~10 次。更好的做法是：① 重试次数 ≤ 3；② 用<strong>总预算</strong>而非次数来控制（如「总耗时不超过 2 秒」）；③ 服务端持续错误时<strong>触发熔断停止重试</strong>。</p></details><details><summary>Q：为什么退避必须加抖动？</summary><p>A：<strong>防止重试同步化</strong>。不加抖动时，所有在同一时刻失败的客户端会在完全相同的时刻重试，形成<strong>周期性的尖峰</strong>（称为 thundering herd），每次尖峰又打垮服务端导致下一轮尖峰。加抖动后重试被摊平在一个时间窗口内，服务端看到的是平滑的流量。<strong>全抖动（uniform(0, delay)）比对半抖动更好</strong>，摊得更均匀。</p></details><details><summary>Q：熔断打开后怎么恢复？</summary><p>A：<strong>靠 Half-Open 状态试探</strong>。Open 期间请求直接失败（快速失败，保护下游）；冷却时间（如 30 秒）后进入 Half-Open，<strong>只放行少量请求</strong>（3~5 个）；若这些试探成功，说明下游恢复，回到 Closed；若失败，重新 Open 并重置计时。<strong>关键是不能从 Open 直接跳回 Closed</strong>——否则一个不健康的下游会被瞬间涌入的全量流量再次打垮。</p></details><details><summary>Q：客户端限流会不会影响正常用户？</summary><p>A：<strong>会，所以要做分级</strong>。三种常用策略——① <strong>按优先级</strong>：付费用户/关键业务不限流或高配额，低优先级先被限；② <strong>按功能</strong>：核心链路（下单、支付）保额，非核心（推荐、统计）先降级；③ <strong>优雅降级</strong>：被限时返回<strong>兜底数据或友好提示</strong>，而不是报错。另外客户端限流应<strong>只在检测到后端压力时启动</strong>（如错误率上升），正常时期不生效，避免误伤。</p></details></div></section>
+</main>
     <footer><p>案例延伸：<a href="../../01-performance-evaluation-framework/04-capacity-and-limits/jina-reader-concurrency-and-rpm.html">Reader 并发描述与 RPM 限额</a> · <a href="../../01-performance-evaluation-framework/00-overview/traffic-terminology.html">并发、QPS 与响应时间</a></p><p><a href="../../index.html">返回专题目录</a></p></footer>
   </div>
 </body>

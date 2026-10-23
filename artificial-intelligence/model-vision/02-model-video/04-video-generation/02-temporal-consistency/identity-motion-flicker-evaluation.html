@@ -12,6 +12,28 @@
 <section class="panel"><h2>指标与人工评审各有盲区</h2><p>逐帧清晰度指标可能奖励每张帧都锐利，却不惩罚衣服花纹换样；相邻帧一致性指标可能奖励静止画面，却不理解用户要求“跑起来”。身份相似度可监测脸部漂移，但侧脸、遮挡、光照变化会造成误判，也不能代表身体与道具一致。运动估计可找跳变，却可能被大幅镜头运动干扰。FVD 等分布指标描述样本集与参考集差异，不能单独判定某条视频的角色是否一直相同。</p><p>人工盲评应拆成指令遵循、单帧质量、身份一致、运动合理、时序闪烁和镜头语言，并给出清晰锚点。多评审者意见不一致时，先核对是否把“创作风格变化”和“错误漂移”混淆。</p></section>
 <section class="panel"><h2>改进和成本取舍</h2><p>条件中加入稳定角色参考、场景布局或轨迹，可约束长程身份与运动；时空注意力和跨片段状态可帮助帧共享信息；后处理可用插帧、稳定化或局部重绘修补个别问题。但后处理也可能改变身份或制造重影，不能只看局部帧。更长上下文和更高分辨率会显著增加计算、延迟与显存，需按目标视频长度和交付成本选择。</p><p>若模型输出用于新闻、证据或人物影像，生成质量之外还要清晰标识来源与授权，不能把视觉一致当作真实事件的证明。</p></section>
 <section class="panel"><h2>验收一个三段视频</h2><p>生成三段各 3 秒，角色同一、服装同一，分别要求站立、转身、走向门口。检查每段内部的相邻帧闪烁，再检查段间脸、衣服和空间关系，最后核对转身与走路是否衔接。对每个错误给出时间戳和对象，统计错误段比例及人工评分，而不是只挑一段最好的展示。若改用了更强角色参考，记录额外生成时间与是否降低动作自由度，才能说明修复的实际代价。</p></section>
+<section class="panel" data-dry-goods><h2>一致性指标怎么量化</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>度量对象</th><th>计算方式</th><th>可用范围</th></tr></thead><tbody><tr><td><b>CLIP-I</b></td><td>帧间语义/身份相似</td><td>相邻帧 CLIP 图像嵌入的余弦相似度</td><td>通用，最常用</td></tr><tr><td><b>DINO-I / ViT 特征距离</b></td><td>身份与结构一致</td><td>自监督特征余弦相似度</td><td>对<strong>形变敏感</strong>，比 CLIP 更严格</td></tr><tr><td><b>LPIPS 帧间</b></td><td>感知级跳变</td><td>相邻帧学习感知距离</td><td>值越低越稳，&gt; 0.1 视为明显闪烁</td></tr><tr><td><b>光流误差 / warp error</b></td><td>运动连续性</td><td>用估计光流 warp 前一帧，算残差</td><td>检测<strong>抖动与跳变</strong>最灵敏</td></tr><tr><td><b>FVD</b></td><td>整段视频分布质量</td><td>视频级特征分布距离</td><td>越低越好，但<strong>不看时序对齐</strong></td></tr><tr><td><b>身份保持（ArcFace）</b></td><td>人脸是否换脸</td><td>人脸嵌入相似度</td><td>人物视频必测</td></tr></tbody></table></div><p><b>经验阈值</b>：CLIP-I 平均 &gt; <b>0.95</b> 通常视觉上连贯；低于 0.90 肉眼可见漂移。帧间 LPIPS &gt; <b>0.1</b> 基本可判定为闪烁。</p></section><section class="panel"><h2>闪烁与身份漂移的成因对照</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>根因</th><th>典型缓解手段</th></tr></thead><tbody><tr><td><b>整体闪烁</b>（每帧亮度/纹理跳）</td><td>逐帧独立采样、缺时序约束</td><td>加时序注意力 / 光流一致性损失 / 潜变量平滑</td></tr><tr><td><b>身份漂移</b>（脸越变越不像）</td><td>长序列累积误差、条件稀释</td><td>关键帧锚定（首帧 ID 特征注入每帧）、分段生成+重叠融合</td></tr><tr><td><b>运动抖动</b>（抖动式来回）</td><td>噪声种子帧间不连续</td><td>共享噪声 / 噪声滚动（noise rolling）</td></tr><tr><td><b>背景跳变</b></td><td> attention 未对齐静态区域</td><td>背景 mask 固定 / 首帧 latent 复用</td></tr><tr><td><b>边界撕裂</b></td><td>分块生成时块间不一致</td><td>重叠分块 + 加权融合，重叠区 <b>8~16 帧</b></td></tr></tbody></table></div></section>
+<section class="panel"><h2>评测流程与采样密度</h2><p><b>一致性评测代码</b></p><pre><code># 评测脚本骨架（CLIP-I 帧间一致性）
+import torch, clip
+from PIL import Image
+
+model, preprocess = clip.load("ViT-B/32", device="cuda")
+
+def clip_i(frames, sample_stride=5):
+    # 全帧太慢，按 stride 采样；长视频建议至少 30 帧
+    idx = list(range(0, len(frames), sample_stride))
+    feats = []
+    for i in idx:
+        x = preprocess(Image.open(frames[i])).unsqueeze(0).to("cuda")
+        with torch.no_grad():
+            f = model.encode_image(x)
+        feats.append(f / f.norm(dim=-1, keepdim=True))
+    feats = torch.cat(feats)
+    sims = (feats[:-1] * feats[1:]).sum(-1)      # 相邻帧余弦相似度
+    return sims.mean().item(), sims.min().item() # 均值 + 最差帧
+
+# 判读：mean &gt; 0.95 连贯；min &lt; 0.85 说明存在明显跳变点，需定位该帧</code></pre><ul><li>采样密度：<b>至少 30 帧</b>，stride 取 5~10；太稀会漏掉瞬时跳变。</li><li>必须同时看 <strong>均值和最小值</strong>——均值高但最小值很低，说明有局部突变，比整体不稳更刺眼。</li><li>光流法对<strong>静态镜头</strong>误报高（物体静止时光流接近 0，残差自然小），需结合运动幅度归一化。</li></ul></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：FVD 低但看着还是很抖，为什么？</summary><p>A：FVD 衡量的是<strong>整段视频的特征分布距离</strong>，它不检查帧与帧之间的对齐关系。一段画面精美但帧间乱跳的视频，FVD 可能很低。所以一致性必须单独用<strong>帧间相似度</strong>（CLIP-I / 光流误差）衡量，不能只看 FVD。</p></details><details><summary>Q：为什么加时序注意力后还是闪？</summary><p>A：常见原因是<strong>训练时的感受野有限</strong>——时序窗口只覆盖 16~24 帧，超出窗口的长期一致性没有被约束。处理办法是分层：短窗内用时序注意力保证局部平滑，长序列用<strong>关键帧锚定</strong>（把首帧的身份特征注入后续每帧）保证不漂移。</p></details><details><summary>Q：人脸视频的身份相似度多少算合格？</summary><p>A：ArcFace 余弦相似度 &gt; <b>0.6</b> 通常认为是同一个人；低于 0.4 已经明显换脸。注意阈值随姿态与光照变化——侧脸与暗光下分数天然偏低，评测时应<strong>固定采样条件</strong>做横向对比，不要跨条件比较绝对值。</p></details><details><summary>Q：怎么快速定位是第几帧开始漂移的？</summary><p>A：画出帧间相似度曲线（横轴帧号、纵轴 CLIP-I），找<strong>持续下降的拐点</strong>。单点毛刺通常是采样噪声或快速运动，不构成漂移；连续 10 帧以上单调下降才是真正的身份漂移起点。从该帧往前的条件注入往往就是失效点。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>相邻帧像素差很小，就能证明视频运动正确、角色身份稳定吗？</summary><p>不能。静止画面也可能像素差小；还需看指令要求的运动、跨长时间的身份和道具连续性。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="video-temporal-consistency.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

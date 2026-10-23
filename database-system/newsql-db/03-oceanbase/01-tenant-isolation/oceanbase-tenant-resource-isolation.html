@@ -16,6 +16,37 @@ OceanBase 在一个集群中可承载多个租户，租户各有数据库对象�
 租户内用户权限应按最小可用范围分配，备份任务、审计日志和密钥管理也要按租户明确归属。共享集群管理员可能拥有跨租户的基础设施权限，因此还需审计管理面操作。测试时用另一个租户账户尝试访问表名相同的对象，确认隔离在数据库权限和应用连接配置两层都有效。</h2><p>恢复演练要验证能否只恢复目标租户或目标库，以及恢复时资源从哪里来。备份成功不等于恢复可用；要记录恢复点、恢复耗时、数据校验和连接切换步骤。若某租户数据增长过快，也不能让备份流量挤占另一个租户的业务高峰。</p></section>
 <section class="panel"><h2>运维指标与决策
 为每个租户建立事务延迟、吞吐、错误、锁等待、资源配额、实际使用、存储增长和后台任务的视图，并能关联到物理节点。若只展示集群平均值，低流量关键租户可能被高流量租户掩盖。为重要租户设置最低可用容量和干扰阈值，定期做邻居噪声演练。</h2><p>租户是否继续共用集群应由实测业务服务等级决定。如果共享路径始终无法满足关键交易延迟，可以分集群部署；如果容量与隔离表现稳定，共享集群可降低运维成本。选择要有成本、风险和可回退路径，而不是仅凭“多租户”三个字。</p></section>
-<section class="panel"><h2>一个容量决策的算例</h2><p>假设交易租户平时需要 12 个 CPU 单位、故障时预计增长到 18 个；分析租户高峰需要 10 个。若剩余两个可用区在单区故障后合计只能提供 24 个单位，就算日常合计 22 个看似能放下，故障时也可能缺 4 个。规划时要用故障后的放置约束重新计算，而不是把全集群所有空闲资源简单相加。再观察日志盘、内存和网络是否也满足故障场景，找出最早触顶的资源。</p><p>给租户扩配后，应用连接池和并发上限未必自动同步调整。若数据库容量变大、应用却仍排队，业务延迟不会改善；若应用一下释放过多并发，又可能把新容量立即打满。数据库与应用的变更应联合压测并分阶段放量。</p></section><section class="panel"><h2>自检</h2><details><summary>两个租户 CPU 配额独立，就能保证交易延迟互不影响吗？</summary><p>不能。磁盘、网络、缓存和后台任务仍可能共享；应通过邻居噪声实验验证尾延迟。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
+<section class="panel"><h2>一个容量决策的算例</h2><p>假设交易租户平时需要 12 个 CPU 单位、故障时预计增长到 18 个；分析租户高峰需要 10 个。若剩余两个可用区在单区故障后合计只能提供 24 个单位，就算日常合计 22 个看似能放下，故障时也可能缺 4 个。规划时要用故障后的放置约束重新计算，而不是把全集群所有空闲资源简单相加。再观察日志盘、内存和网络是否也满足故障场景，找出最早触顶的资源。</p><p>给租户扩配后，应用连接池和并发上限未必自动同步调整。若数据库容量变大、应用却仍排队，业务延迟不会改善；若应用一下释放过多并发，又可能把新容量立即打满。数据库与应用的变更应联合压测并分阶段放量。</p></section><section class="panel" data-dry-goods><h2>租户、资源单元与资源池</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>层级关系</th></tr></thead><tbody><tr><td><b>Unit（资源单元）</b></td><td>最小的资源配额单位：CPU + 内存 + 日志盘 + IOPS</td><td>最底层</td></tr><tr><td><b>资源池（Resource Pool）</b></td><td>由若干 Unit 组成，分布在多个 Zone（OBServer）上</td><td>池 = Unit × Zone 数</td></tr><tr><td><b>租户（Tenant）</b></td><td>逻辑数据库实例，绑定一个或多个资源池</td><td>一个租户可跨多个 Zone</td></tr><tr><td><b>Zone</b></td><td>可用区 / 故障域，通常对应一个机房或机架</td><td>副本分布单位</td></tr></tbody></table></div><p><b>算一下资源</b>：创建一个 3 Zone 的租户，每个 Unit 规格为 4C8G，则该租户在每个 Zone 上占 4C8G，<b>总共占用 12C24G</b>（3 个 Zone × 4C8G）。很多人误以为总共只占 4C8G，导致资源超卖。</p><p><b>OceanBase 租户操作</b></p><pre><code>-- 创建资源单元规格
+CREATE RESOURCE UNIT my_unit
+  MAX_CPU 4, MIN_CPU 4,
+  MEMORY_SIZE '8G',
+  LOG_DISK_SIZE '20G',
+  MAX_IOPS 10000, MIN_IOPS 5000, IOPS_WEIGHT 10;
+
+-- 创建资源池（3 个 Zone 各放一个 Unit）
+CREATE RESOURCE POOL my_pool
+  UNIT 'my_unit', UNIT_NUM 1,
+  ZONE_LIST ('zone1','zone2','zone3');
+
+-- 创建租户（MySQL 兼容模式）
+CREATE TENANT IF NOT EXISTS my_tenant
+  RESOURCE_POOL_LIST ('my_pool'),
+  PRIMARY_ZONE 'RANDOM',
+  CHARSET 'utf8mb4',
+  OB_COMPATIBILITY_MODE 'mysql'
+  SET ob_tcp_invited_nodes = '%';
+
+-- 查看资源使用
+SELECT * FROM oceanbase.__all_unit_config;
+SELECT * FROM oceanbase.__all_resource_pool;
+SELECT * FROM oceanbase.GV$OB_UNITS;
+SELECT tenant_id, svr_ip, max_cpu, min_cpu, memory_size
+  FROM oceanbase.__all_unit;
+
+-- 在线调整（扩容）
+ALTER RESOURCE UNIT my_unit MAX_CPU 8, MEMORY_SIZE '16G';
+-- 增加 Unit 数量（水平扩展）
+ALTER RESOURCE POOL my_pool UNIT_NUM 2;</code></pre></section><section class="panel"><h2>隔离机制与运维要点</h2><div class="table-wrap"><table><thead><tr><th>资源维度</th><th>隔离手段</th><th>说明</th></tr></thead><tbody><tr><td>CPU</td><td>cgroup（控制组）+ OB 内部调度</td><td>MIN_CPU 是<b>保证</b>配额，MAX_CPU 是<b>上限</b>；空闲时可超用</td></tr><tr><td>内存</td><td>严格限制（超过即报错）</td><td><b>内存是硬限制</b>，与 CPU 不同，不能超用</td></tr><tr><td>磁盘</td><td>LOG_DISK_SIZE 独立配额</td><td>日志盘满会导致写入失败，需监控</td></tr><tr><td>IOPS</td><td>MIN/MAX_IOPS + IOPS_WEIGHT</td><td>按权重分配，避免单租户打满磁盘</td></tr><tr><td>连接数/并发</td><td>租户级变量（max_connections 等）</td><td>防止单租户耗尽连接</td></tr><tr><td>大查询</td><td>大查询队列与限流</td><td>避免大查询拖垮整个租户</td></tr></tbody></table></div><ul><li><b>内存是硬限制，CPU 是弹性限制</b>：这是 OceanBase 与很多系统的关键差异。<code>MEMORY_SIZE</code> 超了会直接报 <code>OB_TENANT_OUT_OF_MEM</code>；而 CPU 在集群空闲时可以超过 MIN_CPU 用到 MAX_CPU。</li><li><b>Unit 数量 = 该 Zone 内的副本数</b>：<code>UNIT_NUM = 1</code> 表示每个 Zone 一份资源；调大 UNIT_NUM 可以在 Zone 内做<b>水平分片</b>（多副本并行服务），但会成倍增加资源占用。</li><li><b>PRIMARY_ZONE 决定读写在哪里</b>：设为 <code>RANDOM</code> 让主副本分散在各 Zone（负载均衡）；设为单一 Zone 则所有主副本集中（减少跨机房写入，但容灾能力下降）。</li><li><b>多租户不等于强隔离</b>：CPU/IOPS 是弹性共享的，一个租户跑大查询仍会挤占其它租户。真正需要强隔离时用<b>独立集群</b>或给关键租户设 MIN 配额。</li><li><b>排障顺序</b>：① 看 <code>GV$OB_UNITS</code> 各租户配额与实际使用；② 看是否内存打满（硬限制，最常见报错）；③ 看日志盘是否满；④ 看是否有大查询占满 CPU；⑤ 用 <code>GV$OB_SQL_AUDIT</code> 找慢 SQL。</li><li><b>容量规划</b>：总资源 = Σ(Unit × Zone 数)，规划时务必按<b>三副本</b>计算，且预留 30% 给合并（major compaction）等后台任务。</li></ul><details><summary>为什么我建了 4C8G 的租户，集群却少了 12C24G？</summary><p>因为资源池分布在 3 个 Zone，每个 Zone 各占一份 Unit（4C8G × 3 = 12C24G）。这是多副本容灾的必然代价。若只有一个 Zone 或 UNIT_NUM=1 且单 Zone，才只占一份。</p></details><details><summary>租户内存不够可以临时超用吗？</summary><p>不可以。OceanBase 的内存是<b>硬配额</b>，超了直接报错。要扩容必须 <code>ALTER RESOURCE UNIT</code> 调整 MEMORY_SIZE（在线生效），或者清理数据/降低 memtable 占用。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>两个租户 CPU 配额独立，就能保证交易延迟互不影响吗？</summary><p>不能。磁盘、网络、缓存和后台任务仍可能共享；应通过邻居噪声实验验证尾延迟。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="../00-overview/oceanbase-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

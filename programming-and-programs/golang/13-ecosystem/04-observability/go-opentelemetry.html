@@ -59,6 +59,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -439,5 +457,46 @@ client := &http.Client{ Transport: otelhttp.<span class="fn">NewTransport</span>
   </div>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：三类信号怎么分工</h2><p>一句话判据：<b>Trace 看「一次请求走过哪」，Metric 看「整体趋势多少」，Log 看「某个时刻发生了什么」</b>。三者靠 TraceID / SpanID 关联。</p><div class="table-wrap"><table><thead><tr><th>信号</th><th>回答什么问题</th><th>数据形态</th><th>典型后端</th></tr></thead><tbody><tr><td><b>Trace</b></td><td>这个请求慢在哪一步</td><td>树状 Span，有父子关系</td><td>Jaeger / Tempo / Zipkin</td></tr><tr><td><b>Metric</b></td><td>QPS、错误率、P99 是多少</td><td>时间序列数值（Counter/Gauge/Histogram）</td><td>Prometheus / VictoriaMetrics</td></tr><tr><td><b>Log</b></td><td>这一刻具体发生了什么</td><td>离散事件文本</td><td>Loki / ES</td></tr></tbody></table></div><ul><li>信号一：想排查「某个用户这次请求为什么慢」→ Trace。</li><li>信号二：想看「今天 14:00 错误率突增」→ Metric。</li><li>信号三：Trace 找到了慢的 Span，想看细节 → 用 TraceID 反查 Log。</li></ul><p class="muted">OTel 的定位：<b>它是「数据采集与传输的标准」，不是存储和展示系统</b>。数据最终仍要落到 Jaeger / Prometheus / Loki 这类后端。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：SDK 配置与采样</h2><div class="table-wrap"><table><thead><tr><th>环境变量</th><th>默认值 / 常见值</th><th>作用</th></tr></thead><tbody><tr><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td><b>localhost:4317</b>(gRPC) / 4318(HTTP)</td><td>Collector 地址</td></tr><tr><td><code>OTEL_SERVICE_NAME</code></td><td><b>必填</b>（默认 unknown_service）</td><td>服务名，所有数据的归属标签</td></tr><tr><td><code>OTEL_TRACES_SAMPLER</code></td><td><b>parentbased_traceidratio</b></td><td>采样器类型</td></tr><tr><td><code>OTEL_TRACES_SAMPLER_ARG</code></td><td><b>1.0</b>（全采）</td><td>采样比例；生产常用 0.01～0.1</td></tr><tr><td><code>OTEL_RESOURCE_ATTRIBUTES</code></td><td>空</td><td>附加维度，如 <code>env=prod,version=v1.2</code></td></tr><tr><td><code>OTEL_PROPAGATORS</code></td><td><b>tracecontext,baggage</b></td><td>跨服务传递格式（W3C）</td></tr></tbody></table></div><p><b>Go SDK 初始化与埋点</b></p><pre><code>// Go：初始化 TracerProvider（一次，放 main 里）
+func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
+    exp, err := otlptracegrpc.New(ctx,
+        otlptracegrpc.WithEndpoint("localhost:4317"),
+        otlptracegrpc.WithInsecure(),
+    )
+    if err != nil { return nil, err }
+
+    tp := sdktrace.NewTracerProvider(
+        sdktrace.WithBatcher(exp),
+        // 采样：生产常用按比例，避免全量上报压垮后端
+        sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))),
+        sdktrace.WithResource(resource.NewWithAttributes(
+            semconv.SchemaURL,
+            semconv.ServiceName("order-api"),
+            attribute.String("env", "prod"),
+        )),
+    )
+    otel.SetTracerProvider(tp)
+    otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+        propagation.TraceContext{}, propagation.Baggage{},
+    ))
+    return tp, nil
+}
+
+// 手动建 Span
+ctx, span := otel.Tracer("order").Start(ctx, "CreateOrder")
+defer span.End()
+span.SetAttributes(attribute.String("order.id", orderID))
+if err != nil { span.RecordError(err); span.SetStatus(codes.Error, err.Error()) }</code></pre><p class="muted">量化参考：采样率从 1.0 降到 0.1，后端存储与网络开销下降到约 <b>1/10</b>，但排查「单个慢请求」时该请求可能没被采样——折中做法是<b>基于尾部采样</b>（先全采，再由 Collector 决定保留异常/慢的）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：链路断掉与采样丢失</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>怎么查 / 怎么办</th></tr></thead><tbody><tr><td>链路只有一段，跨服务就断</td><td><b>没有传递 context</b>（用新 context 发请求）</td><td>HTTP 用 <code>otelhttp</code> 中间件；手动要保证 ctx 一路传下去</td></tr><tr><td>Collector 收不到数据</td><td>endpoint 写错或协议不匹配（gRPC vs HTTP）</td><td>确认 4317/4318；<code>telnet</code> 测连通</td></tr><tr><td>服务名显示 unknown_service</td><td>未设 <code>OTEL_SERVICE_NAME</code></td><td>环境变量或 <code>WithResource</code> 设置</td></tr><tr><td>某些请求没有链路数据</td><td>被采样丢弃</td><td>调高采样率；或改尾部采样保留错误请求</td></tr><tr><td>Span 属性看不到</td><td>写在 <code>span.End()</code> 之后了</td><td>属性必须在 End 之前设置</td></tr></tbody></table></div><ul><li><b>排查顺序：</b>先看服务名对不对 → 再看跨服务是否传了 ctx → 再看采样率 → 最后看 Collector 日志。</li><li><b>边界一：</b>W3C <code>traceparent</code> 头格式是 <code>00-{traceId}-{spanId}-{flags}</code>，traceId 32 位十六进制、spanId 16 位。</li><li><b>边界二：</b>自动插桩（otelhttp / otelgrpc）只覆盖常见框架，<b>自研 RPC 或消息队列要手动传</b>。</li><li><b>边界三：</b>批量上报有缓冲，进程退出前必须 <code>tp.Shutdown(ctx)</code>，否则最后一批数据丢失。</li></ul><p><b>连通性与数据发送排查</b></p><pre><code># 看 Collector 是否在监听
+lsof -i :4317 ; lsof -i :4318
+
+# 用 tcpdump 确认有数据发出（grpc）
+tcpdump -i lo -A -s 0 'tcp port 4317' | head -40
+
+# 打开 SDK 内部调试日志
+OTEL_LOG_LEVEL=debug ./your-app</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：OTel 与 Prometheus / Jaeger 的关系</h2><p>最容易混淆的一点：<b>OTel 不做存储</b>。它定义「数据怎么产生、怎么传」，然后交给 Collector 分发给各个后端。所以它不是 Prometheus 的替代，而是<b>埋点层</b>的统一。</p><div class="table-wrap"><table><thead><tr><th>组件</th><th>角色</th><th>是否必须</th><th>常见选型</th></tr></thead><tbody><tr><td>OTel API</td><td>埋点接口（代码只依赖它）</td><td>✅</td><td>—</td></tr><tr><td>OTel SDK</td><td>采样、批处理、导出</td><td>✅</td><td>—</td></tr><tr><td><b>Collector</b></td><td><b>接收 → 处理 → 转发</b></td><td>推荐</td><td>otel/opentelemetry-collector</td></tr><tr><td>Trace 后端</td><td>存储与查询链路</td><td>✅</td><td>Jaeger / Tempo</td></tr><tr><td>Metric 后端</td><td>存储与查询指标</td><td>✅</td><td>Prometheus / VM</td></tr><tr><td>Log 后端</td><td>存储与查询日志</td><td>可选</td><td>Loki / ES</td></tr></tbody></table></div><details><summary>已经有 Prometheus 了还需要 OTel 吗？</summary><p>看需求。如果只要指标，Prometheus 的 client 库就够。OTel 的价值在于<b>一次埋点同时覆盖 Trace + Metric + Log，并用同一套 context 关联</b>；而且 vendor 中立——换后端不用改代码。</p></details><details><summary>采样应该怎么配？</summary><p>开发环境全采；生产环境推荐 <b>头部采样 1%～10% + Collector 侧尾部采样保留异常与慢请求</b>。纯头部采样的缺点是「问题请求可能恰好没被采到」；纯全采的代价是存储成本。</p></details><details><summary>为什么强调要用 Collector？</summary><p>因为把「往哪发」从应用里解耦出来：应用只管往本地 Collector 发，采样策略、后端地址、协议转换都在 Collector 上改，<b>不用改代码、不用重启应用</b>。这是 OTel 架构里最实用的一层。</p></details></div></section>
 </body>
 </html>

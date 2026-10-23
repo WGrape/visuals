@@ -67,6 +67,34 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
 </style>
 </head>
 <body>
@@ -76,33 +104,156 @@
   <p>Write-Ahead Logging 原理、checkpoint，以及它如何支撑崩溃恢复与复制。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#w1">WAL 原理</a><a href="#w2">写入流程</a><a href="#w3">checkpoint</a><a href="#w4">与 MySQL redo 区别</a></nav>
+  <nav class="toc"><a href="#s1">① WAL 是什么：先记账，再落盘</a><a href="#s2">② LSN、段文件与目录结构</a><a href="#s3">③ Checkpoint：把「账」并入「库」</a><a href="#s4">④ 归档、PITR 与备份体系</a><a href="#s5">⑤ 逻辑复制与复制槽</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="w1"><h2>① 什么是 WAL</h2>
-<p><strong>Write-Ahead Logging</strong>：任何数据页修改 <strong>必须先写日志（WAL）并落盘，才能修改内存中的数据页</strong>。崩溃后只需重放 WAL 即可恢复已提交事务，无需全量刷脏页。</p>
-<div class="callout note"><b>核心保证：</b>先日志后数据（Force-log-at-commit）。这是 PG 崩溃恢复与流复制的共同基石。</div>
+<section id="s1"><h2>① WAL 是什么：先记账，再落盘</h2>
+
+<p><strong>WAL（Write-Ahead Log，预写日志）</strong>的核心规则只有一条：<strong>修改数据页之前，必须先把描述这次修改的日志记录持久化</strong>。这样即使崩溃，也能用日志把数据库恢复到一致状态。</p>
+<figure class="fig">
+<svg viewBox="0 0 700 200" role="img" aria-label="WAL 写入顺序">
+  <rect x="30" y="60" width="120" height="70" rx="8" fill="rgba(88,166,255,.15)" stroke="#58a6ff"/>
+  <text x="90" y="92" fill="#e6edf3" font-size="13" text-anchor="middle">事务修改</text>
+  <text x="90" y="112" fill="#8b949e" font-size="11" text-anchor="middle">在内存 Buffer 中</text>
+  <path d="M160,95 L215,95" stroke="#ffa657" stroke-width="2" marker-end="url(#wp1)"/>
+  <text x="187" y="85" fill="#ffa657" font-size="11" text-anchor="middle">①</text>
+  <rect x="225" y="55" width="150" height="90" rx="8" fill="rgba(255,166,87,.15)" stroke="#ffa657"/>
+  <text x="300" y="82" fill="#e6edf3" font-size="13" text-anchor="middle">写 WAL 记录</text>
+  <text x="300" y="102" fill="#8b949e" font-size="11" text-anchor="middle">并 fsync 到磁盘</text>
+  <text x="300" y="122" fill="#8b949e" font-size="11" text-anchor="middle">（顺序写，很快）</text>
+  <path d="M385,95 L440,95" stroke="#3fb950" stroke-width="2" marker-end="url(#wp2)"/>
+  <text x="412" y="85" fill="#3fb950" font-size="11" text-anchor="middle">②</text>
+  <rect x="450" y="55" width="140" height="90" rx="8" fill="rgba(63,185,80,.15)" stroke="#3fb950"/>
+  <text x="520" y="82" fill="#e6edf3" font-size="13" text-anchor="middle">COMMIT 返回</text>
+  <text x="520" y="102" fill="#8b949e" font-size="11" text-anchor="middle">事务成功</text>
+  <text x="520" y="122" fill="#8b949e" font-size="11" text-anchor="middle">（脏页还没落盘）</text>
+  <path d="M450,150 L600,150" stroke="#bc8cff" stroke-width="2" marker-end="url(#wp3)"/>
+  <text x="525" y="168" fill="#bc8cff" font-size="11" text-anchor="middle">③ 后台异步刷脏页（Checkpointer / BgWriter）</text>
+  <rect x="605" y="130" width="70" height="40" rx="6" fill="rgba(188,140,255,.15)" stroke="#bc8cff"/>
+  <text x="640" y="155" fill="#e6edf3" font-size="12" text-anchor="middle">数据文件</text>
+  <text x="350" y="30" fill="#e6edf3" font-size="13" text-anchor="middle">「先记账（WAL），后落库（数据页）」—— 崩溃时靠账本重放</text>
+  <defs>
+    <marker id="wp1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ffa657"/></marker>
+    <marker id="wp2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3fb950"/></marker>
+    <marker id="wp3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#bc8cff"/></marker>
+  </defs>
+</svg>
+<figcaption>WAL 的写入顺序：提交时只需保证 WAL 落盘，数据页可延后</figcaption>
+</figure>
+<div class="callout tip"><b>为什么这样能提速？</b>数据页的修改是<strong>随机写</strong>（散落在文件各处），而 WAL 是<strong>顺序追加写</strong>。把「每次提交都要随机刷页」换成「顺序写日志 + 后台批量刷页」，吞吐提升一个数量级。</div>
+
 </section>
-<section id="w2"><h2>② 写入流程</h2>
-<figure class="fig"><svg viewBox="0 0 720 130">
-  <rect x="20" y="45" width="120" height="44" rx="8" fill="#1c2333" stroke="#58a6ff" stroke-width="1.5"/><text x="80" y="71" fill="#e6edf3" font-size="13" text-anchor="middle">事务修改</text><rect x="170" y="45" width="140" height="44" rx="8" fill="#1c2333" stroke="#ffa657" stroke-width="1.5"/><text x="240" y="71" fill="#e6edf3" font-size="13" text-anchor="middle">WAL Buffers</text><rect x="340" y="45" width="120" height="44" rx="8" fill="#1c2333" stroke="#3fb950" stroke-width="1.5"/><text x="400" y="71" fill="#e6edf3" font-size="13" text-anchor="middle">WAL 落盘</text><rect x="490" y="45" width="200" height="44" rx="8" fill="#1c2333" stroke="#bc8cff" stroke-width="1.5"/><text x="590" y="71" fill="#e6edf3" font-size="13" text-anchor="middle">异步刷脏页到数据文件</text><line x1="140" y1="67" x2="164" y2="67" stroke="#8b949e" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="168,67 159,62 159,72" fill="#8b949e"/><line x1="310" y1="67" x2="334" y2="67" stroke="#3fb950" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="338,67 329,62 329,72" fill="#3fb950"/><line x1="460" y1="67" x2="484" y2="67" stroke="#bc8cff" stroke-width="1.6" marker-end="url(#ar)"/><polygon points="488,67 479,62 479,72" fill="#bc8cff"/>
-</svg><figcaption>图：事务提交时 WAL 刷盘在前，脏页刷盘在后</figcaption></figure>
-<ol>
-  <li>事务修改 Shared Buffers 中的页，同时产生 WAL 记录写入 WAL Buffers。</li>
-  <li><code>COMMIT</code> 时 WAL Buffers 刷到磁盘（受 <code>synchronous_commit</code> 控制）。</li>
-  <li>脏页由后台 writer / checkpoint 异步刷盘。</li>
-</ol>
-</section>
-<section id="w3"><h2>③ Checkpoint</h2>
-<p>Checkpoint 把内存脏页刷盘，并记录“从此点之后重放 WAL 即可”的位置。之后更早的 WAL 段可复用/归档。参数：<code>checkpoint_timeout</code>（默认 5min）、<code>max_wal_size</code>。</p>
-</section>
-<section id="w4"><h2>④ 与 MySQL redo log 的区别</h2>
+<section id="s2"><h2>② LSN、段文件与目录结构</h2>
+
+<p><strong>LSN（Log Sequence Number）</strong>是 WAL 中的字节偏移量，单调递增，用来标识「日志写到哪了」。WAL 文件存放在 <code>pg_wal</code>（10 之前叫 <code>pg_xlog</code>）目录，每个<strong>段文件默认 16MB</strong>，文件名是 24 位十六进制（时间线 + 逻辑编号）。</p>
+<pre><code>-- 当前 WAL 写入位置与 LSN 差
+SELECT pg_current_wal_lsn(), pg_walfile_name(pg_current_wal_lsn());
+
+-- 主从复制延迟（字节）
+SELECT pg_current_wal_lsn() - pg_last_wal_replay_lsn() AS lag_bytes;
+
+-- 查看 WAL 相关配置
+SELECT name, setting, unit FROM pg_settings
+WHERE name IN ('wal_level','wal_segment_size','min_wal_size','max_wal_size',
+               'wal_keep_size','wal_compression','checkpoint_timeout','max_wal_senders');</code></pre>
 <table>
-  <tr><th>维度</th><th>PG WAL</th><th>MySQL redo</th></tr>
-  <tr><td>是否含逻辑信息</td><td>物理+少量逻辑（便于跨版本/物理复制）</td><td>纯物理页修改</td></tr>
-  <tr><td>复制基础</td><td>WAL 流（物理流复制）</td><td>binlog（逻辑，另有 redo 用于崩溃恢复）</td></tr>
-  <tr><td>归档</td><td>WAL 归档 → PITR</td><td>binlog 用于复制/恢复</td></tr>
+<tr><th>参数</th><th>作用</th><th>常见取值</th></tr>
+<tr><td>wal_level</td><td>日志记录的详细程度</td><td><code>replica</code>（支持流复制）／<code>logical</code>（支持逻辑复制）</td></tr>
+<tr><td>max_wal_size</td><td>自动检查点触发的软上限</td><td>1GB~8GB，视写入量</td></tr>
+<tr><td>checkpoint_timeout</td><td>检查点最大间隔</td><td>5min（高写入可 15~30min）</td></tr>
+<tr><td>wal_compression</td><td>压缩 WAL 记录</td><td>高写入时开 <code>on</code> 可显著省空间</td></tr>
+<tr><td>wal_keep_size</td><td>为备库保留的最小 WAL</td><td>配合复制槽使用</td></tr>
+<tr><td>synchronous_commit</td><td>提交是否等待 WAL 落盘</td><td><code>on</code>（安全）／<code>off</code>（快，丢少量）</td></tr>
 </table>
+
 </section>
+<section id="s3"><h2>③ Checkpoint：把「账」并入「库」</h2>
+
+<p>检查点是这样一个时刻：<strong>所有脏页都已刷盘，且 WAL 中记录了一个 checkpoint 记录</strong>。此后崩溃恢复只需从该点重放 WAL，而不必从头开始。</p>
+<div class="grid3">
+<div class="card3"><h4>触发条件</h4><p><code>checkpoint_timeout</code> 到期、WAL 量超过 <code>max_wal_size</code>、手动 <code>CHECKPOINT</code>、创建基础备份、干净关闭</p></div>
+<div class="card3"><h4>代价</h4><p>检查点会引发<strong>大量脏页刷盘</strong>，造成 IO 尖峰与延迟抖动——这就是「checkpoint 抖动」</p></div>
+<div class="card3"><h4>调优</h4><p>调大 <code>checkpoint_timeout</code>、调大 <code>max_wal_size</code>、调小 <code>checkpoint_completion_target</code> 的反面（设为 0.9 让刷页更平滑）</p></div>
+<div class="card3"><h4>full_page_writes</h4><p>检查点后首次修改某页时<strong>整页写入 WAL</strong>，防止部分写（torn page）；代价是 WAL 变大</p></div>
+</div>
+<div class="callout warn"><b>高写入库的典型坑：</b>频繁检查点 + <code>full_page_writes</code> 会让 WAL 量<strong>成倍放大</strong>（可能达到实际数据变更的 3~5 倍）。表现为磁盘很快写满、复制延迟增大。对策：拉长检查点间隔、开启 <code>wal_compression</code>、使用支持原子写的存储/文件系统时可考虑关闭 full_page_writes（需谨慎）。</div>
+
+</section>
+<section id="s4"><h2>④ 归档、PITR 与备份体系</h2>
+
+<p>WAL 段文件会被<strong>循环复用</strong>；若要做时间点恢复（PITR），必须把 WAL <strong>归档</strong>到别处。</p>
+<pre><code># postgresql.conf
+wal_level = replica
+archive_mode = on
+archive_command = 'test ! -f /archive/%f &amp;&amp; cp %p /archive/%f'
+# %p = 源文件路径，%f = 文件名
+
+# 基础备份
+pg_basebackup -D /backup/base -Ft -z -P
+
+# 恢复：准备 recovery.signal + 目标时间
+restore_command = 'cp /archive/%f %p'
+recovery_target_time = '2026-10-20 14:30:00'</code></pre>
+<table>
+<tr><th>方案</th><th>RPO</th><th>特点</th></tr>
+<tr><td>pg_dump 逻辑备份</td><td>备份点</td><td>可跨版本、可单表恢复；大库慢</td></tr>
+<tr><td>pg_basebackup + WAL 归档</td><td>秒级</td><td>PITR 的标配；需归档存储</td></tr>
+<tr><td>流复制备库</td><td>近 0（同步模式）</td><td>高可用首选；不能防误删（会同步）</td></tr>
+<tr><td>延迟备库</td><td>—</td><td><code>recovery_min_apply_delay</code>，用于救回误操作</td></tr>
+</table>
+<div class="callout note"><b>关键提醒：</b>归档命令失败会<strong>无限重试并让 pg_wal 堆积</strong>，最终磁盘写满导致数据库宕机。务必监控 <code>pg_wal</code> 目录大小与 <code>pg_stat_archiver</code> 的 <code>failed_count</code>。</div>
+
+</section>
+<section id="s5"><h2>⑤ 逻辑复制与复制槽</h2>
+
+<p>PostgreSQL 10+ 内置<strong>逻辑复制</strong>：以「表」为单位、按<strong>行级变更</strong>同步，可跨大版本、可只同步部分表，常用于<strong>升级迁移、数据分发、数仓同步</strong>。</p>
+<pre><code>-- 发布端
+CREATE PUBLICATION pub_orders FOR TABLE orders, order_items;
+
+-- 订阅端
+CREATE SUBSCRIPTION sub_orders
+  CONNECTION 'host=10.0.0.1 dbname=prod user=rep'
+  PUBLICATION pub_orders;</code></pre>
+<div class="callout warn"><b>复制槽（Replication Slot）是双刃剑：</b>它保证主库<strong>不会删除备库还没消费的 WAL</strong>，避免备库掉线后需要重建；但<strong>如果备库永久下线而未删除槽，WAL 会无限堆积并撑爆磁盘</strong>。务必监控：<code>SELECT slot_name, active, restart_lsn, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained FROM pg_replication_slots;</code></div>
+
+</section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：WAL 为什么能保证崩溃后不丢数据？</b><p>A：因为提交时<strong>只有 WAL 落盘就返回成功</strong>，而 WAL 完整描述了这次修改。崩溃重启后 PostgreSQL 进入恢复流程：从最近的 checkpoint 开始<strong>重放（REDO）WAL</strong>，把已提交事务的修改补回数据页；未提交事务的修改则根据 clog 判断为无效（其数据页修改可能已落盘，但不会被认为可见）。<strong>核心法则「日志先于数据」（WAL 规则）确保了重放一定完备。</strong></p></div>
+<div class="qa"><b>Q：synchronous_commit 各档位有什么区别？</b><p>A：<code>on</code>（默认）：提交等待本地 WAL fsync 完成，保证本机崩溃不丢；<code>remote_apply</code>：还要等备库<strong>应用完</strong>，最安全但最慢；<code>remote_write</code>：等备库<strong>写入</strong>（不必 fsync）；<code>local</code>：只等本地写入（不必 fsync，掉电可能丢）；<code>off</code>：不等 fsync，异步提交，最多丢几百毫秒数据但吞吐明显提升。<strong>选择原则：金融类用 on/remote_apply，日志类、可重放数据可用 off。</strong></p></div>
+<div class="qa"><b>Q：WAL 突然暴涨，怎么排查？</b><p>A：按顺序查：① <code>SELECT * FROM pg_stat_archiver;</code> 看归档是否失败（失败会一直保留 WAL）；② <code>SELECT * FROM pg_replication_slots;</code> 看是否有<strong>非活跃槽</strong>长期保留大量 WAL；③ 检查是否有大批量写入/大事务（批量 UPDATE 会产生海量 WAL）；④ 检查 <code>checkpoint_timeout</code> 是否过小 + <code>full_page_writes</code> 造成的整页写入放大；⑤ 检查 <code>wal_level</code> 是否为 logical（记录量更大）。<strong>最常见的原因是「归档卡住」和「孤儿复制槽」。</strong></p></div>
+<div class="qa"><b>Q：full_page_writes 为什么要存在？</b><p>A：因为<strong>页写入不是原子的</strong>：8KB 的页在断电时可能只写了一半（torn page），此时页内数据既非旧也非新，仅靠增量 WAL 无法修复。PG 的做法是在<strong>每个检查点之后首次修改某页时，把整页内容写入 WAL</strong>，恢复时直接用整页覆盖，从而免疫部分写。代价是<strong>检查点后的一段时间 WAL 量显著增大</strong>——这也是为什么要避免过于频繁的检查点。</p></div>
+<div class="qa"><b>Q：逻辑复制和物理流复制怎么选？</b><p>A：<strong>物理流复制</strong>：字节级同步整个实例，备库只读、版本必须一致、不能选表——适合<strong>高可用与读扩展</strong>；<strong>逻辑复制</strong>：按表订阅行级变更，可跨版本、可过滤、可双向——适合<strong>升级迁移、数据分发、异构同步、数仓接入</strong>，但<strong>不复制 DDL、不复制序列值、大事务延迟更高</strong>。常见组合是<strong>物理复制做 HA + 逻辑复制做数据分发</strong>。</p></div>
+<div class="qa"><b>Q：PITR 能恢复到任意时刻吗？有哪些限制？</b><p>A：能恢复到<strong>基础备份之后、最新可用 WAL 之前</strong>的任意时间点（<code>recovery_target_time</code>）或指定事务（<code>recovery_target_xid</code>）。<strong>限制</strong>：① 恢复是<strong>整实例级</strong>的，不能只恢复一张表（单表误删只能恢复到临时实例再导出）；② 必须有<strong>完整的基础备份 + 连续的 WAL 归档</strong>，中间断档则只能恢复到断档前；③ 恢复后时间线（timeline）会分叉，需要重新做基础备份。</p></div>
+</section>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · WAL 是什么、为什么必须有</h2><p>WAL（Write-Ahead Log，预写日志）的规则只有一句话：<b>修改数据页之前，必须先把描述这次修改的日志写到磁盘</b>。这样崩溃重启时，重放日志就能把没来得及落盘的数据页补回来——即「ARIES 算法」的核心。</p><div class="table-wrap"><table><thead><tr><th>问题</th><th>没有 WAL</th><th>有 WAL</th></tr></thead><tbody><tr><td>写入 1 行要写多少磁盘</td><td>整页（8KB）随机写</td><td><b>一条小记录顺序追加</b> + 后台批量刷页</td></tr><tr><td>崩溃后未刷盘的修改</td><td><b>丢失</b>（内存中的脏页没了）</td><td>重放 WAL 恢复</td></tr><tr><td>随机写 vs 顺序写</td><td>随机（页在哪写哪）</td><td><b>顺序追加</b>（磁盘顺序写比随机写快 1~2 个数量级）</td></tr><tr><td>fsync 频率</td><td>每次提交要刷整页</td><td>每次提交只刷一条 WAL 记录</td></tr></tbody></table></div><ul><li><b>顺序写是 WAL 性能的根本来源</b>：机械盘上随机写 ~100 IOPS，顺序写可到 ~100MB/s。把随机改成顺序，是数据库能扛住高写入的根本。</li><li><b>提交时只保证 WAL 落盘</b>，数据页可以慢慢刷。这就是「提交很快」的原因，也是「崩溃恢复需要时间」的原因。</li><li><b>WAL 不只用于崩溃恢复</b>：物理流复制（主从）、逻辑复制（逻辑解码）、在线备份（pg_basebackup）、时间点恢复 PITR 全部建立在 WAL 之上。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数与命令</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认</th><th>建议 / 说明</th></tr></thead><tbody><tr><td><code>wal_level</code></td><td>replica</td><td><code>replica</code>（流复制）或 <code>logical</code>（逻辑复制/CDC）；设为 <code>minimal</code> 会关闭复制能力</td></tr><tr><td><code>max_wal_size</code></td><td>1GB</td><td><b>软上限</b>：checkpoint 之间允许积累的 WAL 量。写入密集调到 4~16GB，能显著减少 checkpoint 次数</td></tr><tr><td><code>min_wal_size</code></td><td>80MB</td><td>WAL 文件回收的下限，避免反复创建删除文件</td></tr><tr><td><code>checkpoint_timeout</code></td><td>5min</td><td>两次 checkpoint 的最大间隔。写密集可调到 15~30min（代价是恢复变慢）</td></tr><tr><td><code>checkpoint_completion_target</code></td><td>0.9</td><td>checkpoint 刷页要在目标时间内完成（0.9 = 用掉 90% 的间隔时间），避免 IO 尖刺</td></tr><tr><td><code>wal_compression</code></td><td>off (15+ 可设)</td><td><code>pglz</code>/<code>lz4</code> 可减少 30~50% WAL 体积，代价是少量 CPU</td></tr><tr><td><code>wal_keep_size</code> (13+)</td><td>0</td><td>为从库保留的 WAL 下限。<b>建议设几 GB</b> 防止从库掉队后主库已回收</td></tr><tr><td><code>max_wal_senders</code></td><td>10</td><td>并发 WAL 发送进程数（从库数 + 备份）</td></tr><tr><td><code>full_page_writes</code></td><td>on</td><td><b>不要关</b>。防止崩溃时的「部分写」损坏页面（见第四层）</td></tr><tr><td><code>wal_buffers</code></td><td>-1（自动）</td><td>自动取 shared_buffers 的 1/32，通常不用改</td></tr></tbody></table></div><p><b>运维命令</b></p><pre><code># —— 观察当前 WAL 位置与堆积 ——
+SELECT pg_current_wal_lsn(), pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0'));
+SELECT pg_current_wal_insert_lsn(), pg_current_wal_flush_lsn();   -- insert 与 flush 的差就是未落盘量
+
+# 复制延迟（主库上执行，单位为字节）
+SELECT client_addr, state, sent_lsn, write_lsn, flush_lsn, replay_lsn,
+       pg_size_pretty(pg_wal_lsn_diff(sent_lsn, replay_lsn)) AS lag_bytes
+FROM pg_stat_replication;
+
+# 复制槽（最关键：不消费的槽会让 WAL 无限堆积）
+SELECT slot_name, active, restart_lsn, confirmed_flush_lsn,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained
+FROM pg_replication_slots ORDER BY retained DESC;
+
+# —— WAL 目录体积 ——
+du -sh $PGDATA/pg_wal        # 正常应接近 max_wal_size；远大于说明有槽/从库卡住
+
+# —— 查看 WAL 内容（排查与学习利器）——
+pg_waldump -p $PGDATA/pg_wal -s 0/1A2B3C4D -e 0/1A2B4FFF | head -40
+#   rmgr: Heap     len: 54 ... desc: INSERT+INIT ...    &lt;- 能看到每条记录的类型
+pg_waldump -p $PGDATA/pg_wal -r Heap --stats=record     # 按记录类型统计
+
+# —— 手动操作 ——
+CHECKPOINT;                                        # 手动触发检查点
+SELECT pg_switch_wal();                            # 切换 WAL 段（归档前常用）
+SELECT pg_drop_replication_slot('slot_name');      # 删除不再使用的复制槽！</code></pre><p class="muted">WAL 文件名是 24 位十六进制（如 <code>000000010000000000000001</code>）= 时间线(8) + 逻辑段号(16)。<code>pg_waldump</code> 直接读文件不需要启动数据库，排查崩溃原因时非常有用。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b>pg_wal 目录暴涨、磁盘告警</b> → 90% 是<b>复制槽不消费</b>。执行上面的 <code>pg_replication_slots</code> 查询，看哪个槽 <code>active = false</code> 且 <code>retained</code> 巨大。处理：修好消费者，或确认无用后 <code>pg_drop_replication_slot</code>。<b>这是 PG 最经典的磁盘事故</b>。</li><li><b>日志出现 <code>checkpoints are occurring too frequently</code></b> → <code>max_wal_size</code> 太小，checkpoint 被 WAL 量而非时间触发。调大 <code>max_wal_size</code>（如 4~8GB），并确认 <code>checkpoint_completion_target</code> ≥ 0.9。</li><li><b>写入延迟周期性尖刺</b> → 大概率是 checkpoint 集中刷脏页。调大 <code>checkpoint_timeout</code> + <code>max_wal_size</code>，并下调 <code>shared_buffers</code>（大 shared_buffers 意味着 checkpoint 时要刷的脏页更多）。</li><li><b>从库延迟持续增大</b> → 先看是<b>发送慢</b>（网络/主库 IO）还是<b>回放慢</b>（从库有长查询阻塞回放，或单线程回放跟不上）。PG 16 起支持并行回放。</li><li><b>主库删除了从库还需要的 WAL（<code>requested WAL segment ... has already been removed</code>）</b> → 从库掉队太久。解法三选一：设 <code>wal_keep_size</code> 留更多、开 <b>复制槽</b>（最稳妥，但要监控）、或配置 <code>restore_command</code> 让从库从归档拉。</li><li><b><code>wal_level</code> 从 replica 改成 minimal 后复制全断</b> → 改 wal_level 需要<b>重启</b>，且 minimal 下不保留复制所需信息。改回来重启即可。</li><li><b>归档卡住（<code>archive_command</code> 失败）</b> → <code>.ready</code> 文件堆积在 <code>pg_wal/archive_status/</code>。WAL 段在归档成功前<b>不会被回收</b>，会撑爆磁盘。检查归档目标是否可达/权限/磁盘满。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>三个必须理解的机制：<b>checkpoint 决定了恢复要多长时间</b>，<b>full_page_writes 决定了崩溃后页是否可信</b>，<b>WAL 段回收决定了磁盘会不会被撑爆</b>。</p><ul><li><b>Checkpoint</b>：把内存中所有脏页刷到磁盘，并在 WAL 里记一条 checkpoint 记录。<b>恢复时只需要从最后一个 checkpoint 开始重放</b>，之前的 WAL 就可以删了。所以它同时决定了「恢复时间」和「WAL 保留量」——调大 checkpoint 间隔 = 恢复变慢但写入更平滑。这就是取舍。</li><li><b>full_page_writes（部分写问题）</b>：数据页是 8KB，而磁盘原子写通常是 4KB（或 512B）。断电时可能出现<b>页写了一半</b>——前 4KB 是新的、后 4KB 是旧的，这个页彻底损坏，而 WAL 里的「增量」记录无法修复它。解法：<b>checkpoint 之后第一次修改某页时，把整页写进 WAL</b>（full page image）。恢复时先用整页覆盖，再应用增量。代价是 checkpoint 刚结束时 WAL 量会<b>突然增大</b>（这就是 checkpoint 后写放大的原因）。<b>除非你的文件系统/存储能保证 8KB 原子写（如 ZFS、某些企业存储），否则绝对不要关。</b></li><li><b>WAL 段回收</b>：WAL 以 16MB 的段文件循环使用。一段能被回收，必须同时满足：① 已被 checkpoint 覆盖（崩溃恢复不需要）；② 没有任何复制槽/从库的 <code>restart_lsn</code> 指向它；③ 若开了归档，归档已成功。<b>三个条件任何一个不满足，WAL 就一直堆着</b>——这就是磁盘爆掉的根因。</li><li><b>逻辑解码</b>：<code>wal_level = logical</code> 时 WAL 里会额外记录足够的信息，让 PG 能把物理变更翻译成行级事件（INSERT/UPDATE/DELETE 的前后镜像），供 Debezium 等 CDC 工具消费。代价是 WAL 体积增大（约 +20~50%）。</li></ul><div class="table-wrap"><table><thead><tr><th>选择</th><th>恢复时间</th><th>写入平滑度</th><th>WAL 占用</th></tr></thead><tbody><tr><td>checkpoint 频繁（默认 5min / 1GB）</td><td><b>短</b>（几十秒）</td><td>有明显周期性 IO 尖刺</td><td>小</td></tr><tr><td>checkpoint 稀疏（30min / 16GB）</td><td>长（几分钟~十几分钟）</td><td><b>平滑</b></td><td>大</td></tr><tr><td>开 wal_compression</td><td>略长（要解压）</td><td>更平滑（写盘量小）</td><td><b>小 30~50%</b></td></tr><tr><td>关 full_page_writes</td><td>—</td><td>写放大消失</td><td><b>大幅减小</b>｜<b>但有数据损坏风险</b></td></tr></tbody></table></div><details><summary>WAL 能不能只保留几天用于 PITR？</summary><p>能，这就是<b>时间点恢复（PITR）</b>：一次基础备份（<code>pg_basebackup</code>）+ 连续的 WAL 归档 = 可以恢复到归档覆盖范围内的任意时刻。做法是设 <code>archive_mode = on</code> 和 <code>archive_command</code>（如拷贝到对象存储），恢复时用 <code>recovery_target_time</code> 指定目标时刻。关键点：<b>基础备份必须周期性重做</b>（否则要重放的 WAL 越来越长），常见策略是「每周一次全备 + WAL 连续归档，保留 7~30 天」。这是应对误删/逻辑错误的唯一手段——流复制不行，因为主库上的 <code>DELETE</code> 会立刻同步到从库。</p></details><details><summary>为什么 checkpoint 后写入量会突然变大？</summary><p>就是 <b>full_page_writes</b> 的效应。checkpoint 之后，每个<b>第一次被修改的页</b>都要把整页（8KB）写进 WAL，而不是只写几十字节的增量。所以 checkpoint 刚结束时 WAL 生成速率可能是平时的几倍到十几倍，持续到「热页都写过一次整页」为止。这也解释了一个反直觉的现象：<b>把 checkpoint 调得太频繁，WAL 总量反而会爆炸</b>——因为每次 checkpoint 都重置了 full page 的状态。所以调 checkpoint 要看「WAL 生成速率」而不只是「磁盘占用」。</p></details><details><summary>同步复制（synchronous_commit）应该怎么配？</summary><p><code>synchronous_commit</code> 有五档：<code>off</code>（不等 WAL 落盘，最多丢几百毫秒）、<code>local</code>（等本地落盘）、<code>remote_write</code>（等从库收到写内存）、<code>on</code>（<b>默认</b>，等从库落盘）、<code>remote_apply</code>（等从库回放完）。严格的同步复制（<code>on</code>/<code>remote_apply</code>）能保证 RPO=0，但<b>每次提交都要等一轮网络往返</b>，吞吐可能掉一个数量级，且从库挂掉会让主库写阻塞。实践建议：普通业务用默认 <code>on</code> 配异步从库（RPO 是「网络延迟量级」）；真正要求零丢失的关键库用 <code>synchronous_commit = on</code> + <b>至少两个同步从库</b>（用 <code>synchronous_standby_names = ANY 1 (s1, s2)</code>，这样挂一个不会整体阻塞）。</p></details></div></section>
 </main>
 </div>
 <footer>

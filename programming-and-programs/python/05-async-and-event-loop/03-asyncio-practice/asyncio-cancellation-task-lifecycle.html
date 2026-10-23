@@ -11,6 +11,69 @@
 <section class="panel"><h2>shield 与不可取消区</h2><p>`asyncio.shield()` 可以保护内部 awaitable 不因外层取消而被直接取消，但外层等待者仍会收到取消；内部工作可能继续运行。若没有保存内部 Task 的引用并安排最终等待或记录异常，就可能留下脱离父级管理的后台任务。shield 适用于极少数必须完成的提交或清理步骤，不能把整个请求都包起来以“解决超时”。</p><p>外部副作用更需要幂等性。假设上传文件已经提交到远端，客户端超时后再次发起上传，可能创建两份对象。使用稳定操作 ID 或可查询的提交状态，才可以安全重试。取消解决本地任务调度，不能代替业务幂等协议。</p></section>
 <section class="panel"><h2>资源清理的实操检查</h2><p>网络响应、数据库连接、临时文件与信号量应放在 async with 或 try/finally 作用域中。若在获取信号量后遇到取消，必须确保 release 发生；async with 可减少遗漏。清理代码自身也可能失败，需要记录原始取消与清理异常，避免只留下“连接关闭失败”而丢失超时上下文。对长时间清理可设置独立预算，但不能在半写入状态下草率宣布成功。</p><p>测试时用可控的慢服务让任务刚好停在“获取连接后、收到响应前”和“远端已提交、响应未返回”两个位置，触发取消并检查连接池容量、临时文件数和远端对象数。只测普通成功路径无法发现资源泄漏。</p></section>
 <section class="panel"><h2>把责任写成表</h2><p>调用方负责给任务设时间预算、等待其终态并处理未知的外部结果；子协程负责在取消传播时释放本地资源；外部服务依赖业务 ID 处理重复请求；监控负责记录超时、实际退出耗时和残留任务数。若请求已结束，但后台 Task 仍持续执行且无人持有引用，资源消耗与异常会变成难排查的幽灵负载。</p><p>练习：TaskGroup 中 A 失败，B 正在持有数据库连接等待网络。写出 B 接下来应发生的取消、连接释放和异常传播顺序，并说明若 B 忽略 CancelledError，会怎样影响整个 TaskGroup。</p></section>
+<section class="panel" data-dry-goods><h2>Task 的生命周期与状态</h2><div class="table-wrap"><table><thead><tr><th>状态</th><th>判定方法</th><th>说明</th></tr></thead><tbody><tr><td><b>创建但未调度</b></td><td><code>create_task()</code> 返回后</td><td>还没轮到它运行</td></tr><tr><td><b>运行中</b></td><td><code>task.get_loop().is_running()</code></td><td>—</td></tr><tr><td><b>等待中</b></td><td>在 await 处挂起</td><td><strong>可被取消</strong></td></tr><tr><td><b>已完成</b></td><td><code>task.done()</code></td><td>有结果或异常</td></tr><tr><td><b>已取消</b></td><td><code>task.cancelled()</code></td><td>抛出 CancelledError</td></tr></tbody></table></div><p><b>取消机制</b></p><pre><code>import asyncio
+
+async def worker(n):
+    print(f"start {n}")
+    await asyncio.sleep(10)
+    return n * 2
+
+async def main():
+    t = asyncio.create_task(worker(1))
+    await asyncio.sleep(0)          # 让出一次，让 task 开始执行
+
+    print(t.done())                 # False（还在 sleep）
+    t.cancel()                      # 请求取消
+    try:
+        await t
+    except asyncio.CancelledError:
+        print("task cancelled")     # &lt;strong&gt;必须捕获，否则异常向上传播&lt;/strong&gt;
+
+    print(t.cancelled())            # True
+
+asyncio.run(main())
+
+# 关键：cancel() 只是「请求」，
+#   它会在协程&lt;strong&gt;下一个 await 点&lt;/strong&gt;抛出 CancelledError
+#   如果协程里没有 await，取消不会生效！</code></pre></section><section class="panel"><h2>取消的正确写法与三个坑</h2><div class="table-wrap"><table><thead><tr><th>坑</th><th>表现</th><th>正确做法</th></tr></thead><tbody><tr><td><b>吞掉 CancelledError</b></td><td><code>except Exception</code> 捕获了它</td><td><strong>单独捕获 CancelledError</strong> 并重新抛出</td></tr><tr><td><b>取消后不清理</b></td><td>资源泄漏（连接未关）</td><td>用 <code>try/finally</code> 或 <code>async with</code></td></tr><tr><td><b>屏蔽取消</b></td><td><code>asyncio.shield()</code> 用错</td><td>只用于保护<strong>关键段</strong>，不是全部</td></tr></tbody></table></div><p><b>正确写法</b></p><pre><code>async def worker():
+    try:
+        await asyncio.sleep(100)
+    except asyncio.CancelledError:
+        # ✗ 错误：except Exception 会吞掉取消
+        # ✓ 正确：捕获后做清理，然后&lt;strong&gt;重新抛出&lt;/strong&gt;
+        await cleanup()
+        raise                        # 必须重新抛出！
+    finally:
+        await release_resource()     # 无论取消与否都执行
+
+# 屏蔽取消（慎用）：保护一小段不可中断的操作
+async def critical():
+    await asyncio.shield(save_to_db())   # 外层取消时，save_to_db 仍会跑完
+# 注意：shield 只保护内层任务不被取消传播，
+#       外层的 await 仍会抛 CancelledError
+
+# 超时控制（最常用的取消场景）
+try:
+    await asyncio.wait_for(slow_op(), timeout=5)
+except asyncio.TimeoutError:
+    print("超时")                    # wait_for 内部就是 cancel</code></pre><p class="muted"><b>最容易踩的一条</b>：<code>except Exception</code> 在 Python 里<strong>能捕获 CancelledError</strong>（因为 CancelledError 继承自 BaseException 而非 Exception…实际上 Python 3.8+ 起 CancelledError 继承自 BaseException，所以 <code>except Exception</code> 不会捕获它）。但 <code>except BaseException</code> 和裸 <code>except:</code> 会吞掉取消——务必避免。</p></section>
+<section class="panel"><h2>任务组与结构化并发</h2><div class="table-wrap"><table><thead><tr><th>API</th><th>版本</th><th>特点</th></tr></thead><tbody><tr><td><code>asyncio.gather()</code></td><td>全部</td><td>并发跑，<code>return_exceptions=True</code> 可收集异常</td></tr><tr><td><code>asyncio.wait()</code></td><td>全部</td><td>可设 <code>return_when=FIRST_COMPLETED</code></td></tr><tr><td><code>asyncio.wait_for()</code></td><td>全部</td><td>单个任务超时</td></tr><tr><td><code>asyncio.TaskGroup</code></td><td><b>3.11+</b></td><td><strong>结构化并发，推荐</strong></td></tr></tbody></table></div><p><b>TaskGroup</b></p><pre><code># 3.11+ 推荐：TaskGroup（结构化并发）
+async def main():
+    async with asyncio.TaskGroup() as tg:
+        t1 = tg.create_task(fetch(1))
+        t2 = tg.create_task(fetch(2))
+    # 退出 with 块时，&lt;strong&gt;自动等待所有任务完成&lt;/strong&gt;
+    print(t1.result(), t2.result())
+
+# TaskGroup 的关键优势：
+#   1) 任一任务失败 → 自动取消其他所有任务（不会留孤儿任务）
+#   2) 退出时保证全部完成，不会漏等
+#   3) 异常用 ExceptionGroup 聚合
+
+# 对比 gather 的老问题：
+#   await asyncio.gather(a(), b())
+#   若 a 抛异常，b 仍在后台跑 → &lt;strong&gt;孤儿任务 + 异常难定位&lt;/strong&gt;</code></pre><p><b>结构化并发的核心保证</b>：<strong>任务的生命周期被限制在一个明确的作用域内</strong>。离开作用域时，要么全部成功完成，要么全部被取消——不会留下「跑了一半没人管的任务」。这是 3.11 引入 TaskGroup 的主要动机，也是现代并发编程的共识（Kotlin、Swift、Rust 都采用）。</p></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：<code>task.cancel()</code> 之后为什么任务还在跑？</summary><p>A：两个原因——① <strong>协程里没有 await 点</strong>：取消只在 await 处生效，纯计算的代码段无法被中断（这是协作式调度的固有限制）；② <strong>吞掉了 CancelledError</strong>：如果代码用 <code>except BaseException: pass</code> 或裸 except 捕获后不重新抛出，取消就被「吃」了，任务会继续。诊断：看协程里是否有密集循环且没有 await，必要时在循环中插入 <code>await asyncio.sleep(0)</code> 作为让出点。</p></details><details><summary>Q：<code>asyncio.run()</code> 报「Event loop is closed」怎么办？</summary><p>A：通常是因为<strong>有任务没被等待就退出了</strong>。<code>asyncio.run()</code> 在结束时关闭事件循环，若还有后台任务在跑，它们会报错。解法：① 用 <code>TaskGroup</code> 或显式 <code>await</code> 所有任务；② 退出前统一取消：<code>for t in asyncio.all_tasks(): t.cancel()</code>；③ 检查是否用了 <code>create_task</code> 却没保存引用（任务可能被 GC）。</p></details><details><summary>Q：取消时怎么保证资源被释放？</summary><p>A：<strong>用 <code>try/finally</code> 或 <code>async with</code></strong>，不要用裸的 try/except。因为取消是通过抛异常实现的，<code>finally</code> 一定会执行。但要注意：<strong>finally 里不要再写可能挂起的 await</strong>——取消后再次 await 可能立即又抛 CancelledError。Python 3.8+ 提供了 <code>asyncio.shield()</code> 保护关键的清理操作，或把清理设计成同步的、幂等的。</p></details><details><summary>Q：gather 和 TaskGroup 该用哪个？</summary><p>A：<strong>3.11+ 优先 TaskGroup</strong>。原因是它提供结构化并发保证：一个任务失败会自动取消其余任务，避免孤儿任务与资源泄漏；异常用 <code>ExceptionGroup</code> 聚合，能一次看到所有失败。gather 的问题是：默认<strong>第一个异常会立即抛出，但其他任务继续在后台运行</strong>，容易导致「程序退出了但任务还在跑」的诡异现象。只有当你确实需要「即使有失败也等所有任务跑完并收集异常」时，才用 <code>gather(..., return_exceptions=True)</code>。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>调用 task.cancel() 之后，可以立即认定远端写入已撤销、连接也已关闭吗？</summary><p>不能。取消要等协程运行到可中断点并完成清理，远端副作用还需要单独确认。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="asyncio-tasks.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

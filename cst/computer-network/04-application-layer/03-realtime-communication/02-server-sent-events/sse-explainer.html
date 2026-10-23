@@ -761,6 +761,24 @@
             font-weight: 600;
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="header">
@@ -1402,5 +1420,75 @@
             updateStatus('点击「播放完整流程」开始演示', false);
         });
     </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>SSE 协议细节与字段</h2><p>SSE 就是<b>一个永不关闭的 HTTP 响应</b>：<code>Content-Type: text/event-stream</code>，然后按固定格式一行行往下写。协议简单到可以手写。</p><p><b>协议格式</b></p><pre><code># 最小可用的 SSE 响应
+HTTP/1.1 200 OK
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: keep-alive
+X-Accel-Buffering: no          # 关键：禁止 nginx 缓冲
+
+# 帧格式（每个字段一行，以空行结束一个事件）
+id: 12345\n
+event: message\n              # 可选，自定义事件名，默认 message
+data: {"text":"hello"}\n      # 可多行，会自动用 \n 拼接
+retry: 3000\n                 # 可选，重连间隔（毫秒），客户端会遵守
+\n                            # 空行 = 一个事件结束
+
+# 心跳注释行（防代理超时断连，必须每隔 15~30s 发一次）
+: keep-alive\n\n
+
+# 多行 data 会被客户端合并成 "line1\nline2"
+data: line1\n
+data: line2\n
+\n</code></pre><div class="table-wrap"><table><thead><tr><th>字段</th><th>作用</th><th>客户端行为</th></tr></thead><tbody><tr><td><code>data</code></td><td>消息体（可多行）</td><td>多行用 <code>\n</code> 拼接后触发事件</td></tr><tr><td><code>event</code></td><td>事件名</td><td>需要 <code>addEventListener(event)</code> 才能收到</td></tr><tr><td><code>id</code></td><td>事件序号</td><td>断线重连时自动带上 <code>Last-Event-ID</code> 请求头</td></tr><tr><td><code>retry</code></td><td>重连间隔（ms）</td><td>覆盖浏览器默认（Chrome 约 3s）</td></tr><tr><td><code>: 注释</code></td><td>心跳</td><td>浏览器忽略，仅保持连接</td></tr></tbody></table></div><p><b>Go 服务端实现</b></p><pre><code>// 服务端（Go 标准库，无任何依赖）
+func sse(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "text/event-stream")
+    w.Header().Set("Cache-Control", "no-cache")
+    w.Header().Set("X-Accel-Buffering", "no")
+    flusher, _ := w.(http.Flusher)
+
+    lastID := r.Header.Get("Last-Event-ID")   // 断线重连：从这之后补发
+    id := parseOr(lastID, 0)
+
+    ticker := time.NewTicker(15 * time.Second)  // 心跳
+    defer ticker.Stop()
+    for {
+        select {
+        case &lt;-r.Context().Done():
+            return                              // 客户端断开，退出
+        case msg := &lt;-broker:
+            id++
+            fmt.Fprintf(w, "id: %d\nevent: msg\ndata: %s\n\n", id, msg)
+            flusher.Flush()                     // 必须 flush！
+        case &lt;-ticker.C:
+            fmt.Fprint(w, ": ping\n\n")         // 心跳注释
+            flusher.Flush()
+        }
+    }
+}</code></pre><p class="muted">两个最常踩的坑：① <b>忘记 <code>Flush()</code></b>——响应被缓冲在 Go/框架里，客户端一条都收不到，这是「SSE 不工作」的第一原因；② <b>nginx 缓冲</b>——默认会攒够 4KB 或 60s 才下发，必须加 <code>X-Accel-Buffering: no</code> 或 nginx 里配 <code>proxy_buffering off; proxy_read_timeout 3600s;</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>SSE vs WebSocket vs 长轮询：怎么选</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>SSE</b></th><th><b>WebSocket</b></th><th><b>长轮询</b></th></tr></thead><tbody><tr><td>方向</td><td><b>单向</b>（服务端→客户端）</td><td><b>双向全双工</b></td><td>单向（靠轮询模拟）</td></tr><tr><td>协议</td><td>HTTP（<code>text/event-stream</code>）</td><td>独立协议（<code>ws://</code>，需 Upgrade）</td><td>HTTP</td></tr><tr><td>断线重连</td><td><b>浏览器内置</b> + Last-Event-ID 续传</td><td><b>要自己实现</b></td><td>天然（每次都是新请求）</td></tr><tr><td>二进制</td><td><b>不支持</b>，只能 UTF-8 文本</td><td>支持</td><td>支持</td></tr><tr><td>代理/防火墙兼容</td><td><b>好</b>（就是普通 HTTP）</td><td>部分企业代理会拦</td><td>好</td></tr><tr><td>HTTP/1.1 连接数</td><td>受 6 连接限制（同域）</td><td>同样受限</td><td>同样受限</td></tr><tr><td>实现复杂度</td><td><b>最低</b></td><td>中（心跳、重连、协议都要写）</td><td>低但效率低</td></tr><tr><td>典型场景</td><td>LLM 流式输出、通知、行情推送、日志流</td><td>聊天、协同编辑、游戏</td><td>兼容性兜底</td></tr></tbody></table></div><p><b>两种客户端写法</b></p><pre><code>// 客户端：原生 EventSource（自动重连，最省事）
+const es = new EventSource('/api/stream');
+es.addEventListener('msg', e =&gt; console.log(e.lastEventId, JSON.parse(e.data)));
+es.onerror = e =&gt; console.log('state:', es.readyState);  // 0连接中 1打开 2关闭
+// 关闭：es.close()
+
+// 客户端：fetch + ReadableStream（需要 POST / 自定义 header 时用这个）
+const res = await fetch('/api/stream', { method: 'POST', body: JSON.stringify(q) });
+const reader = res.body.getReader();
+const dec = new TextDecoder();
+let buf = '';
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buf += dec.decode(value, { stream: true });
+  const parts = buf.split('\n\n');          // 按空行切分事件
+  buf = parts.pop();
+  for (const p of parts) {
+    const data = p.split('\n').filter(l =&gt; l.startsWith('data:'))
+                  .map(l =&gt; l.slice(5).trim()).join('\n');
+    if (data) handle(data);
+  }
+}</code></pre><ul><li><b>HTTP/1.1 的 6 连接限制</b>：同一域名浏览器最多 6 个并发连接。开一个 SSE 就占掉 1 个，页面若有多个 SSE 会互相阻塞。<b>上 HTTP/2 就解决了</b>（多路复用，单连接承载多流）——这也是 SSE 在现代部署中的标准前提。</li><li><b>EventSource 不能发 POST / 自定义头</b>：需要携带复杂请求参数时改用 <code>fetch + ReadableStream</code> 自己解析（如上代码），代价是要自己处理重连。</li><li><b>服务端要感知断开</b>：Go 用 <code>r.Context().Done()</code>，Node 用 <code>res.on('close')</code>。否则客户端关了页面，goroutine/连接还在跑，几小时就攒出资源泄漏。</li><li><b>背压</b>：客户端读得慢、服务端一直写，会撑爆缓冲区。生产实现要做<b>丢弃策略</b>（如只保留最新 N 条）或<b>暂停生成</b>。</li></ul><details><summary>LLM 流式输出为什么普遍用 SSE 而不是 WebSocket？</summary><p>因为场景是<b>纯粹的单向推送</b>：客户端发一次请求，服务端持续吐 token。SSE 的三个优势正中需求：① 基于 HTTP，鉴权/Cookie/限流/日志全复用现有网关；② 浏览器原生自动重连 + Last-Event-ID 续传；③ 实现极简（几十行）。WebSocket 的双向能力在这里完全用不上，反而多了握手、心跳、重连三件事要自己写。</p></details><details><summary>SSE 断线后会丢数据吗？</summary><p>用原生 <code>EventSource</code> 不会丢（前提是服务端实现了 <code>id</code> + <code>Last-Event-ID</code>）：浏览器重连时会自动带上<b>最后收到的事件 ID</b>，服务端据此补发。这是 SSE 相对裸 WebSocket 的隐藏优势。若用 fetch 自定义实现，就得自己维护这个 ID 并在重连时传给服务端。</p></details><details><summary>什么时候必须用 WebSocket？</summary><p>三个条件满足任一：① <b>客户端要高频向服务端推</b>（聊天输入、协同编辑的光标位置、游戏操作）；② <b>要传二进制</b>（音视频帧、protobuf）；③ 需要<b>极低且稳定的往返延迟</b>（WebSocket 帧头只有 2~14 字节，比 HTTP 每次都带完整头省得多）。除此之外优先考虑 SSE。</p></details></div></section>
 </body>
 </html>

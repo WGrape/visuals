@@ -36,6 +36,24 @@
   .checklist{list-style:none;padding:0;margin:0}.checklist li{padding:9px 0 9px 28px;position:relative;border-bottom:1px dashed #2a313c}.checklist li:last-child{border-bottom:0}.checklist li:before{content:'✓';position:absolute;left:0;color:var(--green);font-weight:800}.footer{border-top:1px solid var(--border);margin-top:60px;padding-top:20px;color:#6e7681;font-size:.82rem}
   @media(max-width:1000px){.side{display:none}.layout{display:block}main{width:auto;padding:24px 18px 70px}.g4{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.hero{padding:28px 22px}.hero h1{font-size:1.72rem}.g2,.g3,.g4{grid-template-columns:1fr}.control{grid-template-columns:110px 1fr 64px}.sim-stats{grid-template-columns:repeat(3,1fr)}.diagram{padding:12px}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <style>
 .gx-h2{font-size:1.32rem;font-weight:800;margin:38px 0 14px;padding-left:12px;border-left:4px solid var(--a1,#58a6ff)}
@@ -148,7 +166,56 @@ Trace 里如果存原始 prompt 与回复，等于把用户数据复制了一份
 </section>
 
     <footer class="footer">LLM 可观测的难点不在采集，而在<strong>把质量信号接回来</strong>：只要「答错了」在系统里还是一次成功的 200，所有的优化都缺少方向。</footer>
-  </main>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>LLM 可观测的核心指标</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>定义</th><th>健康参考</th></tr></thead><tbody><tr><td><b>TTFT</b>（首 token 延迟）</td><td>请求到第一个 token</td><td>流式场景 <b>&lt; 1s</b>；超过 2s 用户会觉得卡</td></tr><tr><td><b>TPOT</b>（每 token 时间）</td><td>每个输出 token 的平均时间</td><td><b>20~50ms</b>；直接影响「打字机」观感</td></tr><tr><td>端到端延迟</td><td>完整响应耗时</td><td>与输出长度强相关</td></tr><tr><td><b>tokens/s</b></td><td>输出吞吐</td><td>7B 模型单卡 <b>30~60 tok/s</b>（batch 时更高）</td></tr><tr><td>输入/输出 token 数</td><td>计费与容量依据</td><td>输出 token 成本通常是输入的 <b>3~5 倍</b></td></tr><tr><td><b>缓存命中率</b></td><td>prompt 前缀缓存命中比例</td><td>System prompt 固定时能到 <b>80%+</b>，省 90% 输入成本</td></tr><tr><td>错误率 / 重试率</td><td>4xx/5xx 与重试</td><td>&lt; 1%；429（限流）要单独统计</td></tr><tr><td><b>每次会话成本</b></td><td>token 数 × 单价</td><td>必须按用户/功能维度聚合</td></tr></tbody></table></div><p><b>TTFT 与 TPOT 的分离很重要</b>：两者优化手段完全不同。TTFT 取决于 <b>prompt 长度</b>（prefill 是计算密集）和排队；TPOT 取决于 <b>模型大小与解码速度</b>（decode 是访存密集）。优化 TTFT 要用 prompt 缓存、缩短上下文；优化 TPOT 要量化、换小模型。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>埋点与追踪实现</h2><pre><code># OpenTelemetry 风格的 LLM span 埋点
+from opentelemetry import trace
+tracer = trace.get_tracer(__name__)
+
+def call_llm(prompt, model, **kw):
+    with tracer.start_as_current_span("llm.call") as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("llm.prompt_tokens", count_tokens(prompt))
+        span.set_attribute("llm.temperature", kw.get("temperature", 1.0))
+
+        t0 = time.time()
+        first_token_at = None
+        chunks = []
+        for chunk in client.stream(prompt, model, **kw):
+            if first_token_at is None:
+                first_token_at = time.time()
+                span.add_event("first_token", {"ttft_ms": (first_token_at - t0) * 1000})
+            chunks.append(chunk)
+
+        total = time.time() - t0
+        out_tokens = count_tokens("".join(chunks))
+        span.set_attribute("llm.completion_tokens", out_tokens)
+        span.set_attribute("llm.ttft_ms", (first_token_at - t0) * 1000)
+        span.set_attribute("llm.tpot_ms",
+                           (total - (first_token_at - t0)) / max(out_tokens - 1, 1) * 1000)
+        span.set_attribute("llm.cost_usd", calc_cost(model, prompt, out_tokens))
+        return "".join(chunks)</code></pre><pre><code># 成本计算（必须自己算，不要只看总量）
+PRICING = {   # 每 1M token 美元，示例价格
+    "gpt-4o":      {"in": 2.50,  "out": 10.00},
+    "gpt-4o-mini": {"in": 0.15,  "out": 0.60},
+    "claude-3-5":  {"in": 3.00,  "out": 15.00},
+}
+
+def calc_cost(model, prompt, completion):
+    p = PRICING[model]
+    return len(prompt) / 1e6 * p["in"] + len(completion) / 1e6 * p["out"]
+
+# 按用户/功能维度聚合（找出成本大头）
+# SELECT user_id, feature, SUM(cost_usd), SUM(total_tokens)
+# FROM llm_spans GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20;
+
+# 关键告警
+#   1) 单用户单日成本 &gt; 阈值（防刷）
+#   2) p95 TTFT 突增
+#   3) 429 错误率 &gt; 1%（触发限流）
+#   4) 输出 token 突增（可能 prompt 被注入或陷入循环）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>TTFT 突然变长</td><td>prompt 变长 / 排队 / 缓存没命中</td><td>监控 prompt_tokens 分布；开启 prefix caching；检查队列深度</td></tr><tr><td>成本失控</td><td>某个功能循环调用或输出过长</td><td>按 feature 聚合成本；设 <code>max_tokens</code> 硬上限；加预算告警</td></tr><tr><td>看不到失败请求</td><td>只记录了成功的</td><td><b>错误也要埋点</b>；记录 status_code 与错误类型</td></tr><tr><td>追踪断链（span 不连续）</td><td>异步/流式没正确传递 context</td><td>显式传递 parent span；流式要在生成器里保持 context</td></tr><tr><td>prompt 里有敏感信息被记录</td><td>埋点记录了完整 prompt</td><td><b>脱敏后再记录</b>；或只记 hash/长度，内容存加密区</td></tr><tr><td>token 数与账单对不上</td><td>自己算的和官方的不一致</td><td>用官方的 <code>usage</code> 字段为准； tokenizer 版本要对上</td></tr><tr><td>指标太多看不过来</td><td>没有分层</td><td>只看四个黄金指标：延迟、错误率、成本、token 量</td></tr></tbody></table></div><p class="muted"><b>流式响应必须单独埋 TTFT</b>：如果只在请求结束时记录，你会看到「总延迟 3 秒」，但无法区分「1 秒出首字 + 2 秒生成」还是「3 秒才出首字」。这两种的用户体验完全不同，优化手段也不同。</p></div></section>
+</main>
 </div>
 <script>
   // Scroll highlight

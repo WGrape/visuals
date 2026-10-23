@@ -604,6 +604,24 @@
   .section:nth-child(7) { animation-delay: 0.6s; }
   .section:nth-child(8) { animation-delay: 0.7s; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="container">
@@ -1063,5 +1081,43 @@ app.run()  <span class="comment"># 仅开发用，不能上生产！</span></pre
   </div>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>职责划分：各自擅长什么</h2><p>Nginx 是<b>事件驱动的反向代理/静态服务器</b>，应用服务器（Tomcat/uWSGI/Gunicorn/Go 内置 HTTP）是<b>业务逻辑执行环境</b>。两者不是替代关系，是分层关系。</p><div class="table-wrap"><table><thead><tr><th>能力</th><th>Nginx</th><th>应用服务器</th><th>说明</th></tr></thead><tbody><tr><td>静态文件</td><td><b>极强</b>（sendfile、零拷贝）</td><td>能但浪费</td><td>静态资源交给 Nginx，别让应用进程读文件</td></tr><tr><td>并发连接</td><td><b>数万~十万</b>（epoll + 少量 worker）</td><td>受线程/进程模型限制（几百~几千）</td><td>这是最核心的差别</td></tr><tr><td>TLS 卸载</td><td><b>强</b>（专门的优化）</td><td>能但耗 CPU</td><td>TLS 放 Nginx，应用走内网明文</td></tr><tr><td>限流/鉴权</td><td>基础（<code>limit_req</code>、<code>auth_request</code>）</td><td><b>灵活</b>（任意业务规则）</td><td>简单限流在网关，复杂规则在应用</td></tr><tr><td>业务逻辑</td><td><b>不能</b>（或只能用 lua/njs 写简单逻辑）</td><td><b>本职</b></td><td></td></tr><tr><td>长连接保持</td><td><b>强</b>（对客户端连接复用）</td><td>线程池被慢客户端占满</td><td>Nginx 扛住慢客户端（ buffering ）</td></tr><tr><td>内存占用</td><td>极低（每连接约几 KB）</td><td>高（每线程 256KB~1MB 栈）</td><td>C10K 问题的本质</td></tr></tbody></table></div><p><b>Nginx 反向代理配置</b></p><pre><code># Nginx 核心配置（反向代理 + 上游保活）
+upstream backend {
+    server 10.0.0.1:8080 max_fails=3 fail_timeout=30s;
+    server 10.0.0.2:8080 max_fails=3 fail_timeout=30s;
+    keepalive 64;                 # 到上游的长连接池，&lt;b&gt;必配&lt;/b&gt;
+    least_conn;                   # 或 ip_hash / 默认轮询
+}
+
+server {
+    listen 443 ssl http2;
+    server_name example.com;
+
+    # 静态资源直接由 Nginx 返回，不经过应用
+    location /static/ {
+        alias /var/www/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        sendfile on;              # 零拷贝，静态文件性能关键
+        tcp_nopush on;
+    }
+
+    location /api/ {
+        proxy_pass http://backend;
+        proxy_http_version 1.1;               # 保活必需
+        proxy_set_header Connection "";       # 保活必需
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        proxy_connect_timeout 5s;             # 连接上游超时（短）
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;            # 读响应超时（按业务定）
+        proxy_next_upstream error timeout http_502 http_503;   # 失败换一台重试
+        proxy_next_upstream_tries 2;
+    }
+}</code></pre><p class="muted">最关键的两个性能开关：① <code>keepalive</code> + <code>proxy_http_version 1.1</code>——不配的话 Nginx 每次请求都要和上游重新建连，TPS 可能掉一半；② <code>sendfile on</code>——静态文件走零拷贝，不经过用户态。另外 <code>worker_connections</code> 与 <code>worker_processes</code> 的乘积决定了最大连接数（<code>worker_processes auto;</code> 通常 = CPU 核数）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>性能数字与常见坑</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>数量级</th><th>备注</th></tr></thead><tbody><tr><td>Nginx 静态文件 QPS</td><td>数万~十万（单机）</td><td>取决于文件大小与网卡；小文件更高</td></tr><tr><td>Nginx 反向代理 CPS（新建连接/秒）</td><td>数万</td><td>TLS 握手会降到几千（开 session 复用可回升）</td></tr><tr><td>Nginx 每连接内存</td><td><b>几 KB</b></td><td>这是它能扛 C10K 的根本</td></tr><tr><td>Tomcat 默认线程数</td><td>200</td><td>每线程约 1MB 栈；200 线程 = 200MB</td></tr><tr><td>Gunicorn 默认 worker</td><td>1（sync）</td><td>建议 <code>2×CPU+1</code>；IO 密集换 gevent worker</td></tr><tr><td>Go net/http</td><td>goroutine 每请求，初始栈 2KB</td><td>天然高并发，甚至可以不用 Nginx</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>坑</th><th>现象</th><th>解法</th></tr></thead><tbody><tr><td>没配 <code>keepalive</code></td><td>上游 TIME_WAIT 暴增、延迟抖动</td><td>加 <code>keepalive</code> + <code>proxy_http_version 1.1</code></td></tr><tr><td><code>proxy_read_timeout</code> 太短</td><td>慢接口被 504</td><td>按业务 P99 设，长任务要单独配置</td></tr><tr><td><code>client_max_body_size</code> 默认 1MB</td><td>上传大文件 413</td><td>调到实际需求值</td></tr><tr><td>没传 <code>X-Forwarded-For</code></td><td>应用拿不到真实 IP</td><td>配好三个转发头</td></tr><tr><td> buffering 关闭不当</td><td>大响应占满 Nginx 内存</td><td>静态/下载类开 <code>proxy_buffering</code>，SSE 关</td></tr><tr><td><code>worker_connections</code> 太小</td><td>连接被拒</td><td>默认 512，生产要调到 10240+</td></tr></tbody></table></div><details><summary>Go 服务前面还需要 Nginx 吗？</summary><p>看需求。Go 的 net/http 本身就是 epoll + goroutine，并发能力很强，<b>单纯做 API 服务时可以不要 Nginx</b>。但下面几种情况还是要：① 要<b>静态文件 + TLS + 压缩 + 限流</b>的统一入口；② 需要<b>平滑重启/多实例负载</b>；③ 公司规范要求统一接入层（日志、鉴权、WAF）。云原生环境下，这些通常由 <b>Ingress / 网关（Envoy、APISIX）</b>承担，Nginx 只是其中一种实现。</p></details><details><summary>为什么 Nginx 能扛几万并发而 Tomcat 只能几百？</summary><p>本质是<b>并发模型</b>：Nginx 是<b>事件驱动 + 单线程多路复用</b>（epoll/kqueue），一个 worker 进程用少量线程管理上万连接，每连接只占几 KB 内存；Tomcat 默认是<b>一个请求一个线程</b>的阻塞模型，每线程要 256KB~1MB 栈，且线程上下文切换成本高。这就是著名的 <b>C10K 问题</b>及其解法。（注：Tomcat 也有 NIO 模式，但生态和调优复杂度远高于 Nginx。）</p></details><details><summary>Nginx 报 499 是什么？</summary><p>499 是 <b>Nginx 自定义状态码</b>，含义是「客户端在 Nginx 返回响应之前主动关闭了连接」。常见原因：客户端超时设得太短、用户刷新/关闭页面、慢接口。排查方向：① 看是不是集中在某个慢接口（优化该接口）；② 看客户端超时是否合理；③ 配合 <code>proxy_ignore_client_abort</code> 决定是否让上游继续跑（默认关闭，即中断）。</p></details></div></section>
 </body>
 </html>

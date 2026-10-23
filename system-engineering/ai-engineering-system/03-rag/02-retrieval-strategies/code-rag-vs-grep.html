@@ -96,6 +96,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 .footnote{color:#999;font-size:12px;margin-top:26px;padding-top:16px;border-top:0.5px solid rgba(0,0,0,0.1);text-align:center}
 @media(max-width:680px){.metrics{grid-template-columns:1fr}.compare,.scenario-grid{grid-template-columns:1fr}.container{padding:22px 18px}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="container">
@@ -337,6 +355,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
     </div>
     <div class="quiz-explain" id="quizExp">解析：B 正确。Claude Code 的「grep 效果好」实质是 Agent 迭代推理在兜底；grep 与 Code RAG 不是替代关系，而是按成本 / 延迟 / 规模 / 维护代价做场景权衡，且 Code RAG 自身有索引维护、前期投入、调参三重代价。A、C、D 都踩了文中明确反驳的误区。</div>
   </section>
+<section class="sec" data-dry-goods><div class="x-dry"><h2>两种检索方式对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>grep / 符号索引</b></th><th><b>Code RAG（向量检索）</b></th></tr></thead><tbody><tr><td>匹配方式</td><td><b>字面精确</b>（正则/AST）</td><td><b>语义近似</b></td></tr><tr><td>查 <code>handleRequest</code> 定义</td><td><b>瞬间且 100% 准确</b></td><td>可能漏、可能匹配到相似名</td></tr><tr><td>查“处理重试的逻辑在哪”</td><td><b>无从下手</b>（不知道关键词）</td><td><b>擅长</b></td></tr><tr><td>速度</td><td><b>毫秒级</b>（rg 扫 GB 级代码只要秒级）</td><td>需要 embedding（几十 ms）</td></tr><tr><td>依赖</td><td>无需索引，打开文件即可</td><td>需要建索引、维护向量库</td></tr><tr><td>增量更新</td><td><b>天然实时</b></td><td>要重新切分与向量化</td></tr><tr><td>成本</td><td>零</td><td>embedding + 存储 + 检索开销</td></tr></tbody></table></div><p><b>结论先行</b>：对代码而言，<b>grep/符号索引是主力，向量检索是补充</b>。代码是高度结构化的精确文本，函数名、类名、错误码都是字面对量检索在这些场景下既慢又不准。向量检索的价值在于<b>“不知道叫什么，但知道在干什么”</b>的探索式查询。</p><p><b>代码检索命令</b></p><pre><code># 精确查找：ripgrep（现代最快）
+rg "func handleRequest" --type go
+rg -n "TODO|FIXME" -g '!vendor'
+rg --stats "pattern"        # 看扫描了多少文件与耗时
+
+# 符号级查找（比 grep 更准）
+ctags -R .                                  # 生成 tags
+rg --type-definitions                       # 配合编辑器跳转
+# 或直接用 LSP（最准）：
+#   gopls / rust-analyzer / pyright 提供 go-to-definition、find-references
+
+# 语义查找（当你不知道名字时）
+#   用 embedding 检索 + 上述精确工具二次确认
+#   典型提示词："找出所有处理重试和退避的代码"
+
+# 性能对比（经验值，10 万文件仓库）
+# rg 全仓正则搜索   : 0.1 - 1 s
+# LSP 符号跳转      : &lt; 50 ms（有索引）
+# 向量检索（本地）  : 50 - 200 ms</code></pre></div></section>
+<section class="sec" ><div class="x-dry"><h2>混合策略与实践建议</h2><ul><li><b>推荐的三层检索架构</b>：① <b>符号索引（LSP/ctags）</b>处理“找定义/找引用”；② <b>grep/ripgrep</b>处理“找字符串/正则”；③ <b>向量检索</b>处理“找语义相关”。按查询类型路由，而不是一律走 embedding。</li><li><b>代码切分要按结构切</b>：按函数/类/方法切，而不是按固定 token 数。把函数签名、所在文件路径、类名一起放进 chunk 的<b>前缀</b>，能显著提升召回质量（这是 Code RAG 与文档 RAG 最大的区别）。</li><li><b>不要对 vendor/node_modules 建索引</b>：既浪费成本又引入噪声。只索引业务代码，依赖走文档或符号索引。</li><li><b>增量更新是硬需求</b>：代码每天都在变，向量索引必须跟着变。按文件哈希做增量（变了才重新 embed），并在 CI 里触发。全量重建在大型仓库上要几十分钟，不可接受。</li><li><b>实测经验</b>：在“给一个报错信息找原因代码”“找相似的实现做参考”“理解陌生模块”这三类任务上，向量检索明显优于 grep；在“改这个函数”“找所有调用点”上，grep/LSP 完胜。</li><li><b>成本视角</b>：一个 500 万行的仓库，embedding + 存储成本是一次性的（几美元到几十美元），但每次查询的延迟和索引维护是持续的。如果团队主要需求是“跳转到定义”，那根本不需要 RAG。</li></ul><details><summary>给 AI 助手做代码上下文，用 RAG 还是全量塞进去？</summary><p>取决于仓库规模与模型上下文。小仓库（几万行）且有长上下文模型（200K+）时，<b>精选相关文件全量塞入</b>效果更好（信息完整，无切分损失）。大仓库必须检索，且优先用<b>符号索引/依赖图</b>做精准筛选（如取当前文件的 import 与被调用文件），向量检索作为补充。</p></details><details><summary>为什么 Copilot/Cursor 这类工具效果好？</summary><p>它们不是纯 RAG：① 用<b>当前打开的文件与光标位置</b>做极强的局部上下文（最相关）；② 用 LSP 拿精确的符号定义；③ 用仓库级的向量检索补充；④ 用 AST 做结构化切分。是多种检索方式的分层组合，而不是单一 embedding。</p></details></div></section>
+
 
   <div class="footnote">Code RAG vs grep · 基于「字节面试官之 grep 与 Code RAG」访谈内容整理图解 · 适合面试复盘与工程选型参考</div>
 </div>

@@ -16,6 +16,23 @@
 创建容易，删除常涉及外部资源清理。Finalizer 可以在对象删除前阻止最终移除，让控制器删除云负载均衡或存储卷等附属资源，然后移除 finalizer。若清理逻辑永久失败，对象会卡在 Terminating；必须暴露清楚的条件、重试策略和人工修复步骤，而不是无条件忽略错误。</h2><p>控制器重启后不能依赖进程内记录继续工作。它要从 API 中恢复期望与实际关系，处理孤儿对象和重复对象。对长时间 Pending、持续冲突、调谐队列积压分别设告警，并用事件与 status 提供用户可理解的诊断信息。</p></section>
 <section class="panel"><h2>设计和测试
 实现前写下不变量：最多允许多少子资源、每个子资源属于谁、什么状态算 Ready、删除时何时可释放。测试包括重复事件、乱序更新、API 超时、冲突、控制器重启、节点容量不足、删除中断。每个场景都应检查最终状态和中间副作用，不能只断言调谐函数返回 nil。</h2><p>上线后观察收敛耗时分位数、失败重试次数、队列深度、对象状态条件和不期望漂移次数。若用户改了 spec 但长时间不收敛，要能从状态说明原因。这才是声明式接口可信的基础。</p></section>
+<section class="panel" data-dry-goods><h2>Reconcile 循环的关键参数</h2><div class="table-wrap"><table><thead><tr><th>参数/概念</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><b>sync-period（resync）</b></td><td><b>10 小时</b>（controller-manager 默认，含随机抖动）</td><td>即使无事件也强制全量重新对账</td></tr><tr><td>抖动范围</td><td>周期的 ±10%</td><td>避免所有 controller 同时醒</td></tr><tr><td><b>RequeueAfter</b></td><td>按业务（秒–小时）</td><td>主动要求一段时间后再次对账</td></tr><tr><td><b>指数退避</b></td><td>5 ms 起，上限 <b>1000 s</b>（controller-runtime 默认）</td><td>失败后的重试间隔</td></tr><tr><td><b>MaxConcurrentReconciles</b></td><td>1</td><td>同一 controller 的并发 worker 数</td></tr><tr><td><b>幂等性</b></td><td><b>必须</b></td><td>同一输入重复执行结果相同</td></tr></tbody></table></div><p><b>声明式 API 的核心模型</b>：用户声明<b>期望状态（spec）</b>，controller 不断把<b>实际状态（status）</b>朝期望状态收敛。这个循环叫 <b>reconcile</b>，它必须是<b>幂等</b>的——因为同一个对象会被反复 reconcile（事件触发、resync、重启后全量）。</p><p><b>漂移检测命令</b></p><pre><code># 观察漂移与期望状态
+kubectl get deployment nginx -o yaml          # 看 spec（期望）与 status（实际）
+kubectl diff -f manifest.yaml                 # 本地声明 vs 集群实际的差异（server-side dry-run）
+kubectl get deployment nginx -o jsonpath='{.status}'  # 只看实际状态
+
+# 查看 controller 的行为
+kubectl logs -n kube-system deployment/kube-controller-manager | grep -i reconcile
+kubectl get events --sort-by=.lastTimestamp   # 看 controller 产生的事件
+
+# Terraform 的漂移检测
+terraform plan          # 对比 state 与真实基础设施的漂移
+terraform refresh       # 把真实状态同步回 state
+terraform plan -refresh-only
+terraform apply -auto-approve
+
+# 强制触发 reconcile（annotate 改动会触发更新事件）
+kubectl annotate deployment nginx kubectl.kubernetes.io/restartedAt="$(date +%s)" --overwrite</code></pre></section><section class="panel"><h2>漂移的成因与处理</h2><div class="table-wrap"><table><thead><tr><th>漂移来源</th><th>例子</th><th>检测</th><th>处理</th></tr></thead><tbody><tr><td><b>人工直接修改</b></td><td>有人 <code>kubectl edit</code> 或手工改云控制台</td><td><code>kubectl diff</code> / <code>terraform plan</code></td><td>重新 apply 覆盖回去；或限制直接写权限</td></tr><tr><td><b>其它 controller 争抢</b></td><td>两个 controller 改同一个字段</td><td>看 managedFields / metadata</td><td>明确 ownership，用 server-side apply 的 field manager</td></tr><tr><td><b>外部系统变更</b></td><td>云厂商自动升级、节点故障</td><td>resync（定期全量对账）</td><td>controller 重新拉回期望状态</td></tr><tr><td><b>代码/模板升级</b></td><td>GitOps 仓库内容变了</td><td>ArgoCD 的 OutOfSync 状态</td><td>自动或手动 sync</td></tr><tr><td><b>状态滞后</b></td><td>status 没及时更新</td><td>对比 spec 与 status</td><td>检查 controller 是否正常（看日志/重启）</td></tr></tbody></table></div><ul><li><b>resync 是漂移的兜底</b>：事件（watch）可能丢失（网络抖动、controller 重启），所以 controller 必须<b>周期性全量对账</b>。10 小时的默认 resync 意味着最长 10 小时才能发现一次“静默漂移”——对关键资源应缩短或用 RequeueAfter。</li><li><b>漂移是声明式的必然副产品</b>：只要存在“绕过声明层的修改入口”，漂移就无法杜绝。治理靠<b>权限收敛</b>（禁止直接写生产集群）+ <b>GitOps</b>（一切变更走 Git）+ <b>自动对账/自动修复</b>。</li><li><b>Auto-reconcile vs 人工确认</b>：ArgoCD/K8s 默认会自动把实际状态拉回期望；Terraform 默认<b>只报告不自动修</b>（要你 review plan 再 apply）。关键基础设施建议保留人工确认环节。</li><li><b>幂等是硬要求</b>：reconcile 会被调用无数次。如果逻辑不幂等（如每次 append 而不是 set、每次计数 +1），状态会失控。<b>永远用 set 而非 append，用绝对值而非增量。</b></li><li><b>并发与去重</b>：controller-runtime 默认对同一对象的 reconcile 是<b>串行</b>的（workqueue 去重）。要并发需调 <code>MaxConcurrentReconciles</code>，但同一 key 仍不会并发——这保证了安全性。</li><li><b>排障顺序</b>：① <code>kubectl get -o yaml</code> 对比 spec/status；② 看 controller 日志（是否报错、是否在循环）；③ 看 events（有没有 Warning）；④ 看是否达到退避上限（1000 s，表现为长时间不动）；⑤ 确认 RBAC 是否有权限。</li></ul><details><summary>为什么我改了 spec 但很久没生效？</summary><p>三种可能：① controller 没在跑或卡在退避（最长 1000 s）；② 有最终器（finalizer）阻止；③ 变更被 webhook 拒绝（看 events 里的 Warning）。先看 <code>kubectl get events</code> 和 controller 日志。</p></details><details><summary>声明式和命令式的本质区别是什么？</summary><p>命令式描述<b>怎么做</b>（执行一系列动作，中断了就不知道做到哪一步）；声明式描述<b>要什么</b>（目标状态，由 controller 反复收敛）。声明式的优势是幂等、自愈、可版本化、可审计——代价是需要一个持续运行的控制循环。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>控制器收到两次相同事件，会创建两个新副本吗？</summary><p>正确实现应重新读取当前对象并按稳定身份调谐；事件可重复，不能把事件次数当成所需动作次数。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="declarative-api-iac.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

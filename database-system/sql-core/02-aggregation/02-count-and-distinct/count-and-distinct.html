@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -194,6 +212,30 @@ SELECT COUNT(*) FROM (SELECT DISTINCT user_id FROM orders) t;</code></pre>
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：三种 COUNT 与 DISTINCT 的语义</h2><div class="table-wrap"><table><thead><tr><th>写法</th><th>语义</th><th>何时用</th></tr></thead><tbody><tr><td><code>COUNT(*)</code></td><td><b>统计行数</b>（含全 NULL 行）</td><td><b>要行数就用它</b></td></tr><tr><td><code>COUNT(1)</code></td><td>与 COUNT(*) 等价</td><td>可读性略差，性能无差别</td></tr><tr><td><code>COUNT(col)</code></td><td><b>统计 col 非 NULL 的行数</b></td><td>要「有值的有多少」</td></tr><tr><td><code>COUNT(DISTINCT col)</code></td><td>去重后计数</td><td>UV、去重计数</td></tr><tr><td><code>SUM(CASE WHEN ... THEN 1 ELSE 0 END)</code></td><td><b>条件计数</b></td><td>一次扫统计多个条件</td></tr></tbody></table></div><ul><li>信号一：只要总行数 → <code>COUNT(*)</code>，别写 <code>COUNT(col)</code>。</li><li>信号二：要「UV」→ <code>COUNT(DISTINCT uid)</code>，但要注意不能跨维度相加。</li><li>信号三：要一次统计多种状态的数量 → <code>SUM(CASE WHEN ...)</code> 比多次 COUNT 快。</li></ul><p class="muted">常见误解：<code>COUNT(1)</code> 比 <code>COUNT(*)</code> 快——<b>是错的</b>，现代优化器对两者处理完全相同。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：性能与近似计数</h2><div class="table-wrap"><table><thead><tr><th>操作</th><th>复杂度</th><th>说明</th></tr></thead><tbody><tr><td><code>COUNT(*)</code> 走主键索引</td><td>O(n) 扫最小索引</td><td>MySQL InnoDB 会选最小的二级索引扫</td></tr><tr><td><code>COUNT(*)</code> 无 WHERE</td><td>需全表扫（MVCC 决定）</td><td><b>InnoDB 不存行数，MyISAM 存</b></td></tr><tr><td><code>COUNT(DISTINCT col)</code></td><td>需排序或哈希去重</td><td>大数据量下很慢</td></tr><tr><td>近似计数 HLL</td><td><b>O(1) 空间</b>，误差约 1%</td><td>大数据量 UV 的唯一可行方案</td></tr></tbody></table></div><p><b>条件计数与近似计数</b></p><pre><code>-- 条件计数：一次扫描统计多个状态（比多次 COUNT 快）
+SELECT
+  COUNT(*)                                            AS total,
+  SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END)         AS pending,
+  SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END)         AS paid,
+  COUNT(DISTINCT uid)                                 AS uv
+FROM orders WHERE created_at &gt;= '2025-01-01';
+
+-- MySQL 8 也可写成 SUM(status = 1)（布尔自动转 0/1）
+SELECT SUM(status = 1) AS pending FROM orders;
+
+-- PostgreSQL 的 FILTER 语法（更清晰）
+SELECT
+  COUNT(*)                                  AS total,
+  COUNT(*) FILTER (WHERE status = 1)        AS pending
+FROM orders;
+
+-- 近似计数（PostgreSQL 的 HLL 扩展）
+CREATE EXTENSION hll;
+SELECT hll_cardinality(hll_add_agg(hll_hash_integer(uid))) FROM events;
+-- Redis 也有 PFADD / PFCOUNT，误差约 0.81%，12KB 内存可统计 2^64 量级</code></pre><p class="muted">量化参考：千万级表的 <code>COUNT(DISTINCT uid)</code> 可能要<b>几十秒</b>；换成 HLL 近似是<b>毫秒级</b>且内存固定 12KB。误差 0.81% 在绝大多数业务看板里完全可接受。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：精确 vs 近似</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>精度</th><th>空间</th><th>时间</th><th>适用</th></tr></thead><tbody><tr><td><code>COUNT(DISTINCT)</code></td><td><b>精确</b></td><td>O(去重数)</td><td>慢（需排序/哈希）</td><td>数据量小、要求精确</td></tr><tr><td><b>HLL / HyperLogLog</b></td><td>误差约 0.81%</td><td><b>O(1)，约 12KB</b></td><td><b>极快</b></td><td><b>大数据 UV 首选</b></td></tr><tr><td>近似 DISTINCT（MySQL 无）</td><td>误差可控</td><td>小</td><td>快</td><td>看板类场景</td></tr><tr><td>预计算汇总表</td><td>精确</td><td>O(维度组合)</td><td>查询极快</td><td>维度固定、可接受延迟</td></tr></tbody></table></div><details><summary>为什么 InnoDB 的 COUNT(*) 没有 MyISAM 快？</summary><p>因为 MyISAM 在表元数据里<b>存了总行数</b>，COUNT(*) 无 WHERE 时直接返回；而 InnoDB 是 MVCC 的，<b>不同事务看到的行数不同</b>，必须真的扫一遍才能确定。所以 InnoDB 的 COUNT(*) 在大表上必然慢。</p></details><details><summary>大表 COUNT(*) 慢怎么优化？</summary><p>几种思路：① 加 WHERE 走索引，让扫描量变小；② 用<b>近似值</b>（<code>SHOW TABLE STATUS</code> 的 Rows 是估算值）；③ 维护一张<b>计数表</b>或放 Redis；④ 用二级索引（比聚簇索引小，扫得快）。</p></details><details><summary>COUNT(DISTINCT) 为什么不能跨维度相加？</summary><p>因为同一个用户可能同时属于多个维度，相加会重复计数（「北京 UV + 上海 UV ≠ 全国 UV」）。要正确必须先在最细粒度上算出可合并的中间状态（如 HLL 的寄存器），再合并——直接的整数值无法合并。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / COUNT 与 DISTINCT ·

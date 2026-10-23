@@ -60,6 +60,24 @@
   a{color:var(--accent)}
   footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -193,6 +211,52 @@ res = client.search(collection_name=<span class="str">"saas_docs"</span>, data=[
 </section>
 
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Milvus 多租户的四种方案</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>隔离级别</th><th>代价 / 适用</th></tr></thead><tbody><tr><td><b>Database 级</b>（2.3+）</td><td>最彻底，独立库</td><td>资源开销大；适合大客户独立部署</td></tr><tr><td><b>Collection 级</b></td><td>每租户一个 collection</td><td>collection 数上限约 <b>10000</b>；租户多时元数据压力大</td></tr><tr><td><b>Partition 级</b></td><td>同 collection 内分区</td><td><b>最常用</b>；单 collection 分区上限 <b>4096</b></td></tr><tr><td><b>Partition Key</b>（2.4+）</td><td>自动按 key 分区</td><td>Milvus 自动管理，<b>推荐</b>；上限 <b>1024</b> 个分区</td></tr><tr><td><b>过滤检索</b>（标量过滤）</td><td>同一 collection 用 tenant_id 过滤</td><td>最省资源但隔离最弱，需配合<strong>预过滤</strong></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><code>maxCollectionNum</code></td><td><b>65536</b></td><td>元数据能承载的 collection 数</td></tr><tr><td>单 collection 分区数</td><td><b>4096</b></td><td>超过会影响性能</td></tr><tr><td>Partition Key 分区数上限</td><td><b>1024</b></td><td>2.4 起的自动分区</td></tr><tr><td><code>nlist</code>（IVF 聚类数）</td><td>建议 <b>4×sqrt(N)</b></td><td>N=100万 → nlist=4000</td></tr><tr><td><code>nprobe</code>（检索聚类数）</td><td>默认 <b>1</b>（standalone）/<b>16</b></td><td>召回与耗时的权衡杆</td></tr><tr><td>HNSW <code>M</code></td><td><b>16</b></td><td>每个节点的连接数；M 大召回高、内存大</td></tr><tr><td>HNSW <code>efConstruction</code></td><td><b>200</b></td><td>建索引时的候选队列；越大质量越好、越慢</td></tr><tr><td>HNSW <code>ef</code>（检索）</td><td>等于 <b>top_k</b> 或更大</td><td>ef 越大召回越高，通常设 <b>top_k 的 2~4 倍</b></td></tr></tbody></table></div><p><b>Partition Key 是 2.4 的推荐方案</b>：建 collection 时指定 <code>num_partitions=128</code> 和 <code>partition_key_field="tenant_id"</code>，Milvus 自动把相同 tenant_id 的数据放到同一分区，检索时自动裁剪，既省资源又有不错的隔离性，还不用手动管理分区。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>实操代码</h2><pre><code>from pymilvus import MilvusClient, DataType
+
+client = MilvusClient(uri="http://localhost:19530")
+
+# 方式 A：Partition Key（推荐，2.4+）
+schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
+schema.add_field("id", DataType.INT64, is_primary=True)
+schema.add_field("tenant_id", DataType.INT64)
+schema.add_field("vector", DataType.FLOAT_VECTOR, dim=768)
+schema.add_field("text", DataType.VARCHAR, max_length=2000)
+
+client.create_collection(
+    collection_name="docs",
+    schema=schema,
+    num_partitions=128,                        # Milvus 自动按 tenant_id 哈希分区
+)
+# 指定哪列是分区键
+client.create_partition_key("docs", "tenant_id")   # 或建索引时指定
+# 检索时带上 tenant_id，Milvus 自动只扫对应分区
+res = client.search("docs", data=[qvec], filter="tenant_id == 42", limit=10)</code></pre><pre><code># 方式 B：手动 Partition（2.4 之前，或需要精确控制时）
+client.create_partition("docs", "tenant_42")
+client.insert("docs", rows, partition_name="tenant_42")
+res = client.search("docs", data=[q], partition_names=["tenant_42"], limit=10)
+# 注意：单 collection 分区数上限 4096
+
+# 方式 C：Database 级隔离（2.3+，最强隔离）
+client.create_database("tenant_42_db")
+client.using_database("tenant_42_db")
+
+# 索引参数调优（HNSW）
+index_params = client.prepare_index_params()
+index_params.add_index(
+    field_name="vector",
+    index_type="HNSW",
+    metric_type="COSINE",          # 或 L2 / IP
+    params={"M": 16, "efConstruction": 200},
+)
+client.create_index("docs", index_params)
+client.load_collection("docs")
+
+# 检索时调 ef（召回 vs 耗时）
+res = client.search("docs", data=[q], limit=10,
+                    search_params={"params": {"ef": 64}})   # ef 越大召回越高</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>多租户排障</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>collection 太多导致变慢</td><td>元数据膨胀；每个 collection 都有开销</td><td>改用 Partition Key 或过滤检索；collection 数控制在千级以内</td></tr><tr><td>分区数超上限</td><td>手动分区超过 4096</td><td>改用 Partition Key（上限 1024 但自动管理）或分库</td></tr><tr><td>跨租户数据串了</td><td>检索时没传 filter / 没指定 partition</td><td><b>每次检索必须带 tenant_id 条件</b>；在 SDK 层封装强制校验</td></tr><tr><td>小租户拖累大租户</td><td>共享资源，热租户占满</td><td>大客户单独 collection/database；或用资源组（Resource Group）隔离</td></tr><tr><td>召回率低</td><td>nprobe/ef 太小，或过滤后候选不足</td><td>调大 nprobe（IVF）或 ef（HNSW）；注意<b>后过滤会导致结果不足</b></td></tr><tr><td>内存占用大</td><td>索引常驻内存；HNSW 尤其吃内存</td><td>768 维 × 100 万条约需 <b>3GB</b>（HNSW 还要加图结构约 30%）；用 IVF_PQ 或 DiskANN</td></tr><tr><td>写入后查不到</td><td>没 load 或没 flush</td><td>写完 <code>flush()</code>；查询前 <code>load_collection()</code></td></tr></tbody></table></div><p class="muted"><b>过滤检索的陷阱</b>：如果用「先 ANN 再过滤」（后过滤），当 tenant_id 只占 1% 时，ANN 召回的 100 条里可能只有 1 条属于该租户，结果严重不足。<b>Partition Key 与预过滤（Pre-filter）能保证候选集全部属于目标租户</b>，这是分区方案的核心价值。</p></div></section>
 </main>
 
 <footer>

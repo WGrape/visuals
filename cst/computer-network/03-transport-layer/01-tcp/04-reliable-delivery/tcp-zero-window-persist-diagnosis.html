@@ -11,6 +11,33 @@
 <section class="panel"><h2>用数值看吞吐受限</h2><p>假设路径 RTT 为 50 毫秒、网络可提供 100 Mbps，但接收窗口只能保持 16 KiB，理想窗口受限吞吐约 16 KiB/0.05s≈320 KiB/s，远低于链路速率。若窗口归零，正常新数据暂时完全停下。盲目把网卡从 1G 升到 10G 不会让接收应用读得更快。可以先查应用 CPU、磁盘、锁等待及接收缓冲大小，再判断是否需要调内核缓冲。</p><p>窗口变小不总是应用代码 bug：设备内存压力、代理背压或故意限速也可能造成慢读。增加接收缓冲可能缓解短时突发，却无法解决持续消费速度低于生产速度的问题，最终缓冲仍会填满。</p></section>
 <section class="panel"><h2>抓包位置与窗口缩放</h2><p>TCP 窗口字段基础宽度有限，连接建立时可协商窗口缩放。抓包工具显示的原始字段值与实际有效窗口可能不同；若漏抓 SYN，就可能不知道缩放因子。NAT、代理或 TCP 终止设备还会形成多段连接，客户端侧零窗口不一定等于源站侧零窗口。排障应按每一段四元组分别观察，并记录是哪一端通告的零窗口。</p><p>网卡卸载和抓包丢包也会让序列号与 ACK 轨迹看起来异常。先确认抓包完整、方向和相对序列号，再推断是哪一端处理不过来。若服务器发送端抓包没看到零窗口，但客户端抓包看到了，可能是中间路径丢包或观察点不一致。</p></section>
 <section class="panel"><h2>修复与验收</h2><p>复现时记录应用 read 调用频率、接收缓冲占用、窗口通告、磁盘写入耗时、CPU 与网络 RTT。若慢读由磁盘阻塞导致，优化写入或加异步缓冲；若代理队列积压，调小上游速率或加强背压；若确实需要更大短时突发缓冲，再审慎调节接收缓冲。修复后在相同大文件和并发下观察零窗口次数、停顿时长及端到端吞吐。</p><p>不要把所有停顿都称“丢包”。窗口为零时发送方按协议暂停，网络可能完全正常；只有把接收应用的消费速度纳入链路，才能解释现象。</p></section>
+<section class="panel" data-dry-goods><h2>零窗口与窗口探测的确切行为</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>成因</th><th>内核行为</th><th>观测字段</th></tr></thead><tbody><tr><td>接收方通告 win=0</td><td>应用不读 socket，接收缓冲被填满</td><td>发送方必须停止发送数据</td><td><code>ss -ti</code> 显示 <code>snd_wnd:0</code></td></tr><tr><td>窗口探测 ZWP</td><td>零窗口后发送方定期发 1 字节探测</td><td>间隔从 <b>5 s</b> 起指数退避，上限 <b>60 s</b></td><td><code>tcpdump</code> 看 len=1 的重传包</td></tr><tr><td>窗口更新丢失</td><td>接收方恢复后发的窗口更新 ACK 丢了</td><td>靠 ZWP 打破死锁（否则双方永久等待）</td><td>抓包看 win 从 0 跳变</td></tr><tr><td>持续零窗口</td><td>接收进程卡死/GC 停顿/FD 泄漏</td><td>连接最终被应用层超时踢掉</td><td><code>Recv-Q</code> 持续非零且满</td></tr></tbody></table></div><p><b>为什么 ZWP 必须存在</b>：TCP 只有“带数据的包”才会被确认，纯 ACK 不确认。如果接收方恢复后发的“窗口已打开”ACK 丢了，发送方永远不知道可以发了 —— 死锁。所以发送方必须主动发 1 字节探测，逼迫对端回一个带窗口值的 ACK。</p><p><b>诊断零窗口</b></p><pre><code># 看每条连接的收发队列与缓冲（Recv-Q 长期接近 Recv-Buf 就是应用不读）
+ss -tm
+# 输出字段：
+#   skmem:(r0,rb131072,t0,tb2626560,f0,w0,o0,bl0,d0)
+#     r   = 已分配接收内存      rb = 接收缓冲上限
+#     t   = 已分配发送内存      tb = 发送缓冲上限
+#     w   = 发送队列(未确认)    o  = 未确认的 orphan
+
+# 只看有问题的：接收队列非零
+ss -tan | awk '$2 != "0" {print}'
+
+# 抓零窗口通告与窗口探测
+tcpdump -i any -nn 'tcp and (tcp[14:2] == 0 or tcp[15:1] == 0)'   # 简化写法
+tcpdump -i any -nn -v 'tcp' | grep -i 'win 0'
+
+# Linux 自动调优区间（min default max）
+cat /proc/sys/net/ipv4/tcp_rmem    # 4096  131072  6291456
+cat /proc/sys/net/ipv4/tcp_wmem    # 4096  16384   4194304</code></pre></section><section class="panel"><h2>缓冲调优与排障清单</h2><p><b>调缓冲的正确姿势</b>：不要只改 <code>SO_RCVBUF</code>（手动设置会<b>关闭</b>自动调优，且内核会把值翻倍记账），而是调自动调优的<b>上限</b>，让内核按负载动态伸缩。</p><p><b>调参</b></p><pre><code># 提高自动调优上限（长肥管道 / 大吞吐场景）
+sysctl -w net.ipv4.tcp_rmem="4096 131072 16777216"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
+sysctl -w net.ipv4.tcp_mem="262144 524288 1048576"   # 单位是页(4KB)，全局 TCP 内存上限
+sysctl -w net.ipv4.tcp_window_scaling=1
+sysctl -w net.ipv4.tcp_moderate_rcvbuf=1             # 开启接收缓冲自动调优（默认开）
+
+# 应用侧（Go）：读阻塞/慢的常见原因
+# 1) 单 goroutine 读写同一连接，业务逻辑阻塞住读循环 → 分离读写 goroutine
+# 2) 未设置读超时 → conn.SetReadDeadline(time.Now().Add(30*time.Second))</code></pre><ul><li><b>排障顺序</b>：<code>ss -tm</code> 看 <code>Recv-Q</code> 是否堆满 → 满则查应用读循环（CPU 100%？GC？下游阻塞？）；<code>Send-Q</code> 满且 <code>snd_wnd=0</code> → 查对端应用。</li><li><b>孤儿连接</b>：<code>ss -s</code> 中 <code>orphan</code> 高说明连接已 close 但仍有未发送数据，占用内存，<code>tcp_max_orphans</code> 会强制回收。</li><li><b>不要盲目调大</b>：每连接缓冲翻倍 × 几十万连接 = 数十 GB 内存。<code>/proc/net/sockstat</code> 的 <code>tcp: mem</code>（单位是页）可以核对总量。</li><li><b>应用层兜底</b>：永远设置读/写超时（Go <code>SetDeadline</code>、Netty <code>ReadTimeoutHandler</code>），避免对端卡死时连接永久悬挂。</li></ul><details><summary>Recv-Q 一直很大，但 CPU 和 GC 都正常，还有什么可能？</summary><p>读循环里有同步阻塞调用（写 DB、调 HTTP、拿锁）；或者单连接被一个慢请求占住（HTTP/1.1 队头阻塞）；或者 epoll 线程被其它 fd 的事件处理卡住。</p></details><details><summary>ZWP 探测间隔为什么是 5 s 到 60 s？</summary><p>起始 5 s 保证快速感知恢复，指数退避避免零窗口长期存在时探测包本身成为负担；上限 60 s 保证最终一定能探测到。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>零窗口一定说明线路发生严重丢包吗？</summary><p>不是。它通常表明接收端暂时没有缓冲空间，原因可能是应用慢读、内存压力或代理背压。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="tcp-sequence-ack-window-worked-example.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

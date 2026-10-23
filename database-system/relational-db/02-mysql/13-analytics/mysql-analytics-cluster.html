@@ -412,6 +412,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -719,7 +737,46 @@
             </p>
         </section>
 
-        <footer>
+        
+<section class="section" data-dry-goods><div class="x-dry"><h2>MySQL 做分析的边界与替代</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>MySQL 能否胜任</th><th>判据</th></tr></thead><tbody><tr><td>小表聚合（&lt; 100 万行）</td><td><b>可以</b></td><td>加合适索引，秒级</td></tr><tr><td>千万级单表 group by</td><td>勉强，<b>秒~十秒</b></td><td>需要覆盖索引 + 汇总表</td></tr><tr><td>亿级明细扫描</td><td><b>不行</b></td><td>全表扫描几分钟，IO 打满</td></tr><tr><td>多维即席分析</td><td><b>不行</b></td><td>MySQL 无列存、无向量化执行</td></tr><tr><td>实时写入 + 实时分析</td><td><b>不行</b></td><td>HTAP 需求要考虑 TiFlash / Doris</td></tr><tr><td>固定报表</td><td><b>可以</b>（用汇总表）</td><td>预聚合后查汇总表，毫秒级</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>分析场景建议</th></tr></thead><tbody><tr><td><code>innodb_buffer_pool_size</code></td><td>128M</td><td>物理内存的 <b>60~75%</b>；分析库要更大</td></tr><tr><td><code>tmp_table_size</code>/<code>max_heap_table_size</code></td><td><b>16M</b></td><td>GROUP BY 大结果集会落盘，可调到 <b>256M~1G</b></td></tr><tr><td><code>sort_buffer_size</code></td><td><b>256K~2M</b></td><td>排序用；<b>不要盲目调大</b>（每个连接独享）</td></tr><tr><td><code>join_buffer_size</code></td><td><b>256K</b></td><td>无索引 join 时用</td></tr><tr><td><code>read_rnd_buffer_size</code></td><td>256K</td><td>MRR 优化</td></tr><tr><td><code>innodb_io_capacity</code></td><td><b>200</b></td><td>SSD 设 <b>2000~20000</b>，否则刷盘跟不上</td></tr><tr><td><code>max_execution_time</code></td><td>0（不限）</td><td>分析查询设 <b>30000ms</b> 超时保护</td></tr><tr><td><code>innodb_read_io_threads</code></td><td>4</td><td>SSD 上可到 8~16</td></tr></tbody></table></div><p><b>MySQL 分析的性能天花板</b>：InnoDB 是<b>行存</b>，聚合查询要读整行；执行引擎是<b>逐行</b>的（8.0 有部分向量化但很弱）。同硬件下，列存（ClickHouse/Doris）的聚合查询通常快 <b>10~100 倍</b>。<b>判据：单表超过 5000 万行且要做多维聚合，就该考虑专用 OLAP。</b></p></div></section>
+<section class="section" ><div class="x-dry"><h2>优化手段与命令</h2><pre><code>-- 1) 汇总表（最有效）：把明细预聚合成小表
+CREATE TABLE dau_daily (
+    dt DATE PRIMARY KEY, dau INT, new_user INT, orders INT, gmv DECIMAL(18,2)
+);
+INSERT INTO dau_daily
+SELECT dt, COUNT(DISTINCT user_id), SUM(is_new), COUNT(*), SUM(amount)
+FROM events GROUP BY dt
+ON DUPLICATE KEY UPDATE dau=VALUES(dau), new_user=VALUES(new_user),
+                        orders=VALUES(orders), gmv=VALUES(gmv);
+-- 报表查汇总表是毫秒级；查明细是分钟级
+
+-- 2) 覆盖索引：让聚合只扫索引不回表
+ALTER TABLE orders ADD INDEX idx_dt_status(dt, status, amount);
+-- 这样 SELECT dt, SUM(amount) FROM orders WHERE dt=? GROUP BY dt 不用回表
+
+-- 3) 看执行计划，确认用了索引且没全表扫
+EXPLAIN FORMAT=JSON SELECT dt, SUM(amount) FROM orders WHERE dt &gt;= '2026-10-01' GROUP BY dt;
+-- 关注：type=range/index（不能是 ALL）、Extra=Using index（覆盖索引）
+
+-- 4) 大查询的超时保护（防止跑几个小时拖垮库）
+SET SESSION max_execution_time = 30000;      -- 30 秒
+SELECT /*+ MAX_EXECUTION_TIME(30000) */ ...  -- 8.0 的 hint 写法</code></pre><pre><code># 5) 慢查询分析
+# 开启慢日志
+SET GLOBAL slow_query_log = ON;
+SET GLOBAL long_query_time = 1;              # 超过 1 秒记录
+# 用 pt-query-digest 汇总
+pt-query-digest /var/lib/mysql/slow.log &gt; report.txt
+# 看：总耗时占比最高的前几条、Rows_examined/Rows_sent 比值（越大越浪费）
+
+# 6) 关键指标：扫描行数 vs 返回行数
+# Rows_examined / Rows_sent &gt; 100 说明索引没用好
+# 理想应接近 1~10
+
+# 7) 导出到专用 OLAP（数据量大时的正解）
+# MySQL -&gt; Doris/ClickHouse，用 DataX 或 Flink CDC 同步
+# 分析查询走 OLAP，事务走 MySQL，各司其职</code></pre></div></section>
+<section class="section" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>GROUP BY 很慢</td><td>临时表落盘 / 无索引</td><td>调 <code>tmp_table_size</code>；加覆盖索引；改用汇总表</td></tr><tr><td><code>Created_tmp_disk_tables</code> 高</td><td>内存临时表不够</td><td>调 tmp_table_size 到 256M+；优化 SQL 减少中间结果</td></tr><tr><td>COUNT(DISTINCT) 极慢</td><td>MySQL 无高效的近似去重</td><td>用汇总表；或用 bitmap（需要改引擎）</td></tr><tr><td>分析查询把主库拖垮</td><td>大查询占满 IO/CPU</td><td><b>分析必须在从库做</b>；设 max_execution_time；用资源组限制</td></tr><tr><td>主从延迟因分析查询变大</td><td>从库跑大查询阻塞了复制线程</td><td>单独备一个分析从库；从库开并行复制</td></tr><tr><td>磁盘 IO 打满</td><td>buffer pool 太小导致反复读盘</td><td>调大 buffer pool；加索引减少扫描；用 SSD</td></tr><tr><td><code>innodb_io_capacity</code> 没调</td><td>默认值按机械盘设定，SSD 上刷盘太慢</td><td>SSD 设 2000~20000，否则会出现「IO 空闲但写入卡住」</td></tr></tbody></table></div><p class="muted"><b>最实用的一条</b>：如果分析查询是<b>固定维度</b>的，用汇总表（预聚合）几乎总能解决；如果是<b>即席多维</b>的，MySQL 无论如何优化都会到天花板，应该引入 OLAP。</p></div></section>
+<footer>
             <p>MySQL 数据分析集群架构设计 | 数据驱动业务增长</p>
         </footer>
     </div>

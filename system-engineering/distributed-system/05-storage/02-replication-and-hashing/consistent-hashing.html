@@ -70,6 +70,24 @@
     .reveal.visible { opacity: 1; transform: none; }
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="topbar">
@@ -171,6 +189,64 @@
     </div>
     <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">延伸阅读：<a href="../01-sharding-and-ids/data-sharding.html" style="color:var(--accent-blue);text-decoration:none;">数据分片与分区策略</a> · <a href="replication.html" style="color:var(--accent-blue);text-decoration:none;">数据复制（主从/多主/无主）</a> · <a href="../../index.html" style="color:var(--accent-blue);text-decoration:none;">返回分布式系统总目录</a></p>
   </section>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>为什么普通取模不行：一次扩容要搬多少数据</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>加一台节点（N→N+1）</th><th>数据迁移量</th><th>命中率</th></tr></thead><tbody><tr><td><b>hash(key) % N</b></td><td>所有 key 的余数全变</td><td><b>≈ (N−1)/N ≈ 全部</b></td><td>接近 0%</td></tr><tr><td><b>一致性哈希</b></td><td>只影响该节点到前驱之间的一段</td><td><b>1/(N+1)</b></td><td><b>N/(N+1)</b></td></tr></tbody></table></div><p>举例：3 台扩到 4 台。取模法要迁移 <b>约 75%</b> 的数据（缓存几乎全失效，DB 会被打穿）；一致性哈希只迁移 <b>1/4 = 25%</b>，且这 25% 只从 3 个旧节点流向 1 个新节点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>虚拟节点：解决数据倾斜的关键</h2><p>不加虚拟节点时，物理节点在环上分布<b>不均匀</b>，可能某个节点扛了 40% 的数据。解法是让每个物理节点在环上占 <b>K 个虚拟位置</b>（virtual node）。</p><div class="table-wrap"><table><thead><tr><th>虚拟节点数 K/物理节点</th><th>数据分布标准差</th><th>内存开销</th><th>评价</th></tr></thead><tbody><tr><td>1（无虚拟节点）</td><td>很大，可能 &gt;30% 偏差</td><td>无</td><td><b>不可用</b></td></tr><tr><td><b>100</b></td><td>约 3 – 5%</td><td>10 万条（1000 节点 × 100）</td><td>轻量场景够用</td></tr><tr><td><b>150 – 200</b></td><td>约 <b>1 – 2%</b></td><td>约 20 万条</td><td><b>业界常用</b></td></tr><tr><td>1000+</td><td>&lt;1%</td><td>100 万条以上</td><td>收益递减，查找变慢</td></tr></tbody></table></div><p><b>K 的经验值 150 – 200</b>（Amazon Dynamo 论文用的是变体，实践中 100–200 最常见）。再往上加对标标准差的改善已经很小，但环上查找的红黑树/跳表变大，反而拖慢路由。</p><p><b>最小实现与均衡度验证</b></p><pre><code># Python: 一致性哈希最小实现（可直接跑）
+import hashlib, bisect
+
+class ConsistentHash:
+    def __init__(self, nodes, vnodes=150):
+        self.vnodes = vnodes
+        self.ring = []            # 环上位置，有序
+        self.map = {}             # 位置 -&gt; 物理节点
+        for n in nodes: self.add_node(n)
+
+    def _hash(self, s):
+        return int(hashlib.md5(s.encode()).hexdigest(), 16)   # 2^128 空间
+
+    def add_node(self, node):
+        for i in range(self.vnodes):
+            h = self._hash(f"{node}#{i}")
+            bisect.insort(self.ring, h)
+            self.map[h] = node
+
+    def remove_node(self, node):
+        for i in range(self.vnodes):
+            h = self._hash(f"{node}#{i}")
+            self.ring.remove(h); del self.map[h]
+
+    def get_node(self, key):
+        h = self._hash(key)
+        i = bisect.bisect(self.ring, h) % len(self.ring)      # 顺时针第一个
+        return self.map[self.ring[i]]
+
+ch = ConsistentHash(["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+print(ch.get_node("user:10086"))
+
+# 验证均衡度：10 万个 key 的分布
+from collections import Counter
+c = Counter(ch.get_node(f"k{i}") for i in range(100000))
+print(c)   # 每个节点约 33000，偏差 &lt; 2%</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>加权一致性哈希：机器配置不同怎么办</h2><p>真实集群里机器配置不一样（有的 32 核有的 8 核）。做法是<b>按权重分配虚拟节点数</b>：<code>K_i = K_base × weight_i</code>。</p><div class="table-wrap"><table><thead><tr><th>节点</th><th>权重（按内存）</th><th>虚拟节点数（K_base=150）</th><th>预期承载比例</th></tr></thead><tbody><tr><td>node-A（32 GB）</td><td>2</td><td>300</td><td><b>40%</b></td></tr><tr><td>node-B（16 GB）</td><td>1</td><td>150</td><td><b>20%</b></td></tr><tr><td>node-C（16 GB）</td><td>1</td><td>150</td><td><b>20%</b></td></tr><tr><td>node-D（8 GB）</td><td>0.5</td><td>75</td><td><b>10%</b></td></tr><tr><td>node-E（8 GB）</td><td>0.5</td><td>75</td><td><b>10%</b></td></tr></tbody></table></div><p class="muted">注意：扩容时如果只加虚拟节点数而不迁移数据，已存在的 key 分布不会自动变均匀——权重调整后要<b>重新平衡</b>（rebalance），把多出来的 key 迁到新节点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Redis Cluster 用的是哈希槽，不是一致性哈希</h2><div class="table-wrap"><table><thead><tr><th>对比项</th><th>Redis Cluster</th><th>一致性哈希</th></tr></thead><tbody><tr><td>分片单位</td><td><b>16384</b> 个哈希槽（slot）</td><td>虚拟节点</td></tr><tr><td>计算方式</td><td><code>CRC16(key) % 16384</code></td><td><code>hash(key)</code> 找环上后继</td></tr><tr><td>扩容</td><td>把部分 slot <b>整体迁走</b></td><td>迁移环上一段区间</td></tr><tr><td>元数据</td><td>每个节点都知道 slot→node 映射</td><td>客户端或路由层持有环</td></tr><tr><td>重定向</td><td><b>MOVED</b>（永久）/ <b>ASK</b>（迁移中）</td><td>客户端自行计算</td></tr></tbody></table></div><p><b>为什么是 16384</b>：Redis 官方说明是集群节点数最多 <b>1000</b> 个左右，16384 个槽足够均匀分配；同时槽位用 bitmap 表示只需 <b>16384/8 = 2048 字节 = 2 KB</b>，在心跳报文里传输可以接受（若用 65536 槽则需 8 KB，心跳太重）。</p><p><b>Redis Cluster 槽操作</b></p><pre><code># Redis Cluster 实操
+redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 \
+                           127.0.0.1:7004 127.0.0.1:7005 127.0.0.1:7006 \
+                           --cluster-replicas 1
+
+# 查看槽位分布
+redis-cli -c -p 7001 CLUSTER SLOTS
+redis-cli -c -p 7001 CLUSTER INFO | grep -E "slots|state"
+
+# 在线迁移槽（扩容核心命令，一次迁一个 slot）
+redis-cli --cluster reshard 127.0.0.1:7001 --cluster-from &lt;srcID&gt; \
+          --cluster-to &lt;dstID&gt; --cluster-slots 100 --cluster-yes
+
+# 检查集群是否健康（槽是否全覆盖）
+redis-cli --cluster check 127.0.0.1:7001
+
+# 槽计算（客户端侧同样算法）
+redis-cli CLUSTER KEYSLOT mykey</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>哈希环的查找复杂度是多少？</summary><p>环上的虚拟节点位置存在<b>有序结构</b>（红黑树 / 跳表 / 排序数组 + 二分）里，查找是 <b>O(log M)</b>，M = 虚拟节点总数（= 物理节点数 × K）。1000 节点 × 150 = 15 万个位置，log₂ ≈ 17 次比较，完全可接受。用排序数组 + <code>bisect</code> 最简单，代价是插入是 O(M)——但节点变更很罕见，无所谓。</p></details><details><summary>一致性哈希能彻底解决数据倾斜吗？</summary><p>不能<b>彻底</b>，只能<b>压低</b>。虚拟节点让标准差降到 1 – 2%，但如果某些 key 本身是<b>超级热点</b>（比如一个 key 占 30% 的流量），哈希帮不上忙——那是<b>热点</b>问题不是<b>分布</b>问题，需要本地缓存、多副本、key 拆分来解。</p></details><details><summary>扩容时正在迁移的数据怎么读？</summary><p>这是最关键的实现细节。标准做法是<b>双写 + 重定向</b>：迁移期间源节点仍持有数据，若已迁走则返回重定向（Redis 的 <b>ASK</b>），客户端带 <code>ASKING</code> 去新节点读。迁移完成后源节点返回 <b>MOVED</b>（永久），客户端<b>更新本地路由表</b>。一致性哈希方案里则是迁移区间内的 key 在新旧节点都能读到（新节点回填）。</p></details><details><summary>什么时候不该用一致性哈希？</summary><p>① <b>需要范围查询</b>时——哈希把顺序打散了，改用按 key 范围分片（如 HBase Region、TiDB Region）；② <b>数据量很小且节点稳定</b>时——直接取模更简单；③ <b>需要严格控制数据分布</b>时——哈希是概率均匀的，做不到精确。</p></details></div></section>
 </main>
 <footer><p>一致性哈希 · 分布式存储寻址基石</p><p style="margin-top:6px;"><a href="../../index.html" style="color:var(--accent-blue);text-decoration:none;">← 返回分布式系统总目录</a></p></footer>
 <script>

@@ -56,6 +56,24 @@
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
     svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="topbar"><a href="../../index.html" class="logo">☁️ 分布式系统</a><a href="../../index.html" class="back">← 返回分布式系统</a></div>
@@ -166,6 +184,65 @@
     </div>
     <div class="info-box purple"><span class="info-icon">🔥</span><div class="info-body"><strong>必考题：</strong>"如何用 ZK 实现分布式锁？"——在锁目录下建<strong>临时顺序节点</strong>，判断自己是否序号最小；是则获锁，否则 watch 前一个节点，前一个释放（删节点）时收到通知再重试。用临时节点防止"持有者宕机不释放"导致的死锁。</div></div>
   </section>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>ZooKeeper 参数速查（默认值的坑）</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明 / 建议</th></tr></thead><tbody><tr><td><b>tickTime</b></td><td><b>2000 ms</b></td><td>ZK 的时间单位，几乎所有超时都是它的倍数</td></tr><tr><td>initLimit</td><td>10 × tick = <b>20 s</b></td><td>follower 初始同步 Leader 的超时</td></tr><tr><td>syncLimit</td><td>5 × tick = <b>10 s</b></td><td>心跳超时；<b>跨地域要调大</b>，否则频繁掉线</td></tr><tr><td>minSessionTimeout</td><td>2 × tick = <b>4 s</b></td><td>客户端设更短的会被强制拉到 4 s</td></tr><tr><td>maxSessionTimeout</td><td>20 × tick = <b>40 s</b></td><td>客户端设更长的会被截断到 40 s</td></tr><tr><td><b>jute.maxbuffer</b></td><td><b>1048575 B ≈ 1 MB</b></td><td><b>单个 znode 上限</b>；超限报 Len error（客户端服务端都要改）</td></tr><tr><td>autopurge.purgeInterval</td><td>0（<b>不清理</b>）</td><td><b>生产务必设 1</b>（小时），否则磁盘会被事务日志撑爆</td></tr><tr><td>clientPort</td><td>2181</td><td>客户端端口；2888 选举、3888 Leader 通信</td></tr></tbody></table></div><p><b>zoo.cfg 与体检命令</b></p><pre><code># zoo.cfg 生产参考
+tickTime=2000
+initLimit=10
+syncLimit=5
+dataDir=/data/zookeeper
+clientPort=2181
+# 集群格式：server.N=host:选举端口:通信端口
+server.1=zk1:2888:3888
+server.2=zk2:2888:3888
+server.3=zk3:2888:3888
+# 必须开自动清理！
+autopurge.purgeInterval=1      # 每 1 小时清理一次
+autopurge.snapRetainCount=10   # 保留最近 10 个快照
+# 放开 znode 大小限制（如果需要存较大数据，客户端也要同步设）
+jute.maxbuffer=4194304
+
+# 四字命令体检（3.5+ 需先加白名单：4lw.commands.whitelist=*）
+echo srvr | nc localhost 2181     # 角色、连接数、延迟
+echo stat | nc localhost 2181     # 客户端连接明细
+echo mntr | nc localhost 2181     # 全量监控指标（Prometheus 采集用）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>znode 四种类型与 Watch 的致命细节</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>是否持久</th><th>是否有序</th><th>典型用途</th></tr></thead><tbody><tr><td>PERSISTENT</td><td>是</td><td>否</td><td>配置、静态元数据</td></tr><tr><td><b>EPHEMERAL</b></td><td><b>随会话消失</b></td><td>否</td><td><b>服务注册</b>（宕机自动摘除）</td></tr><tr><td>PERSISTENT_SEQUENTIAL</td><td>是</td><td>是</td><td>命名、ID 生成</td></tr><tr><td><b>EPHEMERAL_SEQUENTIAL</b></td><td><b>随会话消失</b></td><td>是</td><td><b>分布式锁</b>、选主</td></tr></tbody></table></div><p><b>Watch 是一次性的（one-time trigger）</b>：触发一次就自动注销，想持续监听必须在回调里<b>重新注册</b>。这是 ZK 最容易踩的坑——很多“监听失效”的 bug 都源于此。</p><p><b>Curator 生产用法</b></p><pre><code>// Curator 正确用法：用它的高层 Recipe，它内部处理了重注册
+CuratorFramework client = CuratorFrameworkFactory.builder()
+    .connectString("zk1:2181,zk2:2181,zk3:2181")
+    .sessionTimeoutMs(15000)      // 建议 2~3 倍 tickTime 以上，别用默认
+    .connectionTimeoutMs(10000)
+    .retryPolicy(new ExponentialBackoffRetry(1000, 3, 15000))  // base=1s, 最多3次, 最大间隔15s
+    .build();
+client.start();
+client.blockUntilConnected(10, TimeUnit.SECONDS);   // 等连接建立
+
+// ① 分布式锁（内部用 EPHEMERAL_SEQUENTIAL + 监听前序节点，避免羊群效应）
+InterProcessMutex lock = new InterProcessMutex(client, "/locks/order");
+if (lock.acquire(5, TimeUnit.SECONDS)) {            // 一定要带超时！
+    try { /* 临界区 */ } finally { lock.release(); }
+}
+
+// ② 服务注册（EPHEMERAL，会话断开自动摘除）
+client.create().withMode(CreateMode.EPHEMERAL)
+      .forPath("/services/order/" + addr, payload);
+
+// ③ 配置监听（用 NodeCache/TreeCache，自动重注册 Watch）
+NodeCache cache = new NodeCache(client, "/config/order");
+cache.getListenable().addListener(() -&gt; reload(cache.getCurrentData().getData()));
+cache.start();</code></pre><p class="muted"><b>会话超时设置</b>：客户端设的 sessionTimeout 会被服务端夹到 [4 s, 40 s]。建议设 <b>10 – 15 s</b>：太短（4 s）会因 GC 停顿误判宕机导致频繁摘除；太长（40 s）故障发现太慢。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>集群规模与部署要点</h2><div class="table-wrap"><table><thead><tr><th>节点数</th><th>Quorum</th><th>容错</th><th>场景</th></tr></thead><tbody><tr><td>1</td><td>—</td><td>0</td><td>仅本地开发</td></tr><tr><td><b>3</b></td><td>2</td><td><b>1</b></td><td><b>最常用</b>，成本最低</td></tr><tr><td><b>5</b></td><td>3</td><td><b>2</b></td><td>要求更高可用 / 滚动升级</td></tr><tr><td>7</td><td>4</td><td>3</td><td>很少用，写性能明显下降</td></tr></tbody></table></div><ul><li><b>必须奇数台</b>：4 台和 3 台一样只能容忍 1 台故障，多花钱没收益</li><li><b>跨机房要“多数派机房”</b>：3 机房各 1 台，任一机房挂掉剩 2 台仍构成 quorum（2/3）✓</li><li>若 2 机房布 2+1：机房 A 挂掉后只剩 1 台，<b>无法构成 quorum，整个集群不可用</b> ✗</li><li><b>ZK 不是存储系统</b>：znode 上限 1 MB，只放元数据（地址、状态、配置），别放业务数据</li><li><b>磁盘要单独 SSD</b>：事务日志（WAL）是顺序写，与普通 IO 混用会拖慢选主</li><li>3.5.0+ 支持<b>动态重配置</b>（<code>reconfig</code>），扩容不用全量重启</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>常见故障与排查</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>可能原因</th><th>排查命令 / 解法</th></tr></thead><tbody><tr><td>频繁选主 / 集群抖动</td><td><b>磁盘 fsync 慢</b> 或 syncLimit 太小</td><td><code>echo mntr | nc ... | grep -E 'fsync|latency'</code>；换 SSD、调大 syncLimit</td></tr><tr><td>客户端频繁 Session expired</td><td><b>GC 停顿</b> 超过 sessionTimeout</td><td>调大 sessionTimeout 到 15 s；查客户端 GC 日志</td></tr><tr><td><code>Len error</code></td><td>znode 超过 jute.maxbuffer</td><td>客户端<b>也要设</b> <code>-Djute.maxbuffer=4194304</code></td></tr><tr><td>磁盘爆满</td><td><b>没开 autopurge</b></td><td>设 <code>autopurge.purgeInterval=1</code>；手动清 <code>dataDir/version-2</code></td></tr><tr><td>Cannot open channel to x at election address</td><td>防火墙 / myid 配错</td><td>检查 2888/3888 端口；确认 <code>myid</code> 与 server.N 一致</td></tr><tr><td>连接数暴涨</td><td><b>客户端没复用</b>或 Watch 泄漏</td><td><code>echo stat | nc ...</code> 看来源；用 Curator 单例</td></tr></tbody></table></div><p><b>目录分离与监控阈值</b></p><pre><code># 事务日志与快照目录分离（性能关键）
+dataDir=/data/zk/data        # 快照（内存快照，定期写）
+dataLogDir=/data/zk/log      # 事务日志（顺序写，必须 SSD，独立盘！）
+
+# 监控必看的 mntr 指标
+echo mntr | nc localhost 2181 | grep -E "zk_server_state|zk_followers|zk_synced_followers|zk_pending_syncs|zk_avg_latency|zk_num_alive_connections|zk_outstanding_requests"
+
+# 关键阈值告警
+#   zk_pending_syncs &gt; 10          -&gt; follower 跟不上，磁盘有问题
+#   zk_avg_latency &gt; 50            -&gt; 明显变慢
+#   zk_outstanding_requests &gt; 10   -&gt; 请求堆积
+#   zk_synced_followers &lt; quorum-1 -&gt; 有 follower 掉队</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>ZooKeeper 的 Watch 为什么设计成一次性的？</summary><p>这是<b>刻意的取舍</b>：ZK 走的是“<b>通知 + 拉取</b>”模型，只告诉客户端“变了”，不推送具体变化内容。若做成持续监听，服务端要为每个连接维护 watch 表状态，客户端重连时还要做状态对账，复杂度高得多。一次性 watch 让服务端<b>无状态</b>，重连时客户端重新拉全量即可。代价就是必须自己重注册——所以生产环境都用 Curator 的 Cache（它帮你处理了）。</p></details><details><summary>为什么不能用 ZK 存业务数据？</summary><p>三个硬约束：① <b>单 znode 1 MB 上限</b>；② 全量数据常驻<b>内存</b>（每个节点都持有完整数据树），数据量上 G 就直接 OOM；③ 写操作要过 <b>Zab 两阶段 + 落盘</b>，吞吐只有每秒<b>几千次</b>写。所以 ZK 定位是<b>协调</b>（锁、选主、服务发现、配置通知），存储请用 DB 或 etcd。</p></details><details><summary>Zab 和 Raft 有什么区别？</summary><p>核心目标一致（顺序一致的日志广播 + 选主），细节不同：① Zab 用 <b>epoch</b>，Raft 用 <b>term</b>，概念等价；② <b>选主时的日志比较</b>：Raft 比较 (lastTerm, lastIndex) 选“最新”的，Zab 倾向于选 <b>zxid 最大</b>的节点（类似）；③ Zab 有显式的 <b>DISCOVERY / SYNCHRONIZATION / BROADCAST</b> 三阶段，新 Leader 上台会先做一轮<b>全量同步</b>（SNAP/DIFF/TRUNC），Raft 则是靠 nextIndex 逐步回溯。工程效果上差别很小。</p></details><details><summary>服务发现用 ZK 还是 etcd / Consul？</summary><p>新项目<b>优先 etcd 或 Consul</b>：etcd 用 Raft + gRPC + 原生 watch 流式推送（watch 是<b>持续</b>的，不用重注册）、有 Kubernetes 生态背书；Consul 自带<b>健康检查 + DNS 接口</b>，运维更友好。ZK 的主要优势是<b>成熟稳定、Java 生态（Curator Recipes）齐全</b>，存量系统继续用没问题，新建系统不建议再从 ZK 起步。</p></details></div></section>
 </main>
 <footer>分布式系统 · ZooKeeper — 分布式协调服务 | 面试核心图解</footer>
 <script>

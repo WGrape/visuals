@@ -41,6 +41,24 @@ ul.tight { margin:10px 0; padding-left:22px; }
 ul.tight li { margin:6px 0; }
 footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -95,6 +113,54 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 Redis 本身的集群、持久化与内存细节见 <a href="../../../../database-system/nosql-db/index.html">NoSQL 数据库 / Redis</a> 子学科。</p>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>五类缓存产品定位图</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>代表产品</th><th>位置</th><th>延迟</th><th>适用</th></tr></thead><tbody><tr><td><b>进程内缓存</b></td><td>Caffeine / Guava / Ehcache</td><td>应用内存</td><td><b>&lt; 1 μs</b></td><td>本地热点、配置、字典</td></tr><tr><td><b>分布式缓存</b></td><td><b>Redis / Memcached</b></td><td>独立服务</td><td><b>0.2 – 1 ms</b></td><td><b>共享缓存主力</b></td></tr><tr><td><b>内存网格</b></td><td>Hazelcast / Ignite</td><td>多节点对等</td><td>1 – 5 ms</td><td>需要计算下推</td></tr><tr><td><b>数据库内置</b></td><td>MySQL Query Cache / PG pgpool</td><td>DB 侧</td><td>随 DB</td><td>基本已废弃</td></tr><tr><td><b>Web 层</b></td><td>Nginx / CDN / Varnish</td><td>接入层</td><td>1 – 10 ms</td><td>静态资源、整页缓存</td></tr></tbody></table></div><p><b>选型一句话</b>：<b>热点 + 可容忍短暂不一致 → Caffeine</b>；<b>共享 + 需要丰富结构 → Redis</b>；<b>超大吞吐纯 KV → Memcached</b>；<b>需要在数据侧做计算 → Hazelcast</b>。绝大多数业务是 <b>Caffeine（L1）+ Redis（L2）</b> 两层。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>进程内缓存三强对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>Caffeine</b></th><th>Guava Cache</th><th>Ehcache</th></tr></thead><tbody><tr><td>淘汰算法</td><td><b>W-TinyLFU</b></td><td>LRU（分段）</td><td>LRU/LFU/FIFO 可配</td></tr><tr><td>命中率</td><td><b>最高（约 95 – 99%）</b></td><td>中等</td><td>中等</td></tr><tr><td>是否支持堆外</td><td>否</td><td>否</td><td><b>是</b>（可突破 GC 限制）</td></tr><tr><td>是否支持磁盘</td><td>否</td><td>否</td><td><b>是</b></td></tr><tr><td>是否分布式</td><td>否</td><td>否</td><td><b>是（需 Terracotta）</b></td></tr><tr><td>推荐度</td><td><b>新项目首选</b></td><td>老项目兼容</td><td>需要堆外/持久化时</td></tr></tbody></table></div><p><b>W-TinyLFU 为什么命中率高</b>：它把缓存分成<b>窗口区（Window，约 1%）</b>和<b>主区（Main，约 99%）</b>。新来的 key 先进入窗口区用 LRU 淘汰，<b>只有被证明“够热”的才能晋升进主区</b>；主区用 TinyLFU（一种极省内存的<b>频率草图</b>，每个 key 只占几 bit）按频率淘汰。这个设计同时解决了 LRU 的“<b>突发流量污染</b>”和 LFU 的“<b>新热点爬不上来</b>”两个老问题。</p><p><b>Caffeine 生产配置</b></p><pre><code>// Caffeine 生产配置（Java）
+Cache&lt;String, Object&gt; cache = Caffeine.newBuilder()
+    .maximumSize(100_000)                    // 按条数（推荐，比按权重快）
+    .expireAfterWrite(60, TimeUnit.SECONDS)  // 写后 60s 过期
+    .refreshAfterWrite(30, TimeUnit.SECONDS) // 关键：30s 后异步刷新，避免阻塞读
+    .recordStats()                           // 开启统计，必开
+    .build();
+
+// 异步刷新：命中时若已过 refresh 期，返回旧值 + 后台加载新值
+// 对比 expireAfterWrite 到期后同步加载（会阻塞请求）—— 这是防击穿的关键手段
+LoadingCache&lt;String, User&gt; users = Caffeine.newBuilder()
+    .maximumSize(10_000)
+    .refreshAfterWrite(1, TimeUnit.MINUTES)
+    .build(key -&gt; queryUserFromDB(key));     // 自动回填
+
+// 看命中率（必须监控）
+System.out.println(cache.stats());
+// CacheStats{hitCount=95234, missCount=4766,
+//            loadSuccessCount=4766, totalLoadTime=1234567890,
+//            evictionCount=1200, evictionWeight=1200}
+// hitRate = 95234/100000 = 95.2%
+
+// 与 Redis 组成二级缓存
+Object v = localCache.get(k, key -&gt; {
+    String s = redis.get(key);               // L1 miss -&gt; 查 L2
+    if (s == null) { s = db.query(key); redis.setex(key, 3600, s); }
+    return s;
+});</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>二级缓存架构与一致性处理</h2><p><b>L1（本地）+ L2（Redis）</b> 是标准组合：L1 挡掉绝大部分重复读，L2 保证多实例间共享与相对一致。</p><div class="table-wrap"><table><thead><tr><th>问题</th><th>现象</th><th>解法</th></tr></thead><tbody><tr><td><b>L1 数据过期</b></td><td>A 实例改了数据，B 实例本地还是旧的</td><td>L1 TTL 设短（<b>10 – 60 s</b>）+ 变更时<b>广播失效</b></td></tr><tr><td><b>广播风暴</b></td><td>大量 key 变更导致消息刷屏</td><td>批量合并失效消息；只对<b>热点 key</b> 广播</td></tr><tr><td><b>缓存不一致窗口</b></td><td>Redis 已更新，L1 未失效</td><td>接受（业务上通常允许秒级）；关键数据不走 L1</td></tr><tr><td><b>冷启动雪崩</b></td><td>实例重启后 L1 全空</td><td><b>预热</b>：启动时加载 Top-N 热点</td></tr></tbody></table></div><p><b>L1 失效广播实现</b></p><pre><code># 用 Redis 发布订阅广播 L1 失效事件
+# ① 变更方：更新 Redis 后发一条失效消息
+redis.set(key, new_val)
+redis.publish("cache:invalidate", json.dumps({"keys": [key]}))
+
+# ② 各实例订阅并在本地删除
+pubsub = redis.pubsub()
+pubsub.subscribe("cache:invalidate")
+for msg in pubsub.listen():
+    if msg["type"] == "message":
+        for k in json.loads(msg["data"])["keys"]:
+            local_cache.invalidate(k)     # 只删本地，下次读自动回填
+
+# ③ Redis 6.0+ 的更优方案：客户端缓存（tracking）
+#    服务端主动通知失效，无需自己搭 pubsub
+redis-cli CLIENT TRACKING ON REDIRECT 1234    # 1234 是另一个连接 ID
+# 注意：这是「服务端辅助的失效通知」，仍需客户端实现缓存逻辑</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>有了 Redis 为什么还要本地缓存？</summary><p>两个不可替代的价值：① <b>延迟</b>——本地 1 μs vs Redis 0.5 ms，差 <b>500 倍</b>；② <b>削峰</b>——极热 key（如顶流明星主页）每秒几十万次读，全打 Redis 会把<b>单分片</b>打爆（Redis 单分片约 10 万 QPS，且热 key 无法分散到多分片）。本地缓存在每个实例各存一份，N 个实例就把 Redis 压力降为 1/N。</p></details><details><summary>本地缓存会不会导致实例间数据不一致？</summary><p>会，这是它的固有代价。控制手段：① <b>TTL 短</b>（10 – 60 s），把不一致窗口压到秒级；② <b>广播失效</b>（Redis pubsub 或 Redis 6 tracking）做到准实时；③ <b>关键数据不走 L1</b>——余额、库存这类强一致数据只允许走 DB 或 Redis。判断标准是：<b>不一致窗口内会不会造成业务损失</b>。</p></details><details><summary>Hazelcast 这类内存网格什么时候用？</summary><p>当你需要<b>把计算下推到数据所在节点</b>时——比如对缓存中的大量数据做聚合、或者需要<b>分布式数据结构</b>（分布式 Map/Queue/Lock）且不想单独部署 Redis。典型场景是<b>有状态的流式处理、会话集群</b>。代价是运维复杂度明显高于 Redis，且生态小。一般业务不要为了“听起来高级”而引入。</p></details><details><summary>缓存产品迁移怎么做到不停机？</summary><p>标准四步：① <b>双写</b>（同时写新旧两套，读仍走旧）；② <b>双读 + 比对</b>（读旧，异步比对新旧一致性，观察 1 – 2 天）；③ <b>灰度切读</b>（按 1% → 10% → 100% 逐步把读切到新）；④ <b>停写旧</b>并观察后下线。全程<b>旧系统保持可回滚</b>。关键是第 ② 步的一致性比对——没有它就不要切，否则线上数据不一致很难察觉。</p></details></div></section>
 <footer>© 2026 Visuals · 分布式缓存 / 产品全景与生态位</footer>
 </body>
 </html>

@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -210,6 +228,34 @@ LEFT JOIN payments p ON p.order_id = o.id AND p.status = 'paid';</code></pre>
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第二层 · 参数·命令·量化：哪些写法能用上索引</h2><p>SARGable = <b>Search ARGument ABLE</b>，指谓词能被直接用来定位索引范围。核心判据：<b>列必须「裸」出现在比较的左侧</b>。</p><div class="table-wrap"><table><thead><tr><th>写法</th><th>能否用索引</th><th>原因</th><th>改写方案</th></tr></thead><tbody><tr><td><code>col = 5</code></td><td>✅</td><td>列是裸的</td><td>—</td></tr><tr><td><code>col &gt; 5 AND col &lt; 10</code></td><td>✅</td><td>范围定位</td><td>—</td></tr><tr><td><code>col LIKE 'abc%'</code></td><td>✅</td><td>前缀匹配可定位</td><td>—</td></tr><tr><td><code>col LIKE '%abc'</code></td><td>❌</td><td><b>前导通配符</b>无法定位起点</td><td>用全文索引 / 倒排 / 反转存储</td></tr><tr><td><code>YEAR(col) = 2024</code></td><td>❌</td><td><b>列被函数包裹</b></td><td>改成 <code>col &gt;= '2024-01-01' AND col &lt; '2025-01-01'</code></td></tr><tr><td><code>col + 1 = 5</code></td><td>❌</td><td>列参与运算</td><td>改成 <code>col = 4</code></td></tr><tr><td><code>col::text = '5'</code>（隐式转换）</td><td>❌</td><td><b>类型不一致触发转换</b></td><td>传入与列同类型的值</td></tr><tr><td><code>col IS NULL</code></td><td>⚠️ 看数据库</td><td>部分索引不含 NULL</td><td>MySQL 可用；Oracle 普通索引不存全 NULL</td></tr></tbody></table></div><p><b>SARGable 改写与函数索引</b></p><pre><code>-- 函数包裹导致的失效：改写成范围
+-- 慢：索引失效，全表扫
+SELECT * FROM orders WHERE YEAR(created_at) = 2024;
+-- 快：列是裸的，走范围扫描
+SELECT * FROM orders WHERE created_at &gt;= '2024-01-01' AND created_at &lt; '2025-01-01';
+
+-- 隐式类型转换导致的失效（col 是 varchar，传了数字）
+-- 慢：数据库会对列做 CAST
+SELECT * FROM users WHERE phone = 13800000000;
+-- 快：传字符串
+SELECT * FROM users WHERE phone = '13800000000';
+
+-- 前导通配符的替代方案
+-- 慢
+SELECT * FROM posts WHERE title LIKE '%优化%';
+-- 方案：MySQL 全文索引
+ALTER TABLE posts ADD FULLTEXT(title);
+SELECT * FROM posts WHERE MATCH(title) AGAINST('优化');
+-- 方案：PostgreSQL 用 pg_trgm + GIN 索引
+CREATE INDEX ON posts USING gin (title gin_trgm_ops);
+
+-- 实在要用函数：建函数索引 / 表达式索引
+-- PostgreSQL
+CREATE INDEX ON orders (date_trunc('month', created_at));
+-- MySQL 8.0 支持函数索引
+CREATE INDEX idx_month ON orders ((DATE_FORMAT(created_at, '%Y-%m')));</code></pre><div class="table-wrap"><table><thead><tr><th>参数 / 机制</th><th>MySQL</th><th>PostgreSQL</th><th>说明</th></tr></thead><tbody><tr><td>函数 / 表达式索引</td><td>8.0+ 支持</td><td>✅ 支持</td><td>让函数包裹也能走索引</td></tr><tr><td>隐式类型转换规则</td><td>字符串 vs 数字比较时转数字</td><td>按类型优先级</td><td><b>传参类型必须与列一致</b></td></tr><tr><td><code>NULL</code> 是否进索引</td><td>进</td><td>进（但 Oracle 普通索引不存全 NULL）</td><td>影响 <code>IS NULL</code> 能否走索引</td></tr><tr><td>统计信息影响</td><td><code>ANALYZE TABLE</code></td><td><code>ANALYZE</code></td><td>过期统计会让优化器放弃索引</td></tr></tbody></table></div><p class="muted">量化参考：1000 万行的表，走索引范围扫描是<b>毫秒级</b>；全表扫描通常<b>秒级到十秒级</b>——差 2～3 个数量级。用 <code>EXPLAIN</code> 看 type 是 range/ref 还是 ALL 即可判断。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：为什么函数包裹会让索引失效</h2><p>B+ 树索引存的是<b>列原始值的有序序列</b>。优化器要在树里定位，必须能把谓词翻译成「从哪个值开始、到哪个值结束」。一旦列被函数或运算包裹，<b>变换后的值在树里没有有序位置</b>，只能把每一行都算一遍再比较——即全表扫描。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>怎么做</th><th>优点</th><th>代价</th></tr></thead><tbody><tr><td><b>改写 SQL</b>（首选）</td><td>把函数从列上移到常量侧</td><td>零成本，所有数据库都有效</td><td>需要人工改写，部分场景不好改</td></tr><tr><td><b>函数 / 表达式索引</b></td><td>索引里存计算结果</td><td>不用改 SQL</td><td>占空间；写入时要维护；表达式必须完全一致才命中</td></tr><tr><td>生成列（Generated Column）</td><td>把计算结果存成真实列再建索引</td><td>可读性好，可用于多种查询</td><td>占存储；MySQL 5.7+ / PG 12+</td></tr><tr><td><b>接受全表扫</b></td><td>—</td><td>—</td><td>仅当表很小或过滤性极差时</td></tr></tbody></table></div><details><summary>为什么 <code>LIKE 'abc%'</code> 可以而 <code>'%abc'</code> 不行？</summary><p>因为 B+ 树按<b>从左到右</b>的字符顺序排列。知道前缀 abc，就能定位到树中 abc 开头那一段的起点，然后顺序扫过去。前导通配符意味着「起点未知」，只能全扫。</p></details><details><summary>隐式类型转换为什么危险？</summary><p>因为数据库会<b>对列做转换</b>（而不是对常量），等价于给列加了函数。例如 phone 是 varchar、传数字时，MySQL 会把 phone 转成数字再比较——索引直接失效，且不报错，非常隐蔽。</p></details><details><summary>建了函数索引为什么还是没走？</summary><p>两个常见原因：① SQL 里的表达式与索引定义<b>不完全一致</b>（多一个空格、类型不同都不行）；② 优化器算下来全表扫描更便宜（过滤性太差）。用 <code>EXPLAIN</code> 确认，必要时 <code>ANALYZE</code> 刷新统计信息。</p></details><details><summary>怎么快速判断一条 SQL 是否 SARGable？</summary><p>记住一条：<b>等号/范围左边必须是光秃秃的列名</b>。只要左边出现了函数、运算、CAST、COLLATE，就不可 SARG。用 <code>EXPLAIN</code> 看是否出现 range/ref 而不是 ALL。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 过滤条件 ·

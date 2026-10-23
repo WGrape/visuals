@@ -11,6 +11,26 @@
 <section class="panel"><h2>一个双栈访问过程</h2><p>浏览器访问同时有 A 与 AAAA 记录的网站。解析器拿到 IPv4 与 IPv6 候选，客户端可能并行或交错尝试连接，以减少某一路径失效带来的等待。若 IPv6 有地址却路由不通，表现可能是首次访问很慢，最后退回 IPv4；不同客户端的回退策略不同。测试应分别强制 IPv4 和 IPv6 路径，再看正常双栈表现。</p><p>DNS 返回 AAAA 只表示有 IPv6 地址记录，不保证网络中每一跳都可达。服务端监听 IPv4 的 0.0.0.0 不必然等于监听 IPv6 的 ::，具体取决于系统与 socket 配置。上线双栈时要分别验证监听、路由、负载均衡、安全组、证书与日志源地址。</p></section>
 <section class="panel"><h2>前缀和地址变更</h2><p>路由器可以发布新前缀并逐步废弃旧前缀；主机可能在过渡期同时保留新旧地址。优先使用哪条源地址受地址选择策略和有效期影响。若防火墙只放行旧前缀，新连接可能突然失败；若日志仅记录地址而不关联设备身份，临时地址会让追踪更难。网络管理应记录前缀分配与租户归属，而非依赖 IPv6 地址永久不变。</p><p>在容器、VPN 和隧道网络中，额外封装会减小有效路径 MTU。IPv6 路由器不会像 IPv4 那样在途中替主机分片，源端要依靠路径 MTU 发现或其他机制调整包大小。不能因“IPv6 地址够用”就忽略 MTU、ICMPv6 和安全策略的协同。</p></section>
 <section class="panel"><h2>可复现的排查清单</h2><p>先看接口是否有链路本地和全球地址，再看 RA 获得的前缀、默认路由和邻居表。随后对同链路邻居、默认网关和外部 IPv6 地址逐级测试，最后测 AAAA 解析和业务端口。每一步都记源地址与出口接口。若能 ping 网关但访问外部失败，重点检查路由、防火墙和上游 IPv6 连通性。</p><p>练习双栈故障时，不要只做一次普通域名访问；分别用 IPv4、IPv6 和完整域名测试。这样可以区分“IPv6 链路坏了”“AAAA 记录错了”和“应用没有监听 IPv6”三种完全不同的修复方向。</p></section>
+<section class="panel" data-dry-goods><h2>IPv6 地址类型与前缀长度</h2><div class="table-wrap"><table><thead><tr><th>地址/前缀</th><th>名称</th><th>等价 IPv4 概念</th><th>用途</th></tr></thead><tbody><tr><td><code>::1/128</code></td><td>Loopback</td><td>127.0.0.1</td><td>本机</td></tr><tr><td><code>fe80::/10</code></td><td><b>Link-Local</b></td><td>169.254.0.0/16</td><td><b>每个接口必有</b>，仅同链路可用</td></tr><tr><td><code>fc00::/7</code></td><td>Unique Local（ULA）</td><td>10/8 等私有地址</td><td>内网，不路由到公网</td></tr><tr><td><code>2000::/3</code></td><td>Global Unicast</td><td>公网地址</td><td>实际分配在 2000–3fff</td></tr><tr><td><code>ff00::/8</code></td><td>Multicast</td><td>224.0.0.0/4</td><td><b>取代广播</b>（IPv6 无广播）</td></tr><tr><td><code>64:ff9b::/96</code></td><td>NAT64 知名前缀</td><td>—</td><td>IPv6-only 访问 IPv4</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>场景</th><th>推荐前缀长度</th><th>说明</th></tr></thead><tbody><tr><td>单条链路（ LAN / VLAN）</td><td><b>/64</b></td><td><b>SLAAC 强制要求 /64</b>，不能用更长的前缀</td></tr><tr><td>家庭/小型站点分配</td><td><b>/56</b></td><td>可划 256 个 /64</td></tr><tr><td>企业站点</td><td><b>/48</b></td><td>可划 65536 个 /64</td></tr><tr><td>点对点链路</td><td>/127（RFC 6164）或 /64</td><td>避免 /126 的 ping-pong 问题</td></tr><tr><td>Loopback</td><td>/128</td><td>单地址</td></tr></tbody></table></div><p><b>地址简写规则</b>：① 每组前导 0 可省（<code>2001:0db8</code> → <code>2001:db8</code>）；② 连续的一组或多组 0 可用 <code>::</code> 代替，但<b>只能用一次</b>。例：<code>2001:db8:0:0:0:0:0:1</code> → <code>2001:db8::1</code>。</p><p><b>IPv6 排查命令</b></p><pre><code># 查看/配置
+ip -6 addr show
+ip -6 route show
+ip -6 neigh show                 # 邻居表（取代 ARP）
+
+# 连通性测试
+ping6 2001:db8::1                 # 或 ping -6
+traceroute6 -n 2001:db8::1
+curl -6 https://ifconfig.co
+
+# 抓 NDP（取代 ARP 的 ICMPv6 报文）
+tcpdump -i any -nn 'icmp6' -v
+#   type 133 = Router Solicitation (RS)
+#   type 134 = Router Advertisement (RA)
+#   type 135 = Neighbor Solicitation (NS)   ← 取代 ARP Request
+#   type 136 = Neighbor Advertisement (NA)  ← 取代 ARP Reply
+tcpdump -i any -nn 'icmp6 and ip6[40] == 135'
+
+# 临时禁用/启用 IPv6
+sysctl -w net.ipv6.conf.all.disable_ipv6=1</code></pre></section><section class="panel"><h2>SLAAC、NDP 与落地坑</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>取代谁</th><th>协议</th><th>说明</th></tr></thead><tbody><tr><td>NDP 地址解析</td><td>ARP</td><td>ICMPv6 NS/NA（135/136）</td><td>用多播代替广播，效率更高</td></tr><tr><td>SLAAC 无状态自动配置</td><td>DHCP</td><td>ICMPv6 RA（134）</td><td>路由器发前缀，主机自己生成后 64 位</td></tr><tr><td>DAD 重复地址检测</td><td>免费 ARP</td><td>ICMPv6 NS</td><td>配置前先确认地址无人使用</td></tr><tr><td>DHCPv6 / RA 的 M、O 标志</td><td>DHCP</td><td>RA 中的标志位</td><td>M=1 用 DHCPv6 取地址；O=1 只取其它配置（DNS 等）</td></tr></tbody></table></div><ul><li><b>SLAAC 的地址生成</b>：早期用 <b>EUI-64</b>（由 MAC 地址推导，会泄露 MAC 且可追踪），现代系统默认用<b>隐私扩展（RFC 4941）</b>生成临时地址并定期更换。所以要区分“稳定地址”（用于对外服务）和“临时地址”（用于主动外访）。</li><li><b>DNS 服务器怎么来</b>：SLAAC 本身<b>不提供 DNS</b>。靠 <b>RDNSS（RA Option 25）</b>或 DHCPv6 下发。这是 IPv6 部署最常见的坑——“拿到地址了但没有 DNS，什么都访问不了”。</li><li><b>Happy Eyeballs（RFC 8305）</b>：双栈客户端应先尝试 IPv6，<b>250 ms</b> 内没建立连接就并行发起 IPv4。没有这个机制时，IPv6 不通会硬等数秒——这是“开了 IPv6 反而变慢”的根因。</li><li><b>防火墙要放行 ICMPv6</b>：IPv6 重度依赖 ICMPv6（PMTUD、NDP、RA）。像 IPv4 那样粗暴禁 ICMP 会导致 IPv6 完全不可用。<b>必须放行</b>类型 1–4、128–137 等。</li><li><b>排查顺序</b>：① 有 link-local 吗（接口是否 UP）；② 有 global 地址吗（RA 是否收到）；③ 有默认路由吗（<code>ip -6 route</code>）；④ DNS 解析出 AAAA 吗；⑤ <code>ping6</code> 通吗。</li></ul><details><summary>为什么 IPv6 配好了，还是上不了网？</summary><p>最常见两条：① 没有 DNS 服务器（SLAAC 不下发，需 RDNSS 或 DHCPv6）；② 防火墙禁了 ICMPv6，导致 PMTUD/NDP 失效。其次是上游没有真正的 IPv6 出口。</p></details><details><summary>IPv6 地址后面的 %eth0 是什么？</summary><p>那是 <b>scope id（区域标识）</b>。link-local 地址（fe80::）在每个接口上都可能重复，必须指定接口才能唯一确定，所以写成 <code>fe80::1%eth0</code> 或 <code>%12</code>。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>拿到了全球 IPv6 地址，就能证明域名访问一定走 IPv6 吗？</summary><p>不能。还需要可达的默认路由、AAAA 解析、客户端地址选择、服务端 IPv6 监听以及沿途放行。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../01-addressing-and-subnets/ip-concepts.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

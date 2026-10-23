@@ -11,6 +11,48 @@
 <section class="panel"><h2>模型抽帧时的正确时间语义</h2><p>行为识别需要从 0–2 秒均匀取 8 帧，理想做法按目标时间戳寻找接近的展示帧，再记录实际 PTS。若原片段存在变帧率、掉帧或重复帧，得到的 8 帧未必等间隔，训练和推理应采用相同规则。对瞬时动作只抽 8 帧可能漏掉关键时刻；增加帧数会增加显存和计算。帧的像素、PTS 和源文件版本都要能追溯。</p><p>图像模型常把一批帧当独立图片处理，但视频任务还需要顺序和间隔。把帧按文件解码顺序喂给时序模型，不仅会丢时间含义，还可能让模型学到编码器特性而非真实动作。</p></section>
 <section class="panel"><h2>转码、裁切和重封装的坑</h2><p>只改容器而不重新编码称重封装，可能改变轨道组织与时间基准，但不一定改变像素质量；重新编码会带来压缩损失和编码参数变化。裁切视频若从非随机访问帧开始，工具可能从前一关键帧开始解码，输出实际第一帧或音画时间不一定与请求值完全一致。需用输出文件的实际首尾 PTS 和逐帧画面验证，而非只看命令返回成功。</p><p>时间基准换算常有整数舍入，尤其长视频或高帧率下会积累偏差。音视频轨各自可能有独立时间基准；解析时应按容器元数据转换成统一时间单位。</p></section>
 <section class="panel"><h2>一次故障排查</h2><p>视频摘要模型把“先拿起杯子，后放下”误判成相反顺序。先抽取带帧号、PTS、DTS 的日志，按 PTS 展示关键帧序列；若模型输入按 DTS 排列，就能解释颠倒。若顺序正确但动作仍误判，检查抽帧间隔是否漏掉转折、视频是否有重复/丢帧，以及标签是否与实际片段时间一致。若只在某设备视频出错，确认其可变帧率和编码结构。</p><p>验收时准备 I/B/P 重排、可变帧率、无音轨、不同容器和远距离关键帧的视频，用同一抽帧程序输出 PTS 列表与拼图。只有时间线与画面一致，后续模型评测才可信。</p></section>
+<section class="panel" data-dry-goods><h2>GOP 结构与关键帧</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>典型值</th><th>影响</th></tr></thead><tbody><tr><td><b>I 帧</b></td><td><b>帧内编码</b>，可独立解码</td><td>每 <b>0.5~10 秒</b>一个</td><td>越大越小，但<strong>seek 越慢</strong></td></tr><tr><td><b>P 帧</b></td><td>参考前面的帧</td><td>占多数</td><td>压缩率高</td></tr><tr><td><b>B 帧</b></td><td><b>双向参考</b>（前后都参考）</td><td>常见 2~3 个连续</td><td>压缩率最高，但<strong>增加延迟</strong></td></tr><tr><td><b>GOP</b></td><td>两个 I 帧之间的帧组</td><td><b>250 帧</b>（10 秒@25fps）</td><td>决定 seek 粒度</td></tr><tr><td><b>IDR 帧</b></td><td><b>强制刷新</b>，其后的帧不参考前面</td><td>特殊 I 帧</td><td>seek 的安全起点</td></tr></tbody></table></div><p><b>为什么 B 帧导致 PTS ≠ DTS</b>：B 帧需要参考<strong>后面的帧</strong>，所以解码顺序与显示顺序不同。编码器必须先解出后面的 P 帧，才能解当前 B 帧。这就是 DTS（解码时间戳）与 PTS（显示时间戳）分离的唯一原因——<strong>没有 B 帧时两者完全相同</strong>。</p><p><b>查看帧信息</b></p><pre><code># 用 ffprobe 查看帧类型与时间戳
+ffprobe -select_streams v -show_frames \
+  -show_entries frame=pict_type,pts,dts,key_frame \
+  -of csv input.mp4 | head -20
+
+# 典型输出（有 B 帧时）：
+#   frame,I,1,0,1      ← I 帧，key_frame=1，pts=dts
+#   frame,P,2,3,0      ← P 帧，dts=1 但 pts=2？注意顺序
+#   frame,B,1,1,0      ← &lt;strong&gt;B 帧：pts(1) &lt; dts(1)，显示早于解码&lt;/strong&gt;
+# 关键观察：DTS 单调递增，PTS 不单调（因为 B 帧重排）
+
+# 统计 GOP 长度
+ffprobe -select_streams v -show_entries frame=key_frame -of csv input.mp4 \
+  | grep -n ',1$' | head -5       # 相邻 I 帧的间隔即 GOP 长度</code></pre></section><section class="panel"><h2>时间戳与 time_base</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>常见值</th></tr></thead><tbody><tr><td><b>time_base</b></td><td>时间戳的<strong>单位</strong>（1/分母 秒）</td><td><b>1/90000</b>（视频）、1/48000（音频）</td></tr><tr><td><b>PTS</b></td><td>显示时间戳（以 time_base 为单位）</td><td><code>pts × time_base</code> = 秒</td></tr><tr><td><b>DTS</b></td><td>解码时间戳</td><td>同上</td></tr><tr><td><b>duration</b></td><td>单帧持续时长（以 time_base 计）</td><td>25fps 时 = <b>3600</b>（90000/25）</td></tr></tbody></table></div><p><b>时间戳换算</b></p><pre><code># 换算：pts 值是 90000 时基，25fps
+#   实际秒数 = pts / 90000 = 90000 / 90000 = 1.0 秒
+#   单帧 duration = 90000 / 25 = 3600
+
+# PyAV / ffmpeg 里的正确换算
+import av
+container = av.open("input.mp4")
+stream = container.streams.video[0]
+tb = stream.time_base          # Fraction(1, 90000)
+for frame in container.decode(stream):
+    sec = float(frame.pts * tb)      # ← 必须乘 time_base！
+    print(f"{sec:.3f}s  {frame.pict_type}")
+
+# 常见 bug：直接用 pts 当秒数，或忘了不同流 time_base 不同
+#   视频 1/90000、音频 1/48000，混用会导致音画不同步</code></pre><p class="muted"><b>最易错的一点</b>：<code>pts</code> 是<strong>整数计数</strong>，不是秒。必须乘 <code>time_base</code>。而且不同流、不同容器的 time_base 可能不同，做音画同步时各自的时基都要单独换算。</p></section>
+<section class="panel"><h2>Seek 精度与性能</h2><div class="table-wrap"><table><thead><tr><th>Seek 方式</th><th>做法</th><th>速度</th><th>精度</th></tr></thead><tbody><tr><td><b>关键帧 seek</b></td><td>跳到最近的 I 帧</td><td><b>最快</b></td><td>差（可能差 <b>GOP 长度</b>）</td></tr><tr><td><b>精确 seek</b></td><td>从 I 帧解码到目标帧</td><td>慢（要解 <b>N 帧</b>）</td><td><b>精确</b></td></tr><tr><td><b>按字节 seek</b></td><td>按文件偏移估算</td><td>最快</td><td><b>极不准</b>，已废弃</td></tr></tbody></table></div><p><b>Seek 命令</b></p><pre><code># ffmpeg 精确 seek（-ss 放 -i 之前 = 输入 seek，快但不精确；
+#                  -ss 放 -i 之后 = 输出 seek，精确但慢）
+# 快但不精确（关键帧对齐）
+ffmpeg -ss 00:01:00 -i input.mp4 -frames:v 1 out.jpg
+
+# 精确（先解码到目标位置）
+ffmpeg -i input.mp4 -ss 00:01:00 -frames:v 1 out.jpg
+
+# 又快又准的做法：两步法（先粗 seek 再精确解码）
+#   ffmpeg -ss 00:00:55 -i input.mp4 -ss 00:00:05 -frames:v 1 out.jpg
+#   第一个 -ss 快进到附近，第二个在解码流里精确定位
+
+# 关键参数：-accurate_seek（默认开启），关闭会退化到关键帧 seek</code></pre><p><b>为什么精确 seek 慢</b>：必须从最近的 I 帧<strong>逐帧解码</strong>到目标位置。GOP 是 250 帧时，最坏要解 249 帧。所以<strong>短视频场景应缩短 GOP</strong>（如设为 1~2 秒），代价是压缩率下降约 <b>10~30%</b>。这是 seek 体验与体积的直接权衡。</p></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：视频时长显示不对或音画不同步，怎么查？</summary><p>A：先查 <strong>time_base 与 duration 是否一致</strong>。用 <code>ffprobe -show_streams</code> 看视频流与音频流各自的 time_base、duration、start_time，再算实际秒数。常见原因有三——① 容器层的 duration 与流层不一致（以流层为准）；② <strong>start_time 非零</strong>（直播切片常见），计算时要减去；③ 音视频 time_base 不同却用了同一个换算系数。</p></details><details><summary>Q：为什么我抽的帧和视频里看到的不一样？</summary><p>A：多半是 <strong>seek 落在了关键帧</strong>上。用 <code>ffmpeg -ss</code> 放在 <code>-i</code> 前时会跳到最近的关键帧，若 GOP 是 10 秒，你请求第 60 秒可能实际拿到第 55 秒的画面。解法是把 <code>-ss</code> 放到 <code>-i</code> 之后（精确但慢），或用两步法。另外要确认<strong>抽帧时用的是 video 流</strong>而不是默认的第一个流（有时第一个是封面图或音频）。</p></details><details><summary>Q：GOP 设多大合适？</summary><p>A：<strong>看分发方式</strong>。点播（可预加载、允许缓冲）→ GOP 可以长（<b>5~10 秒</b>），压缩率高、体积小；直播/实时监控（要求低延迟、快速起播）→ GOP 要短（<b>1~2 秒</b>），代价是体积增大 <b>10~30%</b>。另外<strong>需要频繁 seek 的场景</strong>（如视频编辑、逐帧分析）也应缩短 GOP，否则每次 seek 都要解码上百帧。</p></details><details><summary>Q：B 帧要不要开？</summary><p>A：<strong>点播开，低延迟直播不开</strong>。B 帧能提升压缩率约 <b>10~20%</b>，但它引入两个代价——① <strong>解码延迟</strong>：需要缓存后面的帧才能解（典型增加 2~3 帧延迟）；② <strong>编码复杂度上升</strong>。所以实时通信（视频会议、直播连麦）通常关闭 B 帧（<code>-bf 0</code>），而点播、存储场景一定开。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>显示顺序 I₀、B₁、B₂、P₃，就一定可以按这个顺序解码吗？</summary><p>不一定。若 B₁/B₂ 参考未来的 P₃，须先解出 P₃，再按 PTS 把 B 帧放回正确展示时间。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="video-codec-container.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

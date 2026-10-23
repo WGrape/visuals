@@ -11,6 +11,28 @@
 <section class="panel"><h2>证书轮换为何难</h2><p>证书通常是短期有效以降低长期凭据泄漏风险。轮换时新证书、旧证书和信任根可能短时间重叠，调用方与被调方必须都能接受过渡期的合法身份。若先删旧根，再更新一部分服务，旧客户端会握手失败；若先换支付证书却忘记更新订单侧信任库，也会出现单方向可用、另一方向不可用。应先分发新信任、再颁发新证书、验证覆盖率，最后撤销旧材料。</p><p>自动轮换也会失败：节点离线、时钟漂移、证书文件权限、热加载未生效，都可能造成到期前后大面积故障。监控要按服务和实例记录证书剩余有效期、最近成功加载时间和握手失败原因，而不是只看 CA 控制台“已签发”。</p></section>
 <section class="panel"><h2>私钥与撤销</h2><p>私钥必须留在受控边界，避免写入镜像、日志或普通配置仓库。证书泄漏后，仅等待它自然过期可能不够；可通过吊销、缩短有效期、撤销服务授权和网络阻断等措施降低风险。不同客户端对 CRL/OCSP 或内部吊销列表的支持不同，需要演练真实撤销效果。若使用短寿命证书，仍要知道已签发的旧身份在多长时间内可能继续有效。</p><p>服务账号被禁用后，已建立的长连接可能继续传数据，具体取决于代理和应用是否重新评估授权。高风险操作应在请求层检查权限，不要只靠建立连接时的一次验证。</p></section>
 <section class="panel"><h2>排障与验收</h2><p>订单到支付连接失败时，先看 DNS 与 TCP，再看客户端是否信任支付证书、支付端是否请求并接受订单证书、证书 SAN 与用途是否正确、双方时钟是否一致。抓包可定位 TLS Alert 出现的阶段，但加密握手细节可能要结合端点日志。区分“证书不被信任”“身份不匹配”“证书已过期”和“握手成功但业务拒绝”四种原因。</p><p>验收应包含允许的订单服务、无证书客户端、持其他服务证书的客户端、过期证书和轮换期间新旧证书。通过测试不应只看握手成功，还要验证最小授权：订单服务能扣款，不应自动拥有管理证书或任意退款权限。</p></section>
+<section class="panel" data-dry-goods><h2>mTLS 流程与身份</h2><div class="table-wrap"><table><thead><tr><th>步骤</th><th>内容</th><th>单向 TLS 是否有</th></tr></thead><tbody><tr><td>1. 服务端发送证书</td><td>服务端发送自己的证书链</td><td>有</td></tr><tr><td>2. 客户端验证服务端</td><td>校验链 + 主机名</td><td>有</td></tr><tr><td>3. <b>服务端请求客户端证书</b></td><td><code>CertificateRequest</code></td><td><b>仅 mTLS</b></td></tr><tr><td>4. 客户端发送证书</td><td>客户端发自己的证书链</td><td><b>仅 mTLS</b></td></tr><tr><td>5. <b>客户端证明持有私钥</b></td><td><code>CertificateVerify</code>（对握手摘要签名）</td><td><b>仅 mTLS</b></td></tr><tr><td>6. 服务端验证客户端</td><td>校验链 + 身份 + 是否在白名单</td><td><b>仅 mTLS</b></td></tr></tbody></table></div><p><b>关键点</b>：客户端发证书还不够——必须做 <code>CertificateVerify</code>（用私钥对握手内容签名），否则任何人拿到证书公钥都能冒充。<b>证书是公开的，私钥才是身份。</b></p><div class="table-wrap"><table><thead><tr><th>身份载体</th><th>字段</th><th>示例</th><th>适用</th></tr></thead><tbody><tr><td>SAN（URI）</td><td><code>subjectAltName: URI</code></td><td><code>spiffe://cluster/ns/default/sa/api</code></td><td><b>服务身份（推荐）</b></td></tr><tr><td>SAN（DNS）</td><td><code>subjectAltName: DNS</code></td><td><code>api.internal.example.com</code></td><td>服务或设备</td></tr><tr><td>SAN（Email）</td><td><code>subjectAltName: email</code></td><td><code>ops@example.com</code></td><td>人员</td></tr><tr><td>CN</td><td><code>subject CN</code></td><td>—</td><td><b>已废弃</b>，不要依赖</td></tr></tbody></table></div><p><b>mTLS 实操</b></p><pre><code># 测试 mTLS（双向认证）
+curl --cert client.pem --key client.key --cacert ca.pem https://api.internal/
+
+# 看服务端是否要求客户端证书
+openssl s_client -connect api.internal:443 -CAfile ca.pem
+# 输出中出现 "Acceptable client certificate CA names" = 服务端要求客户端证书
+
+# 生成客户端证书
+openssl req -new -newkey rsa:2048 -nodes -keyout client.key -out client.csr \
+  -subj "/CN=api" -addext "subjectAltName=URI:spiffe://cluster/ns/default/sa/api"
+openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key \
+  -CAcreateserial -out client.pem -days 365
+
+# 查看证书身份
+openssl x509 -in client.pem -noout -text | grep -A2 'Subject Alternative Name'
+openssl x509 -in client.pem -noout -subject -issuer -dates
+
+# Nginx mTLS 配置
+# ssl_client_certificate /etc/ssl/ca.pem;
+# ssl_verify_client on;              # on = 强制，optional = 可选
+# ssl_verify_depth 2;
+# 然后把 $ssl_client_s_dn 或 $ssl_client_escaped_cert 传给后端做鉴权</code></pre></section><section class="panel"><h2>证书轮换的正确姿势</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>操作</th><th>时长</th></tr></thead><tbody><tr><td>1. 发布新根/中间 CA</td><td>把新 CA 加入<b>信任列表</b>（与旧 CA 并存）</td><td>立即</td></tr><tr><td>2. 签新证书</td><td>用<b>新 CA</b>签发服务端与客户端证书</td><td>立即</td></tr><tr><td>3. 部署新证书</td><td>服务端/客户端加载新证书（同时信任新旧 CA）</td><td>滚动发布</td></tr><tr><td>4. 等待重叠期结束</td><td>确保所有节点都已更新</td><td><b>≥ 证书 TTL</b></td></tr><tr><td>5. 移除旧 CA</td><td>从信任列表删除旧 CA</td><td>最后</td></tr></tbody></table></div><ul><li><b>核心原则：先加信任，再换证书，最后删旧的</b>。顺序反了（先签新证书再更新信任库）会导致仍在用旧信任库的一方验证失败——这是证书轮换事故的头号原因。</li><li><b>重叠期要 ≥ 证书有效期</b>（现在证书普遍 90 天甚至 47 天，所以自动化是必须的）。用 cert-manager / SPIRE / Vault 自动签发与轮转，别手工。</li><li><b>短证书 + 自动轮换</b>：现代做法是签<b>小时级到天级</b>的证书（SPIFFE 甚至 15 分钟–1 小时），把吊销问题变成“等它过期”，从而<b>不需要 CRL/OCSP</b>。</li><li><b>吊销的尴尬</b>：CRL 列表越来越大、OCSP 每次都要查询，而浏览器/客户端普遍“软失败”（查不到就放过）。所以真正的安全依赖<b>短有效期</b>而非吊销列表。</li><li><b>排障顺序</b>：① <code>openssl s_client</code> 看服务端是否要求客户端证书；② 确认客户端证书链完整（含中间 CA）；③ 看 SAN 是否匹配服务端期望的身份；④ 看证书是否过期；⑤ 看信任库是否包含签发 CA（轮换场景最常见）。</li><li><b>K8s / 服务网格</b>：Istio/Linkerd 用 SPIFFE 身份 + 自动 mTLS，证书默认有效期 24 小时并自动轮转，业务代码零感知。这是目前最省心的落地方式。</li></ul><details><summary>mTLS 的客户端证书会被中间人拿到吗？</summary><p>不会。TLS 1.3 握手中客户端证书是<b>加密传输</b>的（在握手完成后的加密通道里），且即使被截获，攻击者没有私钥也无法完成 CertificateVerify。所以证书本身不是秘密，私钥才是。</p></details><details><summary>证书快过期了怎么平滑轮换而不中断？</summary><p>双 CA 并存 + 滚动更新：先把新 CA 加进所有节点的信任库，再逐个节点换用新 CA 签发的证书，等全部更新完（至少一个证书周期）后再移除旧 CA。全程无中断。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>mTLS 握手成功，能证明该服务有权执行任意支付操作吗？</summary><p>不能。握手认证服务身份，具体扣款、查询或退款权限仍须在策略和业务层判断。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../../04-application-layer/04-web/02-https-and-tls/tls-certificate-chain-hostname.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

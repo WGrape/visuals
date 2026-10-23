@@ -697,6 +697,24 @@
             opacity: 0.5;
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <!-- 导航 -->
@@ -1338,7 +1356,46 @@ typedef struct aeTimeEvent {
                 </div>
             </div>
         </section>
-    </main>
+    
+<section class="section" data-dry-goods><div class="x-dry"><h2>IO 模型的量化对比</h2><div class="table-wrap"><table><thead><tr><th>模型</th><th>阻塞性</th><th>并发能力</th><th>典型延迟</th></tr></thead><tbody><tr><td><b>阻塞 IO</b></td><td>全程阻塞</td><td>1 连接 1 线程；1 万连接 = 1 万线程</td><td>上下文切换开销大</td></tr><tr><td><b>非阻塞忙轮询</b></td><td>不阻塞但 CPU 空转</td><td>CPU 100%</td><td>不可用于生产</td></tr><tr><td><b>IO 多路复用 select</b></td><td>阻塞在 select</td><td><b>FD_SETSIZE=1024</b> 上限</td><td>O(n) 遍历</td></tr><tr><td><b>poll</b></td><td>同上</td><td>无上限</td><td>仍 O(n) 遍历</td></tr><tr><td><b>epoll</b>（Linux）</td><td>阻塞在 epoll_wait</td><td><b>数十万</b>连接</td><td><b>O(1)</b> 就绪通知</td></tr><tr><td><b>kqueue</b>（BSD/macOS）</td><td>同上</td><td>数十万</td><td>类似 epoll</td></tr><tr><td><b>io_uring</b>（Linux 5.1+）</td><td>真正的异步</td><td>更高</td><td>省掉系统调用；Redis 7 未默认用</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>Redis 相关数值</th><th>值</th><th>说明</th></tr></thead><tbody><tr><td>单实例 QPS</td><td><b>10 万级</b>（简单 get/set）</td><td>单线程模型，靠 epoll + 内存操作</td></tr><tr><td>单次 get 延迟</td><td><b>0.1~0.5ms</b>（同机）</td><td>跨机加 RTT</td></tr><tr><td><code>maxclients</code></td><td><b>10000</b></td><td>超过报 max number of clients reached</td></tr><tr><td><code>tcp-backlog</code></td><td><b>511</b></td><td>受内核 <code>somaxconn</code>（默认 128）限制，需同时调</td></tr><tr><td>epoll 就绪队列</td><td>红黑树 + 就绪链表</td><td>Redis 用 <code>ae_epoll.c</code> 封装</td></tr><tr><td>Redis 6+ 多线程</td><td>只处理<b>网络 IO</b></td><td>命令执行仍单线程；<code>io-threads 4</code></td></tr></tbody></table></div><p><b>为什么 Redis 单线程还能这么快</b>：① 纯内存操作，没有磁盘 IO；② epoll 让单线程能同时管几万连接；③ 数据结构简单（哈希表 O(1)）；④ 避免了多线程的锁与上下文切换。<b>瓶颈在网络 IO 而非 CPU</b>，所以 Redis 6 的多线程只用来做读写 socket，命令执行依然单线程。</p></div></section>
+<section class="section" ><div class="x-dry"><h2>配置与代码</h2><pre><code># Redis 网络相关配置
+maxclients 10000            # 最大客户端连接数
+tcp-backlog 511             # 需同时调内核 net.core.somaxconn
+tcp-keepalive 300           # 秒，探测死连接
+timeout 0                   # 0 = 不主动关闭空闲连接
+# redis.conf (Redis 6+)
+io-threads 4                # IO 线程数；建议小于核数，CPU 密集时不如不开
+io-threads-do-reads yes     # 开启读的 IO 多线程
+
+# 内核参数（高并发必调）
+# /etc/sysctl.conf
+net.core.somaxconn = 1024        # 默认 128，Redis 的 tcp-backlog 受它限制
+net.ipv4.tcp_max_syn_backlog = 1024
+net.core.netdev_max_backlog = 5000
+# 生效：sysctl -p</code></pre><pre><code>// Go 的 netpoll：看似阻塞写法，实际是 epoll 驱动
+// goroutine 发起网络读写时会被「停放」，由 netpoller 在就绪时唤醒
+// 所以可以写：
+conn, _ := net.Dial("tcp", addr)
+buf := make([]byte, 1024)
+n, _ := conn.Read(buf)      // 写法是阻塞的，底层不占 OS 线程
+// 1 万个并发连接只需要少量 OS 线程
+
+// 手动 epoll（了解原理用）
+import "golang.org/x/sys/unix"
+epfd, _ := unix.EpollCreate1(0)
+unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, fd,
+    &amp;unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(fd)})
+events := make([]unix.EpollEvent, 100)
+for {
+    n, _ := unix.EpollWait(epfd, events, 100)   // ms；返回就绪的事件数
+    for i := 0; i &lt; n; i++ { handle(events[i].Fd) }
+}
+
+// epoll 的两种触发模式
+// LT（水平触发，默认）：只要还有数据没读，每次 epoll_wait 都返回 -&gt; 安全但可能低效
+// ET（边缘触发）：只在状态变化时通知一次 -&gt; 必须一次读完（循环读到 EAGAIN），否则会丢事件</code></pre></div></section>
+<section class="section" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td><code>max number of clients reached</code></td><td>连接数超过 maxclients</td><td>调 maxclients；查是否有连接泄漏（没 close）</td></tr><tr><td>连接建立慢/超时</td><td>tcp-backlog 满（somaxconn=128）</td><td>调 <code>net.core.somaxconn=1024</code> + redis 的 tcp-backlog</td></tr><tr><td>QPS 上不去但 CPU 空闲</td><td>网络 IO 成瓶颈（Redis 6 前单线程）</td><td>升级到 Redis 6+ 开 <code>io-threads</code>；或用 pipeline 减少往返</td></tr><tr><td>延迟高但吞吐不高</td><td>大量小请求导致往返开销</td><td><b>用 pipeline 批量</b>；或 mget/mset；减少 RTT 次数</td></tr><tr><td>慢查询阻塞其他请求</td><td>单线程模型，一个慢命令卡住全部</td><td>避免 <code>KEYS *</code>；用 SCAN；大 key 拆分</td></tr><tr><td>ET 模式下丢事件</td><td>没循环读到 EAGAIN</td><td>边缘触发必须读到 EAGAIN 为止</td></tr><tr><td>TIME_WAIT 堆积</td><td>短连接 + 主动关闭</td><td>用连接池；调 <code>tcp_tw_reuse</code></td></tr></tbody></table></div><p class="muted"><b>pipeline 是最容易被忽略的优化</b>：100 个 get 如果一条条发，需要 100 个 RTT；用 pipeline 一次发 100 条只需 <b>1 个 RTT</b>。跨机房 RTT 20ms 时，延迟从 2000ms 降到 20ms，<b>100 倍</b>差距。</p></div></section>
+</main>
 
     <script>
         let eventCount = 0;

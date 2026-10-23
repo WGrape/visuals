@@ -67,6 +67,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-siz
 .plus{background:#F5C4B3;color:#712B13;font-size:11px;padding:2px 8px;border-radius:4px;font-weight:500;margin-left:4px}
 footer{text-align:center;font-size:11px;color:#aaa;margin-top:24px;padding-top:16px;border-top:0.5px solid rgba(0,0,0,0.08)}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="container">
@@ -306,6 +324,47 @@ footer{text-align:center;font-size:11px;color:#aaa;margin-top:24px;padding-top:1
   </div>
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>先量化：两种检索的真实开销对比</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>grep / ripgrep</b></th><th><b>向量检索 (RAG)</b></th></tr></thead><tbody><tr><td>建立索引</td><td><b>0</b>（每次实时扫）</td><td>需预先 embedding，<b>变更即失效</b></td></tr><tr><td>单次查询耗时</td><td><b>0.1 – 3 s</b>（千万行仓库）</td><td><b>20 – 200 ms</b>（不含生成）</td></tr><tr><td>准确率（精确匹配）</td><td><b>100%</b>（字面一致必然命中）</td><td>语义近但<b>可能漏掉精确项</b></td></tr><tr><td>召回（同义/模糊）</td><td><b>差</b>：换个词就搜不到</td><td><b>好</b>：语义相近能召回</td></tr><tr><td>成本</td><td>仅 CPU</td><td>embedding 费用 + 向量库常驻内存</td></tr><tr><td>代码变更敏感度</td><td><b>无</b>，天然实时</td><td>索引滞后，需增量重建</td></tr><tr><td>可解释性</td><td><b>有</b>：能看到文件行号</td><td>弱：只给相似度分数</td></tr></tbody></table></div><p><b>核心结论</b>：代码是<b>精确符号系统</b>——函数名、类型、错误字符串都是字面量，grep 的<b>精确匹配</b>恰好是最优解；而 RAG 的模糊语义在代码场景反而会引入噪声。这就是 Claude Code、Cursor 等工具把 <b>Glob + Grep</b> 作为主力检索手段、而非全仓库 embedding 的原因。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>ripgrep 为什么比 grep 快一个数量级</h2><ul><li><b>并行遍历</b>：多线程递归目录（<code>grep -r</code> 是单线程）</li><li><b>尊重 .gitignore</b>：默认跳过 <code>node_modules</code>、<code>.git</code> 等，扫描量直接少 <b>90%</b></li><li><b>SIMD 加速</b>：用 <code>memchr</code> 向量化指令找首个候选字节</li><li><b>自动跳过二进制</b>：不用手动 <code>--binary-files=without-match</code></li><li><b>内存映射 + 顺序读</b>：大文件处理更高效</li></ul><p><b>ripgrep 实战命令</b></p><pre><code># 实测对比（Linux 内核源码，约 7 万文件 / 1.1 GB）
+time grep -r "tcp_retransmit_skb" .          # 约 8 - 15 s
+time rg "tcp_retransmit_skb"                 # 约 0.3 - 0.8 s   -&gt; 快 10-20 倍
+
+# 只搜特定类型（关键！能再快一个数量级）
+rg -t go "func HandleOrder"                  # 只看 .go
+rg -g '*.{ts,tsx}' "useEffect"               # glob 过滤
+rg --files -g '*.py' | wc -l                 # 先摸清候选规模
+
+# 只看定义 / 只要文件名（AI 助手最常见的两步）
+rg -n "^func " -t go            # 列出所有函数定义（带行号）
+rg -l "TODO|FIXME"              # 只要文件名，不输出内容（省 token！）
+
+# 上下文控制：AI 场景下别把整个文件塞进上下文
+rg -C 3 "func HandleOrder"      # 前后各 3 行
+rg -A 10 -B 2 "panic"           # 后 10 行前 2 行
+
+# 统计与聚合（判断改动范围）
+rg -c "HandleOrder"             # 每个文件命中次数
+rg --stats "pattern"            # 看扫了多少字节/文件</code></pre><p class="muted">AI 编程助手的关键技巧：<b>先用 <code>rg -l</code> 拿文件列表，再用 <code>rg -n</code> 精确定位行号，最后只读取相关行区间</b>。比把整个文件塞进上下文省 <b>10 – 100 倍</b> token。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>那 RAG 在代码场景就没用了吗？——两阶段混合才是正解</h2><p>不是没用，而是<b>用错了位置</b>。正确的分工是：</p><div class="table-wrap"><table><thead><tr><th>阶段</th><th>手段</th><th>候选规模</th><th>目的</th></tr></thead><tbody><tr><td><b>① 粗筛（召回）</b></td><td><b>grep / 符号索引</b></td><td>全仓库 → <b>50 – 200</b> 个文件</td><td>零成本、精确、实时</td></tr><tr><td><b>② 精排（排序）</b></td><td><b>embedding 相似度 / 重排模型</b></td><td>200 → <b>5 – 10</b> 个片段</td><td>理解语义相关性</td></tr><tr><td><b>③ 读取（构造上下文）</b></td><td>按行区间精确读取</td><td>5 – 10 片段</td><td>控制 token 预算</td></tr></tbody></table></div><p>这个结构叫 <b>retrieve-then-rerank</b>。它的价值在于：粗筛用便宜且精确的字面检索兜住<b>召回</b>，精排用昂贵但聪明的模型提升<b>准确性</b>。反过来（纯向量召回）会漏，正过来（纯 grep）会排不准。</p><p><b>混合检索实现</b></p><pre><code># 混合检索的伪实现
+def hybrid_search(query: str, repo: str, k: int = 10):
+    # ① 关键词粗筛：字面精确 + 语义扩展词
+    kws   = extract_keywords(query)            # "重试" -&gt; ["retry", "retries", "Retry-After"]
+    files = ripgrep_files(repo, kws)           # 全仓库 -&gt; 约 100 个候选文件
+
+    # ② 语义精排：只对候选打分（成本降 1000 倍）
+    chunks = chunk_by_function(files)          # 按函数/类切块，100-200 行一块
+    scores = rerank_model.score(query, chunks) # cross-encoder 精排
+
+    # ③ 取 top-k 并控制预算
+    return top_k(scores, k=k, max_tokens=8000)
+
+# 为什么按函数切块而不是按固定长度切？
+#   - 代码有天然边界（函数/类），固定长度会把半个函数切开
+#   - 调用方看到半个函数无法理解语义
+#   - 经验值：函数块 100-200 行，overlap 0（代码不需要 overlap）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>成本账：为什么全仓库 embedding 不划算</h2><div class="table-wrap"><table><thead><tr><th>项目规模</th><th>代码行数</th><th>token 估算</th><th>一次性 embedding 成本</th><th>索引重建频率</th></tr></thead><tbody><tr><td>小项目</td><td>10 万行</td><td>约 400 万</td><td>约 <b>$0.02</b>（</td><td>每次 commit</td></tr><tr><td>中型</td><td>100 万行</td><td>约 4000 万</td><td>约 <b>$0.2 – $1</b></td><td>每次 commit</td></tr><tr><td><b>大型 monorepo</b></td><td>1000 万行</td><td>约 <b>4 亿</b></td><td>约 <b>$2 – $20</b></td><td><b>持续</b></td></tr></tbody></table></div><p>算账逻辑：代码 1 行 ≈ 4 token。monorepo 每天几百次 commit，<b>索引永远处于“正在重建”的状态</b>，新鲜度无法保证——这是比钱更要命的问题。而 grep 的“索引”就是文件系统本身，<b>永远是最新的</b>。</p><ul><li><b>grep 的隐性优势</b>：无需运维向量库、无需 GPU、无冷启动、离线可用</li><li><b>向量检索的不可替代场景</b>：自然语言提问（“哪里处理了支付失败？”）、跨仓库、缺乏明确符号名</li><li><b>折中方案</b>：只对<b>文档、注释、测试用例</b>做 embedding（语义密度高），代码本体用 grep</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>grep 找不到同义词怎么办？比如搜“取消”找不到 cancel？</summary><p>这是 grep 的真实短板，有四种解法：① <b>查询扩展</b>——用一次 LLM 调用把中文查询转成多个英文候选词（<code>取消 → cancel / abort / revoke / terminate</code>），再逐个 grep；② <b>正则</b>：<code>rg 'cancel|abort|revoke'</code>；③ <b>符号索引</b>（LSP / ctags）——按语义符号查找定义与引用，比文本更准；④ 兜底用 grep 到文件名后再读目录结构推测。实践中 ①②③ 组合已能覆盖绝大多数情况。</p></details><details><summary>为什么 AI 助手不全量读代码而是要搜？</summary><p>因为<b>上下文窗口是硬约束</b>。即使 200k token 的窗口，一个中型仓库的全部代码也远超这个量级（100 万行 ≈ 400 万 token，是窗口的 <b>20 倍</b>）。而且<b>塞得越多，注意力越分散</b>——无关代码会稀释模型对关键部分的关注，导致回答质量下降。所以“精准检索 + 少量上下文”不仅省钱，还<b>更准</b>。</p></details><details><summary>RAG 在代码场景下什么时候明显更好？</summary><p>三种情况：① <b>自然语言意图查询</b>（“这个项目怎么做鉴权的？”）——没有可 grep 的符号名；② <b>跨仓库 / 跨服务</b>理解业务流程；③ <b>大规模重构影响面分析</b>，需要理解语义关联而非字面。除此之外（定位符号、找定义、查调用点、搜错误字符串）grep 全面占优。</p></details><details><summary>能不能用 AST 索引替代文本 grep？</summary><p>能，而且更准——这是 <b>LSP（Language Server Protocol）</b> 的做法：解析出 AST 后按符号精确查找定义/引用/实现，不受注释和字符串干扰。代价是需要为每种语言维护解析器、且要<b>增量重建索引</b>。所以现实中的层次是：<b>LSP 符号索引（最准，需维护） &gt; grep（次准，零成本） &gt; 向量检索（模糊，兜底）</b>。Claude Code 等工具会同时用 grep 和 LSP 能力互补。</p></details></div></section>
 <footer>面试题解析 · 代码检索策略 · grep vs RAG</footer>
 
 </div>

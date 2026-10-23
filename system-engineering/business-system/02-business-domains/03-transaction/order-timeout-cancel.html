@@ -66,6 +66,24 @@
   footer{color:var(--muted);font-size:13px;text-align:center;padding:30px 0 50px}
   ol,ul{margin:8px 0 0;padding-left:20px} li{margin:6px 0}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -286,7 +304,47 @@
     </div>
   </section>
 
-  <footer>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>四种超时方案对照</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>实现</th><th>精度</th><th>代价 / 风险</th></tr></thead><tbody><tr><td>定时扫表</td><td><code>WHERE status='INIT' AND created_at &lt; NOW()-30min</code></td><td>等于扫描间隔（1~5 min）</td><td>实现简单；数据量大时要分页与索引</td></tr><tr><td>延迟消息</td><td>RocketMQ 延迟级别 / RabbitMQ TTL+死信 / Kafka 时间轮</td><td>秒级</td><td>依赖中间件；需处理重复消费</td></tr><tr><td>Redis ZSet</td><td>score = 到期时间戳，ZRANGEBYSCORE 捞到期</td><td>秒级</td><td>需防并发重复取；持久化要注意</td></tr><tr><td>时间轮</td><td>内存环形队列（Netty HashedWheel）</td><td>毫秒~秒</td><td>进程内，重启丢失，需持久化兜底</td></tr></tbody></table></div><p>选型判据：<b>订单量小（&lt; 万级）用定时扫表最省心；量大且要求秒级用延迟消息或 Redis ZSet；两者都要配合幂等与状态机。</b></p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>RocketMQ 延迟级别与 Redis ZSet 参数</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>取值</th><th>说明</th></tr></thead><tbody><tr><td>RocketMQ 延迟级别</td><td>18 个固定级别</td><td>1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h</td></tr><tr><td>不支持任意时长</td><td>只能选级别</td><td>需要 15 分钟就得自己实现（或用更高版本的时间轮特性）</td></tr><tr><td>Redis ZSet score</td><td>Unix 毫秒时间戳</td><td><code>ZADD order_delay &lt;expire_ms&gt; &lt;order_id&gt;</code></td></tr><tr><td>捞出到期</td><td><code>ZRANGEBYSCORE key 0 &lt;now&gt; LIMIT 0 100</code></td><td>配合 Lua 保证「取出+删除」原子</td></tr><tr><td>扫描频率</td><td>1~5 秒一次</td><td>频率决定精度上限</td></tr></tbody></table></div><p><b>扫表</b></p><pre><code>-- 定时扫表（注意索引与分页，避免大事务）
+CREATE INDEX idx_order_timeout ON orders (status, created_at);
+
+SELECT id, out_trade_no FROM orders
+ WHERE status = 'INIT'
+   AND created_at &lt; NOW() - INTERVAL 30 MINUTE
+ ORDER BY created_at
+ LIMIT 200;                            -- 分批，避免一次锁太多行
+
+-- 取消必须走状态机，且限定原状态（并发下只有一个能成功）
+UPDATE orders SET status = 'CLOSED', closed_at = NOW()
+ WHERE id = ? AND status = 'INIT';     -- affected rows = 0 表示已被别处处理</code></pre><p><b>Redis Lua</b></p><pre><code>-- Redis ZSet 的原子取出（Lua：取出即删除，防止多实例重复处理）
+-- KEYS[1]=delay zset, ARGV[1]=now_ms, ARGV[2]=limit
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
+if #ids &gt; 0 then
+  redis.call('ZREM', KEYS[1], unpack(ids))     -- 先删再处理，失败靠重试/对账补
+end
+return ids</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>幂等与补偿</h2><div class="table-wrap"><table><thead><tr><th>风险</th><th>表现</th><th>处理</th></tr></thead><tbody><tr><td>重复取消</td><td>消息重投或 Redis 取出后被重复执行</td><td>状态机条件更新（<code>WHERE status='INIT'</code>）+ 幂等键</td></tr><tr><td>取消与支付竞态</td><td>同一时刻支付回调与超时取消并发</td><td>条件更新保证只有一个成功；另一个发现状态已变即退出</td></tr><tr><td>已付款却被取消</td><td>取消前未查支付状态</td><td>取消前主动查单确认未支付；对账兜底</td></tr><tr><td>时钟回拨</td><td>服务器时间跳变导致批量误取消</td><td>NTP 校时；用数据库时间而非应用时间</td></tr><tr><td>任务进程重启</td><td>内存时间轮丢失</td><td>持久化到 DB/Redis；启动时恢复</td></tr><tr><td>库存释放失败</td><td>取消成功但库存没还</td><td>事务消息/Outbox；失败重试 + 对账</td></tr></tbody></table></div><p><b>取消骨架</b></p><pre><code>def cancel_if_unpaid(order_id):
+    """取消前必须确认真实支付状态（防止误杀已支付订单）"""
+    order = db.get(order_id)
+    if order.status != INIT:
+        return "skip"                      # 幂等：已处理过
+    paid = pay_client.query(order.out_trade_no)     # 主动查单，别只信本地状态
+    if paid:
+        db.update(order_id, status=PAID)  # 回调丢了，这里补上
+        return "paid"
+    with db.transaction():
+        n = db.execute(
+            "UPDATE orders SET status='CLOSED' WHERE id=%s AND status='INIT'",
+            order_id)
+        if n == 0:
+            return "raced"                # 被并发路径抢先
+        db.insert(flow(order_id, "TIMEOUT_CLOSED"))
+    outbox.publish(OrderClosed(order_id))  # 库存释放等副作用走事务消息
+    return "closed"</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>超时取消延迟很大</td><td>扫描间隔过长或消息积压</td><td>缩短间隔；看消费 lag；扩容消费者</td></tr><tr><td>同一订单被取消两次</td><td>无状态机或幂等</td><td>条件更新 + 幂等键</td></tr><tr><td>已支付订单被取消</td><td>取消前未确认支付状态</td><td>取消前主动查单</td></tr><tr><td>扫表把数据库打满</td><td>全表扫描无索引、一次处理太多</td><td>加 (status, created_at) 索引；分批 LIMIT</td></tr><tr><td>延迟消息不生效</td><td>用了不支持的延迟时长或级别配置错</td><td>确认中间件支持的级别；改用 ZSet 方案</td></tr><tr><td>Redis 重启后任务丢失</td><td>未开启持久化或只用内存</td><td>开 AOF；关键任务以 DB 为准做兜底对账</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>定时扫表和延迟消息怎么选？</summary><p>看量与精度要求。订单量小、能容忍分钟级延迟时，定时扫表最简单可靠（一个 SQL + 索引即可）；量大或要求秒级时，扫表会频繁扫索引并产生延迟误差，改用延迟消息（RocketMQ 延迟级别、RabbitMQ 死信）或 Redis ZSet。两者都必须配合状态机与幂等。</p></details><details><summary>为什么取消操作必须是条件更新？</summary><p>因为超时取消会与支付回调、人工关闭等路径并发。写成 <code>UPDATE ... WHERE status='INIT'</code>，只有把状态从 INIT 改掉的那一个能成功（affected rows = 1），其它路径发现受影响行数为 0 就退出。这是幂等与防竞态最便宜也最可靠的手段。</p></details><details><summary>取消前为什么还要主动查单？</summary><p>因为本地状态可能滞后：支付已成功但回调丢失或延迟，本地仍显示未支付，此时取消就会误杀真实交易。取消前调用支付平台的查单接口确认真实状态，既避免误杀，也顺便修复了回调丢失的订单。</p></details><details><summary>Redis ZSet 方案为什么要 Lua？</summary><p>因为「捞出到期任务」和「从集合里删除」必须是原子的：多个实例同时用 ZRANGEBYSCORE 会拿到同一批订单，各自去取消就是重复消费。Lua 脚本在 Redis 单线程里一次执行完取出+删除，保证不会被并发重复取到（处理失败则靠重试或对账补）。</p></details><details><summary>如何处理「取消成功但库存没释放」？</summary><p>把副作用放进事务消息（Outbox）：业务库更新与「待发送消息」在同一事务落库，后台投递；投递失败会重试。再加上对账任务定期比对订单状态与库存流水，发现不一致就补偿。不要用「先改库再远程调用」的裸写法。</p></details></div></section>
+<footer>
     订单超时取消方案讲解 · 八方案对比 + 最佳实践 + 推荐架构 · 单文件 HTML，可离线打开
   </footer>
 </div>

@@ -11,6 +11,27 @@
 <section class="panel"><h2>资源隔离不是副本天然保证</h2><p>TiFlash 能减轻 TiKV 事务节点的列扫描压力，但两者仍可能共享 TiDB SQL 节点、网络、存储集群预算或上游流量入口。一次超大报表查询若耗尽 SQL 层线程、内存或网络带宽，在线请求仍会受影响。需要结合资源组、并发限制、查询超时、报表排队和容量规划。为所有表盲目增加 TiFlash 副本会增加存储与复制成本，还会拉长副本构建与维护时间。</p><p>当新增大表副本时，先估算数据量、复制流量、构建峰值、磁盘与后台任务竞争。线上观察 TiKV 写入延迟、TiFlash 副本追赶进度、分析查询等待时间和 SQL 节点资源。试验要覆盖白天写入高峰与夜间大报表，不能只在空库测一条聚合语句。</p></section>
 <section class="panel"><h2>选择计划的实操顺序</h2><p>先写清查询的业务结果与过滤条件，再看访问行数、读取列数和聚合基数。用 EXPLAIN 检查是否使用 TiFlash、是否有大规模数据交换以及聚合是否下推。若没有按预期走列存，先检查副本是否可用、统计信息是否新鲜、谓词是否可下推，再考虑测试性地约束执行引擎。强制计划可能在数据分布变化后退化，正式使用要有对照基准与回退方案。</p><p>扫描只有十行时，列存读取和分布式调度开销可能超过收益；扫描十亿行只取三列时优势才更明显。可把原查询与按日期分区、预聚合物化结果的方案一起比较，记录 P95、CPU 秒、读取字节和报表新鲜度。HTAP 不代表无需数据建模或治理。</p></section>
 <section class="panel"><h2>一次完整验收</h2><p>准备 100 万订单，包含用户、日期、省份、金额、状态等列。先执行订单 ID 点查与更新，再执行按日期和省份的销售额分组；分别检查两类查询的执行计划与节点资源。在 TiFlash 副本未就绪时记录计划；副本就绪后重跑并比较读取字节与延迟。然后在持续写入下做相同对照，观察报表对事务 P99 的影响。</p><p>练习：报表计划走了 TiFlash，但在线交易仍变慢。列出至少三个可能共享的瓶颈，并说明每个瓶颈该查哪项指标。</p></section>
+<section class="panel" data-dry-goods><h2>TiFlash 的关键开关与参数</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>取值</th><th>作用</th></tr></thead><tbody><tr><td>添加列存副本</td><td><code>ALTER TABLE t SET TIFLASH REPLICA 1;</code></td><td>为表创建 TiFlash 副本（1 或 2）</td></tr><tr><td>引擎选择变量</td><td><code>tidb_isolation_read_engines</code></td><td>可选 <code>tikv</code> / <code>tiflash</code> / 两者</td></tr><tr><td>MPP 模式</td><td><code>set @@tidb_allow_mpp=1; set @@tidb_enforce_mpp=1;</code></td><td>启用/强制 MPP 并行执行</td></tr><tr><td>智能选择</td><td><code>tidb_opt_seek_factor</code> 等代价因子</td><td>优化器按代价选行存还是列存</td></tr><tr><td>同步进度</td><td><code>information_schema.tiflash_replica</code></td><td>看 available / progress</td></tr><tr><td>强制走 TiFlash</td><td><code>SELECT /*+ read_from_storage(tiflash[t]) */ ...</code></td><td>Hint 强制列存</td></tr></tbody></table></div><p>列存适合：<b>大范围扫描 + 聚合</b>（行存要读整行，列存只读需要的列，且压缩比更高）；不适合：<b>点查与高频单行更新</b>（行存 + 索引更合适）。</p></section><section class="panel"><h2>行存 vs 列存的量化对照</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th>TiKV（行存）</th><th>TiFlash（列存）</th></tr></thead><tbody><tr><td>存储单位</td><td>按行 + 索引</td><td>按列，压缩比通常 3~10 倍</td></tr><tr><td>擅长</td><td>点查、范围小、事务写入</td><td>大表扫描、聚合、多维分析</td></tr><tr><td>扫描代价</td><td>读整行，列多时代价高</td><td>只读涉及列</td></tr><tr><td>并行执行</td><td>主要在 TiDB 侧</td><td>MPP 多节点并行（Exchange 算子）</td></tr><tr><td>延迟量级</td><td>毫秒级点查</td><td>大查询从数十秒降到秒级（视数据量）</td></tr></tbody></table></div><p><b>命令</b></p><pre><code>-- 1) 加列存副本
+ALTER TABLE orders SET TIFLASH REPLICA 1;
+
+-- 2) 看同步进度（available=1 且 progress=1 才可用）
+SELECT table_schema, table_name, replica_count, available, progress
+  FROM information_schema.tiflash_replica;
+
+-- 3) 让优化器自己选（默认）
+SET @@tidb_isolation_read_engines = 'tikv,tiflash';
+
+-- 4) 强制走列存 + MPP（压测/验证用）
+SET @@tidb_allow_mpp = 1;
+SET @@tidb_enforce_mpp = 1;
+SELECT /*+ read_from_storage(tiflash[orders]) */
+       shop_id, sum(amount) FROM orders GROUP BY shop_id;
+
+-- 5) 确认是否真的走了 MPP
+EXPLAIN SELECT shop_id, sum(amount) FROM orders GROUP BY shop_id;
+--   计划里出现 mpp[tiflash] 与 ExchangeSender/ExchangeReceiver 即 MPP 生效</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>加了副本查询还是很慢</td><td>副本未同步完成（available=0）</td><td>查 tiflash_replica 的 progress；等待或排查同步</td></tr><tr><td>优化器没选 TiFlash</td><td>代价估算认为行存更优</td><td>加 read_from_storage hint；或 enforce_mpp 验证</td></tr><tr><td>报 MPP 相关错误</td><td>版本不支持或内存不足</td><td>检查版本；调 <code>tidb_mem_quota_query</code>；拆分大查询</td></tr><tr><td>小表查询反而变慢</td><td>列存不适合点查</td><td>让点查走 TiKV；只对大表开列存</td></tr><tr><td>副本同步落后</td><td>写入压力大或网络瓶颈</td><td>看 TiFlash 节点负载；增加副本数分摊</td></tr><tr><td>存储成本上升</td><td>列存副本占用额外空间</td><td>只对需要分析的表开副本；必要时删副本</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>TiFlash 副本和 TiKV 副本是什么关系？</summary><p>是同一份数据的<b>不同存储格式</b>：TiKV 保存行存副本（Raft 多副本，服务事务与点查），TiFlash 通过 Raft Learner 异步复制一份列存副本（服务分析查询）。两者由 Raft 组保证一致性，列存副本不参与投票，不影响写入的 quorum。</p></details><details><summary>什么时候该给表加 TiFlash 副本？</summary><p>当该表上有大范围扫描与聚合类查询（报表、多维分析、大表 JOIN），且这些查询在行存上因读整行而很慢时。点查为主、或表很小、或写入极频繁的表则不需要，因为列存对点查无优势且会增加存储与同步成本。</p></details><details><summary>为什么 available=0 时查询没加速？</summary><p>因为 TiFlash 副本还在同步中（progress &lt; 1），此时优化器不会把查询发给它，或者发过去也拿不到完整数据。必须等 <code>information_schema.tiflash_replica</code> 里 available=1 且 progress=1 才算就绪。</p></details><details><summary>MPP 和普通下推有什么区别？</summary><p>普通下推是把算子推到单个 TiFlash 节点执行，结果回到 TiDB 汇总；MPP 会把查询拆分到多个 TiFlash 节点并行执行，节点之间通过 Exchange 算子交换数据（shuffle/broadcast），最后汇总。对大表聚合，MPP 能利用多机 CPU 与内存，通常快一个量级。</p></details><details><summary>enforce_mpp 可以长期开吗？</summary><p>不建议。<code>tidb_enforce_mpp=1</code> 是强制所有适用查询走 MPP，若某些查询其实更适合行存（点查、小表），会变慢甚至因内存不足失败。生产上通常让优化器按代价自选，只在验证或压测时用 hint / enforce 强制。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>配置了 TiFlash 副本后，按订单 ID 更新单行就应该强制走 TiFlash 吗？</summary><p>不应。点查更新通常适合事务路径；是否使用列存应看查询形态、副本状态与真实执行计划。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/tidb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

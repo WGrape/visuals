@@ -12,6 +12,48 @@
 <section class="panel"><h2>NULL、并列和执行计划</h2><p>ORDER BY 列如果有 NULL，不同数据库对 NULL 排序位置的默认约定可能不同；明确处理缺失日期或使用方言支持的 NULLS FIRST/LAST。相同排序键下，ROWS 帧的计算顺序需要额外稳定键，否则两次运行可能把 10 和 20 的逐笔累计分配给不同 id。RANGE 与 peer 组的值虽相同，但窗口可能更大；在大量重复键和复杂窗口表达式中要检查执行计划及内存使用。</p><p>窗口函数通常在 WHERE、GROUP BY 等逻辑处理之后作用于当前结果行集。若先过滤掉某些订单，累计的输入也变了；如果要“先算全量累计再筛出今天”，可能需要子查询或 CTE，把计算与过滤的层次分开。</p></section>
 <section class="panel"><h2>何时该用 GROUP BY</h2><p>要得到每天一行的日收入，用 GROUP BY day 更直接；要保留每笔订单又附上当天总额或截至当天累计，用窗口函数。也可以先按天 GROUP BY 生成日汇总，再对日汇总做跨天累计，这样避免同日多行 peer 的歧义。预聚合与窗口并用时应检查金额单位、退款负数和重复订单处理；SQL 语法正确不保证业务口径正确。</p><p>窗口帧的选择应写在报表定义中：是“前 7 行交易”“此前 7 个自然日”“本月截至当前日期”还是“截至此笔交易”。中文描述若不明确，开发实现可能各有一套。</p></section>
 <section class="panel"><h2>验收三笔订单</h2><p>在数据库里插入 id1/day1/10、id2/day1/20、id3/day2/5，分别执行显式 ROWS 与 RANGE 版本。核对预期 10、30、35 与 30、30、35；再把插入顺序打乱，确认带 id 排序的 ROWS 结果稳定。最后新增 day1/id4/7，观察“逐笔累计”和“截至当天累计”如何变化，并检查 LAST_VALUE 是否真正返回全分区末行。</p><p>上线前把数据库产品与版本写进测试说明，因为窗口帧语法、默认值和 RANGE 对日期的支持存在方言差异。一个三行最小样本比只看大报表总额更容易暴露同值行错误。</p></section>
+<section class="panel" data-dry-goods><h2>窗口帧的三种模式</h2><div class="table-wrap"><table><thead><tr><th>模式</th><th>按什么界定窗口</th><th>相同值的处理</th><th>典型用途</th></tr></thead><tbody><tr><td><b>ROWS</b></td><td><strong>物理行数</strong></td><td>同值也可能被切开</td><td>移动平均（固定行数）</td></tr><tr><td><b>RANGE</b></td><td><strong>值的范围</strong></td><td><strong>同值必定在同一组（PEERS）</strong></td><td>累计求和、按值聚合</td></tr><tr><td><b>GROUPS</b></td><td><strong>peer 组的个数</strong>（PG 11+）</td><td>按组计数</td><td>介于两者之间</td></tr></tbody></table></div><p><b>最关键的差异</b>：<code>RANGE</code> 会把<strong>排序键相同的所有行视为一个整体</strong>（称为 peer），要么全在窗口内、要么全在窗口外；<code>ROWS</code> 严格按行数切，可能把相同值的行切开。</p><p><b>ROWS vs RANGE</b></p><pre><code>-- 示例数据：amount = [100, 200, 200, 300]
+SELECT id, amount,
+  SUM(amount) OVER (ORDER BY amount ROWS UNBOUNDED PRECEDING)  AS sum_rows,
+  SUM(amount) OVER (ORDER BY amount RANGE UNBOUNDED PRECEDING) AS sum_range
+FROM t;
+
+-- 结果对比（关键看 amount=200 的两行）：
+--  id | amount | sum_rows | sum_range
+--   1 |    100 |      100 |       100
+--   2 |    200 |      300 |       500   ← &lt;strong&gt;RANGE 直接跳到 500！&lt;/strong&gt;
+--   3 |    200 |      500 |       500   ← 两行相同（peer 一起算）
+--   4 |    300 |      800 |       800
+--
+-- 解释：RANGE 模式下，amount=200 的两行是 peer，
+--       UNBOUNDED PRECEDING 包含&lt;strong&gt;所有值 ≤ 200 的行&lt;/strong&gt;
+--       所以第 2 行的窗口已包含第 3 行 → 100+200+200 = 500</code></pre></section><section class="panel"><h2>默认帧：容易忽略的坑</h2><p><b>如果写了 <code>ORDER BY</code> 但没写帧子句，默认是 <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code></b>——即「从开头到当前行（含所有 peer）」。</p><div class="table-wrap"><table><thead><tr><th>写法</th><th>实际帧</th><th>注意</th></tr></thead><tbody><tr><td><code>OVER (ORDER BY x)</code></td><td><strong>RANGE</strong> UNBOUNDED PRECEDING ~ CURRENT ROW</td><td><strong>默认不是 ROWS！</strong></td></tr><tr><td><code>OVER ()</code></td><td><strong>整表</strong>（无 ORDER BY 时）</td><td>所有行一组</td></tr><tr><td><code>OVER (PARTITION BY p)</code></td><td>整个分区</td><td>同上</td></tr><tr><td><code>ROWS UNBOUNDED PRECEDING</code></td><td>从首行到当前行</td><td>显式指定才安全</td></tr></tbody></table></div><p><b>移动平均</b></p><pre><code>-- 陷阱：想算「移动平均（最近 7 天）」，用 RANGE 会算错
+-- ✗ RANGE 按值界定，若某天有多条记录，窗口会包含所有同值的行
+AVG(v) OVER (ORDER BY dt RANGE BETWEEN 6 PRECEDING AND CURRENT ROW)
+
+-- ✓ 若想按「最近 7 行」算，必须显式 ROWS
+AVG(v) OVER (ORDER BY dt ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+
+-- ✓ 若想按「最近 7 天」算（日期类型是连续的），用 RANGE 才对
+AVG(v) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 6 DAY PRECEDING AND CURRENT ROW)
+--   注意：RANGE + INTERVAL &lt;strong&gt;要求 ORDER BY 列是日期/数值类型&lt;/strong&gt;
+--   且 MySQL 8.0 / PG 11+ 才支持</code></pre><p class="muted"><b>对重复值敏感的场景必须用 ROWS</b>：比如「最近 7 笔订单」，若同一天有 3 笔，RANGE 会把 3 笔都算进去（变成 9 笔），结果错误。<strong>先想清楚要「7 行」还是「7 天」，再选 ROWS 还是 RANGE</strong>。</p></section>
+<section class="panel"><h2>常用窗口函数与代价</h2><div class="table-wrap"><table><thead><tr><th>函数</th><th>用途</th><th>对帧的敏感</th></tr></thead><tbody><tr><td><code>ROW_NUMBER()</code></td><td>连续序号（同值也给不同号）</td><td>不敏感（只看位置）</td></tr><tr><td><code>RANK()</code></td><td>排名，同值同号，<strong>跳号</strong></td><td>不敏感</td></tr><tr><td><code>DENSE_RANK()</code></td><td>排名，同值同号，<strong>不跳号</strong></td><td>不敏感</td></tr><tr><td><code>SUM/AVG/COUNT</code></td><td>累计/移动聚合</td><td><strong>高度敏感</strong></td></tr><tr><td><code>LAG/LEAD</code></td><td>取前/后 N 行</td><td>不敏感（用偏移量）</td></tr><tr><td><code>FIRST_VALUE/LAST_VALUE</code></td><td>窗口首/末值</td><td><strong>敏感（注意默认帧！）</strong></td></tr></tbody></table></div><p><b>函数与陷阱</b></p><pre><code>-- LAST_VALUE 的经典陷阱
+SELECT id, v,
+  LAST_VALUE(v) OVER (ORDER BY id) AS wrong,      -- ✗ 默认帧到 CURRENT ROW
+  LAST_VALUE(v) OVER (ORDER BY id
+    ROWS BETWEEN UNBOUNDED PRECEDING
+             AND UNBOUNDED FOLLOWING) AS right    -- ✓ 延伸到末尾
+FROM t;
+-- 默认帧是 "... AND CURRENT ROW"，所以 LAST_VALUE 就是当前行！
+--   wrong 列等于 v 本身，毫无意义
+-- &lt;strong&gt;用 LAST_VALUE 必须显式写 UNBOUNDED FOLLOWING&lt;/strong&gt;
+
+-- 性能提示：窗口函数需要排序
+--   PARTITION BY a ORDER BY b  →  需要按 (a, b) 排序
+--   若 (a,b) 上有索引，可省去排序（EXPLAIN 里无 "Using filesort"）
+--   大表上无索引的窗口函数会产生&lt;strong&gt;磁盘临时表&lt;/strong&gt;，很慢</code></pre></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：为什么我的累计求和在同一值的行上结果相同？</summary><p>A：<strong>因为你用了默认的 RANGE 帧</strong>。排序键相同的行互为 peer，窗口要么全包含要么全不包含，所以它们的累计值相同。如果你期望「逐行递增」，必须显式写 <code>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code>。<strong>这是窗口函数最常见的「结果不对」的原因</strong>，而且很容易被误认为是数据库的 bug。</p></details><details><summary>Q：<code>ROW_NUMBER</code> 和 <code>RANK</code> 怎么选？</summary><p>A：<strong>看同值时是否接受并列</strong>。<code>ROW_NUMBER</code> 给 1,2,3,4（同值也分先后，顺序不确定）；<code>RANK</code> 给 1,2,2,4（并列后<strong>跳号</strong>）；<code>DENSE_RANK</code> 给 1,2,2,3（并列<strong>不跳号</strong>）。业务上「前三名」如果用 RANK，可能出现并列第二导致没有第三名——此时该用 DENSE_RANK。另外 <strong>ROW_NUMBER 在值相同时顺序是不确定的</strong>，需要稳定结果必须加一个唯一列作为次排序键。</p></details><details><summary>Q：窗口函数为什么这么慢？</summary><p>A：<strong>主要成本是排序</strong>。每个 <code>OVER (PARTITION BY a ORDER BY b)</code> 都需要一次排序，多个窗口函数若排序键相同可复用一次排序，不同则各自排序。优化手段——① <strong>建 (a, b) 复合索引</strong>让数据已有序，省去排序；② 减少<strong>不同排序键</strong>的窗口函数数量；③ 调大 <code>sort_buffer_size</code> 避免落盘。用 <code>EXPLAIN</code> 看是否出现 <code>Using temporary; Using filesort</code>。</p></details><details><summary>Q：能在 WHERE 里过滤窗口函数的结果吗？</summary><p>A：<strong>不能，必须用子查询或 CTE</strong>。因为 SQL 的执行顺序是 <code>WHERE → GROUP BY → 窗口函数 → ORDER BY</code>，窗口函数在 WHERE 之后才计算，所以 WHERE 里引用它属于「引用了还不存在的东西」。正确写法：<code>SELECT * FROM (SELECT ..., ROW_NUMBER() OVER(...) rn FROM t) x WHERE x.rn = 1</code>。这也是为什么「取每组第一行」要包一层子查询。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>ORDER BY day 且 10 月 1 日有两行，RANGE 到 CURRENT ROW 是否一定只包含当前这一行？</summary><p>不是。同一天的排序值相同，通常是 peer 组；两行都可包含当天两笔金额，得到 30。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="window-functions.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

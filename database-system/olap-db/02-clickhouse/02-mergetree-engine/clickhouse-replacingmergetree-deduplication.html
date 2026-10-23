@@ -11,6 +11,50 @@
 <section class="panel"><h2>什么时候用查询时去重</h2><p>报表必须读到当前准确状态时，可在查询中使用 FINAL，或构建按订单 ID 选最大版本的查询/物化状态。后者需注意聚合状态的正确合并与重复事件处理。大表全量 FINAL 有成本，先评估分区过滤、查询范围与并发。若是每日离线报表，可能接受等待合并后再计算，但等待并不是严格的正确性保证；后台合并何时完成受负载影响。</p><p>若指标本身是事件数，例如“支付状态变更次数”，就不该把旧版删除后再统计。建模时先给每个指标标明“事件”还是“实体当前快照”。把两种粒度混在一起，SQL 再复杂也补不回丢失的语义。</p></section>
 <section class="panel"><h2>写入与查询验收步骤</h2><p>建一张 ORDER BY order_id、带 version 的示意表，插入同一 order_id 的两条不同状态。立即查普通 SELECT、带 FINAL 的 SELECT，以及按 version 求最新的查询，对比行数与金额。再插入一次重复的 version=2 事件，检查重复投递是否产生多计。把更新时间跨分区的例子单独测试，确认实际分区策略不会让旧记录永久残留。</p><p>生产观测包含活跃 Part 数、后台合并队列、查询扫描行数、FINAL 查询延迟与磁盘占用。过多小 Part 会拖慢合并与查询；盲目执行昂贵的强制合并来追求“立刻去重”，可能影响整个集群。应按业务准确性需求选择查询时去重或独立当前状态层。</p></section>
 <section class="panel"><h2>三句必须说清的边界</h2><p>ReplacingMergeTree 的“Replacing”描述合并时的替换行为，不是事务式 UPDATE；ORDER BY 键定义哪些行会被视为同一逻辑行，不等于普通数据库的唯一约束；版本列帮助挑出新旧，不会自动修复错误分区或相同版本冲突。把这三句写到设计评审里，比只说“它支持去重”更能防止线上错账。</p><p>练习：订单 42 的待支付版与已支付版分别落在不同月份分区，报表按月统计当前订单金额。请说明直接 SUM、加 FINAL、重新设计分区或建当前状态表各自需要检查什么。</p></section>
+<section class="panel" data-dry-goods><h2>MergeTree 引擎家族对照</h2><div class="table-wrap"><table><thead><tr><th>引擎</th><th>合并时做什么</th><th>去重/折叠粒度</th><th>适用</th></tr></thead><tbody><tr><td>MergeTree</td><td>只合并排序，不处理重复</td><td>无</td><td>日志、明细（重复可接受）</td></tr><tr><td>ReplacingMergeTree(ver)</td><td>保留 <code>ORDER BY</code> 键相同的一组中 ver 最大的行</td><td>ORDER BY 键</td><td>需要去重的明细表</td></tr><tr><td>SummingMergeTree</td><td>把数值列求和</td><td>ORDER BY 键</td><td>只关心累加值的指标表</td></tr><tr><td>AggregatingMergeTree</td><td>按 AggregateFunction 状态合并</td><td>ORDER BY 键</td><td>预聚合指标</td></tr><tr><td>CollapsingMergeTree(sign)</td><td>按 sign 成对抵消（1/-1）</td><td>ORDER BY 键</td><td>可取消的状态更新</td></tr><tr><td>VersionedCollapsingMergeTree</td><td>带版本的抵消，乱序也能正确折叠</td><td>ORDER BY + version</td><td>乱序更新场景</td></tr></tbody></table></div><p class="muted">共同前提：<b>合并是后台异步的</b>，只在同一个 partition 内、同一个 part 合并时才发生。因此「插入后立刻查」可能仍看到重复行——这不是 bug，是使用方式问题。</p></section><section class="panel"><h2>合并相关参数与观测</h2><div class="table-wrap"><table><thead><tr><th>参数 / 指标</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td><code>parts_to_delay_insert</code></td><td>150</td><td>单表 parts 数超过它，INSERT 开始被人为延迟（反压写入）</td></tr><tr><td><code>parts_to_throw_insert</code></td><td>300</td><td>超过则直接报 <code>TOO_MANY_PARTS</code> 拒绝写入</td></tr><tr><td><code>max_bytes_to_merge_at_max_space_in_pool</code></td><td>约 150 GB</td><td>后台合并能处理的最大总大小</td></tr><tr><td><code>system.parts</code></td><td>—</td><td>看每个 part 的 active/行数/大小/合并时间</td></tr><tr><td><code>system.merges</code></td><td>—</td><td>正在进行的合并与进度</td></tr><tr><td><code>OPTIMIZE ... FINAL</code></td><td>手动</td><td>强制合并（代价高，勿频繁调用）</td></tr></tbody></table></div><p><b>建表与观测</b></p><pre><code>-- 建表：ORDER BY 决定去重粒度（必须包含业务唯一键）
+CREATE TABLE events
+(
+    id          UInt64,
+    user_id     UInt64,
+    amount      Decimal(18,2),
+    version     UInt64 DEFAULT 0,      -- 版本号，保留最大的一条
+    updated_at  DateTime
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(updated_at)
+ORDER BY (id);                         -- 去重键 = id
+
+-- 观测 parts 状态
+SELECT partition, name, active, rows, bytes_on_disk,
+       formatReadableSize(bytes_on_disk) AS size
+  FROM system.parts
+ WHERE table = 'events' AND database = 'default'
+ ORDER BY modification_time DESC LIMIT 10;
+
+-- 正在进行的合并
+SELECT table, elapsed, progress, num_parts, total_size_bytes_compressed
+  FROM system.merges;
+
+-- 强制合并（仅在维护窗口使用）
+OPTIMIZE TABLE events FINAL;</code></pre></section>
+<section class="panel"><h2>查询时拿到“确定去重”结果的三种写法</h2><div class="table-wrap"><table><thead><tr><th>写法</th><th>语义</th><th>代价</th><th>适用</th></tr></thead><tbody><tr><td><code>SELECT ... FINAL</code></td><td>读取时做合并去重</td><td>额外合并开销，大表明显</td><td>正确性优先、量不大</td></tr><tr><td><code>argMax(col, ver) GROUP BY key</code></td><td>显式取 ver 最大的行</td><td>一次聚合，可控</td><td>大表首选</td></tr><tr><td>预聚合表 / 物化视图</td><td>写入时就折叠</td><td>存储与写入逻辑成本</td><td>固定查询模式</td></tr></tbody></table></div><p><b>查询写法</b></p><pre><code>-- 写法 1：FINAL（简单但可能有额外开销）
+SELECT count() FROM events FINAL WHERE user_id = 42;
+
+-- 写法 2：argMax 显式取最新版本（推荐，可控制）
+SELECT id,
+       argMax(amount, version)     AS amount,
+       argMax(updated_at, version) AS updated_at
+  FROM events
+ WHERE user_id = 42
+ GROUP BY id;
+
+-- 写法 3：只关心最新 N 条时的过滤技巧
+SELECT * FROM events
+ WHERE (id, version) IN (
+     SELECT id, max(version) FROM events GROUP BY id
+ );</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>插入后查到重复行</td><td>后台合并未完成</td><td>查询侧用 FINAL / argMax；或用物化视图预折叠</td></tr><tr><td>去重根本没生效</td><td><code>ORDER BY</code> 没包含业务唯一键</td><td>把唯一键放进 ORDER BY（去重粒度由它决定）</td></tr><tr><td>保留的不是最新那条</td><td>未提供 version 列或版本无序</td><td>建 ReplacingMergeTree(version) 并保证版本号递增</td></tr><tr><td>报 TOO_MANY_PARTS</td><td>小批量高频写入产生过多 part</td><td>批量写入（每批 ≥ 1 万行或 ≥ 10 MB）；调大阈值只是缓解</td></tr><tr><td>跨分区仍有重复</td><td>去重只在分区内发生</td><td>唯一键不要跨分区；或按唯一键分区</td></tr><tr><td>OPTIMIZE FINAL 很慢</td><td>强制合并全表</td><td>只在维护窗口执行；日常靠后台合并</td></tr><tr><td>count() 每次都不一样</td><td>合并时机不确定</td><td>用 <code>count() FROM t FINAL</code> 或 uniqExact 语义明确化</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么插入后立刻查询还会看到重复？</summary><p>因为 ReplacingMergeTree 的去重发生在<b>后台 part 合并</b>时，而合并由系统调度、时机不确定，且只在同分区内发生。所以写入后到合并完成之间，重复行是可见的。要拿到确定的去重结果，需在查询侧用 FINAL 或 argMax。</p></details><details><summary>ReplacingMergeTree 的去重粒度由什么决定？</summary><p>由 <code>ORDER BY</code>（排序键）决定：只有 ORDER BY 键完全相同的一组行才会被折叠成一行。所以建表时必须把业务唯一键放进 ORDER BY，否则去重不会按你预期生效。</p></details><details><summary>version 参数有什么用？</summary><p>指定用哪一列作为版本号，合并时保留该列<b>最大</b>的那一行。没有它时保留哪一行是不确定的（通常是最后写入的，但不保证）。需要保留最新状态的表必须显式指定 version。</p></details><details><summary>FINAL 和 argMax 怎么选？</summary><p>FINAL 写起来简单，但会让 ClickHouse 在读取时额外执行合并逻辑，大表上开销明显；argMax 是一次显式聚合，能利用索引与并行，且语义清晰可控，生产中更推荐。固定查询模式还可以用物化视图在写入时预折叠，代价最低。</p></details><details><summary>频繁出现 TOO_MANY_PARTS 说明什么？</summary><p>说明写入批次太小太碎：每批数据都会生成一个 part，parts 数超过 <code>parts_to_delay_insert</code>（默认 150）就开始反压，超过 <code>parts_to_throw_insert</code>（默认 300）就拒绝写入。根治办法是客户端攒批（每批 ≥ 1 万行或 ≥ 10 MB），调大阈值只是缓解。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>ReplacingMergeTree 中插入 v2 后，普通 SUM(amount) 能立刻保证只算 v2 吗？</summary><p>不能。后台合并异步，普通查询可能同时读到 v1 和 v2；需要按准确性要求设计查询时去重。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="clickhouse-mergetree.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -435,6 +435,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="bg-particles"></div>
@@ -768,6 +786,31 @@
                 这套"自动档"编码切换机制，让 Redis Hash 能够在不同数据规模下都保持最优表现。
             </p>
         </section>
+<section class="encoding-section" data-dry-goods><div class="x-dry"><h2>Hash 的两种编码与阈值</h2><div class="table-wrap"><table><thead><tr><th>编码</th><th>底层</th><th>触发条件</th><th>特点</th></tr></thead><tbody><tr><td><b>listpack</b>（Redis 7+）</td><td>紧凑的连续内存双向列表（原 ziplist 的替代）</td><td>字段数 ≤ <code>hash-max-listpack-entries</code>（<b>128</b>）<b>且</b>每个 field/value 长度 ≤ <code>hash-max-listpack-value</code>（<b>64 字节</b>）</td><td><b>极省内存</b>（连续存储、无指针），但读写是 O(n)</td></tr><tr><td><b>hashtable</b></td><td>标准字典（dict）</td><td>任一条件超出（字段数 &gt; 128 或 有值 &gt; 64 字节）</td><td>O(1) 读写，但每个 entry 有指针与结构体开销</td></tr></tbody></table></div><p><b>关键：转换是单向的</b>。一旦转成 hashtable，即使删掉大部分字段也<b>不会</b>变回 listpack（要重启或重建 key）。所以写入模式（是否会短暂超阈值）决定了长期的内存占用。</p><p><b>Hash 编码验证</b></p><pre><code># 查看与修改阈值
+CONFIG GET hash-max-listpack-entries    # 128
+CONFIG GET hash-max-listpack-value      # 64
+CONFIG SET hash-max-listpack-entries 256
+
+# 观察编码转换
+HSET h1 f1 v1
+OBJECT ENCODING h1          # "listpack"
+# 写入一个超过 64 字节的 value
+HSET h1 f2 "$(python3 -c 'print("x"*70)')"
+OBJECT ENCODING h1          # "hashtable"（已转换，不可逆）
+
+# 对比两种编码的内存
+MEMORY USAGE h1
+# 典型差异：listpack 比 hashtable 省 30%–60% 内存
+
+# 扫描大 key
+redis-cli --bigkeys
+MEMORY USAGE &lt;key&gt;
+
+# 生产推荐：用 hash 存对象（而不是多个 string key）
+HSET user:1 name "a" age "20" city "bj"     # 一个 key 存整个对象
+# 对比：SET user:1:name a / SET user:1:age 20 ...（key 数量暴涨，元数据开销大）</code></pre><p class="muted">Redis 7.0 之前叫 <code>ziplist</code>，配置项是 <code>hash-max-ziplist-entries</code>/<code>-value</code>；7.0 起改名为 listpack（更安全的实现，解决了 ziplist 的级联更新问题）。升级时注意配置项改名。</p></div></section>
+<section class="encoding-section" ><div class="x-dry"><h2>选型与坑</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>做法</th><th>理由</th></tr></thead><tbody><tr><td>存对象（用户、商品、配置）</td><td><b>用 Hash</b>，而不是多个 String</td><td>Key 数量少几个量级，元数据开销小；可整取也可取单字段</td></tr><tr><td>字段多且有长文本</td><td>拆成两个 Hash（短字段一个、长文本一个）</td><td>避免长文本把整个 hash 撑成 hashtable</td></tr><tr><td>需要单独设置 TTL</td><td>只能用 String（Hash 的<b>字段不支持 TTL</b>）</td><td>Hash 只有整个 key 有过期时间</td></tr><tr><td>需要对字段做过期/排序</td><td>用 ZSet 或另建索引</td><td>Hash 无字段级过期与分数</td></tr><tr><td>购物车（用户id → 商品id → 数量）</td><td>Hash：key=<code>cart:userId</code>，field=商品，value=数量</td><td>天然契合，HINCRBY 方便</td></tr></tbody></table></div><ul><li><b>listpack 的 O(n) 陷阱</b>：字段数在 100 以内时 O(n) 完全没问题（n 很小，且连续内存缓存友好），所以默认 128 是合理的。但如果把阈值调到几千，<code>HGET</code> 就变成几万次遍历了——<b>阈值要按“字段数少、值短”来调</b>。</li><li><b>级联更新（旧 ziplist 的问题）</b>：ziplist 每个节点存“前一个节点的长度”，插入一个变长的节点可能触发后续节点连锁扩容（最坏 O(n²)）。listpack 通过存自身长度解决了这个问题——这是 Redis 7 换掉 ziplist 的直接原因。</li><li><b>HGETALL 在大 Hash 上会阻塞</b>：字段几万时 <code>HGETALL</code>/<code>HKEYS</code> 是重操作。用 <code>HSCAN</code> 分批遍历。</li><li><b>序列化开销</b>：hashtable 编码下每个 field/value 都要存 SDS，加上 dictEntry 的指针（约 30+ 字节/字段）。所以 1000 个短字段的 hash，hashtable 可能比 listpack 多占 <b>2–3 倍</b>内存。</li><li><b>排障</b>：<code>OBJECT ENCODING</code> → <code>HLEN</code> 看字段数 → <code>MEMORY USAGE</code> → 若大量 hash 是 hashtable 且字段很少，检查是否曾有超大 value 触发了不可逆转换。</li></ul><details><summary>为什么我的 hash 字段只有 50 个，却是 hashtable？</summary><p>因为它曾经超过阈值（字段数 &gt; 128，或曾经写过 &gt; 64 字节的 value），转换不可逆。删掉大字段也不会变回 listpack。解决：重建 key，或调大阈值后重新写入。</p></details><details><summary>Hash 的字段名能设置过期吗？</summary><p>不能。Redis 的过期是 <b>key 级</b>的，Hash/ZSet/List 的单个字段都不支持 TTL。需要字段级过期要另建一个 ZSet（score 为过期时间戳）做定时清理。</p></details></div></section>
+
     </div>
 
     <script>

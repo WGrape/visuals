@@ -11,6 +11,47 @@
 <section class="panel"><h2>聚合前还是聚合后算 rate</h2><p>两台实例各有自己的 Counter。实例 A 重启归零，实例 B 正常增加；若先把两台 Counter 的原始值相加，再对总和求 rate，A 的重置可能被 B 的增长掩盖，导致增量错误。通常先对每条实例时间线分别处理重置和速率，再按服务、地区等维度求和。这也是许多监控查询语言推荐的运算顺序。</p><p>在看板里要写单位：requests/s 与 requests/min 只差倍数但解释不同。一个带 service、instance、status 等标签的指标，聚合时要明确保留哪些维度，否则把 2xx 和 5xx 合并后可能看不到错误率；错误率应以相同窗口、相同服务范围的错误请求速率除以总请求速率。</p></section>
 <section class="panel"><h2>Gauge、直方图和分位数</h2><p>队列长度是 Gauge，当前从 100 降到 20 是好事或异常，不能按 Counter 重置规则把“下降”解释为新增 20。Gauge 可以计算时间平均，但平均队列长度 20 不保证 P99 请求等待短，仍需时延分布。延迟直方图若以各桶累计计数表示，桶本身常是 Counter，可对桶增量或速率做聚合，再估算分位数；多个实例各自的 P99 不能简单取平均后称为全局 P99。</p><p>降采样时也要保持类型：Counter 可存窗口增量或速率统计，Gauge 可存 min/max/avg/last；如果只保留 Gauge 的平均值，就不能再复原短时尖峰。保留策略与查询问题要一起设计。</p></section>
 <section class="panel"><h2>一次告警排障</h2><p>看板 QPS 突然跌成负数，先查原始 Counter 是否在进程重启后归零、目标是否缺测、查询是否错误使用差值。若 QPS 归零且目标仍活着，再看业务真实请求是否下降、网关路由是否改了标签。若只是某实例重启，按实例求 rate 再汇总应比“先总和后 rate”稳定。最后用网关请求日志或业务计数对照数量级，确认修复不是把错误曲线藏起来。</p><p>验收应测试正常增长、单实例重启、采集丢点、两实例轮流重启和标签变更五种情况，并记录查询表达式版本。监控指标是观测近似值，涉及计费、结算或审计时仍应以可核对的业务记录为准。</p></section>
+<section class="panel" data-dry-goods><h2>指标类型与 rate 计算</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>特点</th><th>典型例子 / 处理</th></tr></thead><tbody><tr><td><b>Counter</b></td><td>单调<b>递增</b>（只增不减，除非重置）</td><td>请求数、字节数。必须用 <code>rate()</code>/<code>increase()</code> 才有意义</td></tr><tr><td><b>Gauge</b></td><td>可增可减</td><td>内存占用、队列长度、温度。<b>直接取值</b>，不要用 rate</td></tr><tr><td><b>Histogram</b></td><td>分桶计数 + 总和</td><td>请求耗时。用于算分位数 <code>histogram_quantile()</code></td></tr><tr><td><b>Summary</b></td><td>客户端算好的分位数</td><td>不能做跨实例聚合，已不推荐</td></tr><tr><td>Counter 重置</td><td>进程重启后归零</td><td>PromQL 会自动检测（值变小 = 发生过重置），并补偿</td></tr><tr><td><code>rate(m[5m])</code></td><td>5 分钟窗口的<b>每秒平均增速</b></td><td>窗口太短会抖，太长会掩盖尖峰</td></tr><tr><td><code>increase(m[1h])</code></td><td>1 小时内的增量</td><td>等价于 <code>rate(m[1h]) * 3600</code></td></tr><tr><td><code>irate(m[5m])</code></td><td>最近<b>两个</b>数据点的瞬时速率</td><td>比 rate 敏感，适合看尖峰，<b>不适合告警</b></td></tr></tbody></table></div><p><b>窗口怎么选</b>：必须 ≥ <b>4 倍</b>抓取间隔（scrape_interval）。15s 抓取时，5m 窗口有 <code>300/15 = 20</code> 个点，足够平滑；若窗口只有 1m（4 个点），rate 会因为漏采而剧烈抖动。<b>窗口 &lt; 4×间隔 是 rate 失真的头号原因</b>。</p></section><section class="panel"><h2>PromQL 实战</h2><pre><code># 请求速率（每秒）
+rate(http_requests_total[5m])
+
+# 按状态码聚合
+sum by (status) (rate(http_requests_total[5m]))
+
+# 错误率（百分比）
+100 * sum(rate(http_requests_total{status=~"5.."}[5m]))
+    / sum(rate(http_requests_total[5m]))
+
+# 1 小时的总增量
+increase(orders_total[1h])
+
+# 处理 Counter 重置：rate/increase 会自动处理；手写时要自己判断
+# 原理：后值 &lt; 前值 说明重置，则增量 = 后值（从 0 重新数）
+
+# 分位数（Histogram）
+histogram_quantile(0.95,
+  sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+# 注意：必须按 le 聚合；bucket 配置不合理时结果误差很大
+
+# Gauge 不要套 rate
+# ❌ rate(memory_usage_bytes[5m])     内存不是计数器，结果毫无意义
+# ✅ memory_usage_bytes               直接取
+# ✅ avg_over_time(memory_usage_bytes[5m])   要看区间平均用这个</code></pre><pre><code># 常见错误与修正
+# 1) 窗口太短导致 rate 为 0 或跳变
+rate(x[30s])        # 15s 抓取下只有 2 个点，极不稳定 -&gt; 改成 [5m]
+
+# 2) 用 irate 做告警（会漏报/误报）
+irate(x[5m]) &gt; 100  # 只看最后两点，抖动剧烈 -&gt; 告警用 rate
+
+# 3) Counter 直接相减（会踩到重置）
+x - x offset 1h     # 若期间重启过，结果是负数 -&gt; 用 increase(x[1h])
+
+# 4) 对 Gauge 用 rate
+rate(queue_size[5m])  # 语义错误 -&gt; 直接看 queue_size
+
+# 5) 忘记处理 Counter 的 job/instance 变化
+sum(rate(x[5m]))    # 实例重启后 instance 标签变了，可能产生断点
+                    # 修复：用 without(instance) 或给指标加稳定的聚合标签</code></pre></section>
+<section class="panel"><h2>排查清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>rate 曲线剧烈抖动</td><td>窗口 &lt; 4×抓取间隔</td><td>窗口放大到 <b>4×间隔</b> 以上（15s 抓取用 5m）</td></tr><tr><td>rate 突然变为 0</td><td>抓取失败（target down）或指标名变了</td><td>看 <code>up</code> 指标；检查 exporter</td></tr><tr><td>出现负值</td><td>手写减法遇到 Counter 重置</td><td>改用 <code>increase()/rate()</code>，它们自动处理重置</td></tr><tr><td>分位数结果不准</td><td>bucket 划分太粗（如只有 1 个桶）</td><td>按实际耗时分布设 bucket（如 10ms/50ms/100ms/500ms/1s/5s）</td></tr><tr><td>数据量太大（series 爆炸）</td><td>高基数标签（user_id、url）</td><td><b>禁止把高基数字段作为 label</b>；一个 label 值的笛卡尔积就是 series 数</td></tr><tr><td>重启后曲线断裂</td><td>instance 标签变化 / 抓取中断</td><td>用 <code>without(instance)</code> 聚合；保证 scrape 稳定</td></tr><tr><td>rate 与实际感知不符</td><td>irate vs rate 混用</td><td>看趋势用 rate，找尖峰用 irate，别混</td></tr></tbody></table></div><p class="muted"><b>基数爆炸的量化</b>：假设有 1000 个实例 × 20 个状态码 × 50 个接口 = <b>100 万条 series</b>。每条约 3~5 字节/样本，15s 抓取一天就是 <b>约 200 亿</b> 数据点。所以 <b>URL 路径、用户 ID、订单号绝不能做 label</b>。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>两实例 Counter 要统计服务总 QPS，通常先把原始值相加再对和求 rate 吗？</summary><p>通常先对每条实例时间线分别处理重置并求 rate，再汇总；先相加可能掩盖某实例的重置。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/tsdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

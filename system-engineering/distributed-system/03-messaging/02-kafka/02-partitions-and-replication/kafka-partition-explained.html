@@ -376,6 +376,24 @@
     .hero h1 { font-size: 24px; }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -1096,5 +1114,34 @@ window.addEventListener('resize', () => {
 
 initAll();
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>分区数与副本的关键数值</h2><div class="table-wrap"><table><thead><tr><th>参数 / 概念</th><th>默认值 / 典型值</th><th>说明</th></tr></thead><tbody><tr><td><code>num.partitions</code></td><td>1（常改为 3~12）</td><td>自动创建 topic 时的分区数，<b>只能增不能减</b></td></tr><tr><td><code>default.replication.factor</code></td><td>1（生产用 3）</td><td>副本数。3 副本可容忍 1 节点故障</td></tr><tr><td><code>min.insync.replicas</code></td><td>1</td><td>配合 <code>acks=all</code>。设为 2 时，3 副本可容忍 1 副本掉队</td></tr><tr><td><code>acks</code></td><td>1（0.8.2 之前）</td><td><b>0</b> 不等确认（最快最易丢）/<b>1</b> 等 leader /<b>all</b> 等 ISR 全部</td></tr><tr><td><code>replication.factor=3, min.insync=2, acks=all</code></td><td>生产标准组合</td><td>丢数据概率极低，吞吐约为 acks=1 的 <b>60%~70%</b></td></tr><tr><td>单分区吞吐</td><td>约 <b>5~10 MB/s</b> 写</td><td>分区是<b>并行度上限</b>：consumer 数 &gt; 分区数时多余的会空闲</td></tr><tr><td>分区内顺序</td><td>保证</td><td>全局顺序需要分区数=1，或按 key 路由保证<b>同 key 有序</b></td></tr><tr><td><code>segment.bytes</code></td><td>1 GiB</td><td>日志分段大小，影响清理粒度与索引密度</td></tr><tr><td><code>retention.ms</code></td><td>604800000（7 天）</td><td>也可按 <code>retention.bytes</code> 限制总量</td></tr></tbody></table></div><p><b>分区数怎么定</b>：经验公式 <code>分区数 ≈ max(目标吞吐 / 单分区吞吐, 消费者线程数)</code>。例如目标 50 MB/s、单分区 10 MB/s、消费端 8 线程 → 至少 <b>8~12</b> 个分区。分区过多（&gt; 200/分区每 broker）会带来文件句柄膨胀、leader 切换变慢、端到端延迟上升。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>运维命令</h2><pre><code># 查看 topic 分区分布与 leader/ISR
+kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic orders
+# 输出：Partition 0 -&gt; Leader: 2, Replicas: 2,1,3, Isr: 2,3   ← Isr 缺 1 说明副本 1 掉队
+
+# 增加分区（只能增，且会打乱 key→分区映射，有顺序需求的要停写）
+kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic orders --partitions 12
+
+# 查看消费组堆积（LAG = LOG-END-OFFSET - CURRENT-OFFSET）
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group order-service
+# TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG ...
+# orders  0       12000          15000          3000
+
+# 重置 offset 到最早/最新（重放或跳过堆积）
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group order-service \
+  --topic orders --reset-offsets --to-earliest --execute
+
+# 查看 topic 实际磁盘占用
+kafka-log-dirs.sh --bootstrap-server localhost:9092 --describe --topic-list orders \
+  | grep -o '"size":[0-9]*' </code></pre><pre><code># 生产端可靠性配置（Java）
+props.put("acks", "all");                       // 等 ISR 全部确认
+props.put("enable.idempotence", "true");        // 幂等，防重试导致乱序/重复
+props.put("max.in.flight.requests.per.connection", "5"); // 幂等开启后最多 5 仍保序
+props.put("retries", Integer.MAX_VALUE);        // 幂等开启后可用无限重试
+props.put("compression.type", "lz4");           // 吞吐 +30%~50%，CPU +少量
+props.put("linger.ms", 5);                      // 攒批 5ms，吞吐提升明显
+props.put("batch.size", 32768);                 // 32 KiB 批大小</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>分区相关问题排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>consumer 有线程一直空闲</td><td>consumer 数 &gt; 分区数</td><td>加分区，或减少 consumer。<b>分区数是消费并行度的硬上限</b></td></tr><tr><td>消息顺序乱了</td><td>跨分区无序；或重试 + <code>max.in.flight&gt;1</code> 未开幂等</td><td>按业务 key 分区保证同 key 有序；开启 <code>enable.idempotence</code></td></tr><tr><td>UNKNOWN_TOPIC_OR_PARTITION</td><td>topic 未创建 / <code>auto.create.topics.enable</code> 关闭</td><td>预先建 topic；生产环境建议关闭自动创建，避免拼写错误建出垃圾 topic</td></tr><tr><td>ISR 频繁收缩</td><td>副本同步跟不上（磁盘慢 / 网络 / GC 停顿）</td><td>看 <code>replica.lag.time.max.ms</code>（默认 30s）；加大或优化 follower 所在节点 IO</td></tr><tr><td>LEADER_NOT_AVAILABLE</td><td>正在选主</td><td>重试即可；频繁出现说明 controller 不稳定，检查 ZK/KRaft 与 broker 存活</td></tr><tr><td>磁盘涨满</td><td><code>retention</code> 设置过大或消费停滞</td><td>按 <code>retention.bytes</code> 设硬上限；先查 LAG 确认是不是消费端挂了</td></tr><tr><td>扩容后分区数不够用</td><td>分区只能增</td><td>一开始就留出余量（如按 2 年后的峰值）；实在不够就新建大分区 topic 做双写迁移</td></tr></tbody></table></div><p class="muted">Kafka 分区数与 JVM 文件句柄：每分区至少有 <b>2 个文件</b>（.log + .index），建议单 broker 分区数控制在 <b>100 × 磁盘数</b> 量级以内。</p></div></section>
 </body>
 </html>

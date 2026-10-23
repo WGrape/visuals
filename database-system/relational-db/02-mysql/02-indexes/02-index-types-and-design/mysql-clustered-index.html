@@ -129,6 +129,24 @@
   footer { text-align: center; color: #5a6078; font-size: 0.85rem; margin-top: 40px; }
   footer a { color: var(--accent); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="container">
@@ -315,7 +333,42 @@
     <p>延伸阅读：主键查询为什么快（不回表）、覆盖索引如何省掉回表、UUID 为什么不适合当聚簇键——都源自上面这一个点。</p>
   </div>
 
-  <footer>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>聚簇索引 vs 二级索引：结构差别</h2><div class="table-wrap"><table><thead><tr><th>对比</th><th><b>聚簇索引（Clustered）</b></th><th><b>二级索引（Secondary）</b></th></tr></thead><tbody><tr><td>叶子节点存什么</td><td><b>整行数据</b></td><td><b>索引列 + 主键值</b></td></tr><tr><td>数量</td><td><b>每表仅 1 个</b></td><td>可以有多个</td></tr><tr><td>默认是什么</td><td><b>主键</b>；无主键则选第一个唯一非空索引；都没有则隐式 6 字节 ROWID</td><td>自己建的 KEY</td></tr><tr><td>查到后要不要再查</td><td><b>不需要</b>（数据就在叶子）</td><td><b>需要回表</b>（用主键再查一次聚簇索引）</td></tr></tbody></table></div><p><b>回表的代价</b>：一次二级索引查询 = <b>二级索引 B+树查找</b>（2-3 次 IO）+ <b>聚簇索引 B+树查找</b>（2-3 次 IO）。而且回表的主键值通常是<b>乱序</b>的，会产生<b>随机 IO</b>——这是“为什么明明有索引还是慢”的常见原因。</p><p><b>回表与覆盖索引诊断</b></p><pre><code>-- 判断是否回表：看执行计划里有没有 Using index
+EXPLAIN SELECT name FROM users WHERE age = 20;
+-- +----+-------+------+---------------+------+---------+------+------+-------------+
+-- | id | type  | key  | key_len | ref  | rows | Extra                |
+-- |  1 | ref   | idx_age | 5     | const|  100 | NULL                 |  &lt;- 要回表
+-- |  1 | ref   | idx_age | 5     | const|  100 | Using index          |  &lt;- 覆盖索引，不回表
+
+-- 覆盖索引优化：把要查的列也放进索引
+ALTER TABLE users ADD INDEX idx_age_name (age, name);
+-- 再 EXPLAIN，Extra 出现 "Using index" -&gt; 不回表，快 2-3 倍
+
+-- 用 optimizer_trace 看优化器的选择过程
+SET optimizer_trace = 'enabled=on';
+SELECT * FROM users WHERE age = 20;
+SELECT * FROM information_schema.OPTIMIZER_TRACE\G
+SET optimizer_trace = 'enabled=off';</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>B+树高度与容量：能存多少行</h2><div class="table-wrap"><table><thead><tr><th>计算项</th><th>数值</th><th>推导</th></tr></thead><tbody><tr><td>InnoDB 页大小</td><td><b>16 KB</b>（默认，不可在线改）</td><td><code>innodb_page_size</code></td></tr><tr><td>非叶子节点每项</td><td><b>约 14 B</b>（BIGINT 主键 8 B + 指针 6 B）</td><td>—</td></tr><tr><td><b>每页索引项数</b></td><td><b>约 1170</b></td><td>16 × 1024 / 14 ≈ 1170</td></tr><tr><td>叶子页能存行数</td><td>16 KB / 行大小</td><td>行 1 KB → 约 <b>16 行</b>；行 200 B → 约 80 行</td></tr><tr><td><b>2 层树</b></td><td>约 <b>1170 × 16 ≈ 1.9 万行</b></td><td>根 + 叶子</td></tr><tr><td><b>3 层树</b></td><td>约 <b>1170² × 16 ≈ 2190 万行</b></td><td><b>绝大多数业务表</b></td></tr><tr><td><b>4 层树</b></td><td>约 <b>256 亿行</b></td><td>极少数超大表</td></tr></tbody></table></div><p><b>这个推导的实践意义</b>：单表 <b>2000 万行以内</b>，B+树基本是 <b>3 层</b>，也就是<b>最多 3 次 IO</b> 就能定位一行（而且根节点常驻内存，实际只有 2 次磁盘 IO）。这就是为什么“单表 2000 万要分库分表”的说法不完全准确——<b>真正要看的是 B+树层数，而不是行数</b>。行很宽的表（比如 4 KB/行）100 万行就可能有性能问题。</p><p class="muted"><b>更精确的公式</b>：<code>层数 = log₁₁₇₀(行数 / 每页行数) + 1</code>。实际影响因素还有：页填充率（InnoDB 默认 <b>15/16 ≈ 94%</b>）、行溢出（大字段会存到溢出页）、以及缓冲池命中率（<code>innodb_buffer_pool_size</code> 够大的话，索引页基本都在内存，IO 次数接近 0）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>主键该选自增还是 UUID？</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>自增 BIGINT</b></th><th><b>UUID / 随机值</b></th></tr></thead><tbody><tr><td>插入模式</td><td><b>顺序追加</b>到最右页</td><td><b>随机</b>插入到各页</td></tr><tr><td>页分裂</td><td><b>几乎不分裂</b>（满页才分裂 15/16）</td><td><b>频繁分裂</b>，碎片多</td></tr><tr><td>空间利用率</td><td>接近 <b>94%</b></td><td>可降到 <b>60% 以下</b></td></tr><tr><td>索引大小</td><td>主键 8 B</td><td>UUID 字符串 <b>36 B</b>（或 BINARY(16) 16 B）</td></tr><tr><td>二级索引大小</td><td>叶子存 8 B 主键</td><td>叶子存 36 B 主键 → <b>二级索引膨胀 4 倍</b></td></tr><tr><td>缓冲池效率</td><td>热点集中，命中率高</td><td>随机分散，命中率低</td></tr></tbody></table></div><p><b>碎片整理与 UUID 优化</b></p><pre><code>-- 观察页分裂与碎片
+SHOW TABLE STATUS LIKE 'users'\G
+--   Data_length:    数据总字节
+--   Data_free:      碎片空间（越大说明分裂越多）
+--   Avg_row_length: 平均行长度（若远大于理论值，说明有碎片/溢出）
+
+-- 整理碎片（会锁表，5.6+ 支持 Online DDL）
+ALTER TABLE users ENGINE=InnoDB;        -- 重建表，回收碎片
+OPTIMIZE TABLE users;                   -- 等价，会重建 + 更新统计信息
+
+-- UUID 的正确用法：用 UUID_TO_BIN 存 16 字节，并交换时间位使其有序
+-- MySQL 8.0 原生支持
+INSERT INTO t (id) VALUES (UUID_TO_BIN(UUID(), 1));   -- 参数 1 = 交换时间低位到前面
+SELECT BIN_TO_UUID(id, 1) FROM t;
+-- 效果：UUID 的前 8 字节变成递增的 -&gt; 插入接近顺序 -&gt; 大幅减少页分裂
+-- 索引大小从 36B 降到 16B，且不再随机分裂</code></pre><p class="muted"><b>如果必须用 UUID</b>：① 用 <code>BINARY(16)</code> 而非 <code>CHAR(36)</code>（省 55%）；② 用 MySQL 8.0 的 <code>UUID_TO_BIN(uuid, 1)</code> 让时间位前置，插入变成近似顺序；③ 或者用 <b>Snowflake 风格的分布式 ID</b>（8 字节、趋势递增），这是最推荐的做法。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>为什么 InnoDB 必须有主键？</summary><p>因为<b>聚簇索引决定了数据的物理存储顺序</b>，必须有一个 key 来组织整行数据。如果你不显式定义，InnoDB 会：① 找第一个<b>非空唯一索引</b>；② 都没有则<b>自动生成一个 6 字节的隐藏 ROWID</b>。隐藏 ROWID 的问题是：<b>你无法引用它</b>（不能用于二级索引回表以外的任何地方），而且是全局自增（<code>dict_sys->row_id</code>），多表共享可能引发性能竞争。所以<b>一定要显式定义主键</b>。</p></details><details><summary>回表一定慢吗？什么时候可以接受？</summary><p>不一定。如果回表的行数很少（比如 <code>LIMIT 10</code> 或命中率高的等值查询），回表只有几次随机 IO，完全可以接受。真正慢的是<b>大量回表</b>：比如 <code>SELECT * FROM t WHERE age BETWEEN 20 AND 30</code> 命中 10 万行，就要 10 万次回表，这时优化器可能<b>直接放弃索引走全表扫描</b>——这就是“明明建了索引却全表扫”的原因（回表成本 &gt; 全表成本）。经验阈值：<b>命中超过全表 20 – 30%</b> 时优化器倾向全表扫描。</p></details><details><summary>什么是索引下推（ICP）？</summary><p>MySQL 5.6+ 的优化：对于<b>联合索引 + 无法完全用上索引的条件</b>，以前是在二级索引里找到主键后<b>回表</b>再过滤；ICP 允许<b>在二级索引层就用 where 条件过滤</b>，过滤掉的记录就不用回表了。效果：回表次数大幅减少。EXPLAIN 里显示 <b><code>Using index condition</code></b>。比如 <code>INDEX (name, age)</code> + <code>WHERE name LIKE '张%' AND age = 20</code>，虽然 <code>age</code> 用不上索引（因为 name 是范围），但 ICP 会在索引层先判 age=20。</p></details><details><summary>联合索引的最左前缀原则具体怎么用？</summary><p>规则：<b>索引 (a, b, c) 相当于建了 (a)、(a,b)、(a,b,c) 三个索引</b>，但<b>不能跳过</b>——<code>WHERE b=1</code> 用不上，<code>WHERE a=1 AND c=3</code> 只能用上 a。例外：MySQL 8.0.13+ 有 <b>索引跳跃扫描（Index Skip Scan）</b>，在 a 的<b>不同值很少</b>时能跳过 a，但效果有限，别依赖。实践建议：① <b>等值列放前面，范围列放最后</b>（范围列之后的列用不上）；② 区分度高的列放前面；③ 考虑<b>覆盖索引</b>把查询列也加进去。</p></details></div></section>
+<footer>
     <p>WorkBuddy · 数据库系统 · MySQL 索引系列 · 聚簇索引</p>
     <p>同章课程：<a href="mysql-index-explained.html">索引深入解析</a> · <a href="mysql-covering-index.html">覆盖索引</a> · <a href="../01-bplus-tree-and-pages/b-plus-tree-explainer.html">B+树从数据页说起</a></p>
   </footer>

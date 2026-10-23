@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>存储引擎 - Visuals</title>
+<title>💾 HBase 存储结构 - Visuals</title>
 <style>
   :root {
     --bg:#f6f8fb; --card:#fff; --text:#1f2933; --muted:#66707a;
@@ -39,6 +39,39 @@
   .note.green { background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
   ul.tight { margin:10px 0; padding-left:22px; } ul.tight li { margin:6px 0; }
   footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
+
+  .kv { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; margin:16px 0; }
+  .kv .k { background:var(--card); border:1px solid var(--border); border-left:4px solid var(--accent);
+           border-radius:10px; padding:12px 14px; box-shadow:var(--shadow); }
+  .kv .k b { display:block; font-size:13px; color:var(--accent); margin-bottom:4px; }
+  .kv .k span { font-size:14px; color:var(--text); }
+  .qa { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:13px 16px; margin:12px 0; box-shadow:var(--shadow); }
+  .qa b { color:var(--accent); display:block; margin-bottom:4px; font-size:15px; }
+  .qa p { margin:0; color:var(--muted); font-size:14.5px; }
+  .tag { display:inline-block; background:#eef2f7; color:#475569; border-radius:999px;
+         padding:2px 10px; font-size:12.5px; margin:3px 5px 3px 0; }
+  .tag.g { background:#ecfdf5; color:#065f46; }
+  .tag.r { background:#fef2f2; color:#b91c1c; }
+  .tag.b { background:#eff6ff; color:#1d4ed8; }
+  .steps { counter-reset:s; list-style:none; padding:0; margin:14px 0; }
+  .steps li { counter-increment:s; position:relative; padding:8px 0 8px 42px; border-bottom:1px dashed var(--border); font-size:14.5px; }
+  .steps li:last-child { border-bottom:none; }
+  .steps li::before { content:counter(s); position:absolute; left:0; top:8px; width:26px; height:26px;
+    border-radius:50%; background:var(--accent); color:#fff; font-size:13px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; }
+  table.cmp td:first-child { font-weight:600; color:var(--accent); white-space:nowrap; }
+  .mini-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; margin:14px 0; }
+  .mini { background:#f8fafc; border:1px solid var(--border); border-radius:9px; padding:9px 12px; font-size:13.5px; }
+  .mini b { display:block; color:var(--text); font-size:13.5px; }
+  .mini span { color:var(--muted); font-size:12.5px; }
+  .rel { display:flex; flex-wrap:wrap; gap:10px; margin:14px 0; }
+  .rel a { background:#fff; border:1px solid var(--border); border-radius:9px; padding:8px 13px;
+           font-size:13.5px; color:var(--accent); text-decoration:none; box-shadow:var(--shadow); }
+  .rel a:hover { border-color:var(--accent); }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:15px; margin:16px 0; }
+  .box2 { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:15px 17px; box-shadow:var(--shadow); }
+  .box2 h3 { margin:0 0 6px; font-size:16px; }
+  .box2 p, .box2 li { font-size:14px; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -47,48 +80,117 @@
   <a href="../../../../../index.html#subjects">知识地图</a>
 </header>
 <div class="wrap">
-  <div class="hero"><h1>💾 存储引擎</h1><p>LSM、WAL、MemStore、HFile 与 Compaction</p></div>
-  
-<h2>LSM 树思想</h2>
-<p>HBase 的写性能来自 <strong>LSM-Tree（日志结构合并树）</strong>：写操作先进内存、顺序批量落盘，再用后台合并来消除随机写。这把昂贵的「随机写磁盘」变成了廉价的「顺序追加写」。</p>
+  <div class="hero"><h1>💾 HBase 存储结构</h1><p>HFile 格式、WAL、MemStore 刷写、Compaction 与 BloomFilter</p></div>
 
-<h2>三层存储结构</h2>
-<table>
-<tr><th>组件</th><th>位置</th><th>作用</th></tr>
-<tr><td>WAL / HLog</td><td>磁盘（HDFS）</td><td>写前日志：数据进 MemStore 之前先顺序追加到 WAL，用于崩溃恢复，防止内存数据丢失</td></tr>
-<tr><td>MemStore</td><td>内存</td><td>写缓存：按 rowkey 排序的内存结构，写满后刷盘成 HFile</td></tr>
-<tr><td>HFile / StoreFile</td><td>磁盘（HDFS）</td><td>只读的有序文件，真正持久化的数据；每个列族一个 Store 对应一组 HFile</td></tr>
+<h2>写入的两条路径</h2>
+<p>一次 <code>put</code> 会同时写两个地方：<strong>WAL（顺序追加到 HDFS，用于崩溃恢复）</strong> 和 <strong>MemStore（内存中的有序结构）</strong>。只有两者都成功才返回客户端。<strong>HFile 不是写入时产生的，而是 MemStore 攒够后 flush 出来的。</strong></p>
+
+<svg viewBox="0 0 780 260" role="img" aria-label="HBase 写入与刷写">
+  <rect x="20" y="20" width="120" height="44" rx="9" fill="#dbeafe" stroke="#93c5fd"/>
+  <text x="80" y="47" text-anchor="middle" fill="#1f2933" font-size="12.5" font-weight="600">Client put</text>
+  <rect x="180" y="14" width="150" height="40" rx="8" fill="#fef9c3" stroke="#fde047"/>
+  <text x="255" y="39" text-anchor="middle" fill="#92400e" font-size="12" font-weight="700">① WAL（HLog）</text>
+  <rect x="180" y="62" width="150" height="40" rx="8" fill="#ecfdf5" stroke="#86efac"/>
+  <text x="255" y="87" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700">② MemStore</text>
+  <text x="255" y="112" text-anchor="middle" fill="#64748b" font-size="10.5">内存有序（跳表）</text>
+  <line x1="140" y1="42" x2="178" y2="34" stroke="#64748b" stroke-width="2"/>
+  <line x1="140" y1="42" x2="178" y2="82" stroke="#64748b" stroke-width="2"/>
+  <rect x="370" y="62" width="150" height="40" rx="8" fill="#dcfce7" stroke="#86efac"/>
+  <text x="445" y="87" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700">③ flush 触发</text>
+  <text x="445" y="112" text-anchor="middle" fill="#64748b" font-size="10.5">128MB / 全局上限 / 定时</text>
+  <line x1="330" y1="82" x2="368" y2="82" stroke="#64748b" stroke-width="2"/>
+  <rect x="370" y="140" width="150" height="46" rx="8" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text x="445" y="162" text-anchor="middle" fill="#3730a3" font-size="12.5" font-weight="700">HFile（不可变）</text>
+  <text x="445" y="180" text-anchor="middle" fill="#64748b" font-size="10.5">顺序落 HDFS，多副本</text>
+  <line x1="445" y1="102" x2="445" y2="138" stroke="#64748b" stroke-width="2"/>
+  <rect x="560" y="140" width="200" height="46" rx="8" fill="#fff7ed" stroke="#fed7aa"/>
+  <text x="660" y="162" text-anchor="middle" fill="#9a3412" font-size="12.5" font-weight="700">④ Compaction</text>
+  <text x="660" y="180" text-anchor="middle" fill="#64748b" font-size="10.5">多个小 HFile 合并成大文件</text>
+  <line x1="520" y1="163" x2="558" y2="163" stroke="#64748b" stroke-width="2"/>
+  <rect x="370" y="206" width="390" height="40" rx="9" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="565" y="231" text-anchor="middle" fill="#1f2933" font-size="12">合并时顺带：丢弃超版本数/超 TTL 的 cell、物理删除墓碑</text>
+</svg>
+
+<h2>HFile 内部结构</h2>
+<p>HFile 是<strong>不可变（immutable）</strong>的有序文件，按 (rowkey, 列族, 限定符, 时间戳) 排序。它分成若干层，从尾到头读：</p>
+<table class="cmp">
+<tr><th>块</th><th>作用</th><th>何时加载</th></tr>
+<tr><td>Data Block</td><td>真正的 KeyValue 数据，默认 64KB 一块</td><td>按需读入 BlockCache</td></tr>
+<tr><td>Meta Block</td><td>元数据（BloomFilter 等）</td><td>打开文件时</td></tr>
+<tr><td>File Info</td><td>文件级信息（平均 key 长度、压缩算法等）</td><td>打开文件时</td></tr>
+<tr><td>Data Block Index</td><td>每个 Data Block 的起始 key → 偏移量</td><td><strong>常驻内存</strong>（打开即载入）</td></tr>
+<tr><td>Trailer</td><td>指向其他各块的指针，定长</td><td>首先读（在文件末尾）</td></tr>
+</table>
+<div class="note">💡 查找一个 key 的过程：读 Trailer → 找到 Index（在内存）→ 二分定位到可能包含该 key 的 Data Block → 读该 block（可能命中 BlockCache）→ 在 block 内顺序扫描。<strong>BloomFilter 在这一步之前先做「这个文件一定没有这个 key」的判断</strong>，省掉整次 IO。</div>
+
+<h2>BloomFilter：读放大的克星</h2>
+<p>LSM 结构下一次读可能要查 MemStore + 多个 HFile。BloomFilter 用极小的内存（每个 HFile 一份）回答一个保守问题：<strong>「这个文件里肯定没有这个 rowkey 吗？」</strong>——如果答「肯定没有」就直接跳过整个文件。</p>
+<div class="mini-grid">
+  <div class="mini"><b>ROW（默认）</b><span>按 rowkey 过滤，get 场景收益最大</span></div>
+  <div class="mini"><b>ROWCOL</b><span>按 rowkey+列族+限定符 过滤，精确到列</span></div>
+  <div class="mini"><b>NONE</b><span>关闭；纯 scan 场景可关掉省内存</span></div>
+  <div class="mini"><b>代价</b><span>每个 HFile 多占几 KB~几十 KB 内存</span></div>
+</div>
+<div class="note warn">⚠️ BloomFilter 有<strong>假阳性（说可能有、实际没有）</strong>，但<strong>不会假阴性</strong>。所以它只会带来「多读一个文件」的浪费，不会漏数据。</div>
+
+<h2>Compaction：两种</h2>
+<table class="cmp">
+<tr><th>类型</th><th>触发</th><th>范围</th><th>特点</th></tr>
+<tr><td>Minor</td><td>Store 内 HFile 数 ≥ 3</td><td>挑选<strong>部分</strong>相邻小文件合并</td><td>轻量、频繁；<strong>不删除</strong>墓碑与过期版本</td></tr>
+<tr><td>Major</td><td>默认 7 天一次，或手动</td><td>Store 内<strong>全部</strong>文件合并成一个</td><td>重量级（大量 IO）；<strong>真正物理删除</strong>墓碑与超期数据</td></tr>
+</table>
+<div class="grid2">
+  <div class="box2">
+    <h3>为什么要 Compaction</h3>
+    <ul class="tight">
+      <li>减少文件数 → 减少读时要查的文件数量（降低读放大）</li>
+      <li>回收空间：真正删掉被覆盖的旧版本与 delete 墓碑</li>
+      <li>提升本地性：合并后的新文件重新分布到本机 DataNode</li>
+    </ul>
+  </div>
+  <div class="box2">
+    <h3>Compaction 的副作用</h3>
+    <ul class="tight">
+      <li><strong>写放大</strong>：同一份数据被反复读写合并</li>
+      <li>占用 IO/网络，可能影响在线读写 → 要限速</li>
+      <li>Major Compaction 期间磁盘 IO 峰值明显</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Region Split：自动分片</h2>
+<div class="steps">
+  <li>Region 内某个 Store 的总大小超过阈值（默认 <code>hbase.hregion.max.filesize</code> = 10GB）</li>
+  <li>RegionServer 找到该 Region 的<strong>中间 rowkey（split point）</strong></li>
+  <li>在该点把 Region 切成两个子 Region（原 Region 下线）</li>
+  <li>子 Region 先在同一 RS 上，随后 HMaster 做负载均衡把它们搬走</li>
+  <li>引用文件机制让子 Region 先「引用」父 HFile，避免立刻拷贝数据</li>
+</div>
+<div class="note warn">⚠️ 频繁 split 会产生大量小 Region 与小文件，触发更多 compaction。生产上<strong>强烈建议建表时预分区（pre-splitting）</strong>，并按数据增长速率调大 max.filesize（如 20~50GB）。</div>
+
+<h2>关键参数速查</h2>
+<table class="cmp">
+<tr><th>参数</th><th>默认</th><th>含义</th></tr>
+<tr><td>hbase.hstore.flush.size</td><td>128MB</td><td>单个 MemStore 超过就 flush</td></tr>
+<tr><td>hbase.regionserver.global.memstore.size</td><td>0.4</td><td>RS 上所有 MemStore 占堆上限，超了强制 flush 并可能阻塞写</td></tr>
+<tr><td>hbase.hstore.blockingStoreFiles</td><td>16</td><td>Store 内 HFile 达此数<strong>阻塞写入</strong>，等 compaction</td></tr>
+<tr><td>hbase.hstore.compactionThreshold</td><td>3</td><td>触发 minor compaction 的文件数</td></tr>
+<tr><td>hbase.hregion.majorcompaction</td><td>7 天</td><td>Major compaction 周期（0 表示关闭自动）</td></tr>
+<tr><td>hfile.block.cache.size</td><td>0.4</td><td>BlockCache 占堆比例</td></tr>
+<tr><td>hbase.hregion.max.filesize</td><td>10GB</td><td>Region 分裂阈值</td></tr>
 </table>
 
-<h2>写入（存储视角）</h2>
-<ol class="tight">
-  <li>Client 写请求到 RS → 先<strong>顺序追加 WAL</strong>（HDFS 多副本，保证不丢）。</li>
-  <li>再写入<strong>MemStore</strong>（内存，按 key 排序）。</li>
-  <li>MemStore 达到阈值（默认 128MB 或全局比例）→ <strong>flush</strong> 成 HFile 落盘。</li>
-  <li>WAL 也可被回收（已落盘的 HFile 对应的日志即可清理）。</li>
-</ol>
-
-<h2>Compaction：合并与清理</h2>
-<div class="card-grid">
-  <div class="card"><div class="ico">🧩</div><h3>Minor Compaction</h3><p>把若干小的相邻 HFile 合并成较大的 HFile（不处理已删除/过期的「墓碑」标记），轻量、频繁。</p></div>
-  <div class="card"><div class="ico">🧹</div><h3>Major Compaction</h3><p>把一个 Store 下<strong>所有</strong> HFile 合并成一个，并真正清除被删除、过 TTL、超版本的数据；重、IO 大，通常定时（如周末）执行。</p></div>
+<h2>🎯 常见问法与答题要点</h2>
+<div class="qa"><b>Q：一次 put 会立刻写磁盘吗？</b><p>A：不会写 HFile，但<b>会写 WAL</b>（顺序追加到 HDFS）。路径是：put → 追加 WAL → 写入内存 MemStore → 返回成功。HFile 要等 MemStore 攒到 128MB 才 flush 生成。所以「写入快」的本质是：只做了一次顺序 WAL + 一次内存写，没有随机磁盘 IO。</p></div>
+<div class="qa"><b>Q：HFile 为什么设计成不可变的？</b><p>A：不可变带来三个好处：①<b>无锁并发读</b>——文件不会变，多个读不用加锁；②<b>缓存安全</b>——BlockCache 里的 block 永远不会失效；③<b>顺序写 + 多副本简单</b>——HDFS 只支持追加，不可变文件天然契合。代价是更新只能「写新版本」，删除只能「写墓碑」，最终靠 compaction 合并整理。</p></div>
+<div class="qa"><b>Q：读放大是什么？怎么缓解？</b><p>A：LSM 下一次 get 可能要查：MemStore + BlockCache + 磁盘上多个 HFile。HFile 越多读越慢，这就是读放大。缓解手段：①<b>BloomFilter</b> 跳过肯定不含该 key 的文件；②<b>Compaction</b> 减少文件数量；③<b>BlockCache</b> 缓存热 block；④控制 flush 频率避免产生过多小文件。</p></div>
+<div class="qa"><b>Q：Minor 和 Major Compaction 的本质区别？</b><p>A：<b>Minor</b> 只挑选部分相邻的小文件合并，轻量高频，<b>不做物理删除</b>（墓碑和旧版本仍在）。<b>Major</b> 把 Store 内<b>所有</b>文件合并成一个，会真正丢弃超过 VERSIONS 的版本、超过 TTL 的数据和 delete 墓碑。所以「删了数据磁盘没变小」往往是在等 major compaction。</p></div>
+<div class="qa"><b>Q：写入突然被阻塞（blocked）是怎么回事？</b><p>A：典型是触发了 <code>blockingStoreFiles</code>（默认 16）：某个 Store 的 HFile 数量达到上限，HBase 会<b>阻塞该 Store 的写入</b>，等 compaction 把文件数降下来。原因通常是写入太快而 compaction 跟不上。对策：调大 blockingStoreFiles、调大 compaction 线程数、检查是否关闭了自动 compaction、优化 rowkey 减少小文件。</p></div>
+<div class="qa"><b>Q：BloomFilter 该选 ROW 还是 ROWCOL？</b><p>A：默认 <b>ROW</b> 就够，它按 rowkey 过滤，对 get 场景收益最大。如果查询经常指定到具体列（且列非常多），<b>ROWCOL</b> 更精确，但 BloomFilter 体积也更大（每条 cell 都要算）。纯 scan（全表扫描）场景 BloomFilter 没用，可以关掉省内存。</p></div>
+<div class="qa"><b>Q：为什么建议建表时预分区？</b><p>A：不预分区的表一开始只有 1 个 Region，所有写入打在单台 RegionServer 上形成<b>热点</b>，而且随着数据量增长会不断自动 split，产生大量小 Region 和随之而来的 compaction。预分区在建表时就按规划的 rowkey 范围切好 N 个 Region（配合散列 rowkey），从第一天起就是分布式的。</p></div>
+<h2>相关页面</h2>
+<div class="rel"><a href="../00-overview/hbase-overview.html">HBase 概览</a><a href="../02-data-model/hbase-data-model.html">数据模型</a><a href="../03-architecture/hbase-architecture.html">架构</a><a href="../05-read-write/hbase-read-write.html">读写流程</a><a href="../06-region/hbase-region.html">Region 与分片</a><a href="../09-operations/hbase-operations.html">运维</a></div>
 </div>
-
-<h2>读取与缓存</h2>
-<ul class="tight">
-  <li><strong>BlockCache</strong>：读缓存（默认 LRU），把经常读的 HFile 数据块放内存，加速重复读。</li>
-  <li><strong>Bloom Filter</strong>：每个 HFile 带布隆过滤器，快速判断「某 rowkey 是否可能在本文件」，避免无效 IO。</li>
-  <li>读路径：先查 MemStore，再并行查相关 HFile（借助 Bloom 跳过无关文件），合并多版本后返回最新可见值。</li>
-</ul>
-
-<h2>HFile 结构（简述）</h2>
-<p>一个 HFile 大致是：<strong>Trailer（文件索引根）→ 多个 Data Block（数据）→ 多级 Index → Bloom Block → Meta</strong>。读时先读 Trailer 拿到索引，再二分定位目标 block，避免全文件扫描。</p>
-<svg viewBox="0 0 760 170" role="img" aria-label="写入与 Compaction">
-  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#64748b"/></marker></defs><rect x="40" y="30" width="120" height="44" rx="9" fill="#dbeafe" stroke="#93c5fd"/><text x="100" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">WAL(顺序写)</text><rect x="190" y="30" width="120" height="44" rx="9" fill="#dcfce7" stroke="#86efac"/><text x="250" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">MemStore</text><rect x="340" y="30" width="110" height="44" rx="9" fill="#fef9c3" stroke="#fde047"/><text x="395" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">flush</text><rect x="470" y="30" width="110" height="44" rx="9" fill="#eef2f7" stroke="#94a3b8"/><text x="525" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">小 HFile×N</text><rect x="610" y="30" width="110" height="44" rx="9" fill="#e0e7ff" stroke="#a5b4fc"/><text x="665" y="56" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">Major合并</text><line x1="160" y1="52" x2="188" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><line x1="310" y1="52" x2="338" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><line x1="450" y1="52" x2="468" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><text x="459" y="47" text-anchor="middle" fill="#64748b" font-size="11">minor</text><line x1="580" y1="52" x2="608" y2="52" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/><text x="594" y="47" text-anchor="middle" fill="#64748b" font-size="11">major</text><rect x="190" y="110" width="380" height="40" rx="9" fill="#dbeafe" stroke="#93c5fd"/><text x="380" y="134" text-anchor="middle" fill="#1f2933" font-size="13" font-weight="600">HDFS（DataNode 多副本持久化）</text><line x1="525" y1="74" x2="380" y2="108" stroke="#64748b" stroke-width="2" marker-end="url(#ah)"/>
-</svg>
-<div class="note warn">⚠️ <strong>小文件风暴</strong>：写入过猛或 Region 过多，会刷出海量小 HFile，Compaction 追不上，读放大严重。对策：合理预分区、控制写入速率、调大 MemStore、监控 Compaction 队列。</div>
-
-</div>
-<footer>© 2026 Visuals · 列族数据库 / HBase / 存储</footer>
+<footer>© 2026 Visuals · NoSQL 数据库 / 列族数据库 / HBase 存储结构</footer>
 </body>
 </html>

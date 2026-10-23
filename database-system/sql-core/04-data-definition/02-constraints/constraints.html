@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -163,6 +181,43 @@
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>约束类型与开销</h2><div class="table-wrap"><table><thead><tr><th>约束</th><th>作用</th><th>检查时机</th><th>性能开销</th></tr></thead><tbody><tr><td><b>PRIMARY KEY</b></td><td>唯一且非空，<strong>决定物理存储顺序</strong>（InnoDB）</td><td>每次写入</td><td><b>建索引，必要开销</b></td></tr><tr><td><b>UNIQUE</b></td><td>唯一（允许多个 NULL）</td><td>每次写入</td><td>建索引，同 PK</td></tr><tr><td><b>NOT NULL</b></td><td>禁止空值</td><td>每次写入</td><td><b>几乎为零</b></td></tr><tr><td><b>FOREIGN KEY</b></td><td>引用完整性</td><td>每次写入<strong>都要查父表</strong></td><td><b>较高</b>，且会加锁</td></tr><tr><td><b>CHECK</b></td><td>自定义条件</td><td>每次写入</td><td>低（但 8.0.16 前被忽略）</td></tr><tr><td><b>DEFAULT</b></td><td>默认值</td><td>插入时</td><td>零</td></tr></tbody></table></div><p><b>约束定义</b></p><pre><code>-- MySQL 的重要历史坑：8.0.16 之前 CHECK 约束会被&lt;strong&gt;解析但忽略&lt;/strong&gt;
+CREATE TABLE t (age INT, CHECK (age &gt; 0));   -- 5.7 里这行完全不生效！
+-- 所以老版本只能靠触发器或应用层保证
+
+-- 外键的隐藏代价：会在父表上加&lt;strong&gt;共享锁&lt;/strong&gt;
+-- 子表插入时，需要确认父表记录存在 → 对父行加 S 锁
+-- 高并发下这会成为死锁来源，且难以排查
+
+-- 查看某表的所有约束
+SELECT constraint_name, constraint_type, table_name
+FROM information_schema.table_constraints
+WHERE table_schema = 'mydb';</code></pre><p class="muted"><b>外键为何在生产常被禁用</b>：三个原因——① <strong>性能</strong>：每次写入都要额外查父表并加锁；② <strong>死锁</strong>：外键的隐式锁增加死锁概率；③ <strong>运维</strong>：分库分表、数据迁移、批量导入时外键是巨大阻碍。所以互联网公司普遍<strong>在应用层保证引用完整性</strong>，数据库只留 PK/UNIQUE/NOT NULL。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>NULL 与唯一索引的交互</h2><div class="table-wrap"><table><thead><tr><th>数据库</th><th>唯一索引中的 NULL</th><th>说明</th></tr></thead><tbody><tr><td><b>MySQL</b></td><td><b>允许多个 NULL</b></td><td>NULL 不参与唯一性比较</td></tr><tr><td><b>PostgreSQL</b></td><td><b>允许多个 NULL</b></td><td>同上（15 版起可用 <code>NULLS NOT DISTINCT</code> 改变）</td></tr><tr><td><b>SQL Server</b></td><td><b>只允许一个 NULL</b></td><td><strong>行为不同，迁移时必踩</strong></td></tr><tr><td><b>Oracle</b></td><td>允许多个 NULL</td><td>同 MySQL</td></tr></tbody></table></div><p><b>NULL 与唯一索引</b></p><pre><code>-- 陷阱：想做“手机号唯一但允许未填写”，结果填了多个 NULL 不报错
+CREATE TABLE users (phone VARCHAR(20) UNIQUE);
+INSERT INTO users (phone) VALUES (NULL);   -- 成功
+INSERT INTO users (phone) VALUES (NULL);   -- &lt;strong&gt;也成功！&lt;/strong&gt;
+
+-- 正确做法：用空串或哨兵值代替 NULL
+ALTER TABLE users MODIFY phone VARCHAR(20) NOT NULL DEFAULT '';
+-- 此时唯一约束才会真正生效（空串会重复检查）
+
+-- 或用部分唯一索引（PostgreSQL）
+CREATE UNIQUE INDEX idx_phone ON users(phone) WHERE phone IS NOT NULL;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>约束的在线变更</h2><div class="table-wrap"><table><thead><tr><th>操作</th><th>安全做法</th><th>风险</th></tr></thead><tbody><tr><td><b>加 NOT NULL</b></td><td>先加可空 → 分批回填 → 再加约束</td><td>直接加会锁表且失败</td></tr><tr><td><b>加 UNIQUE</b></td><td>先查重（<code>GROUP BY ... HAVING count&gt;1</code>）</td><td>有重复数据会失败</td></tr><tr><td><b>加外键</b></td><td>先清理孤儿数据</td><td>有孤儿行会失败</td></tr><tr><td><b>删约束</b></td><td>直接删元数据</td><td>风险低</td></tr></tbody></table></div><p><b>变更前置检查</b></p><pre><code>-- 加唯一索引前必做的查重
+SELECT email, COUNT(*) c FROM users GROUP BY email HAVING c &gt; 1 LIMIT 10;
+-- 有结果说明已存在重复，必须先清洗才能加 UNIQUE
+
+-- 加外键前必做的孤儿检查
+SELECT c.* FROM orders c
+LEFT JOIN users p ON c.user_id = p.id
+WHERE c.user_id IS NOT NULL AND p.id IS NULL;
+-- 有结果 → 存在引用不存在的用户，加外键会失败
+
+-- MySQL 8.0 支持在线加 NOT NULL（前提是数据已满足）
+ALTER TABLE users MODIFY email VARCHAR(100) NOT NULL, ALGORITHM=INPLACE;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：主键该用自增还是 UUID？</summary><p>A：<strong>优先自增（BIGINT）</strong>。原因是 InnoDB 的<strong>聚簇索引按主键顺序存储</strong>：自增 ID 是顺序写入，页利用率高、几乎无页分裂；UUID 是随机的，每次插入可能落在任意页，导致<strong>频繁页分裂、碎片化、缓存命中率下降</strong>，写入性能可能差 <strong>2~5 倍</strong>，表体积也明显更大。若必须用 UUID（如分布式 ID），至少用<strong>时间有序的 UUIDv7/雪花 ID</strong>，或把 UUID 作为唯一索引而主键仍用自增。</p></details><details><summary>Q：<code>CHECK</code> 约束遇到 NULL 会怎样？</summary><p>A：<strong>视为通过</strong>。因为 <code>NULL &gt; 0</code> 的结果是 UNKNOWN，SQL 里 UNKNOWN 不被视为违反约束。所以 <code>CHECK(age &gt; 0)</code> 挡不住 <code>age = NULL</code> 的插入。要真正约束必须同时声明 <code>NOT NULL</code>：<code>age INT NOT NULL CHECK (age &gt; 0)</code>。这是三值逻辑在约束上的直接体现。</p></details><details><summary>Q：唯一索引和唯一约束有什么区别？</summary><p>A：<strong>MySQL 里几乎没区别</strong>——声明 <code>UNIQUE</code> 约束时会自动创建同名唯一索引，物理上完全一样。真正的区别在语义与外键引用：<strong>唯一约束可以被外键引用</strong>，唯一索引不能（标准 SQL 层面）。PostgreSQL 里两者都是用唯一索引实现，但 <code>information_schema</code> 中分类不同。实践中不用纠结，直接用 <code>UNIQUE</code> 约束声明即可。</p></details><details><summary>Q：为什么不推荐在数据库层做业务校验？</summary><p>A：<strong>要看校验的性质</strong>。结构性约束（非空、唯一、引用）放数据库是对的——数据库是最后防线，能挡住所有写入路径（包括手工 SQL、数据迁移工具）。但<strong>业务规则</strong>（如<strong>优惠券每人限领 3 张</strong>、<strong>余额不能为负</strong>）放数据库会让规则分散、难以测试、难以变更，且很多规则需要跨表跨服务判断，数据库表达不了。判据：<strong>能用一行约束表达的放数据库，需要逻辑判断的放应用层</strong>。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 约束 ·

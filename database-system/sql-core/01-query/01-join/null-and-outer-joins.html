@@ -15,6 +15,81 @@ LEFT JOIN orders o ON o.user_id=u.id AND o.status=&#x27;paid&#x27;;
 <section class="panel"><h2>边界与误区</h2><p>优化器可重排物理执行，但必须保持 SQL 语义。对 NULL 值做等号比较应使用 IS NULL / IS NOT NULL；部分方言还有专用的 NULL 安全比较。</p></section>
 <section class="panel"><h2>检查真实查询时的顺序</h2><p>先用极小的手工数据覆盖“有匹配”“只有不满足条件的右表行”“完全无右表行”三种情况，并写出期望结果；再看实际 SQL。之后才使用 EXPLAIN 检查索引和连接算法。性能计划不能替代语义验证：即便优化器把 LEFT JOIN 在特定条件下化简为 INNER JOIN，也必须与原 SQL 在该条件下的结果一致。若报表还需要聚合，先确认右表一对多会生成多少行，再聚合，以免把每个用户的金额重复计数。</p></section>
 <section class="panel" data-depth-note><h2>COUNT 的另一处陷阱</h2><p>LEFT JOIN 补出的行在右表列上是 NULL。按用户分组后，<code>COUNT(*)</code> 会把这条补齐行计为 1，而 <code>COUNT(o.id)</code> 只统计非空的右表主键；因此“无订单用户的订单数”应根据需要选后者。若右表真实匹配多行，<code>COUNT(o.id)</code> 会给出多行数量，<code>COUNT(DISTINCT o.id)</code> 才去重。把 ON/WHERE 的条件位置与 COUNT 的对象同时检查，才能防止报表既漏用户又错计数量。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · ON 与 WHERE 的本质区别</h2><p>这是 SQL 最容易出错的地方：<b>ON 决定「怎么匹配」，WHERE 决定「保留哪些行」</b>。对 LEFT JOIN 来说，把条件放错位置会<b>让它退化成 INNER JOIN</b>。</p><div class="table-wrap"><table><thead><tr><th>条件位置</th><th>作用时机</th><th>对 LEFT JOIN 的影响</th></tr></thead><tbody><tr><td><b>ON 子句</b></td><td><b>匹配阶段</b>（决定右表哪些行能匹配上）</td><td><b>不匹配的左表行仍然保留</b>（右表列填 NULL）</td></tr><tr><td><b>WHERE 子句</b></td><td><b>过滤阶段</b>（匹配完成后筛掉行）</td><td><b>会过滤掉右表为 NULL 的行</b> → 退化成 INNER JOIN</td></tr></tbody></table></div><p><b>SQL 对比</b></p><pre><code>-- —— 经典陷阱：LEFT JOIN 写成了 INNER JOIN ——
+-- 场景：查出所有用户，以及他们的【有效】订单（status=1）
+
+-- ❌ 错误：条件写在 WHERE -&gt; 没有有效订单的用户被过滤掉了
+SELECT u.name, o.id
+FROM user u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.status = 1;
+--   结果：只返回有有效订单的用户
+--   原因：没有订单的用户 o.status 是 NULL，NULL = 1 结果为 UNKNOWN -&gt; 被 WHERE 过滤
+
+-- ✅ 正确：条件写在 ON -&gt; 没订单的用户仍然出现（o.id 为 NULL）
+SELECT u.name, o.id
+FROM user u
+LEFT JOIN orders o ON u.id = o.user_id AND o.status = 1;
+--   结果：所有用户都返回，没有效订单的 o.id 为 NULL
+
+-- ✅ 等价写法（显式处理 NULL）
+SELECT u.name, o.id
+FROM user u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.status = 1 OR o.status IS NULL;
+--   注意：这个写法在【右表本来就有 status IS NULL 的行】时会出错！
+
+-- —— 找出「没有订单的用户」（LEFT JOIN + IS NULL 的标准用法）——
+SELECT u.name
+FROM user u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.id IS NULL;                    -- 【注意用主键判 NULL，最可靠】
+--   用 o.id（主键，非空）判断，避免右表本来就有 NULL 列的误判
+
+-- —— 三值逻辑速查 ——
+--   NULL = 1      -&gt; UNKNOWN（被 WHERE 过滤）
+--   NULL &lt;&gt; 1     -&gt; UNKNOWN（也被过滤！）
+--   NULL IS NULL  -&gt; TRUE
+--   NULL AND TRUE -&gt; UNKNOWN
+--   NULL OR TRUE  -&gt; TRUE      &lt;- 注意这个
+--   NOT NULL      -&gt; UNKNOWN</code></pre><p class="muted">记忆口诀：<b>LEFT JOIN 想保留左表全部行 → 右表的条件必须写在 ON 里</b>。写在 WHERE 里就等于 INNER JOIN 了。</p></section><section class="panel"><h2>第二层 · 量化陷阱与正确写法</h2><div class="table-wrap"><table><thead><tr><th>陷阱</th><th>错误写法</th><th>正确写法</th><th>后果差异</th></tr></thead><tbody><tr><td><b>COUNT 与 NULL</b></td><td><code>COUNT(col)</code></td><td><code>COUNT(*)</code> 或 <code>COUNT(主键)</code></td><td><code>COUNT(col)</code> <b>跳过 NULL</b>，计数偏小</td></tr><tr><td><b>聚合忽略 NULL</b></td><td><code>SUM(a)/COUNT(*)</code></td><td><code>AVG(a)</code> 或 <code>SUM(a)/COUNT(a)</code></td><td><b>AVG 自动忽略 NULL</b>，分母不是总行数</td></tr><tr><td><b>NOT IN + NULL</b></td><td><code>WHERE x NOT IN (SELECT y ...)</code></td><td><b>改用 <code>NOT EXISTS</code></b></td><td>子查询里有 NULL 时 <b>NOT IN 返回空集</b>！</td></tr><tr><td><b>判等</b></td><td><code>col = NULL</code></td><td><code>col IS NULL</code></td><td><code>= NULL</code> 永远 UNKNOWN，<b>查不到任何行</b></td></tr><tr><td><b>空字符串 vs NULL</b></td><td>混为一谈</td><td><b>明确区分</b></td><td>MySQL 里 <code>''</code> ≠ <code>NULL</code></td></tr><tr><td><b>LEFT JOIN 后 COUNT</b></td><td><code>COUNT(*)</code></td><td><code>COUNT(右表.主键)</code></td><td>一对多时 <code>COUNT(*)</code> 会<b>膨胀计数</b></td></tr></tbody></table></div><p><b>SQL 陷阱</b></p><pre><code>-- —— 最危险的陷阱：NOT IN 遇到 NULL ——
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders);
+--   如果 orders.user_id 里有【任何一个 NULL】-&gt; 整个查询返回【空集】！
+--   原因：x NOT IN (1, 2, NULL) 等价于 x&lt;&gt;1 AND x&lt;&gt;2 AND x&lt;&gt;NULL
+--         x&lt;&gt;NULL 是 UNKNOWN -&gt; 整个表达式为 UNKNOWN -&gt; 一行都不返回
+
+-- ✅ 正确写法 1：NOT EXISTS（推荐，语义清晰且不受 NULL 影响）
+SELECT * FROM users u
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id);
+
+-- ✅ 正确写法 2：LEFT JOIN + IS NULL
+SELECT u.* FROM users u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.user_id IS NULL;
+
+-- ✅ 正确写法 3：排除 NULL（不推荐，容易漏）
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders WHERE user_id IS NOT NULL);
+
+-- —— COUNT 的三种写法差异 ——
+--   表有 10 行，其中 col 有 3 个 NULL
+SELECT COUNT(*)    FROM t;   -- 10  【统计行数】
+SELECT COUNT(col)  FROM t;   -- 7   【跳过 NULL】
+SELECT COUNT(1)    FROM t;   -- 10  （与 COUNT(*) 等价，某些旧版本略慢）
+
+-- —— AVG 的陷阱 ——
+--   col 值为 10, 20, NULL
+SELECT AVG(col) FROM t;              -- 15     （只算非 NULL：(10+20)/2）
+SELECT SUM(col)/COUNT(*) FROM t;     -- 10     （30/3，把 NULL 当 0）
+SELECT SUM(col)/COUNT(col) FROM t;   -- 15     （与 AVG 一致）
+--   【注意】很多业务想要的是「把 NULL 当 0」，那就用 COALESCE：
+SELECT AVG(COALESCE(col, 0)) FROM t; -- 10
+
+-- —— LEFT JOIN 后的计数膨胀 ——
+--   user 3 行，orders 每个用户 2 单
+SELECT COUNT(*) FROM user u LEFT JOIN orders o ON u.id=o.user_id;  -- 6（膨胀！）
+SELECT COUNT(DISTINCT u.id) FROM user u LEFT JOIN orders o ON ...;  -- 3（正确）</code></pre><p class="muted"><b>NOT IN 遇到 NULL 返回空集</b>是 SQL 里最隐蔽的坑之一。养成用 <code>NOT EXISTS</code> 的习惯，一劳永逸。</p></section>
+<section class="panel"><h2>第三层 · 排障清单</h2><ul><li><b>LEFT JOIN 结果行数和 INNER JOIN 一样（少了数据）</b> → 右表条件写在 WHERE 了。移到 ON。<b>这是最高频的问题</b>。</li><li><b>查询突然返回 0 行</b> → 检查是否有 <code>NOT IN</code> + 子查询含 NULL。改用 <code>NOT EXISTS</code>。</li><li><b><code>col = NULL</code> 查不到数据</b> → 要用 <code>IS NULL</code>。<code>= NULL</code> 永远返回 UNKNOWN。</li><li><b>COUNT 的结果比预期少</b> → 用了 <code>COUNT(可空列)</code>。改用 <code>COUNT(*)</code>。</li><li><b>LEFT JOIN 后 SUM/COUNT 变大</b> → 一对多关系导致行膨胀。解法：① 先聚合右表再 JOIN（<code>JOIN (SELECT user_id, SUM(...) GROUP BY user_id) t</code>）；② 用 <code>COUNT(DISTINCT 左表主键)</code>。</li><li><b>多个 LEFT JOIN 导致结果爆炸</b> → 每个一对多都会乘一次（2×3×4 = 24 行）。<b>必须先把每个右表聚合到「一对一」再 JOIN</b>。</li><li><b>平均值偏低/偏高</b> → AVG 忽略了 NULL，但你的业务语义可能是「NULL 当 0」。用 <code>COALESCE</code> 明确。</li><li><b>ORDER BY 带 NULL 的顺序不符合预期</b> → 各数据库不同：<b>MySQL/SQL Server 把 NULL 排最前（升序时），PostgreSQL/Oracle 排最后</b>。要显式写：<code>ORDER BY col IS NULL, col</code>（把 NULL 放最后）或 <code>ORDER BY col NULLS LAST</code>（PG/Oracle 支持）。</li><li><b>索引列允许 NULL 导致索引行为异常</b> → <code>IS NULL</code> 在某些数据库上能用索引（MySQL 可以），但 <code>col &lt;&gt; 1</code> 不会包含 NULL 的行。<b>建议关键列设 NOT NULL + 默认值</b>，从根源避免。</li><li><b>外连接 + 聚合导致 NULL 传播</b> → <code>SUM(NULL + x)</code> 结果是 NULL。用 <code>COALESCE(SUM(x), 0)</code>。</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><p>所有 NULL 相关的问题，根源都是同一条：<b>SQL 使用三值逻辑（TRUE / FALSE / UNKNOWN），而 NULL 表示「未知」而不是「空」</b>。</p><ul><li><b>为什么是三值逻辑</b>：<code>NULL</code> 的语义是「值未知」。那么「未知的值等于 1 吗？」答案既不是 TRUE 也不是 FALSE，而是<b>不知道</b>（UNKNOWN）。这个哲学选择导致了所有 NULL 相关的反直觉行为。理解这一点，就能推导出所有规则，而不用死记。</li><li><b>WHERE 只保留 TRUE</b>：WHERE 子句里的条件为 UNKNOWN 的行会被<b>丢弃</b>（和 FALSE 一样）。所以 <code>WHERE col = 1</code> 会同时丢掉 <code>col IS NULL</code> 的行——这是很多人没意识到的。</li><li><b>为什么 NOT IN 会返回空集</b>：<code>x NOT IN (a, b, c)</code> 展开为 <code>x&lt;&gt;a AND x&lt;&gt;b AND x&lt;&gt;c</code>。只要集合里有一个 NULL，就有 <code>x &lt;&gt; NULL</code> → UNKNOWN → <code>TRUE AND TRUE AND UNKNOWN</code> = <b>UNKNOWN</b> → 所有行都不满足 → <b>空集</b>。这是三值逻辑最著名的陷阱。</li><li><b>ON 与 WHERE 的执行顺序</b>：对 LEFT JOIN，逻辑上是「先按 ON 做外连接（保证左表行全部保留）→ 再按 WHERE 过滤」。所以 WHERE 里对右表的条件会把「补了 NULL 的行」过滤掉，效果等价于 INNER JOIN。</li><li><b>设计建议：尽量用 NOT NULL</b>。允许 NULL 的列会带来：① 三值逻辑的复杂性；② 索引和统计信息的行为差异；③ 应用代码要到处判断。所以<b>建表时给合理的默认值（空字符串、0、''）比允许 NULL 更好</b>。例外：「确实未知」的语义（如「用户未填写」）用 NULL 是合适的。</li></ul><div class="table-wrap"><table><thead><tr><th>场景</th><th>推荐写法</th><th>为什么</th></tr></thead><tbody><tr><td>判空</td><td><code>IS NULL</code> / <code>IS NOT NULL</code></td><td><code>= NULL</code> 永远 UNKNOWN</td></tr><tr><td>排除子集</td><td><code>NOT EXISTS</code></td><td><b>不受 NULL 影响</b></td></tr><tr><td>统计行数</td><td><code>COUNT(*)</code></td><td>不跳过 NULL</td></tr><tr><td>默认值</td><td><code>COALESCE(col, 0)</code></td><td>把 NULL 当 0 参与计算</td></tr><tr><td>条件在右表</td><td><b>写在 ON</b></td><td><b>保留左表全部行</b></td></tr><tr><td>NULL 排序</td><td><code>ORDER BY col IS NULL, col</code></td><td>跨数据库行为一致</td></tr><tr><td>建表</td><td><b>NOT NULL + DEFAULT</b></td><td>从根源避免三值逻辑</td></tr></tbody></table></div><details><summary>为什么 NOT IN 遇到 NULL 会返回空集？这个坑怎么避免？</summary><p>因为 <code>x NOT IN (集合)</code> 会被展开成<b>一串 AND 连接的不等式</b>：<code>x&lt;&gt;a AND x&lt;&gt;b AND x&lt;&gt;c</code>。如果集合里有一个 NULL，那么其中一项变成 <code>x &lt;&gt; NULL</code>，其结果是 <b>UNKNOWN</b>（不是 TRUE）。而三值逻辑里 <code>TRUE AND UNKNOWN = UNKNOWN</code>，<b>UNKNOWN 在 WHERE 中会被当作不满足</b>。所以结果是：<b>每一行都不满足条件 → 返回空集</b>。这个坑特别隐蔽，因为它在子查询「碰巧没有 NULL」时工作正常，一旦数据里出现 NULL 就突然返回空——而且是<b>静默的</b>（不报错，只是结果不对）。避免方法：① <b>永远用 NOT EXISTS 代替 NOT IN</b>——NOT EXISTS 用的是「存在性判断」，不涉及与 NULL 的比较，所以完全不受影响，而且语义更清晰、优化器通常也能生成更好的计划。<b>这是最推荐的做法，应该变成肌肉记忆</b>；② 用 LEFT JOIN + IS NULL（效果相同，某些场景更快）；③ 如果一定要用 NOT IN，必须加 <code>WHERE col IS NOT NULL</code> 过滤（但容易漏，不推荐）。顺带说，<code>IN</code>（不带 NOT）是安全的——因为 <code>x IN (1,2,NULL)</code> 展开是 OR 连接，只要有一项 TRUE 就成立。</p></details><details><summary>LEFT JOIN 到底什么时候用 ON，什么时候用 WHERE？</summary><p>判断标准只有一条：<b>这个条件是「匹配规则」还是「结果过滤」</b>。<b>放 ON</b>：条件描述的是「右表的哪些行算匹配上了」——比如「只要有效订单」<code>o.status = 1</code>，这是匹配规则的一部分，不满足的行<b>不算匹配</b>，但左表的行仍要保留（右表列填 NULL）。<b>放 WHERE</b>：条件描述的是「最终结果里要保留哪些行」——比如「只要 VIP 用户」<code>u.is_vip = 1</code>，这是对左表本身的过滤，放 ON 或 WHERE 对 LEFT JOIN 的效果<b>是一样的</b>（因为是过滤左表，不涉及右表 NULL）。所以核心区别只在<b>针对右表的条件</b>：放 ON 保留左表全部行，放 WHERE 则把没匹配上的行也过滤掉（退化成 INNER JOIN）。一个快速自检方法：<b>写完 LEFT JOIN 后问一下「没匹配上的左表行还在吗？」</b>——如果不在，说明你把右表条件放错位置了。另外提醒：这个区别<b>只对 OUTER JOIN 有意义</b>，对 INNER JOIN 来说 ON 和 WHERE 的效果完全相同（优化器也会等价处理）。</p></details><details><summary>COUNT(*)、COUNT(1)、COUNT(列) 有什么区别？</summary><p>三个层次的区别：<b>语义</b>上——<code>COUNT(*)</code> 统计<b>行数</b>（不关心列值，NULL 也算）；<code>COUNT(1)</code> 统计「表达式 1 非 NULL 的行数」，而常量 1 永远非 NULL，所以等价于 <code>COUNT(*)</code>；<code>COUNT(列)</code> 统计<b>该列非 NULL 的行数</b>，会跳过 NULL。<b>结果</b>上——只有 <code>COUNT(列)</code> 可能与前两者不同（当列可为 NULL 时）。<b>性能</b>上——现代数据库（MySQL 5.7+、PostgreSQL）对三者一视同仁，优化器会选择最小的可用索引来计数，没有实质差异；老的说法「COUNT(1) 比 COUNT(*) 快」是没有根据的（甚至有些时候 COUNT(列) 更快，因为它能用该列的窄索引）。实践建议：<b>统一用 <code>COUNT(*)</code></b>——语义最清晰（就是数行数）、不会有跳过 NULL 的意外、且性能不差。只有在「我想知道这一列有多少个非空值」这种明确意图时才用 <code>COUNT(列)</code>。另外提一个相关陷阱：<b>COUNT 在 LEFT JOIN 后会膨胀</b>——因为一对多会产生多行，此时要 <code>COUNT(DISTINCT 左表主键)</code> 或者先聚合右表再 JOIN。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>LEFT JOIN 后写 WHERE o.status = paid，为何无订单用户消失？</summary><p>其 o.status 为 NULL，比较结果 UNKNOWN；WHERE 不保留 UNKNOWN。</p></details></section>
 <footer>继续阅读：<a href="join-principles.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

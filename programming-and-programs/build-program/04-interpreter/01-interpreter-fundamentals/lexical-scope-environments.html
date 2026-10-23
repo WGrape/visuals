@@ -16,6 +16,67 @@ call(); // 词法作用域结果为 1</code></pre>
 <section class="panel"><h2>边界与误区</h2><p>具体语言还可能有块级作用域、提升、暂时性死区或按值捕获等规则；环境链只说明词法查找的基础模型。</p></section>
 <section class="panel"><h2>从 AST 到环境对象的实现草图</h2><p>解释变量表达式时执行 lookup(name)，沿当前环境与 parent 链查找；解释声明语句时在当前环境 define(name,value)；解释赋值语句时按语言规则找到已有绑定并更新。函数表达式产生的值不仅包含参数与函数体，还要持有定义时的环境引用。调用表达式先计算函数值和实参，再创建以定义环境为 parent 的新局部环境，把参数绑定进去，最后执行函数体。这里的关键是“定义环境”，不是“调用表达式所在环境”。</p><p>实现测试可以用三组程序：局部变量遮蔽外层变量、函数返回后闭包继续读写变量、两个独立闭包各自维护状态。再加入递归和错误路径，确认异常退出时局部环境不会污染下次调用。对于按值捕获的语言，闭包保存的可能是定义时的值或特殊单元，而不是整个可变环境对象；具体实现仍须符合该语言对赋值和生命周期的规定。</p></section>
 <section class="panel" data-depth-note><h2>环境链的两个实现选择</h2><p>直接用链表式环境字典最容易解释和实现，但每次变量查找可能逐层向外走。编译器或解释器可在静态解析阶段为变量确定“向外几层、该层第几个槽位”，运行时直接按位置访问；这样更快，但闭包捕获和可变绑定仍须保持正确。若一个函数只捕获外层的两个变量，也可把捕获值或引用放在专门的闭包对象里，避免保留整个大环境。优化前先用遮蔽、递归、独立闭包和赋值测试语义，再比较查找开销与内存占用。</p></section>
+<section class="panel" data-dry-goods><h2>词法作用域与环境的实现</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>说明</th><th>例子</th></tr></thead><tbody><tr><td><b>词法作用域</b></td><td>作用域由<b>代码书写位置</b>决定</td><td>闭包捕获的是定义处的环境</td></tr><tr><td><b>动态作用域</b></td><td>作用域由<b>调用链</b>决定</td><td>早期 Lisp、shell 变量</td></tr><tr><td><b>环境（Environment）</b></td><td>变量名 → 值的映射</td><td>通常用哈希表或链表</td></tr><tr><td><b>闭包</b></td><td>函数 + 其定义时的环境</td><td>让变量的生命周期超过作用域</td></tr><tr><td><b>作用域链</b></td><td>当前环境 → 外层环境 → ... → 全局</td><td>查找时逐层向上</td></tr><tr><td><b>静态距离</b></td><td>编译时就能算出变量在第几层</td><td>优化：不用逐层查名字</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>实现方式</th><th>查找复杂度</th><th>特点</th></tr></thead><tbody><tr><td><b>哈希表</b></td><td>O(1)</td><td>简单；每次调用都要建表，开销大</td></tr><tr><td><b>链表（链式环境）</b></td><td>O(深度)</td><td>实现简单；深嵌套时慢</td></tr><tr><td><b>扁平化 + 静态距离</b></td><td><b>O(1) 数组索引</b></td><td><b>最快</b>；Lua、很多 VM 的做法</td></tr><tr><td><b>寄存器化</b></td><td>直接索引寄存器</td><td>最快；需编译期确定（Lua 的做法）</td></tr></tbody></table></div><p><b>闭包为什么能「记住」变量</b>：因为闭包持有的是<b>环境对象的引用</b>，而不是值的拷贝。所以经典的循环陷阱——<code>for i:=0; i&lt;3; i++ { fns = append(fns, func(){ print(i) }) }</code>——所有闭包共享同一个 <code>i</code>，最后都打印 3。<b>解决：每次迭代创建新的绑定</b>（Go 1.22+ 已修复循环变量语义）。</p></section><section class="panel"><h2>实现代码</h2><pre><code># 链式环境（最简单易懂的实现）
+class Env:
+    def __init__(self, parent=None):
+        self.vars = {}
+        self.parent = parent          # 指向外层环境
+
+    def lookup(self, name):
+        e = self
+        while e is not None:
+            if name in e.vars:
+                return e.vars[name]
+            e = e.parent              # 逐层向外找
+        raise NameError(name)
+
+    def define(self, name, value):
+        self.vars[name] = value       # 只在当前层定义
+
+    def assign(self, name, value):
+        e = self
+        while e is not None:
+            if name in e.vars:
+                e.vars[name] = value  # 找到就改（不在当前层也能改）
+                return
+            e = e.parent
+        raise NameError(name)
+
+# 函数定义时捕获 env，调用时创建新 Env 并把 parent 指向捕获的 env
+class Closure:
+    def __init__(self, params, body, env):
+        self.params, self.body, self.env = params, body, env
+    def call(self, args):
+        new_env = Env(parent=self.env)      # 关键是 parent 指向定义处
+        for p, a in zip(self.params, args):
+            new_env.define(p, a)
+        return eval(self.body, new_env)</code></pre><pre><code># 优化：扁平化环境 + 静态距离（O(1) 查找）
+# 编译时就能算出「变量 x 在向上第几层、第几个槽位」
+# 运行时直接用 env[depth][slot] 索引，不用按名字查
+
+def compile_var(name, ctx):
+    depth = 0
+    scope = ctx.current_scope
+    while scope is not None:
+        if name in scope.vars:
+            return ('local', depth, scope.vars.index(name))   # (深度, 槽位)
+        scope = scope.parent
+        depth += 1
+    return ('global', name)
+
+# 运行时
+def get_var(frames, depth, slot):
+    return frames[depth][slot]      # 两次数组索引，O(1)
+
+# 进一步优化：闭包变量转成「值数组」（Lua 的 upvalue）
+# 逃逸到闭包里的变量放进一个共享的数组，通过索引访问
+# 这样既支持闭包捕获，又能 O(1) 访问，且不需要哈希表
+
+# 对比：
+#   哈希表查找：约 50~100 ns
+#   数组索引：  约 1~2 ns  (快 50 倍)
+# 这就是为什么高性能解释器都做「变量扁平化」</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>闭包捕获的值不对（循环陷阱）</td><td>所有闭包共享同一个变量</td><td>每次迭代创建新绑定；Go 1.22+ 已修复</td></tr><tr><td>变量查找很慢</td><td>深嵌套 + 链表环境</td><td>扁平化 + 静态距离；或寄存器化</td></tr><tr><td>递归函数找不到自己</td><td>定义时环境里还没有自己</td><td>先声明再定义；或用 letrec</td></tr><tr><td>赋值改到了外层的变量</td><td>assign 逐层向上找</td><td>确认这是不是你想要的（Python 需要 nonlocal）</td></tr><tr><td>解释器内存涨</td><td>闭包持有大环境不释放</td><td>只捕获需要的变量；或用扁平化减少引用</td></tr><tr><td>动态作用域的 bug</td><td>误用了动态作用域</td><td>确认语言用的是词法作用域（现代语言都是）</td></tr></tbody></table></div><p class="muted"><b>词法作用域 vs 动态作用域的判别</b>：在函数 <code>g</code> 里引用变量 <code>x</code>，<code>g</code> 被 <code>f</code> 调用——词法作用域看 <code>g</code> <b>定义处</b>的 x；动态作用域看 <code>f</code> 里的 x。<b>现代语言几乎全用词法作用域</b>（可静态分析、可优化）。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>read 在 call 中被调用，为什么不读取 call 的 x=9？</summary><p>词法作用域使用 read 定义时的外层环境，call 的局部环境不是它的父环境。</p></details></section>
 <footer>继续阅读：<a href="interpreter-fundamentals.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

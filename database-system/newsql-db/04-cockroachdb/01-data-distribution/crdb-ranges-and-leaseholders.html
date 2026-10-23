@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -181,6 +199,54 @@ for attempt := 0; attempt &lt; maxRetry; attempt++ {
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Range：CockroachDB 的分片单位</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th><b>默认值</b></th><th>含义</th><th>调优建议</th></tr></thead><tbody><tr><td><b>range_max_bytes</b></td><td><b>512 MiB</b></td><td>Range 超过此值就<b>自动分裂</b></td><td>大表可调到 1 – 2 GiB 减少元数据</td></tr><tr><td><b>range_min_bytes</b></td><td><b>128 MiB</b></td><td>小于此值且无写入则<b>自动合并</b></td><td>—</td></tr><tr><td>副本数（默认 RF）</td><td><b>3</b></td><td>每个 Range 存 3 份（跨节点/机架）</td><td>生产保持 3</td></tr><tr><td>Raft Group</td><td><b>每个 Range 一个</b></td><td>Range 内用 Raft 共识</td><td>Range 数越多 Raft 开销越大</td></tr></tbody></table></div><p><b>关键概念</b>：<b>Range 是<b>按 key 范围</b>切分的连续片段</b>，每个 Range 是一个<b>独立的 Raft Group</b>（有自己的 leader、日志、leaseholder）。这与“按 key 哈希分片”不同——<b>范围分片保留了 key 的顺序</b>，所以范围扫描只碰少数几个 Range（哈希分片则要扫全部分片）。</p><p><b>Range 观测与操作</b></p><pre><code>-- 查看 Range 分布（CRDB 的必备排障 SQL）
+SHOW RANGES FROM TABLE orders;
+--   start_key  end_key  range_id  range_size_mb  lease_holder  replicas  voting_replicas
+--   NULL       /1000    42        245            3              {1,3,5}   {1,3,5}
+--   /1000      /2000    43        312            7              {2,7,9}   {2,7,9}
+--   -&gt; lease_holder 所在节点负责该 Range 的读和协调写
+
+-- 查看集群各节点的 Range 数与容量
+SELECT node_id, range_count,
+       round(used_capacity/1024^3,1) AS used_gb,
+       round(available_capacity/1024^3,1) AS avail_gb
+FROM crdb_internal.kv_store_status;
+
+-- 找出最大的 Range（可能需要手动分裂）
+SELECT range_id, round(range_size/1024^2) AS mb,
+       start_key, end_key, lease_holder
+FROM crdb_internal.ranges
+ORDER BY range_size DESC LIMIT 10;
+
+-- 手动分裂（热点 Range 手动打散）
+ALTER TABLE orders SPLIT AT VALUES (1000), (2000), (3000);
+
+-- 手动转移 leaseholder（负载均衡）
+ALTER TABLE orders RELOCATE LEASE TO 5;
+ALTER TABLE orders RELOCATE TO 5, 6, 7;    -- 搬副本</code></pre><p class="muted"><b>热点 Range 是最常见的性能问题</b>：如果主键是<b>单调递增</b>的（自增 ID 或时间戳前缀），所有写入都会打到<b>最后一个 Range</b>——单点瓶颈，无法分散。解法：① 用<b>随机前缀或 UUID</b> 作为主键；② 用 <code>ALTER ... SPLIT AT</code> 预分裂；③ CRDB 18.0+ 支持<b>哈希分片索引</b>（<code>USING HASH</code>）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Leaseholder：读写的关键角色</h2><div class="table-wrap"><table><thead><tr><th>角色</th><th>职责</th><th>数量</th><th>与 Raft Leader 的关系</th></tr></thead><tbody><tr><td><b>Raft Leader</b></td><td>接收写请求、驱动 Raft 日志复制</td><td>每个 Range 1 个</td><td>—</td></tr><tr><td><b>Leaseholder</b></td><td><b>服务读请求</b>、协调写、维护时间戳缓存</td><td>每个 Range 1 个</td><td><b>通常与 Raft Leader 是同一节点</b>（会跟随转移）</td></tr></tbody></table></div><p><b>为什么要区分 Leaseholder 和 Raft Leader</b>：因为<b>读操作不需要走 Raft 日志</b>（那样太慢）。Leaseholder 持有一个<b>租约（lease）</b>——在租约期内它<b>保证自己是最新的</b>（能读到所有已提交的数据），所以可以直接本地读，<b>不需要与其他副本通信</b>。这就是 CRDB 能提供<b>可串行化隔离级别</b>但读延迟仍然很低的原因。</p><p><b>Leaseholder 操作</b></p><pre><code>-- 查看 leaseholder 分布是否均衡
+SELECT lease_holder, count(*) AS ranges
+FROM crdb_internal.ranges
+GROUP BY lease_holder ORDER BY ranges DESC;
+--   如果某个节点的 range 数明显多于其他 -&gt; 该节点读压力大
+--   CRDB 会自动做 lease 再平衡，但有时需要手动触发
+
+-- 查看租约转移历史（排查抖动）
+SELECT * FROM crdb_internal.lease_history LIMIT 20;
+
+-- 强制转移某个热点 Range 的 lease
+ALTER TABLE orders RELOCATE LEASE TO 3;
+
+-- 关键配置：lease 相关的系统设置
+SHOW CLUSTER SETTING kv.lease.transfer_timeout;      -- 租约转移超时
+SET CLUSTER SETTING kv.range_split.by_load_enabled = true;    -- 按负载分裂（关键！）
+SET CLUSTER SETTING kv.range_split.load_based_threshold = 1000; -- QPS 阈值
+
+-- 按负载分裂（Load-based Splitting）是 CRDB 的特色：
+#   当某个 Range 的 QPS 超过阈值，&lt;b&gt;即使没到大小上限也会分裂&lt;/b&gt;
+#   这能自动打散热点（传统按大小分裂做不到这点）</code></pre><p class="muted"><b>Load-based Splitting 是 CRDB 解决热点 Range 的关键特性</b>：传统分片只按<b>大小</b>分裂，一个被高频访问的小 Range 永远不会分裂。CRDB 会监控每个 Range 的 <b>QPS</b>，超过阈值（默认约 1000 QPS）就分裂，从而把热点分散到多个 Range、多个节点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>Range 和 TiDB 的 Region 有什么区别？</summary><p>概念几乎一样（都是按 key 范围分片 + Raft 多副本），主要差别在默认值和调度：① <b>默认大小</b>——CRDB Range 默认 <b>512 MiB</b> 分裂、TiDB Region 默认 <b>96 MiB</b> 分裂（TiDB 的更小，调度更灵活但元数据更多）；② <b>调度器</b>——TiDB 有独立的 <b>PD（Placement Driver）</b>集群做全局调度，CRDB 的调度是<b>内置在集群里</b>的（每个节点参与）；③ <b>读服务</b>——CRDB 用 <b>Leaseholder</b>，TiDB 用 <b>Leader + Follower Read</b>（可配置从副本读，牺牲强一致换延迟）；④ <b>分裂策略</b>——CRDB 支持<b>按负载分裂</b>，TiDB 主要按大小（也有按 key 数量）。</p></details><details><summary>跨地域部署怎么配置？</summary><p>CRDB 的特色能力是<b>副本放置策略</b>（用 SQL 声明数据放哪）：① <b>ALTER TABLE ... CONFIGURE ZONE</b> 设置 <code>num_replicas</code>、<code>constraints</code>、<code>lease_preferences</code>；② 典型配置：3 副本分别放在 3 个地域，并把 <b>lease_preferences 设为用户所在地域</b>——这样读请求本地就能完成（<b>本地性延迟</b>），写入仍需跨地域共识；③ 更激进的做法是用 <b>REGIONAL BY ROW</b> 表——<b>每一行根据某个字段（如 region 列）自动放到对应地域</b>，实现真正的<b>数据主权（data domiciling）</b>和本地读写。代价：跨地域写入延迟 = RTT（北京↻欧洲约 200 ms），所以要把<b>写入和读的 lease 放在同一侧</b>。</p></details><details><summary>Range 太多会有什么问题？</summary><p>三个问题：① <b>Raft 开销</b>——每个 Range 一个 Raft Group，都要维持心跳（默认约每秒数次）和选举定时器，Range 数上万时<b>心跳流量就会占用可观的网络和 CPU</b>；② <b>元数据压力</b>——Range 的描述信息存在 <b>meta ranges</b> 里，Range 越多，查找路由的深度和缓存压力越大；③ <b>调度开销</b>——再平衡算法要跟踪所有 Range 的负载。经验上限：<b>单个节点几万个 Range</b> 是合理的，超过 <b>10 万</b>就要关注。控制方法：调大 <code>range_max_bytes</code>、清理无用数据（让小 Range 自动合并）。</p></details><details><summary>怎么排查某个查询慢？</summary><p>四步：① <b>EXPLAIN</b>——看是否走了索引、有没有 <b>full scan</b>、是否有 <b>跨节点的分布式扫描</b>；② 看是否是<b>热点 Range</b>——<code>crdb_internal.ranges</code> 看 range 大小和 QPS，或用 DB Console 的 Hot Ranges 页面；③ 看是否<b>跨地域</b>——如果 leaseholder 在另一个地域，每次读都要跨地域 RTT（几十到上百 ms）；④ 看<b>事务重试</b>——CRDB 是<b>可串行化</b>隔离，冲突时会返回 <code>40001</code> 错误要求<b>客户端重试</b>，如果应用没处理重试逻辑，会表现为“随机失败”或“很慢”。第 ④ 点是 CRDB 特有的、最容易踩的坑。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / CockroachDB · 数据分布 ·

@@ -77,6 +77,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -171,5 +189,66 @@ mod = <span class="fn">importlib.import_module</span>(<span class="str">"json"</
   }, { rootMargin: '-45% 0px -50% 0px' });
   Object.keys(map).forEach(id => obs.observe(document.getElementById(id)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>模块搜索顺序与关键机制</h2><p><b>import 的完整查找顺序</b>：① <code>sys.modules</code> 缓存（已导入的直接返回）→ ② 内置模块（<code>sys.builtin_module_names</code>）→ ③ 按 <code>sys.path</code> 顺序查找 .py/.so/包目录 → ④ 找到后编译/加载并执行模块代码 → ⑤ 写入 <code>sys.modules</code>。</p><div class="table-wrap"><table><thead><tr><th>阶段</th><th>做什么</th><th>耗时（首次）</th></tr></thead><tbody><tr><td>查找</td><td>遍历 sys.path 找文件</td><td>几十 μs</td></tr><tr><td>编译</td><td>.py → 字节码（.pyc 缓存到 <code>__pycache__</code>）</td><td><b>ms 级</b>（大模块几十 ms）</td></tr><tr><td>执行</td><td>执行模块顶层代码（<b>所有副作用在这里发生</b>）</td><td>取决于模块内容</td></tr><tr><td>缓存</td><td>写入 sys.modules</td><td>—</td></tr><tr><td>重复导入</td><td>直接从 sys.modules 返回</td><td><b>&lt; 1 μs</b></td></tr></tbody></table></div><p><b>import 排查命令</b></p><pre><code># 看模块搜索路径
+python3 -c "import sys; print('\n'.join(sys.path))"
+python3 -m site                     # 详细的 site-packages 与路径配置
+
+# 看某个模块从哪来
+python3 -c "import numpy; print(numpy.__file__)"
+python3 -c "import json; print(json.__file__)"
+
+# 测量导入耗时（找出启动慢的元凶）
+python3 -X importtime -c "import requests" 2&gt;&amp;1 | sort -k2 -n | tail -20
+# 输出：import time: 列，能看到每个模块的累计/自身耗时
+
+# 看已加载模块与内置模块
+python3 -c "import sys; print(len(sys.modules)); print(sys.builtin_module_names)"
+
+# 手动加载与重载
+import importlib
+mod = importlib.import_module("os.path")
+importlib.reload(mod)          # 修改了源码后重载（只在开发时用）
+
+# 清缓存看冷启动差异
+find . -name __pycache__ -type d -exec rm -rf {} +</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>循环导入、包结构与坑</h2><ul><li><b>循环导入（circular import）</b>：A 导入 B，B 又导入 A。Python 能处理部分情况（部分初始化的模块对象），但常表现为 <code>ImportError: cannot import name X from partially initialized module</code>。<b>解法</b>：① 把共享的东西抽到第三个模块；② 在函数内部延迟导入（<code>def f(): import B</code>）；③ 用 <code>import module</code> 而不是 <code>from module import name</code>。</li><li><b>sys.path[0] 是脚本所在目录</b>（不是当前工作目录），这是很多“明明在同目录却 import 不到”的原因。运行方式不同（<code>python a.py</code> vs <code>python -m pkg.a</code>）会让 sys.path[0] 不同。</li><li><b>相对导入只能在包内用</b>：<code>from . import x</code> 依赖 <code>__package__</code>，直接运行一个模块文件（<code>python x.py</code>）时会报 <code>attempted relative import with no known parent package</code>。</li><li><b>__init__.py 的作用</b>：标记目录为包（Python 3.3+ 有命名空间包，不再强制），且<b>导入包时会执行它</b>。所以重型初始化放这里会拖慢所有 import。</li><li><b>导入的副作用</b>：模块顶层代码在导入时执行（连接数据库、读配置、起线程）。这是“为什么 import 一下就卡住”的原因。原则：<b>模块顶层只做定义，副作用放 main 或显式初始化函数</b>。</li><li><b>启动优化</b>：① 用 <code>python -X importtime</code> 找慢模块；② 延迟导入（函数内 import）；③ 避免 <code>from x import *</code>（导入所有名字，慢且污染命名空间）；④ 冷启动敏感场景（如 Lambda、CLI）尤其要注意。</li><li><b>排障顺序</b>：① <code>sys.path</code> 对不对；② <code>sys.modules</code> 里有没有（重复/部分初始化）；③ 是不是循环导入（看 traceback 的 partially initialized）；④ 用 <code>-X importtime</code> 定位慢模块。</li></ul><details><summary>为什么改了源码但没生效？</summary><p>三种可能：① 跑的是 <code>__pycache__</code> 里的旧 .pyc（Python 会按 mtime 校验，通常会自动失效，但某些文件系统或手动改 mtime 会出问题）→ 删 <code>__pycache__</code>；② 模块已被导入，<code>sys.modules</code> 有缓存 → 用 <code>importlib.reload</code>；③ 装的包在 site-packages，而你改的是另一份源码 → 用 <code>pip install -e .</code> 开发模式安装。</p></details><details><summary>from x import y 和 import x 有什么区别？</summary><p><code>import x</code> 只把模块对象绑定到名字 x；<code>from x import y</code> 会执行整个模块，然后把 y 单独绑定。后者更方便但：① 对循环导入更敏感；② 无法感知 y 后续被重新赋值；③ 命名空间污染。大型项目建议 <code>import x</code> + <code>x.y</code> 使用。</p></details></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>导入机制速查：搜索顺序与缓存</h2><p>一次 <code>import foo</code> 实际走完 5 步。搞清楚顺序，90% 的「明明有这个文件却 import 不到」都能自己定位。</p><div class="table-wrap"><table><thead><tr><th>步骤</th><th>做什么</th><th>失败时的表现</th></tr></thead><tbody><tr><td>① 查 <code>sys.modules</code></td><td>已导入过就直接返回缓存对象</td><td>改了源码不生效（需 <code>importlib.reload</code>）</td></tr><tr><td>② 查内置模块</td><td>解释器编译进来的（sys、builtins、math 部分）</td><td>几乎不会失败</td></tr><tr><td>③ 查 <code>sys.path</code> 逐个目录</td><td>按顺序找 <code>foo.py</code> / <code>foo/__init__.py</code></td><td><code>ModuleNotFoundError</code></td></tr><tr><td>④ 加载并<b>执行</b>模块顶层代码</td><td>创建 module 对象、写入 sys.modules</td><td>顶层有副作用/慢，导入就慢</td></tr><tr><td>⑤ 绑定到当前命名空间</td><td><code>import a.b</code> 只绑定 <code>a</code></td><td><code>AttributeError: module 'a' has no attribute 'b'</code></td></tr></tbody></table></div><p><b>定位导入问题的 5 条命令</b></p><pre><code># 1) 看真实的搜索路径（顺序 = 优先级）
+python -c "import sys; [print(i, p) for i, p in enumerate(sys.path)]"
+
+# 2) 单独看某个模块是从哪个文件加载的
+python -c "import json; print(json.__file__)"
+
+# 3) 包 vs 模块：区分 __init__.py 是否被用到
+python -c "import os; print(os.__path__)"      # 有 __path__ =&gt; 是包
+
+# 4) 清掉缓存重新导入（REPL 里改了源码）
+import importlib, mymod
+importlib.reload(mymod)
+
+# 5) 强制不走 __pycache__（排查 .pyc 与源码不一致）
+PYTHONDONTWRITEBYTECODE=1 python app.py
+python -B app.py</code></pre><div class="table-wrap"><table><thead><tr><th><code>sys.path</code> 的第 0 项</th><th>什么时候是它</th><th>坑</th></tr></thead><tbody><tr><td>脚本所在目录</td><td><code>python app.py</code></td><td>同名文件会<b>屏蔽</b>标准库（如自己写了 <code>email.py</code>）</td></tr><tr><td>当前工作目录 <code>''</code></td><td><code>python -m app</code> / <code>python -c</code> / 交互式</td><td>cd 到别的目录就 import 不到</td></tr><tr><td><code>''</code>（空串）</td><td><code>python -m</code> 启动</td><td><b>推荐</b>：<code>-m</code> 让相对导入和包结构都对</td></tr></tbody></table></div><p class="muted">经验法则：项目里一律用 <code>python -m package.module</code> 启动，别用 <code>python src/package/module.py</code>——后者会把 <code>src/package</code> 塞进 sys.path[0]，导致同一模块被导入两次、出现「两个类不相等」的诡异 bug。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>循环依赖：报错形态与 6 种解法</h2><p>循环导入的本质是<b>模块顶层代码在导入期就要用到对方的属性</b>，而对方还没执行完。报错有固定形态，看到就能认。</p><p><b>两种报错形态</b></p><pre><code># 典型报错（Python 3.7+ 信息已经很直白）
+ImportError: cannot import name 'User' from partially initialized module 'models'
+    (most likely due to a circular import) (/app/models.py)
+
+# 另一种形态：先导入的一方拿到的是「半成品」模块
+AttributeError: partially initialized module 'a' has no attribute 'b'
+    (most likely due to a circular import)</code></pre><div class="table-wrap"><table><thead><tr><th>解法</th><th>做法</th><th>代价 / 适用</th></tr></thead><tbody><tr><td>① <b>延迟导入</b></td><td>把 <code>import</code> 挪进函数体内部</td><td>最省事；但每次调用会查 sys.modules（有缓存，开销极小）</td></tr><tr><td>② <b>提取第三模块</b></td><td>公共部分抽到 <code>common.py</code>，两边都 import 它</td><td>最干净，<b>首选</b>；需要动结构</td></tr><tr><td>③ <b>依赖倒置</b></td><td>上层定义接口/协议，下层实现，运行时注入</td><td>解耦彻底；代码量增加</td></tr><tr><td>④ <b>局部 import + TYPE_CHECKING</b></td><td><code>if TYPE_CHECKING: from x import Y</code>，注解写字符串</td><td>只解决类型注解，运行时还得真导入</td></tr><tr><td>⑤ <b>把导入放到底部</b></td><td>模块末尾再 <code>import</code></td><td>臭名昭著的 hack，可读性差</td></tr><tr><td>⑥ <b>合并模块</b></td><td>两个模块本来就拆错了</td><td>适合小模块</td></tr></tbody></table></div><p><b>两种最常用写法</b></p><pre><code># ④ 的标准写法：注解用字符串 / from __future__ import annotations
+from __future__ import annotations          # 3.7+ 所有注解都变字符串，不求值
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                            # 只有类型检查器会执行，运行时跳过
+    from .user import User
+
+class Order:
+    def __init__(self, owner: "User") -&gt; None: ...   # 引号可省（有 future 导入时）
+
+# ② 延迟导入
+def send_email():
+    from .mailer import Mailer               # 调用时才导入
+    return Mailer().send()</code></pre><ul><li><b>自检方法</b>：<code>python -X importtime app.py 2&gt;&amp;1 | sort -k2 -n</code>，按累计耗时排序列出导入链，既找循环也找慢导入。</li><li><b>包内相对导入</b>：<code>from . import x</code> 只能在<b>包</b>里用，直接跑 <code>python mod.py</code> 会报 <code>ImportError: attempted relative import with no known parent package</code>。</li><li><code>__init__.py</code> 里写业务代码 = 导入 <code>pkg</code> 就执行，最容易制造循环，应保持为空或只做 <code>__all__</code> 声明。</li></ul></div></section>
+
 </body>
 </html>

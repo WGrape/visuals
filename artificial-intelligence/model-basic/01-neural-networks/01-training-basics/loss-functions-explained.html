@@ -70,6 +70,24 @@
   .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
   .fade.in{opacity:1;transform:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <nav class="toc" id="toc"></nav>
@@ -207,6 +225,47 @@
   </div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>损失函数速查：公式、适用与坑</h2><p>选损失的三个判断点：<b>输出是连续值还是类别</b>、<b>要不要概率校准</b>、<b>样本平不平衡</b>。</p><div class="table-wrap"><table><thead><tr><th>损失</th><th>公式</th><th>适用</th><th>坑</th></tr></thead><tbody><tr><td><b>MSE</b> L2</td><td><code>mean((y-ŷ)²)</code></td><td>回归</td><td><b>对异常值极敏感</b>（误差平方放大）；与 sigmoid 搭配会梯度消失</td></tr><tr><td><b>MAE</b> L1</td><td><code>mean(|y-ŷ|)</code></td><td>回归，有异常值</td><td>0 点不可导（需 Huber 平滑）；梯度恒定，收敛末期抖动</td></tr><tr><td><b>Huber</b></td><td>误差&lt;δ 用 L2，否则 L1</td><td>回归（鲁棒）</td><td>多一个超参 δ，常取 1.0</td></tr><tr><td><b>BCEWithLogits</b></td><td>二分类交叉熵（含 sigmoid）</td><td>二分类 / 多标签</td><td><b>必须用这个而不是 BCE+Sigmoid</b>：前者用 log-sum-exp 技巧，数值稳定</td></tr><tr><td><b>CrossEntropy</b></td><td><code>-log softmax(logits)[y]</code></td><td>单标签多分类</td><td>PyTorch 的 <code>CrossEntropyLoss</code> <b>输入是 logits</b>，不要先 softmax</td></tr><tr><td><b>Focal Loss</b></td><td>CE × <code>(1-p)^γ</code></td><td><b>极度不平衡</b>（如 1:1000）</td><td>γ 常取 2，α 常取 0.25；简单样本权重被压低</td></tr><tr><td><b>KL 散度</b></td><td><code>Σ p log(p/q)</code></td><td>分布匹配、蒸馏</td><td><b>非对称</b>：<code>KL(p‖q) ≠ KL(q‖p)</code>；q 为 0 处会爆</td></tr><tr><td><b>InfoNCE</b></td><td><code>-log exp(s+/τ)/Σexp(s/τ)</code></td><td>对比学习 / 向量召回</td><td>τ（温度）是关键，常取 0.05~0.1；<b>批越大越好</b></td></tr><tr><td><b>Triplet</b></td><td><code>max(0, d(a,p)-d(a,n)+margin)</code></td><td>度量学习</td><td>难样本挖掘决定成败；margin 常取 0.2~0.5</td></tr><tr><td><b>Dice / IoU</b></td><td>集合重叠度</td><td>分割（前景极小）</td><td>空目标会产生 nan，需加平滑项</td></tr></tbody></table></div><p><b>PyTorch 常用写法</b></p><pre><code>import torch, torch.nn as nn
+import torch.nn.functional as F
+
+# 回归
+F.mse_loss(pred, target)                       # 或 F.l1_loss / F.smooth_l1_loss(beta=1.0)
+
+# 二分类：永远用 WithLogits 版本（logits 直接进，不要自己 sigmoid）
+crit = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([10.0]))   # 正样本少时加权
+loss = crit(logits, target.float())
+
+# 多分类：输入是 logits，target 是 LongTensor 类别 id（不是 one-hot）
+loss = F.cross_entropy(logits, target, label_smoothing=0.1)
+# 类别不平衡：按频次反比加权
+loss = F.cross_entropy(logits, target, weight=torch.tensor([1.0, 5.0, 3.0]))
+
+# Focal loss（多分类版）
+def focal(logits, y, alpha=0.25, gamma=2.0):
+    ce = F.cross_entropy(logits, y, reduction='none')
+    pt = torch.exp(-ce)
+    return (alpha * (1 - pt) ** gamma * ce).mean()
+
+# InfoNCE / 对比学习（sim 已算好相似度矩阵，对角线为正样本）
+def infonce(sim, tau=0.07):
+    labels = torch.arange(sim.size(0), device=sim.device)
+    return F.cross_entropy(sim / tau, labels)</code></pre><p class="muted">最容易踩的三个坑：① <code>BCELoss</code> + 自己 sigmoid → 概率接近 0/1 时 <code>log(0)</code> 变 nan，改用 <code>BCEWithLogitsLoss</code>；② <code>CrossEntropyLoss</code> 又套了一次 softmax → 梯度被压扁、学不动；③ 多标签分类用 <code>CrossEntropyLoss</code> → 语义就错了，多标签要各标签独立 sigmoid，用 <code>BCEWithLogitsLoss</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>loss 出问题时怎么查</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>最常见原因</th><th>排查动作</th></tr></thead><tbody><tr><td><b>loss = nan</b>（第 1 步就 nan）</td><td>数据里有 nan/inf；除零</td><td><code>torch.isnan(x).any()</code> 逐层查；检查归一化分母</td></tr><tr><td><b>loss = nan</b>（训练中途变 nan）</td><td><b>学习率过大</b>导致梯度爆炸</td><td>lr 降 10 倍；加 <code>grad_clip_norm_(1.0)</code></td></tr><tr><td>loss 不降，卡在某个值</td><td>lr 太小 / 死锁在鞍点 / 标签错</td><td>lr 扫描（1e-5→1e-1）；检查标签是否全同一类</td></tr><tr><td>loss 剧烈震荡</td><td>batch 太小 / lr 太大</td><td>batch 翻倍或 lr 减半；加 warmup</td></tr><tr><td>train 降、val 升</td><td>过拟合</td><td>加 dropout / weight decay / 数据增强；早停</td></tr><tr><td><b>分类 loss 卡在 ln(C)</b></td><td>模型输出常数（没学到）</td><td>C=2 时 ln2≈0.693、C=10 时 ≈2.303；检查最后一层初始化与 lr</td></tr><tr><td>验证 loss 比训练 loss 还低</td><td>训练时开了 dropout/augment，验证没开</td><td>正常现象；也可对比 train 模式下的 eval</td></tr></tbody></table></div><p><b>loss 排查命令</b></p><pre><code># 万能排查三步
+for name, p in model.named_parameters():
+    if p.grad is None:
+        print("no grad:", name)                          # 1) 有没有参数没接到梯度
+    elif torch.isnan(p.grad).any():
+        print("nan grad:", name)                         # 2) 梯度有没有爆
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 3) 先加上梯度裁剪再说
+
+# 检查数据
+print(torch.isnan(x).any().item(), torch.isinf(x).any().item())
+print(torch.unique(target, return_counts=True))          # 标签分布漂不漂亮
+
+# 数值稳定性自查：logits 量级
+print(logits.abs().max().item())                         # 超过 50 基本要出事</code></pre><details><summary>MSE 和交叉熵本质区别是什么？</summary><p>是<b>对输出分布的假设不同</b>。MSE 等价于假设噪声服从<b>高斯分布</b>的极大似然；交叉熵等价于假设标签服从<b>伯努利/类别分布</b>的极大似然。所以回归用 MSE、分类用 CE 不是惯例，是概率模型推导的结果。分类用 MSE 会怎样？sigmoid 饱和区梯度接近 0，学得极慢——这就是早期神经网络的经典问题。</p></details><details><summary>标签不平衡一定用 Focal Loss 吗？</summary><p>不一定，优先级是：① <b>先试加权</b>（<code>pos_weight</code> / <code>class weight</code>），简单有效；② 再试<b>重采样</b>（过采样少数类或欠采样多数类）；③ 最后才上 Focal。Focal 的 γ 很敏感，且会让校准变差（输出概率不再可靠），如果下游要用概率阈值做决策，反而要慎用。</p></details><details><summary>蒸馏里的 KL 为什么要除以温度 T？</summary><p>温度 T 把 teacher 的 logits 压缩后再 softmax，让<b>非正确类别的相对关系</b>（暗知识 dark knowledge）暴露出来。T→∞ 时分布趋于均匀，信息只剩类别关系；T=1 时就是普通 softmax，非正确类概率都接近 0，学不到东西。典型 T 取 2~4，且梯度要乘 T² 补偿缩放。</p></details></div></section>
 <footer><p>Visuals · 模型基础 / 神经网络地基</p></footer>
 
 <script>

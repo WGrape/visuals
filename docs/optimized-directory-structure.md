@@ -100,12 +100,19 @@
     03-reinforcement-learning/
       01-rl/
       02-rlhf-dpo/
-    04-distillation/
+    03-distillation/
       01-distillation-foundations/
     05-deploy/
-      01-model-quantization/
-      02-model-serving/
-      03-inference-acceleration/
+      00-overview/
+      01-gateway-and-routing/
+      02-gpu-cluster-and-scaling/
+      03-model-serving/
+      04-kv-cache-and-memory/
+      05-inference-acceleration/
+      06-speculative-decoding/
+      07-model-quantization/
+      08-model-formats-and-runtimes/
+      09-inference-metrics-and-cost/
     06-distributed-training/
       01-parallelism/
   model-video/

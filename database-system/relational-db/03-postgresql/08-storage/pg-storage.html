@@ -67,6 +67,16 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,22 +86,131 @@
   <p>relfilenode、8KB 页、元组布局，以及大字段的 TOAST 行外存储。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#s1">堆表与文件</a><a href="#s2">页与元组</a><a href="#s3">TOAST</a><a href="#s4">表膨胀</a></nav>
+  <nav class="toc"><a href="#s1">① 堆表与 relfilenode：表就是一堆文件</a><a href="#s2">② 页（Page）与元组（Tuple）</a><a href="#s3">③ TOAST：大字段的行外存储</a><a href="#s4">④ FSM 与 VM：怎么快速找到空位</a><a href="#s5">⑤ 表膨胀（Bloat）与治理</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="s1"><h2>① 堆表与 relfilenode</h2>
-<p>每张表是一个 <strong>堆（Heap）</strong> 文件，由 <code>relfilenode</code> 命名，超 1GB 自动分段（<code>relfilenode.1</code> …）。索引是独立文件。表本身是无序堆，顺序由写入决定。</p>
+<section id="s1"><h2>① 堆表与 relfilenode：表就是一堆文件</h2>
+
+<p>PostgreSQL 里每张表是一个<strong>堆（Heap）</strong>——一个无序的行集合，写入顺序决定物理顺序。表的数据文件以 <code>relfilenode</code> 命名（可在 <code>pg_class</code> 中查到），单个文件超过 1GB 自动分段（<code>relfilenode.1</code>、<code>relfilenode.2</code>…）。<strong>索引是独立的文件</strong>，与表数据分开存放。</p>
+<pre><code>-- 查看表对应的物理文件
+SELECT relname, relfilenode, relpages, reltuples
+FROM pg_class WHERE relname = 'orders';
+
+-- 查看数据目录路径
+SHOW data_directory;
+-- 定位文件：SELECT pg_relation_filepath('orders');</code></pre>
+<div class="callout note"><b>注意：</b><code>TRUNCATE</code>、<code>VACUUM FULL</code>、<code>CLUSTER</code> 会重建表并<strong>改变 relfilenode</strong>；而普通的 <code>DELETE/UPDATE</code> 不会。这就是为什么复制工具要小心处理 DDL。</div>
+<h3>表空间的本质</h3>
+<p>表空间只是一个<strong>目录别名</strong>：把不同的表放到不同的磁盘上，用于 IO 隔离或容量管理（如把历史归档表放到廉价盘）。它<strong>不是</strong> MySQL 那种「一个库一个目录」的逻辑隔离。</p>
+
 </section>
-<section id="s2"><h2>② 页（Page）与元组</h2>
-<p>数据文件按 <strong>8KB 页</strong>（默认 <code>block_size</code>）组织，每页含若干元组（行）。元组头部存 <code>xmin/xmax/ctid</code> 等 MVCC 与定位信息。行通过 <code>ctid</code>（块号+偏移）定位。</p>
+<section id="s2"><h2>② 页（Page）与元组（Tuple）</h2>
+
+<p>数据文件按 <strong>8KB 页</strong>（默认 <code>block_size</code>，编译期确定）组织。每个页内含若干元组（行版本），以及页头、行指针数组（ItemId）和空闲空间。</p>
+<figure class="fig">
+<svg viewBox="0 0 700 230" role="img" aria-label="PostgreSQL 页面结构">
+  <defs><marker id="pgah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8b949e"/></marker></defs>
+  <rect x="40" y="40" width="620" height="150" fill="#161b22" stroke="#30363d"/>
+  <rect x="40" y="40" width="110" height="150" fill="rgba(88,166,255,.15)" stroke="#58a6ff"/>
+  <text x="95" y="80" fill="#e6edf3" font-size="13" text-anchor="middle">Page Header</text>
+  <text x="95" y="102" fill="#8b949e" font-size="11" text-anchor="middle">24 字节</text>
+  <text x="95" y="122" fill="#8b949e" font-size="11" text-anchor="middle">LSN / 校验和</text>
+  <text x="95" y="142" fill="#8b949e" font-size="11" text-anchor="middle">空闲起止偏移</text>
+  <rect x="150" y="40" width="110" height="150" fill="rgba(63,185,80,.15)" stroke="#3fb950"/>
+  <text x="205" y="80" fill="#e6edf3" font-size="13" text-anchor="middle">ItemId 数组</text>
+  <text x="205" y="102" fill="#8b949e" font-size="11" text-anchor="middle">每项 4 字节</text>
+  <text x="205" y="122" fill="#8b949e" font-size="11" text-anchor="middle">指向行偏移</text>
+  <text x="205" y="142" fill="#8b949e" font-size="11" text-anchor="middle">= ctid 的 offset</text>
+  <rect x="260" y="40" width="180" height="150" fill="rgba(210,153,34,.10)" stroke="#30363d" stroke-dasharray="4 3"/>
+  <text x="350" y="115" fill="#8b949e" font-size="12" text-anchor="middle">空闲空间（Free Space）</text>
+  <rect x="440" y="40" width="220" height="150" fill="rgba(188,140,255,.13)" stroke="#bc8cff"/>
+  <text x="550" y="66" fill="#e6edf3" font-size="13" text-anchor="middle">元组（从尾部向前生长）</text>
+  <rect x="450" y="80" width="200" height="26" fill="rgba(188,140,255,.25)" stroke="#bc8cff"/>
+  <text x="550" y="98" fill="#e6edf3" font-size="11" text-anchor="middle">HeapTupleHeader（23B+）：xmin/xmax/ctid</text>
+  <rect x="450" y="112" width="200" height="24" fill="rgba(188,140,255,.18)" stroke="#bc8cff"/>
+  <text x="550" y="129" fill="#c9d1d9" font-size="11" text-anchor="middle">NULL 位图 + 对齐填充</text>
+  <rect x="450" y="142" width="200" height="24" fill="rgba(188,140,255,.18)" stroke="#bc8cff"/>
+  <text x="550" y="159" fill="#c9d1d9" font-size="11" text-anchor="middle">用户数据（列值）</text>
+  <text x="350" y="215" fill="#8b949e" font-size="12" text-anchor="middle">典型 8KB 页：ItemId 从前往后长，元组从后往前长，中间是空闲空间</text>
+</svg>
+<figcaption>PostgreSQL 页面布局：页头 + 行指针数组 + 空闲空间 + 元组</figcaption>
+</figure>
+<h3>元组头里的 MVCC 字段</h3>
+<table>
+<tr><th>字段</th><th>含义</th><th>作用</th></tr>
+<tr><td>xmin</td><td>插入该行版本的事务 ID</td><td>决定该版本对谁可见</td></tr>
+<tr><td>xmax</td><td>删除/更新该版本的事务 ID（0 表示未删）</td><td>决定该版本是否已被作废</td></tr>
+<tr><td>ctid</td><td>(块号, 行指针偏移)</td><td>行的物理地址；UPDATE 后指向新版本</td></tr>
+<tr><td>infomask</td><td>标志位（已提交/已回滚/已冻结…）</td><td>避免频繁查 clog</td></tr>
+</table>
+<div class="callout tip"><b>关键理解：</b><strong>UPDATE = INSERT + 旧版本标记删除</strong>。旧版本仍留在页里直到 VACUUM 回收，所以频繁 UPDATE 的表会「膨胀」。</div>
+
 </section>
-<section id="s3"><h2>③ TOAST：大字段行外存储</h2>
-<p>单行不能超过一页（约 8KB，留头）。超阈值（约 2KB）的宽列（text/jsonb/bytea）会被 <strong>TOAST</strong> 压缩并切分存到附属的 toast 表，主表只留指针。查询不访问该列时不读 toast，省 IO。</p>
-<pre><code>SELECT relname FROM pg_class WHERE reltoastrelid != 0;  -- 查看有 TOAST 的表</code></pre>
+<section id="s3"><h2>③ TOAST：大字段的行外存储</h2>
+
+<p>一行必须能放进一页（约 8KB 减去头部）。当某行的可变长列（<code>text</code>、<code>jsonb</code>、<code>bytea</code>）超过约 <strong>2KB</strong>（<code>TOAST_TUPLE_THRESHOLD</code>）时，PostgreSQL 会先<strong>压缩</strong>，仍放不下就<strong>切块存到附属 TOAST 表</strong>，主表只留一个指针。</p>
+<div class="grid3">
+<div class="card3"><h4>PLAIN</h4><p>不压缩、不行外存储（用于定长类型）</p></div>
+<div class="card3"><h4>EXTENDED</h4><p>默认：先压缩，再行外存储</p></div>
+<div class="card3"><h4>EXTERNAL</h4><p>只行外存储、不压缩（适合已压缩的图片）</p></div>
+<div class="card3"><h4>MAIN</h4><p>先压缩，压缩后仍太大才行外存储</p></div>
+</div>
+<pre><code>-- 查看带 TOAST 的表
+SELECT relname FROM pg_class WHERE reltoastrelid != 0;
+
+-- 修改列的存储策略
+ALTER TABLE articles ALTER COLUMN body SET STORAGE EXTERNAL;
+
+-- TOAST 表的大小
+SELECT pg_size_pretty(pg_total_relation_size('articles'));</code></pre>
+<div class="callout note"><b>性能提示：</b>SELECT 时若不访问 TOAST 列，就不会读 TOAST 表——所以<strong>避免 <code>SELECT *</code></strong> 对宽表意义重大。另外 <code>LIKE '%x%'</code> 这类操作必须解压 TOAST，代价很高。</div>
+
 </section>
-<section id="s4"><h2>④ 表膨胀（bloat）</h2>
-<p>MVCC 的死元组、频繁 UPDATE 会产生 <strong>表膨胀</strong>：文件里大量行版本已不可见但未被回收。需 <code>VACUUM</code> 回收，并用 <code>pgstattuple</code> 评估膨胀率。</p>
+<section id="s4"><h2>④ FSM 与 VM：怎么快速找到空位</h2>
+
+<div class="grid3">
+<div class="card3"><h4>FSM 空闲空间映射</h4><p>记录每个页的空闲空间量，插入时快速定位可容纳的页，避免逐页扫描</p></div>
+<div class="card3"><h4>VM 可见性映射</h4><p>标记「页内所有元组对所有事务可见」，让 VACUUM 跳过这些页，也支持 index-only scan</p></div>
+<div class="card3"><h4>index-only scan</h4><p>若 VM 标记页为全可见，且查询列都在索引里，可完全不回表</p></div>
+<div class="card3"><h4>VACUUM 与 VM</h4><p>VACUUM 清理死元组后设置 VM 位；之后的 UPDATE/INSERT 会清除该位</p></div>
+</div>
+<p>这也是为什么<strong>及时 VACUUM 能显著提升 index-only scan 命中率</strong>——很多人只把 VACUUM 当「回收空间」，忽略了它在可见性地图上的作用。</p>
+
 </section>
-</main>
+<section id="s5"><h2>⑤ 表膨胀（Bloat）与治理</h2>
+
+<p>MVCC 下 UPDATE/DELETE 产生的旧版本不会立即释放，而是等待 VACUUM 标记为可复用。若长时间不清理，或存在<strong>长事务阻止回收</strong>，文件会不断膨胀——这就是 <strong>bloat</strong>。</p>
+<pre><code>-- 安装扩展后查看膨胀
+CREATE EXTENSION pgstattuple;
+SELECT * FROM pgstattuple('orders');
+-- dead_tuple_percent 高说明膨胀严重
+
+-- 常用估算查询（基于统计信息）
+SELECT relname,
+       n_live_tup, n_dead_tup,
+       round(n_dead_tup * 100.0 / GREATEST(n_live_tup + n_dead_tup, 1), 2) AS dead_pct,
+       last_autovacuum
+FROM pg_stat_user_tables
+WHERE n_dead_tup &gt; 1000
+ORDER BY n_dead_tup DESC LIMIT 20;</code></pre>
+<table>
+<tr><th>治理手段</th><th>做法</th><th>代价</th></tr>
+<tr><td>常规 VACUUM</td><td>标记死元组空间可复用，<strong>不还给操作系统</strong></td><td>低，可在线</td></tr>
+<tr><td>VACUUM FULL</td><td>重写整表，真正收缩文件</td><td><strong>ACCESS EXCLUSIVE 锁</strong>，需双倍空间</td></tr>
+<tr><td>pg_repack</td><td>在线重建表，锁时间极短</td><td>需额外扩展，需磁盘</td></tr>
+<tr><td>分区表</td><td>按时间分区，旧分区直接 DETACH/DROP</td><td>改造成本</td></tr>
+<tr><td>填充因子 fillfactor</td><td>页内预留空间，减少跨页更新</td><td>牺牲一点空间换 UPDATE 性能</td></tr>
+</table>
+<div class="callout warn"><b>最常见的膨胀原因：</b>① 存在<strong>长时间未提交的事务</strong>（它之后的死元组都不能回收）；② 未提交的<strong>复制槽 / 逻辑复制</strong>持有旧版本；③ autovacuum 参数过保守跟不上写入速度；④ <strong>孤儿预备事务</strong>（prepared transaction）。排查顺序：<code>pg_stat_activity</code> → <code>pg_replication_slots</code> → <code>pg_prepared_xacts</code>。</div>
+
+</section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：PostgreSQL 的 UPDATE 和 MySQL InnoDB 的 UPDATE 有什么不同？</b><p>A：PostgreSQL 的 UPDATE 是<strong>「插入新版本 + 旧版本留在原处」</strong>，旧版本需要 VACUUM 回收，因此频繁更新会膨胀；InnoDB 也是类似的 MVCC，但把旧版本放到 <strong>undo 表空间</strong>，由 purge 线程清理，主键索引里是「原地更新 + 回滚段」，因此<strong>聚簇表本身的膨胀较轻</strong>，代价是 undo 表空间可能暴涨。<strong>结论：PG 要重点盯 autovacuum，MySQL 要重点盯 history list length。</strong></p></div>
+<div class="qa"><b>Q：为什么表删了一半数据，文件大小没变？</b><p>A：因为 <code>DELETE</code> 只是把行标记为死元组（设置 xmax），<strong>空间仍被占用、只是可复用</strong>；只有 <code>VACUUM FULL</code> / <code>CLUSTER</code> / <code>pg_repack</code> / <code>TRUNCATE</code> 这类<strong>重写表</strong>的操作才会把空间还给操作系统。<strong>治理建议</strong>：普通 VACUUM 让空间可复用（对后续写入有利），真正要收缩文件则用 pg_repack 在线重建，避免 VACUUM FULL 的长时间排他锁。</p></div>
+<div class="qa"><b>Q：ctid 能不能当主键用？</b><p>A：<strong>不能。</strong>ctid 是物理地址 (块号, 偏移)，<strong>VACUUM FULL、CLUSTER、UPDATE</strong> 都会改变它，而且表重写后全部失效。它只适合在<strong>单条语句内</strong>做临时技巧，例如快速去重：<code>DELETE FROM t a USING t b WHERE a.ctid &lt; b.ctid AND a.id = b.id;</code>（同一语句内 ctid 稳定）。</p></div>
+<div class="qa"><b>Q：fillfactor 该怎么设？</b><p>A：默认堆表是 100（页填满）、B-tree 索引是 90。<strong>频繁 UPDATE 的表建议设 70~90</strong>，让页内留出空间容纳新版本，从而<strong>减少跨页迁移、降低索引更新代价</strong>（PG 的 HOT 更新还能在页内复用索引指针，避免索引膨胀）。设置方式：<code>ALTER TABLE t SET (fillfactor = 80);</code>——注意<strong>只对之后写入的新页生效</strong>，已有页需 VACUUM FULL / pg_repack 重写。</p></div>
+<div class="qa"><b>Q：一行最大能多大？一张表最大能多大？</b><p>A：<strong>单行</strong>：受页大小限制，但通过 TOAST 可以把大字段放到行外，因此实际可存约 <strong>1GB 级别的单个字段值</strong>（TOAST 最大约 1GB）。<strong>单表</strong>：默认受文件系统限制，理论上限 32TB；超过 1GB 会分裂成多个段文件。<strong>单个字段</strong>：text/jsonb/bytea 经 TOAST 后上限约 1GB。<strong>实践建议</strong>：单个 JSON 文档最好不要超过几 MB，否则 TOAST 的读写与解压开销会很可观。</p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

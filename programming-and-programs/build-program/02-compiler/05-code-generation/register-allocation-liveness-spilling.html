@@ -12,6 +12,37 @@
 <section class="panel"><h2>拷贝合并与 φ 降低</h2><p>编译器常有“把 x 复制到 y”的指令；若 x 和 y 的活跃区间不冲突，分配到同一个寄存器可消除这次拷贝。过于激进地合并也可能让干扰图难以着色，最终多出 spill，得不偿失。SSA 形式中的 φ 节点在降低时会转成控制流边上的拷贝，这些拷贝也参与寄存器分配和消除。应按真实前驱边执行，不可让不同分支的值互相覆盖。</p><p>若机器指令只能在特定寄存器做乘除法，或一次指令有固定输出寄存器，还要预着色和插入移动指令。纯抽象的 K 色模型不能表达全部 ISA 约束，但提供理解分配冲突的第一步。</p></section>
 <section class="panel"><h2>为什么重排可能减少压力</h2><p>本例若不需要保持原指令顺序，并且运算无副作用，可以先计算 d=a×b，此后 a、b 不再使用，再计算 c=a+b 就晚了：a、b 的值已可能被覆盖，所以要在改写前确认值仍可得。更实际的做法可能是保留 a/b 到最后，或重算便宜的表达式；有时改变计算顺序、及时消费中间值能缩短同时活跃的区间。重排必须尊重数据依赖、溢出/异常语义与内存副作用，不能只为了减少寄存器就改变程序结果。</p><p>寄存器压力还会影响指令调度：为了隐藏流水线延迟提前计算，可能拉长中间值活跃时间，产生更多 spill。后端需要在并行性与寄存器成本间平衡。</p></section>
 <section class="panel"><h2>看汇编时怎样验收</h2><p>先画每条指令前后的活跃集合，确认三角形冲突确实存在；再数目标机器真正可用的寄存器，不把栈指针或 ABI 保留寄存器算进去。检查生成汇编是否有对应 spill store 与 reload load，重新运行多种输入核对结果。性能测试对比内存访问次数、循环热度和指令数，而不仅是汇编文件大小。一个多余 spill 在冷路径可能无足轻重，在十亿次迭代的热循环里却会显著影响性能。</p></section>
+<section class="panel" data-dry-goods><h2>寄存器资源与分配算法对照</h2><div class="table-wrap"><table><thead><tr><th>架构</th><th>通用寄存器数</th><th>参数传递寄存器</th><th>被调用者保存（callee-saved）</th></tr></thead><tbody><tr><td>x86-64</td><td>16（RAX..R15）</td><td>rdi, rsi, rdx, rcx, r8, r9（SysV）</td><td>rbx, rbp, r12-r15</td></tr><tr><td>ARM64</td><td>31（x0-x30）</td><td>x0-x7</td><td>x19-x28, x29(fp), x30(lr)</td></tr><tr><td>RISC-V</td><td>32（x0-x31）</td><td>a0-a7</td><td>s0-s11</td></tr><tr><td>x86（32 位）</td><td>8</td><td>全部走栈</td><td>ebx, esi, edi, ebp</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>算法</th><th>复杂度</th><th>质量</th><th>使用者</th></tr></thead><tbody><tr><td>图着色（Chaitin / Briggs）</td><td>O(n²) 以上</td><td>高（全局最优倾向）</td><td>GCC 部分模式、学术编译器</td></tr><tr><td>线性扫描（Linear Scan）</td><td>O(n log n)</td><td>够好，速度快</td><td>LLVM（默认 greedy/linear scan）、JIT</td></tr><tr><td>PBQP（分区布尔二次规划）</td><td>较高</td><td>适合不规则寄存器结构</td><td>LLVM 用于部分后端</td></tr></tbody></table></div><p>判定规则：若活跃区间冲突图能用 k 种颜色着色（k = 可用寄存器数），就无需溢出；无法着色时选择代价最低的区间做 <b>spill</b>。</p></section><section class="panel"><h2>活跃区间与溢出的代价</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>定义</th><th>量化影响</th></tr></thead><tbody><tr><td>活跃变量（live）</td><td>在某点之后还会被读取的变量</td><td>同时活跃数 > 寄存器数就必须溢出</td></tr><tr><td>活跃区间</td><td>从定义到最后一次使用的范围</td><td>区间越长冲突概率越高</td></tr><tr><td>spill（溢出）</td><td>把寄存器值写入内存槽</td><td>多出 1 次 store</td></tr><tr><td>fill（回填）</td><td>从内存槽读回寄存器</td><td>多出 1 次 load</td></tr><tr><td>代价对比</td><td>寄存器访问 ≈ 0 周期；L1 命中约 4 周期；内存约 200+ 周期</td><td>一次 spill+fill 约等于几十条指令的时间</td></tr></tbody></table></div><p><b>观测</b></p><pre><code># 看 LLVM 的寄存器分配过程与溢出统计
+clang -O2 -S -o - example.c | head -40
+llc -O2 example.ll -debug-only=regalloc 2&gt; regalloc.log
+#   regalloc.log 里能看到：
+#     - "assigning %vreg to %phys"
+#     - "spilling %vreg to stack slot #N"
+grep -c spilling regalloc.log      # 溢出次数
+
+# 看最终用了哪些寄存器、有没有 rsp 相对寻址（spill 的痕迹）
+clang -O2 -fverbose-asm -S example.c &amp;&amp; grep -E "rbp|rsp" example.s | head</code></pre></section>
+<section class="panel"><h2>代码写法如何影响分配结果</h2><p><b>示例</b></p><pre><code>// 1) 同时活跃的变量越多，越容易溢出
+int f(int a, int b, int c, int d) {
+    int t1 = a * b, t2 = c * d, t3 = a + c, t4 = b - d;   // 4 个同时活跃
+    return t1 + t2 + t3 + t4;
+}
+
+// 2) 缩短活跃区间：尽早使用、缩小作用域
+int g(int a, int b, int c, int d) {
+    int s = a * b;            // 用掉就不再活跃
+    s += c * d;
+    s += a + c;
+    s += b - d;
+    return s;
+}
+
+// 3) 循环里的不变量外提（减少循环内的活跃压力）
+for (int i = 0; i &lt; n; i++) {
+    sum += arr[i] * scale;    // scale 若在循环内计算，会反复占用寄存器
+}</code></pre><div class="table-wrap"><table><thead><tr><th>写法</th><th>对分配的影响</th><th>建议</th></tr></thead><tbody><tr><td>引入大量中间变量</td><td>活跃区间变多变长</td><td>复用变量、缩小作用域</td></tr><tr><td><code>register</code> 关键字</td><td>现代编译器基本忽略</td><td>不要用，靠 -O2 即可</td></tr><tr><td>取地址 <code>&x</code></td><td>变量必须落在内存，无法常驻寄存器</td><td>热路径避免对频繁使用的局部变量取地址</td></tr><tr><td>大函数（上百个局部变量）</td><td>冲突图稠密，溢出多</td><td>拆分函数</td></tr><tr><td><code>-O0</code> 编译</td><td>每个变量都放栈，几乎不分配寄存器</td><td>性能对比必须用 -O2/-O3</td></tr></tbody></table></div></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>汇编里大量 rsp/rbp 相对访问</td><td>寄存器溢出到栈</td><td>减少同时活跃变量；拆分函数</td></tr><tr><td>-O0 下性能很差</td><td>未启用优化，所有变量走栈</td><td>用 -O2/-O3 对比</td></tr><tr><td>热循环性能不达预期</td><td>循环内活跃变量超过寄存器数</td><td>循环展开适度、变量复用、外提不变量</td></tr><tr><td>函数调用开销大</td><td>参数多于传参寄存器（x86-64 为 6 个整数参数）</td><td>参数过多时改用结构体指针</td></tr><tr><td>内联后反而变慢</td><td>内联增加了寄存器压力</td><td>用 <code>__attribute__((noinline))</code> 或调整内联阈值</td></tr><tr><td>不同编译器结果差异大</td><td>分配算法与启发式不同</td><td>以实测为准，不要假设某种写法一定更快</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>寄存器不够时会发生什么？</summary><p>发生溢出（spill）：把某些活跃值写入栈上的槽位，用到时再 load 回来。选择哪些值溢出由代价模型决定（通常选使用频率低、区间长的）。spill/fill 会引入额外的内存访问，是热路径性能下降的常见原因。</p></details><details><summary>图着色和线性扫描有什么区别？</summary><p>图着色构建冲突图（边表示两个区间重叠）再尝试 k 着色，质量高但复杂度高，适合离线编译；线性扫描按区间起点顺序遍历并维护活跃列表，超限时溢出，速度快，适合 JIT 与 LLVM 默认流程。</p></details><details><summary>为什么 -O0 生成的代码会频繁读写栈？</summary><p>因为 -O0 的目标是调试友好：每个变量都在内存里有唯一位置，方便调试器随时查看，且不做寄存器分配与优化。因此 -O0 的性能数据没有参考价值，必须看 -O2 及以上。</p></details><details><summary>怎么判断一段热代码是否被溢出拖累？</summary><p>看生成的汇编：若热循环里出现大量 <code>mov %reg, -8(%rbp)</code> / <code>mov -8(%rbp), %reg</code> 这类存取，就是溢出信号。进一步可用 <code>llc -debug-only=regalloc</code> 统计 spilling 次数，再配合 perf 看是否停顿在访存。</p></details><details><summary>把变量声明得更靠近使用点有意义吗？</summary><p>对源码可读性有意义；对编译器而言，真正决定寄存器压力的是<b>活跃区间</b>（定义到最后一次使用），而不是声明位置（现代编译器用 SSA，声明位置几乎不影响）。真正有效的是减少同时活跃的值、复用变量、拆分函数。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>a、b、c 在同一点两两同时活跃，目标只有两个可用寄存器，能让三者全留寄存器吗？</summary><p>不能。三角形干扰图至少需要三种颜色；必须改变活跃结构或让至少一个值溢出到其他位置。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="code-generation.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

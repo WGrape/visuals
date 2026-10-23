@@ -67,6 +67,34 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
 </style>
 </head>
 <body>
@@ -76,30 +104,163 @@
   <p>表级锁、行级锁（无间隙锁）、advisory lock，以及死锁处理。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#k1">表级锁</a><a href="#k2">行级锁与 FOR UPDATE</a><a href="#k3">advisory lock</a><a href="#k4">死锁与排查</a></nav>
+  <nav class="toc"><a href="#s1">① 锁的三个层次</a><a href="#s2">② 表级锁模式与冲突矩阵</a><a href="#s3">③ 行级锁与死锁</a><a href="#s4">④ 咨询锁（Advisory Lock）</a><a href="#s5">⑤ 排查阻塞的实战 SQL</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="k1"><h2>① 表级锁</h2>
-<p>PG 有 8 种表锁强度，从 <code>ACCESS SHARE</code>（SELECT）到 <code>ACCESS EXCLUSIVE</code>（DDL/DROP）。大多数 DML 只取 <code>ROW EXCLUSIVE</code>，互不阻塞；<code>ALTER TABLE</code> 取 <code>ACCESS EXCLUSIVE</code>，会阻塞读写。</p>
+<section id="s1"><h2>① 锁的三个层次</h2>
+
+<div class="grid3">
+<div class="card3"><h4>表级锁</h4><p>由 <code>LOCK TABLE</code>、DDL、VACUUM FULL、某些 DML 触发；8 种模式，冲突关系见下表</p></div>
+<div class="card3"><h4>行级锁</h4><p>由 <code>SELECT FOR UPDATE/SHARE</code>、<code>UPDATE/DELETE</code> 触发；<strong>不阻塞读</strong>（MVCC），只阻塞互相冲突的写</p></div>
+<div class="card3"><h4>咨询锁 Advisory Lock</h4><p>应用自定义的锁，与表无关；用于<strong>分布式任务互斥、防并发重复执行</strong></p></div>
+<div class="card3"><h4>页级 / 内存锁</h4><p>LWLock、spinlock 等内部锁，一般不直接暴露给 DBA，可通过等待事件观察</p></div>
+</div>
+<p>关键认知：<strong>PostgreSQL 的读不阻塞写、写不阻塞读</strong>——因为 MVCC 让读者看快照。真正会互相阻塞的是<strong>写与写</strong>（同一行的 UPDATE/DELETE）以及 <strong>DDL 与一切</strong>（强排他锁）。</p>
+
 </section>
-<section id="k2"><h2>② 行级锁（没有间隙锁！）</h2>
-<p>PG 的行锁由 <code>SELECT ... FOR UPDATE / FOR SHARE</code> 或 DML 隐式产生，锁信息存在行版本上（不是内存锁表）。<strong>PG 没有 MySQL 式的 Gap Lock / Next-Key Lock</strong>——它靠 MVCC 快照+写冲突解决幻读，所以行锁更轻。</p>
-<pre><code>BEGIN;
-SELECT * FROM accounts WHERE id=1 FOR UPDATE;  -- 锁住该行
-UPDATE accounts SET balance=balance-10 WHERE id=1;
+<section id="s2"><h2>② 表级锁模式与冲突矩阵</h2>
+
+<table>
+<tr><th>模式</th><th>典型触发</th><th>与自身冲突？</th></tr>
+<tr><td>ACCESS SHARE</td><td><code>SELECT</code></td><td>否（只与 ACCESS EXCLUSIVE 冲突）</td></tr>
+<tr><td>ROW SHARE</td><td><code>SELECT FOR UPDATE/SHARE</code></td><td>否</td></tr>
+<tr><td>ROW EXCLUSIVE</td><td><code>UPDATE/DELETE/INSERT</code></td><td>否</td></tr>
+<tr><td>SHARE UPDATE EXCLUSIVE</td><td><code>VACUUM</code>、<code>CREATE INDEX CONCURRENTLY</code>、<code>ALTER TABLE ... ADD COLUMN</code>（部分）</td><td>是</td></tr>
+<tr><td>SHARE</td><td><code>CREATE INDEX</code>（非并发）</td><td>否（但阻塞写）</td></tr>
+<tr><td>SHARE ROW EXCLUSIVE</td><td><code>CREATE TRIGGER</code> 等</td><td>是</td></tr>
+<tr><td>EXCLUSIVE</td><td>某些 DDL</td><td>是</td></tr>
+<tr><td>ACCESS EXCLUSIVE</td><td><code>ALTER TABLE</code>、<code>DROP TABLE</code>、<code>TRUNCATE</code>、<strong>VACUUM FULL</strong></td><td><strong>是（阻塞一切，包括 SELECT）</strong></td></tr>
+</table>
+<div class="callout warn"><b>生产事故高发点：</b>一条 <code>ALTER TABLE ... ADD COLUMN</code>（尤其带默认值或 <code>SET NOT NULL</code>）会拿 <strong>ACCESS EXCLUSIVE</strong> 锁。若此时有一个跑了 10 分钟的长查询持有 ACCESS SHARE 锁，DDL 会<strong>排队等待</strong>，而<strong>后续所有新查询都会排在 DDL 后面</strong>——瞬间造成全表不可用。<strong>对策：给 DDL 加 <code>lock_timeout</code> 与 <code>statement_timeout</code>，并先查是否有长事务。</strong></div>
+<pre><code>-- 上线 DDL 的稳妥写法
+SET lock_timeout = '3s';       -- 拿不到锁就放弃，避免阻塞雪崩
+ALTER TABLE orders ADD COLUMN note text;   -- PG 11+ 无默认值是瞬时的</code></pre>
+
+</section>
+<section id="s3"><h2>③ 行级锁与死锁</h2>
+
+<table>
+<tr><th>锁类型</th><th>触发语句</th><th>冲突对象</th></tr>
+<tr><td>FOR UPDATE</td><td><code>SELECT ... FOR UPDATE</code>、<code>UPDATE</code>、<code>DELETE</code></td><td>其他 FOR UPDATE / FOR NO KEY UPDATE / FOR SHARE</td></tr>
+<tr><td>FOR NO KEY UPDATE</td><td><code>UPDATE</code>（不改主键/唯一键列时）</td><td>FOR UPDATE、FOR SHARE</td></tr>
+<tr><td>FOR SHARE</td><td><code>SELECT ... FOR SHARE</code></td><td>FOR UPDATE、FOR NO KEY UPDATE</td></tr>
+<tr><td>FOR KEY SHARE</td><td><code>SELECT ... FOR KEY SHARE</code>、外键检查</td><td>仅 FOR UPDATE</td></tr>
+</table>
+<p>死锁：两个事务互相等待对方持有的锁。PostgreSQL 默认在 <code>deadlock_timeout</code>（默认 1s）后<strong>检测死锁并回滚其中一个事务</strong>（报 40P01）。</p>
+<pre><code>-- 经典死锁：两个事务以相反顺序更新两行
+-- T1: UPDATE a SET ... WHERE id=1;  UPDATE a SET ... WHERE id=2;
+-- T2: UPDATE a SET ... WHERE id=2;  UPDATE a SET ... WHERE id=1;
+-- 对策：所有业务按「同一顺序」访问资源（如按 id 升序排序后更新）
+
+-- 用 SELECT FOR UPDATE 显式排序，避免死锁
+BEGIN;
+SELECT id FROM orders WHERE id IN (3,1,2) ORDER BY id FOR UPDATE;
+UPDATE orders SET status='paid' WHERE id IN (3,1,2);
 COMMIT;</code></pre>
-<div class="callout note"><b>注意：</b>并发更新同一行时，后者会等待前者的行锁；若两个事务互相等待对方持有的行锁，则死锁，PG 会检测并回滚其中一个。</div>
+<div class="callout tip"><b>排查阻塞的常用 SQL：</b><code>SELECT pid, wait_event_type, wait_event, state, query FROM pg_stat_activity WHERE wait_event_type='Lock';</code> 再结合 <code>pg_locks</code> 找 <code>granted=false</code> 的 pid 与持锁者，用 <code>pg_cancel_backend()</code> 或 <code>pg_terminate_backend()</code> 处理。</div>
+
 </section>
-<section id="k3"><h2>③ Advisory Lock（应用级锁）</h2>
-<p><code>pg_advisory_lock(key)</code> 是应用自定义的、不绑定到具体行的会话级锁，常用于分布式限流、任务抢占、防止重复执行。</p>
-<pre><code>SELECT pg_advisory_lock(12345);   -- 获取
--- 做临界区工作
-SELECT pg_advisory_unlock(12345); -- 释放</code></pre>
+<section id="s4"><h2>④ 咨询锁（Advisory Lock）</h2>
+
+<p>咨询锁是<strong>应用自己定义语义</strong>的锁：锁什么、什么时候加锁完全由代码决定，数据库只提供「互斥」能力。常用于：<strong>防止定时任务并发执行、防止重复消费、跨会话串行化某个业务键</strong>。</p>
+<pre><code>-- 会话级（需显式释放或会话结束）
+SELECT pg_advisory_lock(12345);       -- 阻塞等待
+SELECT pg_try_advisory_lock(12345);   -- 拿不到立刻返回 false
+SELECT pg_advisory_unlock(12345);
+
+-- 事务级（事务结束自动释放，推荐！）
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('order:1001'));
+-- 在这里做需要互斥的业务逻辑
+COMMIT;
+
+-- 常用模式：防止任务重复执行
+SELECT pg_try_advisory_lock(999) AS got;   -- 返回 false 说明已有实例在跑</code></pre>
+<div class="callout note"><b>选型建议：</b>优先用<strong>事务级</strong>（<code>pg_advisory_xact_lock</code>），避免忘记解锁；锁键用 <code>hashtext('业务键')</code> 或双 int 版本 <code>pg_advisory_xact_lock(int, int)</code>（可表达「类型 + ID」）。<strong>注意它与行锁不同：不会阻止别人直接改数据，只约束「同样遵守该约定的代码」。</strong></div>
+
 </section>
-<section id="k4"><h2>④ 死锁与排查</h2>
-<p>PG 内置死锁检测（<code>deadlock_timeout</code> 默认 1s），一旦检出立即回滚一个事务并报 <code>40P01</code>。排查用：</p>
-<pre><code>SELECT * FROM pg_locks WHERE NOT granted;       -- 等待中的锁
-SELECT pid, wait_event_type, query FROM pg_stat_activity WHERE wait_event_type='Lock';</code></pre>
+<section id="s5"><h2>⑤ 排查阻塞的实战 SQL</h2>
+
+<pre><code>-- 1. 谁在等锁
+SELECT pid, wait_event_type, wait_event, state,
+       now() - query_start AS dur, query
+FROM pg_stat_activity
+WHERE wait_event_type = 'Lock'
+ORDER BY dur DESC;
+
+-- 2. 找持锁者（blocking pid）
+SELECT blocked.pid AS blocked_pid, blocked.query AS blocked_sql,
+       blocking.pid AS blocking_pid, blocking.query AS blocking_sql,
+       now() - blocking.query_start AS blocking_dur
+FROM pg_stat_activity blocked
+JOIN pg_locks bl ON bl.pid = blocked.pid AND NOT bl.granted
+JOIN pg_locks kl ON kl.locktype = bl.locktype AND kl.database IS NOT DISTINCT FROM bl.database
+                AND kl.relation IS NOT DISTINCT FROM bl.relation
+                AND kl.page IS NOT DISTINCT FROM bl.page
+                AND kl.tuple IS NOT DISTINCT FROM bl.tuple
+                AND kl.virtualxid IS NOT DISTINCT FROM bl.virtualxid
+                AND kl.transactionid IS NOT DISTINCT FROM bl.transactionid
+                AND kl.classid IS NOT DISTINCT FROM bl.classid
+                AND kl.objid IS NOT DISTINCT FROM bl.objid
+                AND kl.objsubid IS NOT DISTINCT FROM bl.objsubid
+                AND kl.pid != bl.pid AND kl.granted
+JOIN pg_stat_activity blocking ON blocking.pid = kl.pid;
+
+-- 3. 处理（先 cancel 再 terminate）
+SELECT pg_cancel_backend(&lt;blocking_pid&gt;);      -- 温和：取消当前查询
+SELECT pg_terminate_backend(&lt;blocking_pid&gt;);   -- 强制：断开连接</code></pre>
+
 </section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：PostgreSQL 的读写会互相阻塞吗？</b><p>A：<strong>不会。</strong>MVCC 让读者读取事务开始时的快照，写者创建新版本，两者互不阻塞（这也意味着<strong>读不需要加锁</strong>）。会互相阻塞的是：① <strong>写与写</strong>（同一行的 UPDATE/DELETE/FOR UPDATE）；② <strong>DDL 与一切</strong>（ACCESS EXCLUSIVE 连 SELECT 都阻塞）；③ 显式加锁的 <code>SELECT FOR UPDATE/SHARE</code> 与冲突的写。<strong>这是 PG 与 MySQL InnoDB 类似的优点，也是它高并发读表现好的原因。</strong></p></div>
+<div class="qa"><b>Q：一条 ALTER TABLE 为什么会导致整表不可用？</b><p>A：因为 <code>ALTER TABLE</code>（多数形式）需要 <strong>ACCESS EXCLUSIVE</strong> 锁，它与<strong>包括 SELECT 在内的所有锁</strong>冲突。若当时有一个长查询持有 ACCESS SHARE，DDL 会<strong>排在锁队列里等待</strong>；而 PG 的锁队列是<strong>公平队列</strong>，<strong>后续所有新来的 SELECT 都会排在这个等待中的 DDL 之后</strong>——于是整表访问被「卡死」，直到长查询结束。<strong>对策：① 给 DDL 设 <code>lock_timeout</code>；② 上线前检查长事务；③ 尽量使用 <code>CREATE INDEX CONCURRENTLY</code>、<code>ADD COLUMN</code>（无默认值）等在线操作；④ 大表结构变更用 gh-ost/pg_repack 类工具。</strong></p></div>
+<div class="qa"><b>Q：SELECT FOR UPDATE 和 FOR SHARE 有什么区别？</b><p>A：<strong>FOR UPDATE</strong>：最强，阻塞其它事务对该行的 UPDATE/DELETE 以及 FOR UPDATE/FOR SHARE，用于「我要改这行」；<strong>FOR SHARE</strong>：允许别人也加 FOR SHARE（共享读锁），但阻塞别人的 UPDATE/DELETE，用于「我要保证这行在我事务期间不被改，但允许别人也读锁它」。<strong>还有更弱的 FOR NO KEY UPDATE 与 FOR KEY SHARE</strong>，用于精细控制（如外键检查只需保护主键不被删）。<strong>实践：库存扣减用 FOR UPDATE；「读-判断-写」的防并发场景也用 FOR UPDATE 或直接<strong>用原子 UPDATE ... WHERE 条件</strong>更好。</strong></p></div>
+<div class="qa"><b>Q：死锁是怎么产生的？数据库怎么处理？</b><p>A：两个或多个事务<strong>循环等待</strong>对方持有的锁（如 T1 锁 A 等 B、T2 锁 B 等 A）。PostgreSQL 在 <code>deadlock_timeout</code>（默认 1s）后会<strong>主动检测等待图</strong>，发现环就<strong>回滚其中一个事务</strong>（报 SQLSTATE 40P01），让另一个继续。<strong>防范</strong>：① 所有业务<strong>按固定顺序</strong>访问资源（如按 id 排序后再更新）；② 缩短事务、尽快提交；③ 降低隔离级别或拆大事务；④ 捕获 40P01 错误并<strong>重试</strong>。<strong>注意：死锁检测有开销，死锁频繁通常说明应用层顺序有问题。</strong></p></div>
+<div class="qa"><b>Q：咨询锁适合什么场景？有什么坑？</b><p>A：<strong>适合</strong>：① 防止定时任务并发执行；② 对「业务键」做跨会话互斥（如同一订单的并发处理串行化）；③ 替代分布式锁（在单库范围内）。<strong>坑</strong>：① 它<strong>不阻止不遵守约定的代码</strong>改数据——只是约定式互斥；② 会话级锁<strong>必须显式释放</strong>（否则连接复用时会一直持有），推荐用事务级 <code>pg_advisory_xact_lock</code>；③ 锁键是 int/bigint，字符串要先哈希，<strong>有极小碰撞概率</strong>；④ 连接被池复用时注意锁的生命周期。</p></div>
+<div class="qa"><b>Q：怎么快速定位「谁阻塞了谁」？</b><p>A：标准三步：① <code>pg_stat_activity</code> 过滤 <code>wait_event_type='Lock'</code> 找到被阻塞者；② 用 <code>pg_locks</code> 自连接，找 <code>granted=false</code> 的等待项对应的 <code>granted=true</code> 持锁者 pid；③ 用 <code>pg_cancel_backend()</code>（温和取消查询）或 <code>pg_terminate_backend()</code>（断开连接）处理。日常建议把这段排查 SQL 做成<strong>运维脚本或视图</strong>，并配置<strong>长事务告警</strong>（如 xact_start 超过 60s）。</p></div>
+</section>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>PG 锁的类型与冲突矩阵</h2><div class="table-wrap"><table><thead><tr><th>锁模式</th><th>获取者</th><th>与哪些冲突</th></tr></thead><tbody><tr><td><b>ACCESS SHARE</b></td><td><code>SELECT</code></td><td>只与 ACCESS EXCLUSIVE 冲突</td></tr><tr><td><b>ROW SHARE</b></td><td><code>SELECT FOR UPDATE/SHARE</code></td><td>EXCLUSIVE、ACCESS EXCLUSIVE</td></tr><tr><td><b>ROW EXCLUSIVE</b></td><td><code>UPDATE/DELETE/INSERT</code></td><td>SHARE、SHARE ROW EXCL、EXCL、ACCESS EXCL</td></tr><tr><td><b>SHARE UPDATE EXCL</b></td><td><code>VACUUM</code>、<code>CREATE INDEX CONCURRENTLY</code></td><td>同类与更强的</td></tr><tr><td><b>SHARE</b></td><td><code>CREATE INDEX</code></td><td><b>阻塞所有写</b></td></tr><tr><td><b>SHARE ROW EXCLUSIVE</b></td><td><code>ALTER TABLE</code> 等</td><td>阻塞写与 SHARE</td></tr><tr><td><b>EXCLUSIVE</b></td><td>阻塞除 ACCESS SHARE 之外的所有</td><td>很重</td></tr><tr><td><b>ACCESS EXCLUSIVE</b></td><td><code>DROP/ALTER TABLE</code>、<code>VACUUM FULL</code></td><td><b>与一切冲突</b>（含 SELECT）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><code>lock_timeout</code></td><td>0（不限）</td><td>建议设 <b>1~3s</b>，避免 DDL 长时间阻塞</td></tr><tr><td><code>deadlock_timeout</code></td><td><b>1s</b></td><td>死锁检测间隔；超过就检查并回滚一个事务</td></tr><tr><td><code>statement_timeout</code></td><td>0</td><td>语句超时，建议设 30s</td></tr><tr><td><code>idle_in_transaction_session_timeout</code></td><td>0</td><td><b>建议设 60s</b>，防长事务</td></tr><tr><td><code>max_locks_per_transaction</code></td><td>64</td><td>分区表多时要调大</td></tr></tbody></table></div><p><b>最危险的操作</b>：<code>ALTER TABLE ... ADD COLUMN</code>（不带默认值）只需要 <b>ACCESS EXCLUSIVE</b> 锁，但只持续<b>毫秒级</b>（只改元数据）；而带默认值的 <code>ADD COLUMN ... DEFAULT xxx</code> 在 PG 11 之前会<b>重写整张表</b>，锁表时间与表大小成正比（大表可能几小时）。<b>PG 11+ 已优化为非阻塞</b>，但仍要确认版本。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>诊断命令</h2><pre><code>-- 1) 查看当前锁等待（最常用的一条）
+SELECT blocked.pid AS blocked_pid, blocked.usename,
+       blocking.pid AS blocking_pid, blocking.usename AS blocking_user,
+       blocked.query AS blocked_query,
+       blocking.query AS blocking_query,
+       blocking.state,
+       now() - blocked.query_start AS blocked_duration
+FROM pg_stat_activity blocked
+JOIN pg_stat_activity blocking
+  ON blocking.pid = ANY(pg_blocking_pids(blocked.pid))
+WHERE cardinality(pg_blocking_pids(blocked.pid)) &gt; 0
+ORDER BY blocked_duration DESC;
+-- 关键函数：pg_blocking_pids(pid) 返回阻塞该 pid 的进程列表</code></pre><pre><code>-- 2) 查看锁详情
+SELECT l.pid, l.locktype, l.mode, l.granted,
+       l.relation::regclass AS table_name,
+       a.query, a.state, now() - a.query_start AS duration
+FROM pg_locks l
+JOIN pg_stat_activity a ON l.pid = a.pid
+WHERE NOT l.granted            -- granted=false 表示正在等待
+ORDER BY duration DESC;
+
+-- 3) 查看长事务（锁的万恶之源）
+SELECT pid, usename, state,
+       now() - xact_start AS xact_age,
+       now() - query_start AS query_age,
+       query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+  AND now() - xact_start &gt; interval '1 min'
+ORDER BY xact_age DESC;
+-- 长事务会阻止 VACUUM 清理，导致表膨胀
+
+-- 4) 终止阻塞者
+SELECT pg_cancel_backend(&lt;pid&gt;);      -- 温和：取消当前查询
+SELECT pg_terminate_backend(&lt;pid&gt;);   -- 强杀：断开连接
+
+-- 5) 安全的 DDL 模式（必做）
+SET lock_timeout = '3s';              -- 拿不到锁就失败，不一直等
+ALTER TABLE t ADD COLUMN c int;       -- 失败也无所谓，重试即可
+-- 不要不加 lock_timeout 直接跑 DDL，否则会堵住整张表的所有查询</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>DDL 卡住导致全表不可用</td><td>DDL 等待长事务，后面所有查询排队</td><td><b>DDL 前必设 lock_timeout</b>；先杀掉长事务</td></tr><tr><td>SELECT 也被阻塞</td><td>ACCESS EXCLUSIVE 锁（如 VACUUM FULL）</td><td>避免 VACUUM FULL；用 pg_repack</td></tr><tr><td>死锁报 40P01</td><td>两个事务互相等待</td><td>固定加锁顺序；缩短事务；设 deadlock_timeout</td></tr><tr><td>表膨胀（bloat）</td><td>长事务阻止 VACUUM</td><td>设 <code>idle_in_transaction_session_timeout</code>；定期 VACUUM</td></tr><tr><td>自增序列不连续</td><td>序列不回滚（正常行为）</td><td>这是设计如此，不是 bug</td></tr><tr><td>分区表锁不够用</td><td>max_locks_per_transaction 太小</td><td>调大；或减少单次操作的分区数</td></tr><tr><td><code>CREATE INDEX</code> 阻塞写入</td><td>默认 SHARE 锁阻塞写</td><td>用 <code>CREATE INDEX CONCURRENTLY</code>（不阻塞写，但更慢且失败会留无效索引）</td></tr></tbody></table></div><p class="muted"><b>DDL 的黄金规则</b>：任何 DDL 前先 <code>SET lock_timeout = '3s';</code>。这样拿不到锁会快速失败而不是排队，避免「一个 ALTER TABLE 堵死整张表」的线上事故。</p></div></section>
 </main>
 </div>
 <footer>

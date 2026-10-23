@@ -12,6 +12,25 @@
 <section class="panel"><h2>WebRTC 与服务间 RPC 的边界</h2><p>WebRTC 媒体可尝试 P2P，也可能经 TURN 中继；它要处理采样、编解码、抖动缓冲、拥塞和传输安全。WebSocket 只给双向消息通道，音视频的这些能力需另做。gRPC 则更适合受控服务间调用，浏览器直连支持取决于环境和代理，常需要 gRPC-Web 或网关适配；不能假定普通浏览器 `fetch` 可直接使用全部 gRPC/HTTP2 功能。</p><p>网络防火墙可能阻断 UDP，导致 WebRTC 走中继或失败；企业代理也可能限制 WebSocket Upgrade。选型要以目标环境实测，而不是只在本机浏览器开发环境成功。</p></section>
 <section class="panel"><h2>延迟之外还要看语义</h2><p>订单通知必须不漏，可以在数据库保存状态，用推送只做“有变化了”的提示，客户端再按游标拉权威数据；聊天消息需要确认和去重；视频帧过期后通常宁愿丢弃也不无限重传。协议提供的可靠性与应用需要的业务保证不完全相同。若服务端写操作在超时前已提交，任何协议都需要幂等键或结果查询。</p><p>对单向通知，SSE 和长轮询都可做；若业务要求客户端持续高频上行，SSE 不适合独立承担。把通信方向画在架构图上，比先争论“哪个协议先进”更有效。</p></section>
 <section class="panel"><h2>选型验收</h2><p>对候选方案在目标浏览器、移动弱网、企业代理和大量并发下测更新 P95/P99、重连时间、缺消息率、服务端每连接内存和带宽。模拟代理关闭、认证过期、服务器重启和客户端后台省电。最后写明协议组合：例如“HTTP 提交命令，SSE 通知版本，断线后 GET 补状态”；用户体验由完整链路决定。</p></section>
+<section class="panel" data-dry-goods><h2>五种方案硬对比</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>方向</th><th>传输</th><th>每条消息开销</th><th>断线重连</th><th>代理/防火墙兼容</th><th>典型延迟</th></tr></thead><tbody><tr><td>短轮询 Polling</td><td>客户端拉</td><td>HTTP/1.1</td><td>完整 HTTP 头，数百 B – 数 KB</td><td>天然无状态</td><td>最好</td><td>轮询间隔（1–5 s）</td></tr><tr><td>长轮询 Long Polling</td><td>客户端拉</td><td>HTTP/1.1</td><td>每消息一次请求头</td><td>需应用处理</td><td>好</td><td>近实时（几十 ms）+ 一次往返</td></tr><tr><td>SSE</td><td>服务端推（单向）</td><td>HTTP/1.1 + text/event-stream</td><td>很小（<code>data: ...\n\n</code>）</td><td><b>浏览器原生自动重连</b></td><td>好（就是 HTTP）</td><td>毫秒级</td></tr><tr><td>WebSocket</td><td>全双工</td><td>TCP（ws/wss）</td><td><b>2–14 B 帧头</b></td><td>需自己实现</td><td>需 Upgrade 支持</td><td>毫秒级</td></tr><tr><td>WebRTC</td><td>全双工（P2P）</td><td>UDP（SRTP/SCTP）</td><td>极低（走 UDP）</td><td>ICE 自己处理</td><td>最差（需 STUN/TURN）</td><td>亚百毫秒（媒体）</td></tr><tr><td>gRPC / 流式 HTTP</td><td>全双工</td><td>HTTP/2 + Protobuf</td><td>二进制，很小</td><td>需自己实现（有 keepalive）</td><td>需 HTTP/2 支持</td><td>毫秒级</td></tr></tbody></table></div><p><b>决策树</b>：只要服务端单向推 → <b>SSE</b>（最省事，浏览器自动重连）；需要客户端频繁发（聊天、协作、游戏）→ <b>WebSocket</b>；音视频/P2P → <b>WebRTC</b>；内部服务间流式 RPC → <b>gRPC</b>；兼容性与简单性压倒一切、对延迟不敏感 → <b>轮询</b>。</p><p><b>代理侧关键配置</b></p><pre><code># SSE 服务端（Node 伪代码）关键响应头
+# Content-Type: text/event-stream
+# Cache-Control: no-cache
+# Connection: keep-alive
+# X-Accel-Buffering: no        # 关键！禁止 Nginx 缓冲
+
+# Nginx 反向代理 SSE 必须做的配置
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+proxy_buffering off;               # 关缓冲，否则消息被攒着不发
+proxy_cache off;
+proxy_read_timeout 3600s;          # 长连接超时要调大
+chunked_transfer_encoding on;
+
+# WebSocket 的 Nginx 配置
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 3600s;</code></pre></section><section class="panel"><h2>落地时的硬约束</h2><div class="table-wrap"><table><thead><tr><th>限制</th><th>具体数值</th><th>影响</th></tr></thead><tbody><tr><td>浏览器同域并发连接数</td><td>HTTP/1.1 每域名 <b>6 条</b></td><td>长轮询会占满连接池，必须换域名或用 HTTP/2</td></tr><tr><td>WebSocket 帧头</td><td><b>2 B</b> 起（+ 4 B 掩码 + 0/2/8 B 长度）</td><td>客户端→服务端<b>必须</b>掩码，防缓存投毒</td></tr><tr><td>WebSocket payload 上限</td><td>单帧理论 2^63，实现常限 64 MB–1 GB</td><td>大数据要分片</td></tr><tr><td>SSE 消息大小</td><td>无硬限制，但常被代理缓冲截断</td><td>必须关掉 proxy_buffering</td></tr><tr><td>gRPC 消息默认上限</td><td><b>4 MB</b>（客户端/服务端均可调）</td><td>超出报 RESOURCE_EXHAUSTED</td></tr><tr><td>HTTP/2 SETTINGS</td><td>初始流控窗口 <b>65535 B</b></td><td>大响应需要及时 WINDOW_UPDATE，否则吞吐上不去</td></tr><tr><td>WebRTC 打洞成功率</td><td>约 <b>80–90%</b></td><td>剩余必须走 TURN 中继，务必部署 TURN</td></tr></tbody></table></div><ul><li><b>SSE 的隐藏坑</b>：Nginx/负载均衡默认开 <code>proxy_buffering</code> 和 gzip，会把 SSE 攒成一坨再发，看起来像“消息延迟几十秒”。必须 <code>proxy_buffering off</code> + <code>X-Accel-Buffering: no</code>。</li><li><b>WebSocket 不被代理支持</b>：老企业代理可能剥离 <code>Upgrade</code> 头。生产环境要有 SSE 或长轮询降级路径。</li><li><b>HTTP/2 让轮询重新可用</b>：多路复用后不再受 6 连接限制，且头部压缩把开销压到几十字节；gRPC 流式调用在很多场景可以替代裸 WebSocket。</li><li><b>移动端省电</b>：长连接心跳在蜂窝网下代价高，iOS/Android 后台会被系统挂起；关键消息应走系统级推送（APNs/FCM）而非自建长连接。</li></ul><details><summary>SSE 只能服务端推，客户端怎么发消息？</summary><p>SSE 是单向的，客户端照常发普通 HTTP 请求（POST）即可。绝大多数“推送 + 偶尔上报”的场景这样就够了，不必上 WebSocket。</p></details><details><summary>WebSocket 和 HTTP/2 流有什么区别？</summary><p>HTTP/2 流仍然是请求-响应语义，且整条 TCP 连接仍有队头阻塞（丢包影响所有流）；WebSocket 是真正的全双工消息语义。客户端主动发消息、服务端随时推的场景用 WebSocket 更自然。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>选了 SSE 并设置事件 ID，就一定不会漏任何历史消息吗？</summary><p>不会。服务器仍需持久化事件并按 Last-Event-ID 实现补发；否则 ID 只是标识。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="http-vs-sse.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

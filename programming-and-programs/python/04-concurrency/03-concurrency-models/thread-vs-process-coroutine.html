@@ -77,6 +77,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -151,5 +169,67 @@ t0 = time.<span class="fn">time</span>()
   }, { rootMargin: '-45% 0px -50% 0px' });
   Object.keys(map).forEach(id => obs.observe(document.getElementById(id)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>三者的硬指标对比（背下这张表）</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>线程 Thread</b></th><th><b>进程 Process</b></th><th><b>协程 Coroutine</b></th></tr></thead><tbody><tr><td>创建开销</td><td><b>约 50 – 100 μs</b></td><td><b>约 5 – 50 ms</b>（fork + 复制页表）</td><td><b>约 1 – 5 μs</b></td></tr><tr><td>切换开销</td><td><b>约 1 – 10 μs</b></td><td>约 5 – 20 μs（要切页表）</td><td><b>&lt; 1 μs</b>（纯用户态）</td></tr><tr><td>内存占用</td><td>栈 <b>8 MB</b>（Linux 默认）/ 可调</td><td>独立地址空间，<b>几十 MB 起</b></td><td><b>约 1 – 10 KB</b>/个</td></tr><tr><td>可同时存在数量</td><td><b>几百 – 上千</b></td><td><b>几十</b>（受内存限制）</td><td><b>10 万+</b></td></tr><tr><td>能否利用多核</td><td>受 GIL 限制，<b>不能</b>跑 CPU 密集</td><td><b>能</b></td><td>不能（单线程内调度）</td></tr><tr><td>数据共享</td><td><b>共享内存</b>，需加锁</td><td>需 IPC（Queue/Pipe/共享内存）</td><td>共享内存，<b>但不会抢占</b></td></tr><tr><td>崩溃影响</td><td>整个进程挂掉</td><td>只挂自己</td><td>整个事件循环挂掉</td></tr></tbody></table></div><p><b>选型一句话</b>：<b>CPU 密集 → 进程</b>（绕开 GIL，用满多核）；<b>IO 密集且高并发 → 协程</b>（几万个连接也不在话下）；<b>IO 密集但并发不高 / 要用不支持 async 的库 → 线程池</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>GIL 的真实影响：什么时候它真的卡你</h2><div class="table-wrap"><table><thead><tr><th>参数 / 事实</th><th>数值</th><th>说明</th></tr></thead><tbody><tr><td><b>切换间隔</b></td><td><b>5 ms</b>（<code>sys.getswitchinterval()</code>）</td><td>每 5 ms 强制让出 GIL</td></tr><tr><td>切换间隔可调</td><td><code>sys.setswitchinterval(0.001)</code></td><td>调小→响应更快但吞吐降</td></tr><tr><td>GIL 释放时机</td><td><b>IO 操作、<code>time.sleep</code>、C 扩展显式释放</b></td><td>所以 IO 密集不受 GIL 限制</td></tr><tr><td>CPU 密集多线程</td><td><b>比单线程还慢</b>（多了切换开销）</td><td>这是最反直觉但真实的现象</td></tr></tbody></table></div><p><b>GIL 实测代码</b></p><pre><code># 实测：CPU 密集任务，多线程 vs 多进程
+import time, threading, multiprocessing, os
+
+def cpu_work(n):
+    s = 0
+    for i in range(n): s += i * i
+    return s
+
+N = 30_000_000
+
+# ① 单线程
+t=time.time(); [cpu_work(N) for _ in range(4)]; print("单线程  ", round(time.time()-t,2), "s")
+
+# ② 4 线程（受 GIL 制约，反而更慢）
+t=time.time()
+ts=[threading.Thread(target=cpu_work, args=(N,)) for _ in range(4)]
+[t.start() for t_ in ts]; [t_.join() for t_ in ts]
+print("4 线程  ", round(time.time()-t,2), "s")     # 通常比单线程慢 10-30%
+
+# ③ 4 进程（真正并行，接近 4 倍速）
+t=time.time()
+ps=[multiprocessing.Process(target=cpu_work, args=(N,)) for _ in range(4)]
+[p.start() for p in ps]; [p.join() for p in ps]
+print("4 进程  ", round(time.time()-t,2), "s")     # 通常快 3-4 倍
+
+# IO 密集场景则完全相反：线程/协程远胜进程
+# 因为 IO 期间会释放 GIL，切换成本远低于进程</code></pre><p class="muted"><b>Python 3.13 起有实验性的 free-threading（<code>--disable-gil</code> 编译选项，PEP 703）</b>，但短期内生态（C 扩展）还没跟上，生产仍按“有 GIL”来设计。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>并发模型选型决策树</h2><div class="table-wrap"><table><thead><tr><th>场景特征</th><th>推荐模型</th><th>具体方案</th><th>理由</th></tr></thead><tbody><tr><td>CPU 密集、可并行（图像处理/加密/数值计算）</td><td><b>多进程</b></td><td><code>multiprocessing.Pool</code> 或 <code>ProcessPoolExecutor</code></td><td>绕开 GIL，用满多核</td></tr><tr><td>CPU 密集、但算法本身是 C 实现（numpy/pandas）</td><td><b>单线程即可</b></td><td>直接调 numpy</td><td>C 扩展内部已释放 GIL 且自身多线程</td></tr><tr><td>IO 密集、并发 &lt; 100（调少量接口）</td><td><b>线程池</b></td><td><code>ThreadPoolExecutor(max_workers=20)</code></td><td>简单，且兼容同步库</td></tr><tr><td>IO 密集、并发 <b>&gt; 1000</b></td><td><b>协程</b></td><td><code>asyncio</code> + <code>aiohttp</code></td><td>内存与切换成本最低</td></tr><tr><td>混合：既有阻塞库又要高并发</td><td><b>协程 + 线程池</b></td><td><code>loop.run_in_executor</code></td><td>把阻塞调用丢进线程池，不卡事件循环</td></tr></tbody></table></div><p><b>四种并发模型代码</b></p><pre><code># ① 进程池：CPU 密集（注意：必须在 __main__ 里，Windows/macOS spawn 模式要求）
+from concurrent.futures import ProcessPoolExecutor
+if __name__ == "__main__":
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as ex:
+        results = list(ex.map(cpu_work, [N]*8))
+# max_workers 默认 = os.cpu_count()；CPU 密集就设成核数，不要多
+
+# ② 线程池：IO 密集（线程数可以远大于核数）
+from concurrent.futures import ThreadPoolExecutor
+# 经验公式：线程数 = 核数 * (1 + 等待时间/计算时间)
+# 纯 IO（等待时间 &gt;&gt; 计算时间）可设 核数 * 10 ~ 50，如 8 核设 50-200
+with ThreadPoolExecutor(max_workers=50) as ex:
+    results = list(ex.map(fetch_url, urls))
+
+# ③ 协程：超高并发 IO
+import asyncio, aiohttp
+async def fetch(session, url):
+    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+        return await r.text()
+async def main(urls):
+    sem = asyncio.Semaphore(200)          # 关键：限流，别把对方打挂
+    async with aiohttp.ClientSession() as s:
+        async def g(u):
+            async with sem:
+                return await fetch(s, u)
+        return await asyncio.gather(*[g(u) for u in urls])
+asyncio.run(main(urls))
+
+# ④ 混合：协程里调阻塞库
+loop = asyncio.get_running_loop()
+result = await loop.run_in_executor(None, blocking_call, args)</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>协程为什么快：把开销拆开看</h2><div class="table-wrap"><table><thead><tr><th>开销来源</th><th>线程</th><th>协程</th><th>倍数</th></tr></thead><tbody><tr><td>创建</td><td>需 <code>clone()</code> 系统调用 + 分配 8 MB 栈</td><td>只是分配一个对象（<b>几百字节</b>）</td><td><b>100×</b></td></tr><tr><td>切换</td><td><b>陷入内核</b>、保存寄存器、TLB 可能失效</td><td><b>纯用户态</b>，改几个寄存器</td><td><b>10 – 100×</b></td></tr><tr><td>调度</td><td><b>抢占式</b>（内核随时打断，要加锁保护临界区）</td><td><b>协作式</b>（只在 await 处让出）</td><td>无锁竞争</td></tr><tr><td>内存</td><td>8 MB × 1000 = <b>8 GB</b>（需调小栈）</td><td>10 KB × 100000 = <b>1 GB</b></td><td><b>800×</b></td></tr></tbody></table></div><p><b>协作式调度最大的好处是“不用加锁”</b>：因为协程只在 <code>await</code> 处让出，两个 <code>await</code> 之间的代码<b>不可能被打断</b>，天然是原子的。这就是为什么 asyncio 代码里很少看到锁——不是不需要，而是大部分场景不需要。</p><p class="muted">但反过来，<b>协作式也意味着一个协程不让出就会卡死整个循环</b>。所以协程里<b>绝对不能</b>出现 <code>time.sleep()</code>、<code>requests.get()</code>、密集 CPU 计算——要用 <code>asyncio.sleep()</code>、<code>aiohttp</code>、<code>run_in_executor</code>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>有了 asyncio，线程池是不是就没用了？</summary><p>完全不是。三个场景线程池更合适：① <b>调用的库不支持 async</b>（requests、boto3、多数数据库驱动）——只能用 <code>run_in_executor</code> 包一层，本质上还是线程池；② <b>并发量不大</b>（&lt; 100）时线程池代码更简单，心智负担低；③ <b>遗留同步代码改造</b>——改成 async 会传染（async 函数只能被 async 函数调用），成本极高。判断标准：<b>并发量是否到了线程池撑不住的程度（数千以上）</b>。</p></details><details><summary>协程数量有没有上限？</summary><p>理论上限很高（10 万级），但<b>实际瓶颈往往在别处</b>：① <b>文件描述符</b>——默认 <code>ulimit -n</code> 常是 <b>1024</b>，必须调大到 <b>10 万</b>；② <b>对方服务承受力</b>——几万并发会把下游打挂，所以要 <b>Semaphore 限流</b>；③ <b>内存</b>——每个连接的缓冲区。所以正确做法是<b>用信号量控制真实并发数</b>，而不是无脑创建海量协程。</p></details><details><summary>多进程的 IPC 开销有多大？</summary><p>不小。<code>multiprocessing.Queue</code> 传递数据要<b>pickle 序列化 + 管道拷贝</b>，传 1 MB 数据约 <b>1 – 5 ms</b>。所以原则：<b>传少量结果，别传大量中间数据</b>。需要共享大块数据时用 <code>multiprocessing.shared_memory</code>（3.8+）或 <code>mmap</code>，进程启动时就加载好（fork 模式的 copy-on-write 也能省一份）。</p></details><details><summary>怎么快速判断该用哪种？</summary><p>一句话：<b>看瓶颈是 CPU 还是 IO</b>。跑一下 <code>top</code>——CPU 打满 → 进程；CPU 很闲但吞吐上不去 → IO 密集 → 协程/线程池。再看并发量：低 → 线程池（简单）；高 → 协程。最后看生态：主力库不支持 async 就别硬改，用线程池 + 调大 worker 数通常够用。</p></details></div></section>
 </body>
 </html>

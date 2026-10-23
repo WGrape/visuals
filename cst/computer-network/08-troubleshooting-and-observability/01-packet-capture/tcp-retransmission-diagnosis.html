@@ -8,6 +8,57 @@
 <section class="panel"><h2>逐段读取一次异常</h2><p>假设抓包里依次看到 seq=1000 len=1000、seq=2000 len=1000、重复 ACK=1000、随后重传 seq=1000。先核对接收方是否真的看到了第一段：如果接收端也没有，而后段已到，可能是数据段在路径中丢失；如果接收端已回 ACK=2000，但发送端没看到，则可能是 ACK 路径问题；如果两端看到的顺序不同，可能是网络乱序。时间间隔也有价值：很快重传常由重复 ACK 等信号触发，等待较久后重传可能是 RTO。</p><div class="table-wrap"><table><thead><tr><th>证据</th><th>可能解释</th><th>还要验证</th></tr></thead><tbody><tr><td>重复 ACK</td><td>接收方仍在等待缺口</td><td>是否伴随乱序和 SACK</td></tr><tr><td>SACK 块</td><td>部分后续数据已到</td><td>缺失范围与重传范围</td></tr><tr><td>较长等待后重传</td><td>可能是超时路径</td><td>RTT、RTO 与 ACK 轨迹</td></tr><tr><td>单端缺少原始包</td><td>也可能是抓包漏包</td><td>对照另一端与接口丢包计数</td></tr></tbody></table></div></section>
 <section class="panel"><h2>抓包位置与网卡卸载的影响</h2><p>在发送端网卡前抓包，可能看到尚未被硬件切成最终线上包的大段数据；接收端又可能因 GRO/LRO 合并而显示不同长度。抓包中“一个大 TCP 包”未必就是线上的真实以太网帧。分析 MSS、分段和重传时要记录 TSO/GSO/GRO 等卸载状态，必要时在交换机镜像口或另一端抓包比对。</p><p>时间戳也要小心。两台主机时钟未校准，不能简单用两份抓包的绝对时间相减得到单向延迟。可以先用同一 TCP 连接的序列号和 ACK 配对，再校正时钟偏差。若应用报告超时，但 TCP 没有明显重传，瓶颈可能在服务端排队、线程池、TLS 或应用逻辑，不应把所有慢请求归因于网络。</p></section>
 <section class="panel"><h2>可重复的排障流程</h2><ol><li>固定五元组、抓包位置与时间范围，保留原始 pcap 和接口丢包计数。</li><li>按序列号重建字节范围，记录首次发送、重复发送、ACK、SACK 与时间间隔。</li><li>对照发送端和接收端：确定原始数据是否到达、ACK 是否返回以及是否乱序。</li><li>把网络证据与应用超时、队列时长和重试日志关联，判断真正的用户影响。</li></ol><p>练习：发送端见到重传，接收端抓包却显示原始数据已经到达并发出 ACK。至少列出两种可能原因，并说明需要哪一份证据才能区分 ACK 丢失和发送端抓包误判。</p></section>
-<section class="panel"><h2>别把窗口受限误判成丢包</h2><p>发送方暂时不发数据，可能因为拥塞窗口收缩，也可能因为接收窗口为零、应用本身没有更多数据，或服务端处理慢。抓包时要看发送窗口、接收窗口广告、ACK 节奏和应用日志。零窗口通常表示接收方来不及从 TCP 缓冲读取数据；这与链路丢包需要不同处理。快速重传之后拥塞控制还可能降低发送速率，使用户看到一段更长的吞吐下降。</p><p>单个抓包文件也可能不完整：过滤表达式漏掉反向 ACK、抓包进程丢包、NAT 或负载均衡改变连接五元组，都可能导致分析者错误拼接时间线。准备抓包时尽量保留双向流量并记录抓包丢包统计。若无法双端同时抓包，就把结论表述为“某端观察到什么、仍缺少什么证据”，不要把推测写成已证实的链路故障。</p></section><section class="panel"><h2>应用重试的干扰</h2><p>HTTP 客户端超时后可能新建另一条 TCP 连接重试同一业务请求。抓包若只按目标端口统计，会把两条连接混成一条“重复发送”。先按五元组和连接建立时间分开，再用请求 ID 关联日志，区分 TCP 层重传与应用层重试。</p></section><section class="panel"><h2>自检</h2><details><summary>ACK=2000 对 seq=1000、len=1000 表示什么？</summary><p>接收方累计确认到 1999，下一步期待从 2000 开始的字节。</p></details><details><summary>为什么单端抓包不能直接证明网络丢包？</summary><p>ACK 丢失、乱序、抓包漏包和网卡卸载都可能改变所见轨迹。</p></details></section>
+<section class="panel"><h2>别把窗口受限误判成丢包</h2><p>发送方暂时不发数据，可能因为拥塞窗口收缩，也可能因为接收窗口为零、应用本身没有更多数据，或服务端处理慢。抓包时要看发送窗口、接收窗口广告、ACK 节奏和应用日志。零窗口通常表示接收方来不及从 TCP 缓冲读取数据；这与链路丢包需要不同处理。快速重传之后拥塞控制还可能降低发送速率，使用户看到一段更长的吞吐下降。</p><p>单个抓包文件也可能不完整：过滤表达式漏掉反向 ACK、抓包进程丢包、NAT 或负载均衡改变连接五元组，都可能导致分析者错误拼接时间线。准备抓包时尽量保留双向流量并记录抓包丢包统计。若无法双端同时抓包，就把结论表述为“某端观察到什么、仍缺少什么证据”，不要把推测写成已证实的链路故障。</p></section><section class="panel"><h2>应用重试的干扰</h2><p>HTTP 客户端超时后可能新建另一条 TCP 连接重试同一业务请求。抓包若只按目标端口统计，会把两条连接混成一条“重复发送”。先按五元组和连接建立时间分开，再用请求 ID 关联日志，区分 TCP 层重传与应用层重试。</p></section><section class="panel" data-dry-goods><h2>两种重传机制：触发条件完全不同</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>触发条件</th><th>重传什么</th><th>等待时间</th></tr></thead><tbody><tr><td><b>超时重传（RTO）</b></td><td><b>定时器到期没收到 ACK</b></td><td>从<b>未确认的第一个段</b>开始</td><td><b>RTO</b>（动态计算，200 ms ~ 120 s）</td></tr><tr><td><b>快速重传</b></td><td>收到 <b>3 个重复 ACK</b></td><td><b>只重传丢失的那个段</b></td><td><b>立即</b>（不等 RTO）</td></tr><tr><td><b>SACK 重传</b></td><td>开启 SACK 后</td><td><b>精确重传多个空缺</b></td><td>立即</td></tr><tr><td><b>TLP</b>（尾部丢失探测）</td><td>尾部少量数据丢失（凑不够 3 个 dup ACK）</td><td>重传最后一个段</td><td>约 <b>2 × RTT</b></td></tr></tbody></table></div><p><b>为什么要“3 个重复 ACK”</b>：因为<b>收到重复 ACK 也可能是乱序</b>（包没丢，只是走不同路径晚到了）。如果是乱序，等一会就补齐了，重传反而浪费；如果连续 3 个都是重复 ACK，说明后续 3 个包都到了、唯独缺中间那个——<b>大概率是真丢了</b>。这个“3”是概率上的平衡点。</p><p><b>重传参数</b></p><pre><code># 系统里的重传相关参数
+sysctl net.ipv4.tcp_retries1    # 默认 3   ：放弃前尝试 3 次（开始怀疑网络有问题）
+sysctl net.ipv4.tcp_retries2    # 默认 15  ：最多 15 次后放弃连接（约 13-30 分钟！）
+sysctl net.ipv4.tcp_sack        # 默认 1   ：开启 SACK（强烈建议保持开启）
+sysctl net.ipv4.tcp_frto        # 默认 2   ：F-RTO（虚假超时检测）
+sysctl net.ipv4.tcp_early_retrans   # 默认 3 ：ER，降低重传延迟
+
+# 关键计算：tcp_retries2=15 意味着什么？
+#   RTO 指数退避：200ms -&gt; 400 -&gt; 800 -&gt; ... -&gt; 上限 120s
+#   前几次很快，后面越来越慢
+#   15 次累计约 13 - 30 分钟（取决于 RTO 初始值）
+#   -&gt; 这就是为什么"网络断了但连接要很久才报错"
+
+# 实际影响：连接假死后，应用要等 15 分钟才感知
+# 优化：应用层必须有自己的超时（不要依赖 TCP 的超时！）
+#   Go:    conn.SetDeadline(time.Now().Add(5*time.Second))
+#   Java:  socket.setSoTimeout(5000)
+#   Python:socket.settimeout(5.0)</code></pre></section><section class="panel"><h2>RTO 怎么算（RFC 6298）</h2><div class="table-wrap"><table><thead><tr><th>变量</th><th>含义</th><th><b>初始值 / 典型值</b></th></tr></thead><tbody><tr><td><b>RTO</b></td><td>重传超时时间</td><td><b>初始 1 s</b>，SYN 重传也是 1 s</td></tr><tr><td><b>SRTT</b></td><td>平滑的 RTT</td><td>首次测量后得出</td></tr><tr><td><b>RTTVAR</b></td><td>RTT 的偏差</td><td>初始 = RTT/2</td></tr><tr><td><b>RTO 下限</b></td><td><code>tcp_rto_min</code></td><td><b>200 ms</b>（默认）</td></tr><tr><td><b>RTO 上限</b></td><td><code>tcp_rto_max</code></td><td><b>120 s</b>（默认）</td></tr></tbody></table></div><p><b>计算公式</b>（Karn 算法 + Jacobson 的平滑）：<code>SRTT = (1−α)·SRTT + α·RTT</code>（α = 1/8）；<code>RTTVAR = (1−β)·RTTVAR + β·|SRTT − RTT|</code>（β = 1/4）；<code>RTO = SRTT + 4·RTTVAR</code>，然后夹到 [200 ms, 120 s]。<b>指数退避</b>：每次超时重传后 <code>RTO × 2</code>，成功后再重置。</p><p class="muted"><b>Karn 算法的关键细节</b>：<b>重传过的段的 RTT 不能用来更新 SRTT</b>——因为你无法知道收到的 ACK 是对<b>原始包</b>还是对<b>重传包</b>的确认，算出来的 RTT 是错的。所以重传时只做指数退避，不更新估计值。</p></section>
+<section class="panel"><h2>抓包诊断：三步定位</h2><p><b>抓包诊断命令</b></p><pre><code># ① 抓包（生产环境要限制大小和时长）
+tcpdump -i eth0 -w /tmp/cap.pcap -s 0 -C 100 -W 5 \
+        'tcp and host 10.0.0.5'
+#   -s 0    抓完整包（不截断，否则看不到 payload）
+#   -C 100  每个文件 100MB
+#   -W 5    最多 5 个文件，循环覆盖（防止撑爆磁盘）
+#   -w      写文件（比直接打印快得多，生产必备）
+
+# ② 分析（命令行快速看）
+tcpdump -nn -r /tmp/cap.pcap | grep -c retransmission
+# 用 tshark 更精确
+tshark -r /tmp/cap.pcap -Y "tcp.analysis.retransmission" \
+       -T fields -e frame.number -e ip.src -e tcp.seq -e tcp.analysis.rto
+
+# 统计重传率（健康值 &lt; 0.1%）
+tshark -r /tmp/cap.pcap -Y "tcp" | wc -l                      # 总包数
+tshark -r /tmp/cap.pcap -Y "tcp.analysis.retransmission" | wc -l  # 重传数
+
+# ③ 关键要看的几类包
+#   [TCP Retransmission]      超时重传（严重：等到 RTO 了）
+#   [TCP Fast Retransmission] 快速重传（较轻：3 dup ACK 触发）
+#   [TCP Dup ACK n#]          重复 ACK（前兆）
+#   [TCP Spurious Retransmission] 虚假重传（没丢但重传了，可能是乱序）
+#   [TCP Previous segment not captured] 抓包漏了（可能是抓包点的问题，不是真丢包）
+#   [TCP Out-Of-Order]        乱序
+#   [TCP ZeroWindow]          接收方缓冲区满（应用层问题！不是网络问题）
+
+# ④ 只看某个连接的 RTT 与重传
+ss -ti '( dport = :80 )'
+#   rtt:12.5/3.2   -&gt; 平均 RTT 12.5ms，偏差 3.2ms
+#   retrans:0/15   -&gt; 当前重传中 0 个，累计 15 次  &lt;- 关键指标！
+#   cwnd:10 ssthresh:20</code></pre><div class="table-wrap"><table><thead><tr><th>现象</th><th>可能原因</th><th>怎么验证</th></tr></thead><tbody><tr><td><b>大量超时重传</b></td><td>丢包严重、链路质量差、中间设备丢包</td><td>ping 看丢包率；mtr 定位哪一跳</td></tr><tr><td><b>少量快速重传</b></td><td>偶发丢包（正常，&lt; 0.1% 可接受）</td><td>看比例，偶发不用管</td></tr><tr><td><b>虚假重传</b></td><td>RTO 估计偏小 / 乱序严重</td><td>看 RTT 波动是否很大</td></tr><tr><td><b>ZeroWindow</b></td><td><b>接收方应用读得慢</b>（不是网络问题！）</td><td>看接收方 CPU/GC/负载</td></tr><tr><td><b>重传但对方已收到</b></td><td><b>ACK 丢了</b>（反向链路问题）</td><td>在对端也抓包对比</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>重传率多少算正常？</summary><p>经验阈值：<b>&lt; 0.1% 正常</b>；<b>0.1% – 1% 需要关注</b>；<b>&gt; 1% 明显有问题</b>（会造成吞吐大幅下降）。注意重传对吞吐的影响是<b>非线性</b>的：丢包率从 0.1% 升到 1%，吞吐可能下降 <b>50% 以上</b>——因为丢包会触发<b>拥塞控制</b>（cwnd 减半），而不仅仅是重传那几个包。所以重传率是要<b>告警</b>的核心指标，阈值建议设在 <b>0.5%</b>。</p></details><details><summary>为什么带宽没跑满，速度却很慢？</summary><p>最常见的原因是<b>丢包 + 拥塞窗口被压小</b>。经典公式（Mathis）：<code>吞吐 ≤ (MSS / RTT) × (1 / √p)</code>，其中 p 是丢包率。举例：MSS=1460 B、RTT=50 ms、p=1%（0.01）：吞吐 ≤ (1460/0.05) × (1/0.1) = 292 KB/s × 10 = <b>约 2.9 MB/s</b>——即使链路是 100 Mbps，也只能跑到 2.9 MB/s。要提速只能：<b>降低丢包率</b>或<b>降低 RTT</b>（上 CDN / 就近接入）。这也解释了为什么长肥管道（高带宽 × 高延迟）特别怕丢包。</p></details><details><summary>SACK 有什么用？为什么必须开？</summary><p>没有 SACK 时，接收方只能告诉发送方“<b>我收到了第 N 字节之前的所有数据</b>”（累积确认）。如果一个窗口里丢了 2 个包，发送方<b>不知道后面哪些到了</b>，可能重传已经收到的包——浪费带宽。有了 <b>SACK</b>，接收方可以精确报告“<b>我收到了 X-Y 和 Z-W 两段</b>”，发送方只重传真正缺的部分。在高丢包或大窗口场景（如长肥管道）下，SACK 能<b>显著提升吞吐</b>。现代系统默认开启（<code>net.ipv4.tcp_sack=1</code>），不要关（有些老的安全加固文档会建议关，那是过时的）。</p></details><details><summary>应用该多久超时？和 TCP 重传的关系？</summary><p><b>绝对不要依赖 TCP 的超时</b>——它默认是 <b>15 次重试、最长约 13 – 30 分钟</b>，用户早就跑光了。应用层必须有自己的超时：① <b>连接超时</b>：<code>connect</code> 通常设 <b>1 – 5 s</b>（SYN 重传默认 6 次，约 127 s，太久了）；② <b>读写超时</b>：按业务设，通常 <b>1 – 10 s</b>；③ <b>整请求超时（deadline）</b>：包含重试在内的总时间，且要<b>跨服务传递</b>（A 调 B，B 调 C 时用 A 的剩余时间，而不是重新计时）。另外，如果想快速感知对端宕机，可调小 <code>tcp_retries2</code>（如设为 5，约 30 s 就放弃）——这是很多 RPC 框架的做法。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>ACK=2000 对 seq=1000、len=1000 表示什么？</summary><p>接收方累计确认到 1999，下一步期待从 2000 开始的字节。</p></details><details><summary>为什么单端抓包不能直接证明网络丢包？</summary><p>ACK 丢失、乱序、抓包漏包和网卡卸载都可能改变所见轨迹。</p></details></section>
 <footer>继续阅读：<a href="network-packet-capture.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

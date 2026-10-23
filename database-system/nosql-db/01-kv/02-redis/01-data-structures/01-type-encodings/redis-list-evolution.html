@@ -430,6 +430,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="bg-particles"></div>
@@ -773,6 +791,28 @@
                 <span style="color: var(--accent-purple);">无级联更新</span>
             </p>
         </section>
+<section class="quicklist-section" data-dry-goods><div class="x-dry"><h2>List 的编码演进（三代）</h2><div class="table-wrap"><table><thead><tr><th>版本</th><th>编码</th><th>底层</th><th>内存</th><th>问题</th></tr></thead><tbody><tr><td>Redis &lt; 3.2</td><td><code>ziplist</code> 或 <code>linkedlist</code></td><td>连续数组 / 双向链表</td><td>链表每个节点 3 个指针（prev/next/value），<b>开销大</b></td><td>小列表用链表浪费内存</td></tr><tr><td>Redis 3.2 – 6.x</td><td><b>quicklist</b></td><td>链表 + 每个节点是一个 ziplist</td><td><b>折中</b>：既省内存又避免大块连续内存</td><td>配置项复杂</td></tr><tr><td><b>Redis 7.0+</b></td><td><b>quicklist2（listpack 版）</b></td><td>链表 + 每个节点是 <b>listpack</b></td><td>同 quicklist，且无级联更新问题</td><td>—</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>配置项</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td><code>list-max-ziplist-size</code></td><td><b>-2</b></td><td>每个 quicklist 节点的 ziplist 大小。<b>正值=元素个数，负值=按字节</b>：-1=4KB、-2=8KB、<b>-3=16KB</b>、-4=32KB、-5=64KB</td></tr><tr><td><code>list-compress-depth</code></td><td><b>0</b></td><td>节点压缩深度：<b>0=不压缩</b>；1=首尾各 1 个节点不压缩、中间压缩；2=首尾各 2 个...</td></tr></tbody></table></div><p><b>quicklist 的设计取中</b>：纯 ziplist 在元素多时（几万个）插入/删除要整体搬移内存；纯 linkedlist 每个元素多占约 24 字节指针。quicklist 把元素分装进多个 ziplist（每个约 8 KB），既控制了单块内存大小，又把指针开销摊薄到“每个节点一个”而不是“每个元素一个”。</p><p><b>List 编码与验证</b></p><pre><code># 查看配置
+CONFIG GET list-max-ziplist-size     # -2  → 每个节点 8KB
+CONFIG GET list-compress-depth       # 0   → 不压缩
+
+# 观察编码（Redis 7 统一显示为 quicklist，但内部节点已是 listpack）
+RPUSH mylist a b c
+OBJECT ENCODING mylist      # "quicklist"
+LLEN mylist
+MEMORY USAGE mylist
+
+# 验证压缩效果（元素多时才明显）
+# 压入 10000 个元素，对比 compress-depth=0 与 =1 的内存
+CONFIG SET list-compress-depth 1
+MEMORY USAGE mylist
+
+# 常用命令复杂度
+# LPUSH / RPUSH / LPOP / RPOP : O(1)      ← 两端操作是 List 的核心优势
+# LINDEX / LSET / LINSERT     : O(n)      ← 按下标访问很慢，别用 List 做随机读
+# LRANGE 0 -1                 : O(n)      ← 大列表要小心
+# LTRIM                       : O(n)</code></pre></div></section>
+<section class="quicklist-section" ><div class="x-dry"><h2>用法与坑</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>用 List？</th><th>更合适的选择</th></tr></thead><tbody><tr><td>消息队列（简单的生产者-消费者）</td><td>可以（LPUSH + BRPOP）</td><td><b>Stream</b>（需要 ACK、多消费者组、持久化时）</td></tr><tr><td>最新动态/时间线（只看前 N 条）</td><td>可以（LPUSH + LTRIM 保持长度）</td><td>ZSet（需要按分数排序时）</td></tr><tr><td>栈/队列</td><td><b>合适</b></td><td>—</td></tr><tr><td>需要按下标随机访问</td><td><b>不合适</b>（O(n)）</td><td>用 String 存 JSON，或用 Hash</td></tr><tr><td>需要去重</td><td><b>不合适</b></td><td>Set</td></tr><tr><td>需要防止重复消费</td><td><b>不合适</b></td><td>Stream 的消费者组 + ACK</td></tr></tbody></table></div><ul><li><b>BRPOP 是阻塞的，会占用一个连接</b>：每个阻塞的客户端在服务端占一个 client 槽位。大量消费者要考虑连接数与 <code>maxclients</code>。另外阻塞连接受 <code>timeout</code> 影响（设 0 表示永不超时）。</li><li><b>List 做队列丢消息</b>：<code>RPOP</code> 拿到消息后客户端崩溃 → 消息永久丢失。List 没有 ACK 机制。要可靠队列用 <b>Stream</b>（<code>XREADGROUP</code> + <code>XACK</code> + <code>XPENDING</code> 处理未确认）。</li><li><b>list-compress-depth 只对中间节点压缩</b>：因为两端才是频繁操作的位置，压缩它们会白白消耗 CPU（每次操作都要解压）。设 1–2 通常性价比最高。</li><li><b>大 List 的删除阻塞</b>：几百万元素的 List 用 <code>DEL</code> 会阻塞主线程（毫秒到秒级）。用 <code>UNLINK</code>（异步删）或 <code>LTRIM</code> 逐步缩短。</li><li><b>排障</b>：<code>OBJECT ENCODING</code> → <code>LLEN</code> 看长度 → <code>MEMORY USAGE</code> → 若内存异常高，检查 <code>list-compress-depth</code> 是否为 0 且元素是否很大。</li></ul><details><summary>List 和 Stream 该选哪个做消息队列？</summary><p>只需要“先进先出、能阻塞等待、丢几条无所谓”→ List 足够且更省。需要<b>消费确认（ACK）、多消费者组、消息回放、失败重试</b> → 必须用 Stream。生产级队列建议直接上 Stream 或专业 MQ（Kafka/RabbitMQ）。</p></details><details><summary>为什么 LPUSH 是 O(1) 而 LINSERT 是 O(n)？</summary><p>quicklist 对<b>两端</b>做了优化（头尾节点直接定位），但中间位置必须遍历节点、再在 listpack 内查找/搬移。所以 List 是“两端操作快、中间操作慢”的结构，别当数组用。</p></details></div></section>
+
     </div>
 
     <script>

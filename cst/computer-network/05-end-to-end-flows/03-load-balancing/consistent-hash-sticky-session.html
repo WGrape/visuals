@@ -11,6 +11,31 @@
 <section class="panel"><h2>粘性会话的代价</h2><p>把用户会话只存在某后端内存，再依靠负载均衡粘性让用户每次回到该后端，是一种兼容方案。节点故障或部署重启后，这份状态仍可能丢失；如果一个“超级用户”产生极高请求量，粘性还会形成热点。更稳健的方式是把会话放共享存储，或用可验证令牌并设计撤销机制，后端尽量无状态。此时亲和可作为性能优化，而不是正确性的唯一前提。</p><p>长连接尤其要注意：四层负载均衡选一次后，一条 HTTP/2 或 WebSocket 连接可能承载大量请求。即使按新请求哈希均匀，已有热连接不会自动迁移。扩容时要结合连接排空和新连接分配策略。</p></section>
 <section class="panel"><h2>权重与健康状态</h2><p>不同节点规格可能不一样，可用加权虚拟节点或其他算法分配更多键到大机器。节点摘除时，环上键重映射；恢复时也会再次变化。健康检查抖动若让节点频繁上下线，键会反复迁移，缓存命中率和会话稳定性持续受损。要设置恢复阈值与排空窗口，避免一时探测失败引发全局抖动。</p><p>对请求路由和数据分片不能盲目共用同一环：请求层可快速调整，数据层迁移可能需要校验与副本协议。写入去哪个分片会影响一致性，算法升级必须有版本兼容和迁移计划。</p></section>
 <section class="panel"><h2>验收与观测</h2><p>用一百万个代表性用户或缓存键模拟三节点到四节点，统计每节点键数、迁移键数、最大/最小负载比；再模拟单节点故障和恢复。线上灰度时观察缓存命中率、回源 QPS、登录失效、节点 CPU、连接数和 P99 延迟。若新节点加入后少量热门 key 集中落在它上面，虚拟节点数量多也未必消除热点，需要按访问频率而非仅按键数量检查。</p><p>一致性哈希解决“节点数量变化时尽量少改路由”，不解决会话数据持久、写入幂等或后端容量。只有把三个问题分开，扩容才不会以用户掉线为代价。</p></section>
+<section class="panel" data-dry-goods><h2>一致性哈希的关键数字</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>数值/做法</th><th>说明</th></tr></thead><tbody><tr><td>哈希环空间</td><td>2^32（常用）</td><td>节点与 key 都映射到环上</td></tr><tr><td>虚拟节点数</td><td><b>100 – 200 个/物理节点</b></td><td>解决分布不均；太少仍会倾斜</td></tr><tr><td>节点变化时重映射比例</td><td>约 <b>K/N</b>（K=key 数，N=节点数）</td><td>普通哈希是 ~100%，一致性哈希只动 1/N</td></tr><tr><td>负载均衡度（100 vnodes）</td><td>偏差约 <b>5–10%</b></td><td>虚拟节点越多越均匀，但内存与时间开销上升</td></tr><tr><td>典型实现</td><td>Ketama、Jump Consistent Hash、Rendezvous（HRW）</td><td>Jump 无需虚拟节点、分布极均匀</td></tr></tbody></table></div><p><b>为什么需要虚拟节点</b>：物理节点少时（如 3 台），它们在环上的位置是随机的，很可能把环分成很不均匀的三段（比如 10% / 30% / 60%）。每个物理节点拆成 100–200 个虚拟节点后，大数定律让分布趋于均匀。</p><div class="table-wrap"><table><thead><tr><th>算法</th><th>重映射比例</th><th>分布均匀性</th><th>内存开销</th></tr></thead><tbody><tr><td>普通取模 <code>hash(key) % N</code></td><td><b>约 (N−1)/N ≈ 100%</b></td><td>均匀</td><td>O(1)</td></tr><tr><td>一致性哈希 + 虚拟节点</td><td>约 <b>1/N</b></td><td>较好（5–10% 偏差）</td><td>O(N × vnodes)</td></tr><tr><td>Jump Consistent Hash</td><td>约 <b>1/N</b>（理论最优）</td><td>极均匀</td><td><b>O(1) 内存</b>，O(ln N) 时间</td></tr><tr><td>Rendezvous（HRW）</td><td>约 1/N</td><td>极均匀</td><td>O(N) 每次计算</td></tr></tbody></table></div><p><b>一致性哈希实现与验证</b></p><pre><code># Jump Consistent Hash（Google，2014）—— 无需虚拟节点，代码极短
+def jump(key, num_buckets):
+    import random
+    random.seed(key)
+    b, j = -1, 0
+    while j &lt; num_buckets:
+        b = j
+        r = random.random()
+        j = int((b + 1) / r)
+    return b
+
+# 一致性哈希的验证方法：扩缩容前后统计 key 迁移比例
+# 期望：从 10 节点加到 11 节点，只有约 1/11 ≈ 9% 的 key 需要迁移
+
+# Nginx 一致性哈希（upstream）
+# upstream backend {
+#     hash $request_uri consistent;    # consistent 关键字即一致性哈希
+#     server 10.0.0.1;
+#     server 10.0.0.2;
+# }
+
+# 缓存命中率对比（实测方法）
+# 1) 记录每个 key 落在哪台后端
+# 2) 增加一台后端，重新计算
+# 3) 统计有多少 key 换了后端 = 缓存失效比例</code></pre></section><section class="panel"><h2>会话保持的三种做法与取舍</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td><b> hashing（无状态）</b></td><td>按 key（IP / URI / Cookie）哈希选后端</td><td>无状态、后端挂了只影响 1/N</td><td>扩缩容仍有少量重映射；热点 key 会倾斜</td></tr><tr><td><b>Sticky Cookie</b></td><td>LB 下发 cookie 记住后端</td><td>精确、支持任何 key</td><td>客户端必须支持 cookie；LB 要维护状态</td></tr><tr><td><b>会话复制/集中存储</b></td><td>Session 放 Redis</td><td><b>最彻底</b>，任意后端都能服务</td><td>Redis 成为依赖；增加一次网络往返</td></tr></tbody></table></div><ul><li><b>首选方案是“消灭会话粘性”</b>：把 session 外置到 Redis（或改用 JWT 无状态 token），这样任何请求都能打到任意后端——扩容、故障切换、灰度都变得简单。粘性会话是最后手段。</li><li><b>缓存场景必须用一致性哈希</b>：普通取模在扩缩容时会让 <b>几乎全部</b> 缓存 key 失效，瞬间击穿到数据库（缓存雪崩）。一致性哈希只失效 1/N。</li><li><b>但一致性哈希不能解决热点</b>：某个 key 被访问 100 万次（如爆款商品），无论哈希怎么算都只落在一台机器上 → 该机器被打爆。热点要靠<b>本地缓存 + 副本 + 限流</b>解决。</li><li><b>按 IP 哈希的坑</b>：移动端/NAT 出口会让大量用户共享同一个出口 IP → 严重倾斜；且用户 IP 变化会导致会话丢失。优先用 cookie 或用户 ID 做 key。</li><li><b>健康检查与哈希的配合</b>：节点摘除时，一致性哈希只影响该节点的 key（1/N）；如果还要保证“尽量不迁移”，可以用 <b>有界负载的一致性哈希</b>或 <b>Rendezvous hashing</b>。</li><li><b>验证方法</b>：用真实 key 分布跑一遍，统计各节点负载的标准差/最大最小比。偏差 > 20% 就要增加虚拟节点或换算法。</li></ul><details><summary>一致性哈希能彻底避免缓存失效吗？</summary><p>不能，只能把失效比例从 ~100% 降到 ~1/N。要进一步降低可以用<b>双层哈希</b>或<b>预热</b>；但更实际的思路是让后端能承受短暂击穿（熔断 + 限流 + 数据库保护）。</p></details><details><summary>虚拟节点越多越好吗？</summary><p>不是。100–200 个通常够了；再往上收益递减，但内存和查找开销线性上升（1000 个 vnode × 1000 节点 = 100 万条环上条目）。Jump Consistent Hash 能完全避开这个问题，是更现代的选择。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>一致性哈希让用户落到新节点后，旧会话数据会自动出现吗？</summary><p>不会。算法只改变路由，旧节点内存状态不会自动搬迁，仍需共享存储或明确迁移。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="l4-l7-load-balancing-health-checks.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

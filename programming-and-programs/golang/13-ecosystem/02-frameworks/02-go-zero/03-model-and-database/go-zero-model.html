@@ -58,6 +58,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -410,5 +428,54 @@ l.svcCtx.UserModel.<span class="fn">Delete</span>(l.ctx, user.Id)</pre>
   go-zero 系列 · 建表与 Model 流程 · 与「svc 目录 / 初始化 / 全局变量 / pkg-internal」同属 golang 速查 · 配图与代码仅供回忆核心流程
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · Model 层解决什么</h2><p>go-zero 的 Model 层是 <b>sqlx + 缓存自动生成</b>。它解决的是「手写 CRUD + 手搓缓存」这两件重复且容易写错的事。</p><div class="table-wrap"><table><thead><tr><th>能力</th><th>说明</th><th>是否自动生成</th></tr></thead><tbody><tr><td><b>基础 CRUD</b></td><td>Insert / FindOne / Update / Delete</td><td><b>是</b>（<code>goctl model</code>）</td></tr><tr><td><b>缓存管理</b></td><td>主键缓存 + 唯一索引缓存，读写自动维护</td><td><b>是</b>（<code>-c</code> 开启）</td></tr><tr><td><b>防缓存穿透</b></td><td>查询为空时缓存占位符</td><td><b>是</b>（内置）</td></tr><tr><td><b>事务</b></td><td><code>Transact</code> / <code>TransactCtx</code></td><td>骨架生成，逻辑自写</td></tr><tr><td><b>复杂查询</b></td><td>自定义 SQL</td><td><b>否</b>（要自己写，且要手动处理缓存）</td></tr></tbody></table></div><ul><li><b>核心机制：双缓存 key</b>。go-zero 会为主键建缓存（<code>cache:table:primaryKey:id</code>），为<b>每个唯一索引</b>也建缓存（<code>cache:table:index:idxName:value</code>），后者存的是主键值。查询唯一索引时：先查索引缓存拿到主键 → 再查主键缓存拿数据。</li><li><b>缓存一致性</b>：更新/删除时会<b>同时删除</b>主键缓存和所有索引缓存（删除而非更新，避免并发写覆盖）。</li><li><b>防穿透</b>：查不到数据时会在缓存里放一个<b>占位符</b>（默认过期 1 分钟），避免同样的无效查询反复打数据库。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 生成、配置与命令</h2><p><b>命令与配置</b></p><pre><code># —— 从 SQL 生成 model（最常用）——
+goctl model mysql datasource \
+    -url "user:pass@tcp(127.0.0.1:3306)/dbname" \
+    -table "user" \
+    -dir "./model" \
+    -c                                  # 【-c 表示生成带缓存的版本】
+#   产物：usermodel.go（含 CRUD + 缓存） + 部分是生成的 model 接口
+
+# —— 从建表 SQL 文件生成 ——
+goctl model mysql ddl -src user.sql -dir ./model -c
+
+# —— 生成的代码结构 ——
+#   type UserModel interface {
+#       Insert(ctx, data) (sql.Result, error)
+#       FindOne(ctx, id) (*User, error)
+#       FindOneByMobile(ctx, mobile) (*User, error)   # 唯一索引自动生成一个方法
+#       Update(ctx, data) error
+#       Delete(ctx, id) error
+#   }
+
+# —— 配置（etc/*.yaml）——
+#   Mysql:
+#     DataSource: user:pass@tcp(127.0.0.1:3306)/db?parseTime=true
+#   CacheRedis:
+#     - Host: 127.0.0.1:6379
+#       Type: node                       # node 或 cluster
+#       Pass: ""
+
+# —— 初始化 ——
+#   c := cache.New(conf.CacheRedis, ...)
+#   conn := sqlx.NewMysql(conf.Mysql.DataSource)
+#   m := model.NewUserModel(conn, c)
+
+# —— 事务 ——
+err := m.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+    _, err := session.ExecCtx(ctx, "UPDATE account SET balance=balance-? WHERE id=?", 100, 1)
+    if err != nil { return err }
+    _, err = session.ExecCtx(ctx, "UPDATE account SET balance=balance+? WHERE id=?", 100, 2)
+    return err
+})   # 出错自动回滚；返回 nil 自动提交
+
+# —— 自定义查询（注意缓存！）——
+#   【坑】自己写 SQL 查询不会走缓存，也不会维护缓存
+#   解决：复杂查询自己加缓存，并在写操作时手动删除相关缓存
+#   _, err := m.DelCacheCtx(ctx, id)     # 手动删缓存</code></pre><div class="table-wrap"><table><thead><tr><th>参数 / 选项</th><th>说明</th><th>经验</th></tr></thead><tbody><tr><td><code>-c</code></td><td>生成带缓存的版本</td><td><b>读多写少必开</b></td></tr><tr><td><code>--style</code></td><td>文件命名风格</td><td>项目统一（如 <code>gozero</code>）</td></tr><tr><td><code>parseTime=true</code></td><td>DSN 参数，<b>时间字段必需</b></td><td><b>不加会报 scan 错误</b></td></tr><tr><td><code>loc=Local</code></td><td>时区</td><td>避免 UTC 与本地时区混淆</td></tr><tr><td>缓存过期时间</td><td>生成代码里默认 <b>7 天</b></td><td>按业务调；热点数据可更长</td></tr><tr><td>占位符过期</td><td>查空时的占位缓存，默认 <b>1 分钟</b></td><td>防穿透</td></tr><tr><td><code>cache.Score</code></td><td>缓存统计</td><td>可观察命中率</td></tr></tbody></table></div><p class="muted">两个必踩的坑：① <b>DSN 少了 <code>parseTime=true</code></b>，<code>time.Time</code> 字段会 scan 失败；② <b>自定义 SQL 不走缓存</b>，要自己维护。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b><code>unsupported Scan, storing driver.Value type []uint8 into type *time.Time</code></b> → DSN 缺 <code>parseTime=true</code>。<b>这是最高频的错误</b>。</li><li><b>改了数据但读到旧的</b> → 自定义 SQL 更新了数据但<b>没清缓存</b>。凡是绕过 Model 方法直接写 SQL 的地方，都要手动 <code>DelCache</code>。</li><li><b>缓存与数据库不一致</b> → 多服务共用一个库，其中一个不用 go-zero（或不用缓存）。解法：所有写入方统一走同一套缓存逻辑，或缩短缓存过期时间。</li><li><b>唯一索引没生成查询方法</b> → 建表时该列不是 <code>UNIQUE</code>。go-zero 只对<b>唯一索引</b>生成 <code>FindOneByXxx</code>。普通索引不会生成。</li><li><b>批量操作很慢</b> → <code>Insert</code> 是单条的。批量要自己写 <code>INSERT ... VALUES (...),(...)</code>，并记得处理缓存。</li><li><b>缓存 key 冲突</b> → 表名+主键生成 key，若同库有同名表会冲突。注意命名空间。</li><li><b>Redis 挂了导致服务不可用</b> → go-zero 的缓存是「穿透型」：Redis 报错时会<b>直接查库</b>（不会致命），但性能会下降。<b>要监控 Redis 健康</b>。</li><li><b>事务里用了带缓存的 Model 方法</b> → 缓存可能在事务提交前就被写了，回滚后缓存是脏的。<b>事务内应使用 session 的原生方法，不用 Model 的缓存方法</b>。</li><li><b>连接数打满</b> → 检查 <code>sqlx</code> 的连接池配置与慢查询。MySQL 的 <code>max_connections</code> 与应用的连接池要匹配。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>理解 go-zero 缓存的两个设计决策，就能预判它的所有行为：<b>① 更新时删除缓存而不是更新缓存；② 查空时缓存占位符</b>。</p><ul><li><b>为什么删除而不是更新</b>：并发写会有<b>覆盖问题</b>。请求 A 和 B 同时更新同一行，如果都去「更新缓存」，可能顺序变成 A写库 → B写库 → B写缓存 → A写缓存，最终缓存里是 A 的<b>旧值</b>。而「删除缓存」没有这个问题——下次读自然会从库里加载最新值。这是 <b>Cache-Aside 模式</b>的标准做法，几乎所有成熟框架都这么做。代价是<b>删除后第一次读会 miss</b>（多一次数据库查询）。</li><li><b>为什么查询为空也要缓存</b>：为了<b>防穿透</b>。如果攻击者用一个不存在的 ID 反复查询，每次都会打到数据库（缓存里没有，永远 miss）。缓存一个「空」的占位符后，这些请求就被挡住了。占位符的过期时间要短（默认 1 分钟），否则真的插入这条数据后要等很久才可见。</li><li><b>双 key 设计的取舍</b>：为唯一索引也建缓存（存主键值），好处是「按手机号查用户」这种高频查询也能命中缓存；代价是<b>写操作要删 2 个 key</b>（主键 + 索引），且索引缓存失效会导致多一次跳转。<b>只有唯一索引才有这个待遇</b>——普通索引因为可能对应多行，无法确定 key。</li><li><b>什么情况下不该用 go-zero 的缓存</b>：① <b>写多读少</b>（缓存频繁失效，反而增加开销）；② <b>强一致要求</b>（如余额，缓存的秒级延迟不可接受）；③ <b>单行数据很大</b>（缓存占用高）；④ <b>有其他写入方不经过这套逻辑</b>（一致性无法保证）。这些情况下用无缓存版 Model（不加 <code>-c</code>）反而更简单可靠。</li></ul><div class="table-wrap"><table><thead><tr><th>场景</th><th>用缓存版？</th><th>理由</th></tr></thead><tbody><tr><td>读多写少（用户资料、配置、字典）</td><td><b>是</b></td><td>命中率高，收益大</td></tr><tr><td>写多读少（日志、流水）</td><td><b>否</b></td><td>缓存频繁失效，纯开销</td></tr><tr><td>强一致（余额、库存）</td><td><b>否</b></td><td>缓存延迟不可接受</td></tr><tr><td>大字段（文本内容）</td><td>视情况</td><td>缓存内存成本高</td></tr><tr><td>有外部写入方</td><td><b>谨慎</b></td><td>一致性难保证</td></tr><tr><td>复杂查询为主</td><td>部分</td><td>自定义 SQL 不走缓存，要自己维护</td></tr></tbody></table></div><details><summary>go-zero 的缓存和直接用 Redis 有什么区别？</summary><p>本质上是同一套 Cache-Aside 逻辑，区别在<b>谁来实现</b>。直接用 Redis 时你要自己写：查缓存 → miss 查库 → 回填 → 更新时删缓存 → 处理穿透 → 处理并发。go-zero 把这些<b>生成到代码里</b>，保证逻辑一致且不会漏（比如「更新时忘了删索引缓存」这种 bug 手写时很常见，生成的代码不会漏）。代价是<b>灵活性下降</b>：你只能用它生成的查询方法（主键 + 唯一索引），复杂查询要自己写且自己维护缓存。所以判断标准是：如果你的访问模式就是「按主键/唯一索引查」，用生成的缓存版非常划算；如果大量复杂查询，那自动缓存覆盖不到，不如自己设计缓存策略。另外注意：go-zero 的缓存是<b>应用层的</b>，多实例部署时是共享 Redis，所以不存在本地缓存不一致的问题——这比本地缓存方案简单。</p></details><details><summary>自定义查询怎么和缓存配合？</summary><p>三个必须记住的点：① <b>自定义查询不会自动走缓存</b>——生成的缓存逻辑只绑定在生成的方法上（FindOne、FindOneByXxx）。你自己写的 <code>QueryRows</code> 每次都打数据库；② <b>自定义写操作要手动删缓存</b>——如果你用 <code>session.Exec</code> 直接改了数据，必须手动调 <code>DelCache</code> 删除对应的主键缓存和索引缓存，否则会读到旧值（这是最常见的缓存不一致来源）；③ <b>复杂查询要自己设计缓存 key</b>——比如「查某用户最近 10 单」这种列表查询，可以自己存一个 <code>user:orders:{uid}</code> 的 key，但要注意<b>失效时机</b>（有新订单时要删）。实践建议：<b>把「需要缓存的自定义查询」封装在 Model 里</b>，并在同一处处理缓存的读写与失效，而不是散落在 Logic 层——这样缓存逻辑才可控。最后提醒：列表类查询的缓存失效比单条复杂得多（任何一个元素变化都要失效整个列表），收益往往不如想象的大，要谨慎。</p></details><details><summary>事务和缓存一起用有什么坑？</summary><p>最大的坑是<b>缓存写入早于事务提交</b>。具体场景：事务里更新了数据（还没提交），如果此时用了带缓存的 Model 方法，缓存<b>可能已经被删除或写入</b>；然后事务因为后续操作失败而<b>回滚</b>——结果数据库回到了旧值，但缓存已经被删了（下次读会重新加载旧值，这个方向还好）；更糟的情况是某些实现会「更新缓存为新值」，回滚后缓存里就是<b>不存在的新值</b>。go-zero 的做法是删除缓存，所以回滚后下次读会重新加载（最终一致，问题不大），但仍有短暂窗口。正确做法有三条：① <b>事务内只用 session 的原生方法</b>（<code>session.ExecCtx</code>），不要用 Model 的带缓存方法；② <b>缓存在事务成功提交后再删</b>——把 DelCache 放在事务外的回调里；③ 如果必须强一致，<b>这个场景就别用缓存</b>。另外还有个常见的坑：事务里的查询如果走缓存，可能读到事务外已经提交的旧值（因为缓存还没失效），这在需要「读己所写」的场景下会出问题——同样建议事务内绕开缓存。</p></details></div></section>
 </body>
 </html>

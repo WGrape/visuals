@@ -41,6 +41,24 @@ details{margin:12px 0;background:var(--panel2);border-radius:9px;padding:12px 16
 footer{color:var(--muted);font-size:.87rem;margin-top:28px}
 footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body><nav class="toc" id="toc"></nav><main class="shell">
 <a class="back" href="../../index.html">← 返回语音与音频模型</a>
@@ -152,4 +170,42 @@ const io=new IntersectionObserver(es=>{es.forEach(e=>{
 secs.forEach(s=>io.observe(s));
 </script>
 
+
+<section class="panel" data-dry-goods><div class="x-dry"><h2>神经音频编解码的参数对照</h2><div class="table-wrap"><table><thead><tr><th>Codec</th><th>码率</th><th>采样率</th><th>特点</th></tr></thead><tbody><tr><td><b>EnCodec</b>(Meta)</td><td><b>1.5~24 kbps</b></td><td>24k/48k</td><td>RVQ 残差矢量量化，8 个码本 × 1024</td></tr><tr><td><b>SoundStream</b>(Google)</td><td><b>3~18 kbps</b></td><td>24k</td><td>首个端到端神经 codec，可联合压缩与增强</td></tr><tr><td><b>DAC</b>(Descript)</td><td><b>0.5~8 kbps</b></td><td>44.1k</td><td>改进 RVQ + 周期性先验，低码率下最好</td></tr><tr><td><b>HiFi-Codec</b></td><td><b>1~4 kbps</b></td><td>24k</td><td>分组 RVQ，码本利用率高</td></tr><tr><td><b>AudioDec</b></td><td>6~12 kbps</td><td>48k</td><td>面向实时，延迟低</td></tr><tr><td>MP3</td><td>128~320 kbps</td><td>44.1k</td><td>传统codec，码率是神经 codec 的 <b>10~50 倍</b></td></tr><tr><td>Opus</td><td>6~510 kbps</td><td>48k</td><td>实时通信标准，延迟 <b>5~20ms</b></td></tr><tr><td>AAC</td><td>96~256 kbps</td><td>44.1k</td><td>流媒体主流</td></tr></tbody></table></div><p><b>神经 codec 的核心思路</b>：不再传波形，而是把音频压成<b>离散 token 序列</b>。典型结构：编码器下采样到 <b>75Hz</b>（每秒 75 帧）→ RVQ 多层量化（如 8 层）→ 解码器重建。24kHz 音频原本是 <b>24000×16bit = 384 kbps</b>，压到 <b>6 kbps</b> 就是 <b>64 倍</b>压缩。</p><p class="muted">关键参数换算：<code>码率 = 帧率 × 码本层数 × log₂(码本大小)</code>。75Hz × 8 层 × 10bit（1024）= <b>6000 bps = 6 kbps</b>。改任何一个都会线性改变码率。</p></div></section>
+<section class="panel" ><div class="x-dry"><h2>使用与评估代码</h2><pre><code># EnCodec 使用示例（Meta 官方）
+from encodec import EncodecModel
+from encodec.utils import convert_audio
+import torchaudio, torch
+
+model = EncodecModel.encodec_model_24khz()      # 24kHz 版本，支持 1.5/3/6/12/24 kbps
+model.set_target_bandwidth(6.0)                  # 目标码率 kbps
+model.eval()
+
+wav, sr = torchaudio.load("in.wav")
+wav = convert_audio(wav, sr, model.sample_rate, model.channels)   # 重采样对齐
+wav = wav.unsqueeze(0)
+
+with torch.no_grad():
+    encoded = model.encode(wav)                  # -&gt; [(codes, scale), ...]
+    codes = encoded[0][0]                        # shape: [B, n_q(=8), T]
+    out = model.decode(encoded)                  # 重建波形
+
+# 压缩比核算
+n_frames = codes.shape[-1]                       # 帧数 = 时长(s) × 75
+bitrate = 75 * 8 * 10                            # 75Hz × 8层 × log2(1024) = 6000 bps
+print(f"帧率={n_frames/(wav.shape[-1]/24000):.1f}Hz, 码率={bitrate/1000:.1f}kbps")</code></pre><pre><code># 客观指标评估
+# 1) ViSQOL / PESQ / STOI：感知质量与可懂度
+#    PESQ: -0.5~4.5，&gt; 3.5 认为质量好（窄带）
+#    STOI: 0~1，&gt; 0.9 可懂度好
+# 2) Mel 重建损失 / STFT 多尺度损失：训练时的主损失
+# 3) 码本困惑度（codebook perplexity）：若接近 1 说明码本坍塌，只用了极少数码字
+
+# 码本坍塌检测
+import torch
+def codebook_usage(codes, n_q, codebook_size=1024):
+    for q in range(n_q):
+        uniq = torch.unique(codes[0, q]).numel()
+        print(f"layer {q}: 使用 {uniq}/{codebook_size} 个码字 ({uniq/codebook_size:.1%})")
+# 若某层使用率 &lt; 5%，说明该层几乎没贡献，是浪费的码率</code></pre></div></section>
+<section class="panel" ><div class="x-dry"><h2>训练与部署排障</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>重建音质有金属感/水声</td><td>低码率下 RVQ 层数不够 / 判别器过强</td><td>增加码本层数；调整对抗损失权重；用 DAC 的周期性先验</td></tr><tr><td>码本坍塌（使用率低）</td><td>训练初期随机初始化后没人用</td><td>用 <b>EMA / k-means 重初始化</b>死码字；或降低码本大小（1024→512）</td></tr><tr><td>高频丢失（声音发闷）</td><td>mel 损失对高频不敏感 / 采样率不足</td><td>加多尺度 STFT 损失；24kHz 上限只能到 12kHz 频率，音乐要用 44.1/48k 模型</td></tr><tr><td>生成语音时长不匹配</td><td>帧率换算错误（75Hz 不是 50Hz）</td><td><code>时长 = 帧数 / 帧率</code>；不同 codec 帧率不同（SoundStream 50Hz，EnCodec 75Hz）</td></tr><tr><td>实时率（RTF）不够</td><td>模型太大 / 自回归解码慢</td><td>非流式任务用非因果卷积；实时场景用流式版本 + 缓存；RTF 要 &lt; 1 才实时</td></tr><tr><td>下游 TTS 训练不稳定</td><td>codec token 序列太长 / 分布不均</td><td>先用大批量数据训好 codec 再冻住；token 序列长度控制在 <b>几百</b> 量级</td></tr></tbody></table></div><ul><li><b>选 codec 的判据</b>：语音对话用 <b>3~6 kbps</b> 足够；音乐要 <b>12 kbps 以上</b>且 44.1k 采样率；极低带宽（&lt;2 kbps）只能保可懂度，别指望音质。</li><li><b>与传统 codec 的关系</b>：神经 codec 在 <b>&lt;10 kbps</b> 区间远超 Opus/AAC，但在 &gt;64 kbps 时传统 codec 反而更好且省算力。</li></ul></div></section>
 </main></body></html>

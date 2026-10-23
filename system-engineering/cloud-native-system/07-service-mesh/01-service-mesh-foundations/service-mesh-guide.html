@@ -670,6 +670,24 @@
     .hero h1 { font-size: 26px; }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -1792,5 +1810,61 @@ setTimeout(() => {
 // Init
 drawTrafficArrows();
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Service Mesh 的代价与关键参数</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>数值</th><th>说明</th></tr></thead><tbody><tr><td>Sidecar 增加的延迟</td><td><b>1~5ms</b>（每跳）</td><td>Envoy 转发；跨两跳就是 2~10ms</td></tr><tr><td>Sidecar 内存</td><td>Envoy 约 <b>50~150 MB</b></td><td>每 Pod 一份；1000 个 Pod 就是 50~150 GB</td></tr><tr><td>Sidecar CPU</td><td>每 Pod 约 <b>0.05~0.5 核</b></td><td>高并发下更高</td></tr><tr><td>mTLS 握手开销</td><td>首次 <b>1~2 RTT</b>，之后复用</td><td>长期连接几乎无感</td></tr><tr><td>istio 控制面资源</td><td>istiod 约 <b>1 核 / 2GB</b>（千级服务）</td><td>规模大时需分片</td></tr><tr><td>默认重试</td><td>HTTP 请求<b>默认重试 2 次</b></td><td>对非幂等接口很危险，<b>必须显式关闭</b></td></tr><tr><td>默认超时</td><td>Istio <b>无默认超时</b>（意味着不超时）</td><td>必须自己设</td></tr><tr><td>熔断 outlierDetection</td><td>默认关闭</td><td>需显式配置 <code>consecutive5xxErrors</code></td></tr><tr><td>xDS 推送延迟</td><td>配置变更到生效 <b>100ms~数秒</b></td><td>大规模下可达数十秒</td></tr></tbody></table></div><p><b>引入 Mesh 前必算的三笔账</b>：① 延迟增加 <b>2~10ms</b>（视调用链长度）；② 内存增加 <b>Pod 数 × 100MB</b>；③ 运维复杂度（多了控制面、证书轮转、xDS 排障）。如果只有十几个服务，用 SDK（如 go-zero 内置治理）比 Mesh 划算得多。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Istio 配置实战</h2><pre><code># VirtualService：超时 + 重试（重试只对幂等接口开）
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews
+spec:
+  hosts: [reviews]
+  http:
+  - route:
+    - destination: {host: reviews, subset: v1}
+    timeout: 2s                        # 必须显式设置，默认不超时
+    retries:
+      attempts: 3
+      perTryTimeout: 800ms             # 单次尝试超时，总时间受 timeout 约束
+      retryOn: 5xx,reset,connect-failure
+      retryBudget:                     # 防重试风暴
+        ratio: 0.1                     # 重试请求不超过总请求的 10%
+---
+# DestinationRule：连接池 + 熔断
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews
+spec:
+  host: reviews
+  trafficPolicy:
+    connectionPool:
+      tcp: {maxConnections: 100}
+      http: {http1MaxPendingRequests: 100, maxRequestsPerConnection: 10}
+    outlierDetection:
+      consecutive5xxErrors: 5         # 连续 5 个 5xx 就摘除
+      interval: 10s                    # 检测间隔
+      baseEjectionTime: 30s            # 摘除时长（会指数增长）
+      maxEjectionPercent: 50           # 最多摘除 50%，防全部摘完</code></pre><pre><code># 常用运维命令
+istioctl proxy-status                  # 看各 sidecar 的配置同步状态（Stale = 没同步）
+istioctl analyze                       # 静态检查配置是否有错（非常有用）
+istioctl proxy-config routes &lt;pod&gt;     # 看某个 Pod 实际生效的路由
+istioctl proxy-config clusters &lt;pod&gt;   # 看上游集群与端点
+
+# 看 sidecar 的实际开销
+kubectl exec &lt;pod&gt; -c istio-proxy -- curl localhost:15000/stats | grep upstream_rq_time
+
+# 注入方式
+kubectl label namespace default istio-injection=enabled    # 自动注入
+istioctl kube-inject -f app.yaml | kubectl apply -f -      # 手动注入
+
+# 渐进式迁移：先用 PERMISSIVE 模式，再转 STRICT
+kubectl apply -f - &lt;&lt;EOF
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata: {name: default, namespace: istio-system}
+spec: {mtls: {mode: PERMISSIVE}}      # 同时允许明文和 mTLS
+EOF</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Mesh 排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>引入 Mesh 后延迟明显上升</td><td>每跳 1~5ms 累积；或 Envoy CPU 不够</td><td>看链路上有几跳；给 sidecar 加 CPU limit；考虑<b>用 Gateway 代替 mesh 内部跳</b></td></tr><tr><td>503 增多</td><td>mTLS 不匹配（一端 STRICT 一端明文）</td><td>先用 <b>PERMISSIVE</b> 模式过渡；<code>istioctl analyze</code> 检查</td></tr><tr><td>非幂等接口被重复执行</td><td><b>默认重试 2 次</b>把 POST 也重试了</td><td>只对 GET 配重试；POST 显式 <code>retries: {attempts: 0}</code></td></tr><tr><td>配置改了不生效</td><td>xDS 没推送；或有多条规则冲突</td><td><code>istioctl proxy-status</code> 看是否 Stale；检查规则的匹配优先级</td></tr><tr><td>sidecar 内存持续涨</td><td>集群/端点太多，xDS 数据量大</td><td>用 <b>Sidecar 资源</b>限制只下发需要的配置（可减 70%+ 内存）</td></tr><tr><td>启动顺序问题：Pod 先于 sidecar 就绪</td><td>应用启动时 sidecar 还没准备好，流量被拒</td><td>设 <code>holdApplicationUntilProxyStarts: true</code></td></tr><tr><td>istiod 压力大</td><td>服务/端点数量大</td><td>分片；减少不必要的配置变更频率</td></tr></tbody></table></div><p class="muted"><b>用 Sidecar 资源裁剪配置是必备优化</b>：默认情况下每个 Envoy 都拿到全集群的配置，1000 个服务时能有几十 MB。加上 <code>Sidecar</code> 资源限定只关心几个 host 后，内存常能降 <b>70%+</b>，推送延迟也大幅下降。</p></div></section>
 </body>
 </html>

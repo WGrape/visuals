@@ -105,6 +105,24 @@ table.cmp th{background:rgba(255,255,255,.05)}
 .tl-body .who{font-size:.7rem;color:var(--muted);font-family:monospace}
 @media(max-width:680px){.hero h1{font-size:1.45rem}.sg-head{flex-basis:110px}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header><nav>
@@ -425,5 +443,39 @@ function flagFocus(k){
 }
 flags.forEach(f=>f.addEventListener('click',()=>flagFocus(f.dataset.k)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>fork / vfork / clone / exec：创建与替换</h2><div class="table-wrap"><table><thead><tr><th>调用</th><th>做什么</th><th>关键差别</th></tr></thead><tbody><tr><td><b>fork()</b></td><td>复制当前进程（写时复制）</td><td>子进程获得独立地址空间（COW，不立即拷贝物理内存）</td></tr><tr><td><b>vfork()</b></td><td>创建子进程但<b>共享</b>地址空间，且父进程被阻塞</td><td>只为保证 <code>exec</code> 立刻跟上；现代代码基本不用</td></tr><tr><td><b>clone()</b></td><td>底层通用接口，用 flags 精细控制「共享什么」</td><td><b>pthread_create 和 fork 最终都走它</b></td></tr><tr><td><b>execve()</b></td><td>用新程序<b>替换</b>当前地址空间</td><td>PID 不变，代码/数据/堆栈全部换新</td></tr></tbody></table></div><p><b>clone flags</b></p><pre><code>// clone 的关键 flags（决定「共享什么」）
+CLONE_VM      共享地址空间（线程要它）
+CLONE_FS      共享文件系统信息（cwd、umount）
+CLONE_FILES   共享打开文件表（线程要它）
+CLONE_SIGHAND 共享信号处理器（线程要它）
+CLONE_THREAD  放入同一个线程组（tgid 相同）
+CLONE_PTRACE  父进程可继续跟踪
+
+// 组合结果：
+//   fork()   = clone(SIGCHLD)                     -&gt; 什么都不共享 = 新进程
+//   pthread_create() = clone(CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND
+//                            | CLONE_THREAD | ...)  -&gt; 共享地址空间/文件/信号 = 线程
+
+// 所以：Linux 的「进程」和「线程」本质是同一个东西，区别只在 clone 的 flags。
+//   内核里调度的是 task_struct，它没有「线程」这个概念。</code></pre><p><b>写时复制（COW）</b>是关键优化：<code>fork()</code> 时父子共享同一份物理页，页表项被标记为<b>只读</b>；任一方写入时触发缺页异常，内核才真正拷贝那一页。所以 <code>fork()</code> 的开销与进程内存大小<b>基本无关</b>，只与页表大小有关。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>开销数字与观测命令</h2><div class="table-wrap"><table><thead><tr><th>操作</th><th>典型开销</th><th>说明</th></tr></thead><tbody><tr><td><code>fork() + exec()</code></td><td>约 0.5~2 ms</td><td>exec 要加载 ELF、建新页表，比 fork 本身贵</td></tr><tr><td><code>fork()</code> 单独</td><td>约 0.1~1 ms</td><td>COW 让大内存进程的 fork 也不至于爆炸</td></tr><tr><td><code>pthread_create()</code></td><td>约 10~50 μs</td><td>比 fork 快一个数量级以上（不建新地址空间）</td></tr><tr><td><b>线程栈</b></td><td>默认 8 MB（Linux，<code>ulimit -s</code>）</td><td>是<b>虚拟内存</b>预留，实际占用按页增长；goroutine 栈初始仅 2 KB</td></tr><tr><td><b>上下文切换</b></td><td>约 1~10 μs</td><td>含 TLB 影响与缓存污染；进程切换还要换页表</td></tr></tbody></table></div><p><b>观测命令</b></p><pre><code># 看内核里的 task_struct 字段（需 CONFIG_DEBUG_INFO / 或看头文件）
+#   include/linux/sched.h   -&gt; struct task_struct
+# 运行期常用观测：
+cat /proc/&lt;pid&gt;/status          # State / Threads / VmSize / VmRSS
+cat /proc/&lt;pid&gt;/stat            # 一行的 52 个字段（ps 就是读它）
+ls /proc/&lt;pid&gt;/task | wc -l     # 线程数 = task 目录数
+cat /proc/&lt;pid&gt;/smaps_rollup    # 汇总内存（RSS/PSS/Swap）
+cat /proc/&lt;pid&gt;/limits          # 资源限制（含 Max open files / Max processes）
+
+# 线程与 CPU
+ps -eLf                          # L 显示线程（LWP + NLWP）
+top -H -p &lt;pid&gt;
+taskset -cp &lt;pid&gt;                # 看/设 CPU 亲和性
+
+# 系统级
+cat /proc/sys/kernel/threads-max
+cat /proc/sys/kernel/pid_max     # 默认 4194304（32位）/ 更大（64位）
+ulimit -u                        # 每用户进程数限制</code></pre><ul><li><b>NLWP 就是线程数</b>：<code>ps -eLf</code> 的 NLWP 列，或 <code>/proc/&lt;pid&gt;/status</code> 的 Threads 字段。</li><li><b>线程栈是虚拟内存</b>：起 1000 个线程不会真的吃掉 8GB，但会吃掉虚拟地址空间并增加内核对象开销。</li><li><b>进程数上限</b>：受 <code>pid_max</code>、<code>threads-max</code>、<code>ulimit -u</code> 三者共同限制；容器里还要注意 cgroup 的 <code>pids.max</code>。</li><li><b>CPU 亲和性</b>：绑定核可以减少跨核迁移带来的缓存失效，但对负载不均的场景反而有害。</li></ul><details><summary>fork 出来的子进程从哪里开始执行？</summary><p>从 <code>fork()</code> 返回处开始，父子执行同一份代码，靠返回值区分（父得子 PID，子得 0）。想要跑新程序必须跟一个 <code>execve()</code>——这就是 shell 执行命令的方式。</p></details><details><summary>线程到底是不是「轻量级进程」？</summary><p>在 Linux 上，是的。历史上 LinuxThreads 就是拿进程模拟线程；现代的 NPTL 依然是同一个 <code>task_struct</code>，只是 clone 时共享了更多东西。</p></details><details><summary>为什么 Go 的 goroutine 能起几十万个？</summary><p>因为它是<b>用户态</b>调度：初始栈 2 KB、按需增长、切换不进内核、不需要内核的 task_struct。代价是没有真正的内核级抢占（靠 runtime 的异步抢占与协作点）。</p></details></div></section>
 </body>
 </html>

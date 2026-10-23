@@ -56,6 +56,24 @@
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
     svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="topbar"><a href="../../../index.html" class="logo">☁️ 分布式系统</a><a href="../../../index.html" class="back">← 返回分布式系统</a></div>
@@ -182,6 +200,43 @@
     </div>
     <div class="info-box amber"><span class="info-icon">🔥</span><div class="info-body"><strong>必考题：</strong>"Kafka 怎么保证不丢消息？"——生产端 acks=all+重试、服务端 多副本(ISR)+刷盘、消费端 先处理后提交 offset。再追问"顺序/高吞吐"就接 partition 与零拷贝。</div></div>
   </section>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>分区数与吞吐的量化关系</h2><div class="table-wrap"><table><thead><tr><th>分区数</th><th>单分区吞吐</th><th>总吞吐</th><th>代价</th></tr></thead><tbody><tr><td><b>1</b></td><td>约 <b>10 MB/s</b>（受单线程与磁盘顺序写限制）</td><td>10 MB/s</td><td>无并发能力</td></tr><tr><td><b>10</b></td><td>同上</td><td>约 <b>100 MB/s</b></td><td>消费者组内最多 10 个并行</td></tr><tr><td><b>100</b></td><td>同上</td><td>接近网卡上限</td><td><b>文件句柄与 rebalance 开销上升</b></td></tr><tr><td><b>1000+</b></td><td>下降（随机 IO 增加）</td><td>不再线性增长</td><td><b>选举变慢、ZooKeeper/KRaft 压力大</b></td></tr></tbody></table></div><p><b>分区数怎么定</b>：先按<strong>目标吞吐</strong>算下限（目标吞吐 / 单分区吞吐），再按<strong>消费者并行度</strong>校验（分区数必须 ≥ 消费者组内实例数，多出来的消费者会闲置）。</p><p><b>分区规划</b></p><pre><code># 经验公式
+#   分区数 ≈ max(目标吞吐 / 单分区吞吐, 峰值消费者实例数 × 2)
+# 例：目标 50 MB/s，峰值 8 个消费者
+#   → max(50/10, 8×2) = max(5, 16) = 16 分区（取 16，并预留扩容到 32）
+
+# 调整分区数（只能增不能减！）
+kafka-topics.sh --bootstrap-server localhost:9092 \
+  --alter --topic orders --partitions 32
+
+# 注意：增加分区会&lt;strong&gt;打乱 key 的分区映射&lt;/strong&gt;，
+# 若业务依赖 key 保序，扩分区期间会短暂乱序，须在低峰执行</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>副本、ISR 与持久化参数</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义与建议</th></tr></thead><tbody><tr><td><code>replication.factor</code></td><td>1（可配 3）</td><td><b>生产至少 3</b>，容忍 1 节点故障</td></tr><tr><td><code>min.insync.replicas</code></td><td><b>1</b></td><td>配合 <code>acks=all</code>，设为 <b>2</b> 才真正防丢</td></tr><tr><td><code>acks</code></td><td>1</td><td><b>0</b>=不等确认（最快，可能丢）；<b>1</b>=等 leader；<b>all</b>=等 ISR 全部</td></tr><tr><td><code>unclean.leader.election</code></td><td>false</td><td><b>false</b>=宁可不可用也不丢数据；true=可能丢</td></tr><tr><td><code>retention.ms</code></td><td><b>604800000</b>（7 天）</td><td>按业务定，-1 为永久</td></tr><tr><td><code>log.segment.bytes</code></td><td><b>1073741824</b>（1 GB）</td><td>段文件越大越少，但清理粒度变粗</td></tr></tbody></table></div><p><b>acks=all 不等于绝对不丢</b>：只有当 <code>min.insync.replicas ≥ 2</code> 时才成立。若该值为 1，ISR 里只剩 leader 一个也会返回成功，此时 leader 宕机照样丢。这是最常见的配置陷阱。</p><p><b>生产者配置</b></p><pre><code># 生产级生产者配置（不丢 + 幂等）
+props.put("acks", "all");
+props.put("min.insync.replicas", "2");          // 需在 broker 侧配
+props.put("enable.idempotence", "true");        // 开启幂等，防重
+props.put("max.in.flight.requests.per.connection", "5");  // 幂等下可 &gt;1
+props.put("retries", Integer.MAX_VALUE);
+props.put("compression.type", "lz4");           // 或 zstd，省带宽
+
+# 查看 ISR 是否健康（ISR 收缩是故障前兆）
+kafka-topics.sh --describe --bootstrap-server localhost:9092 --topic orders
+# 输出里 Isr: 1,2,3 应与 Replicas: 1,2,3 一致；不一致说明有副本掉队</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>消费、rebalance 与 lag</h2><div class="table-wrap"><table><thead><tr><th>问题</th><th>表现</th><th>处理</th></tr></thead><tbody><tr><td><b>消费 lag 持续增长</b></td><td>处理速度跟不上生产速度</td><td>加分区 + 加消费者；或优化单条处理耗时</td></tr><tr><td><b>频繁 rebalance</b></td><td>消费者反复上下线</td><td>调大 <code>session.timeout.ms</code>、减小 <code>max.poll.records</code></td></tr><tr><td><b>单条处理超时被踢</b></td><td><code>max.poll.interval.ms</code> 超时</td><td>该值默认 <b>5 分钟</b>；处理慢就减小批量</td></tr><tr><td><b>重复消费</b></td><td>先处理业务后提交 offset</td><td>改为<strong>先提交再处理</strong>或做幂等</td></tr><tr><td><b>消息丢失</b></td><td>先提交 offset 再处理，中途崩溃</td><td>关闭自动提交，手动同步提交</td></tr></tbody></table></div><p><b>消费与 lag</b></p><pre><code># 查看消费 lag（关键监控项）
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group order-service
+# 输出：LAG 列是堆积量；持续上涨说明消费者不够快
+
+# 手动提交 offset 的正确顺序（at least once）
+try:
+    for record in consumer.poll(timeout_ms=1000):
+        process(record)                     # 1) 先处理
+    consumer.commit_sync()                  # 2) 处理成功后再提交
+except Exception:
+    consumer.close()                        # 不提交，下次重新消费
+# 代价：可能重复消费 → 业务侧必须幂等（用唯一键去重）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：分区数能不能减？</summary><p>A：<strong>不能</strong>。Kafka 只支持增加分区，减少会导致已有数据的分区映射混乱（<code>partition = hash(key) % numPartitions</code>，分区数一变映射全变）。要“减”只能新建 topic 再迁移数据。所以<strong>初始分区数宁可偏大一点</strong>，因为扩容虽然可行但会短暂破坏按 key 的保序性。</p></details><details><summary>Q：怎么保证同一个用户的消息顺序？</summary><p>A：用 <strong>key</strong>——相同 key 的消息进同一分区，而分区内是有序的。注意两点：① 顺序只在<strong>分区内</strong>保证，跨分区无序；② 生产者开启重试且 <code>max.in.flight &gt; 1</code> 时，<strong>可能乱序</strong>（前一批失败重试、后一批先成功）。解决：开启幂等（<code>enable.idempotence=true</code>）后 Kafka 会保证每个分区最多 5 个在途请求的顺序；或保守地把该值设为 1（牺牲吞吐）。</p></details><details><summary>Q：Kafka 为什么能这么快？</summary><p>A：四个原因——① <strong>顺序写磁盘</strong>（顺序写比随机写快约 6000 倍，接近内存速度）；② <strong>零拷贝</strong>（sendfile 让数据从页缓存直接进网卡，跳过 2 次用户态拷贝）；③ <strong>批量压缩</strong>（多条消息一起压缩，网络与磁盘都省）；④ <strong>页缓存</strong>而非 JVM 堆（避免 GC 开销与对象头膨胀）。所以调优方向是<strong>加大批量与压缩</strong>，而不是调 JVM 堆。</p></details><details><summary>Q：<code>enable.auto.commit=true</code> 有什么风险？</summary><p>A：自动提交按固定间隔（默认 <b>5 秒</b>）提交已拉取的最大 offset，<strong>与实际处理进度无关</strong>。若在提交后、处理完之前崩溃，这批消息就永久丢失了（offset 已前进）。生产环境应关闭自动提交，改为<strong>处理成功后手动同步提交</strong>，并接受“至少一次”语义、在业务侧做幂等。</p></details></div></section>
 </main>
 <footer>分布式系统 · Kafka 深入 — Partition / Replica / ISR / HW / 零拷贝 | 面试核心图解</footer>
 <script>

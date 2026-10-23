@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -184,6 +202,30 @@ WHERE o.created_at &gt;= '2026-01-01';  -- 100 次主键查找，毫秒级
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>三种 JOIN 算法对照</h2><div class="table-wrap"><table><thead><tr><th>算法</th><th>核心思路</th><th>复杂度</th><th>适用场景</th></tr></thead><tbody><tr><td><b>Nested Loop</b></td><td>外层逐行，内层全扫匹配</td><td><b>O(N×M)</b></td><td>小表 × 小表；<strong>内表有索引时变快</strong></td></tr><tr><td><b>Hash Join</b></td><td>小表建哈希表，大表探测</td><td><b>O(N+M)</b></td><td><b>大表等值连接首选</b></td></tr><tr><td><b>Merge Join</b></td><td>两表排序后归并</td><td>O(N+M) <strong>+ 排序代价</strong></td><td>已排序 / 非等值但有序</td></tr></tbody></table></div><p><b>选择逻辑</b>：</p><ul><li>连接条件是<strong>等值</strong>且一侧较小 → <strong>Hash Join</strong>（绝大多数场景的最优解）。</li><li>一侧极小（如几条）且另一侧有索引 → <strong>Index Nested Loop</strong>（避免建哈希表）。</li><li>两侧都已按连接键有序（如有索引或刚排过序）→ <strong>Merge Join</strong> 省去排序。</li><li><strong>非等值连接</strong>（&gt;、BETWEEN、LIKE）→ 只能 Nested Loop（哈希与归并都要求等值）。</li></ul><p class="muted"><b>Merge Join 的真实代价</b>：虽然扫描是 O(N+M)，但前期的<strong>排序是 O(N log N)</strong>。只有当输入已有序（走索引扫描）时才真正省力——优化器算的就是“排序代价 + 归并代价”是否低于“哈希代价”。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Hash Join 的内存与溢出</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>动作</th><th>内存不足时</th></tr></thead><tbody><tr><td><b>Build</b></td><td>读小表建哈希表</td><td>哈希桶放不下 → <strong>分片落盘</strong></td></tr><tr><td><b>Probe</b></td><td>读大表逐行探测</td><td>读取对应分片</td></tr><tr><td><b>溢出</b></td><td>按哈希值分片写临时文件</td><td>IO 次数增加，<b>性能可能降数倍</b></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>MySQL</th><th>PostgreSQL</th><th>SQL Server</th></tr></thead><tbody><tr><td>哈希内存</td><td><code>join_buffer_size</code>（<b>256 KB</b>）</td><td><code>work_mem</code>（<b>4 MB</b>）</td><td><code>memory grant</code>（自适应）</td></tr><tr><td>溢出表现</td><td>多次扫描内表</td><td><code>external merge</code> 落盘</td><td><code>spill to tempdb</code></td></tr></tbody></table></div><p><b>内存与溢出诊断</b></p><pre><code>-- MySQL：确认是否用了 Block Nested Loop（无索引时的退化形式）
+EXPLAIN SELECT * FROM orders o JOIN users u ON o.user_id = u.id;
+-- 若 Extra 出现 "Using join buffer (Block Nested Loop)" → 内表无索引，
+--   退化成 O(N×M)。&lt;strong&gt;解决方案是给连接列加索引&lt;/strong&gt;，而不是调 join_buffer_size
+
+-- PostgreSQL：看是否落盘
+EXPLAIN (ANALYZE, BUFFERS) SELECT ...
+-- 关注 "Batches: 2" 或 "Sort Method: external merge  Disk: xxx kB"
+--   Batches &gt; 1 说明哈希表溢出分片了 → 调大 work_mem
+SET work_mem = '64MB';   -- 可按会话调整，注意并发数 × work_mem 的总量</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>驱动表选择与执行计划</h2><p><b>驱动表（外层表）的选择直接影响代价</b>：Nested Loop 中内层表会被扫描 N 次，所以<strong>大表应作外层、小表作内层且内层有索引</strong>；Hash Join 中应该用<strong>小表建哈希表</strong>。</p><div class="table-wrap"><table><thead><tr><th>场景</th><th>最优驱动表</th><th>原因</th></tr></thead><tbody><tr><td>Nested Loop + 内表索引</td><td><b>行数多的作驱动</b></td><td>内表走索引，每行代价固定</td></tr><tr><td>Hash Join</td><td><b>小表作 build 侧</b></td><td>哈希表更小，可放内存</td></tr><tr><td>带 WHERE 过滤</td><td><b>过滤后行数少的作驱动</b></td><td>先过滤再连接，中间结果小</td></tr></tbody></table></div><p><b>谓词下推</b></p><pre><code>-- 关键优化：谓词下推（先过滤再连接）
+-- ✗ 先连接后过滤（中间结果巨大）
+SELECT * FROM orders o JOIN users u ON o.user_id = u.id
+WHERE o.created_at &gt;= '2026-10-01';
+
+-- ✓ 优化器通常会自动下推，等效于：
+SELECT * FROM (SELECT * FROM orders WHERE created_at &gt;= '2026-10-01') o
+       JOIN users u ON o.user_id = u.id;
+
+-- 确认下推是否生效：看 EXPLAIN 里 orders 的 rows 是否已减少
+-- 若没下推（如用了 OR、函数包裹），改写 SQL 或加索引</code></pre><p><b>多表 JOIN 的顺序爆炸</b>：N 个表连接的可行顺序是 <strong>N!</strong> 量级（还有左右/深树的组合）。优化器不会穷举——MySQL 在表数超过 <code>optimizer_search_depth</code>（默认 <b>62</b>）时用贪心，PostgreSQL 在超过 <code>join_collapse_limit</code>（默认 <b>8</b>）时用遗传算法。所以<strong>超过 8~10 个表的大 JOIN 要手工拆分成临时结果</strong>，别指望优化器。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：为什么 EXPLAIN 显示用了 Nested Loop 而不是 Hash Join？</summary><p>A：常见三个原因——① <strong>MySQL 8.0.18 之前不支持 Hash Join</strong>（只有 Block Nested Loop），老版本必须靠索引；② 连接条件<strong>不是等值</strong>（Hash Join 只支持等值）；③ 优化器估算认为一侧极小、走索引更快。诊断：先看数据库版本，再确认连接条件是否等值，最后看内表连接列<strong>有没有索引</strong>——没索引时 Nested Loop 是灾难。</p></details><details><summary>Q：大表 JOIN 大表怎么办？</summary><p>A：三种递进手段——① <strong>加索引 + 谓词下推</strong>，先把两侧结果集缩到最小；② <strong>分批处理</strong>：按主键或时间分片，每批 JOIN 后合并，避免单次大事务与临时表溢出；③ <strong>冗余换连接</strong>：在事实表里冗余维度字段（宽表化），彻底消除 JOIN——这是数仓里最常见也最有效的办法。若都不行，就该考虑走 Spark/Flink 而非在数据库里硬算。</p></details><details><summary>Q：<code>join_buffer_size</code> 调大有用吗？</summary><p>A：<strong>作用有限且容易误导</strong>。它只影响 Block Nested Loop 一次能缓存多少行，但复杂度仍是 O(N×M)，调大只是减少内表扫描的轮数。真正的解法是<strong>给连接列加索引</strong>，让 Nested Loop 变成 Index Nested Loop（复杂度降到 O(N log M)）。此外它是<strong>按连接分配</strong>的，并发高时过大会导致内存暴涨——全局调到几百 MB 是危险的。</p></details><details><summary>Q：LEFT JOIN 和 INNER JOIN 性能有差别吗？</summary><p>A：<strong>通常 LEFT JOIN 更慢</strong>，但不是因为算法不同，而是因为<strong>它限制了优化器的自由度</strong>：LEFT JOIN 保证左表行不丢失，优化器不能随意调整连接顺序（某些情况下也不能把左表放内层）。 INNER JOIN 则允许优化器自由重排。所以<strong>语义允许时优先用 INNER JOIN</strong>——这不是微优化，在大表多连接时可能差一个数量级。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / JOIN 算法 ·

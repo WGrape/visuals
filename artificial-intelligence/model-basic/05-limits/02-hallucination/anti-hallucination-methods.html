@@ -104,6 +104,24 @@
   .pill{display:inline-block;background:var(--panel2);border:1px solid var(--border);
     border-radius:6px;padding:2px 8px;color:var(--dim);font-size:12px;margin:2px;}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <nav class="nav">
@@ -418,5 +436,41 @@
   });
 })();
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>抑幻方法的层次与效果</h2><div class="table-wrap"><table><thead><tr><th>层次</th><th>方法</th><th>典型收益 / 代价</th></tr></thead><tbody><tr><td><b>数据层</b></td><td>清洗训练数据、去重、降噪</td><td>根本但成本高；数据质量是最上游的杠杆</td></tr><tr><td><b>训练层</b></td><td>RLHF/DPO、事实一致性奖励</td><td>能显著降低幻觉，但无法归零</td></tr><tr><td><b>解码层</b></td><td>降低 temperature、约束采样</td><td><b>temperature 0.7→0.2</b> 可减少约 <b>30~50%</b> 的编造；代价是多样性下降</td></tr><tr><td><b>检索层（RAG）</b></td><td>提供外部事实依据</td><td><b>效果最直接</b>；但检索错了会引入新的幻觉</td></tr><tr><td><b>提示层</b></td><td>要求引用来源、不确定时说不知道</td><td>简单有效；模型仍可能无视指令</td></tr><tr><td><b>验证层</b></td><td>自洽性检查（多次采样投票）</td><td>自洽性投票可提 <b>5~15%</b> 准确率，代价是 <b>5~10 倍</b>算力</td></tr><tr><td><b>输出层</b></td><td>引用校验、事实验证器（NLI 模型）</td><td>可拦截约 <b>30~60%</b> 的幻觉；增加延迟</td></tr><tr><td><b>系统层</b></td><td>工具调用（计算器/搜索/数据库）</td><td><b>最可靠</b>：让模型别猜，去查</td></tr></tbody></table></div><p><b>各手段的组合效果（经验值）</b>：单纯靠模型自身，幻觉率通常在 <b>5%~20%</b>；加 RAG 后可降到 <b>2%~8%</b>；再加引用校验与工具调用可降到 <b>&lt;2%</b>。<b>没有任何单一手段能归零幻觉</b>，必须分层防御。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>可落地的检查手段</h2><pre><code># 1) 自洽性检查：同一问题采样 N 次，投票取多数（最实用）
+import collections
+def self_consistency(prompt, n=5, temperature=0.8):
+    outs = [llm(prompt, temperature=temperature) for _ in range(n)]
+    # 归一化后投票
+    norm = [normalize(o) for o in outs]
+    best, cnt = collections.Counter(norm).most_common(1)[0]
+    return best, cnt / n        # cnt/n 是置信度，低于阈值就转人工
+# 经验：n=5 时准确率提升约 5~15%；n 越大提升越缓，成本线性增长
+
+# 2) 引用校验：模型给的每个引用是否真的出现在检索到的文档里
+def verify_citations(answer, retrieved_docs):
+    cites = extract_citations(answer)      # 提取 [1] [2] 之类
+    bad = []
+    for c in cites:
+        if not any(contains_fact(c, d) for d in retrieved_docs):
+            bad.append(c)
+    return bad                              # 非空 = 有编造引用，需重新生成或标注</code></pre><pre><code># 3) NLI 事实验证：用蕴含模型判断「证据是否支持结论」
+from transformers import pipeline
+nli = pipeline("text-classification",
+               model="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli")
+
+evidence = "公司 2025 年营收为 12.3 亿元。"
+claim    = "公司 2025 年营收超过 20 亿元。"
+res = nli(f"{evidence} &lt;/s&gt;&lt;/s&gt; {claim}")[0]
+# label: entailment(支持) / neutral(无关) / contradiction(矛盾)
+# contradiction -&gt; 判定为幻觉；neutral -&gt; 无依据，也应按「不确定」处理
+
+# 4) 让模型显式表达不确定性
+# 提示词：
+# 「如果上下文中没有答案，直接回答『根据提供的资料无法回答』，不要猜测。
+#   每个事实陈述后标注来源编号。禁止输出上下文中不存在的具体数字。」
+# 加上这句之后，编造类错误的下降幅度通常最明显</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>幻觉排查清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>编造了具体数字/日期</td><td>模型倾向给出「看起来合理」的具体值</td><td>强制引用来源；数字类问题改用工具（计算器/数据库）</td></tr><tr><td>编造了文献/法条</td><td>参数记忆中模式化生成</td><td><b>必须 RAG + 引用校验</b>；不要让模型凭记忆输出引用</td></tr><tr><td>给了检索内容但仍在编</td><td>检索结果不相关或模型没看进去</td><td>检查召回质量（先看检索对不对）；限制「只依据上下文回答」</td></tr><tr><td>降 temperature 后仍编</td><td>是知识缺失不是采样随机性</td><td>这类幻觉靠解码参数解决不了，必须补检索或工具</td></tr><tr><td>回答很自信但是错的</td><td>模型不校准（overconfident）</td><td>要求输出置信度；做自洽性投票；低置信转人工</td></tr><tr><td>多轮对话中前后矛盾</td><td>上下文被截断或注意力衰减</td><td>做摘要压缩历史；关键事实写入结构化记忆</td></tr><tr><td>RAG 后幻觉反而变多</td><td>检索到冲突/错误信息</td><td>提升检索质量（重排序 rerank）；多来源交叉验证</td></tr></tbody></table></div><ul><li><b>最有效的一条</b>：把「模型应该知道」改成「模型必须查」。凡是<b>可验证的事实</b>（数字、日期、法条、库存、价格），都不要让模型生成，而是让它调用工具查询。</li><li><b>评测建议</b>：建一个 50~200 条的事实性测试集（含「无答案」的陷阱题），每次改提示或改模型都跑一遍，用<b>幻觉率</b>和<b>拒答率</b>两个指标监控。</li></ul></div></section>
 </body>
 </html>

@@ -11,6 +11,34 @@
 <section class="panel"><h2>远程与动态转发</h2><p>远程端口转发 `-R` 让远端某端口的连接经 SSH 回到客户端侧，常用于临时暴露本地开发服务，但如果远端绑定到公共接口，暴露范围会扩大。动态转发 `-D` 可在本地提供 SOCKS 代理，浏览器或程序通过它选择目标；目标 DNS 在本地还是代理侧解析，依客户端配置而定。三种转发模式的“谁监听、谁发起到目标”不同，画出路径再配置可减少误用。</p><p>某些 SSH 服务端会禁止端口转发或限制可达目标。登录成功但转发失败时，查服务器 AllowTcpForwarding、PermitOpen 等策略和目标路由，不要直接给账户更高系统权限。</p></section>
 <section class="panel"><h2>隧道不是完整授权</h2><p>SSH 可加密和认证到跳板机的连接，却不会替后端服务做用户级授权。多人共用同一跳板账户时，数据库可能只看到同一个来源地址，审计困难。更好的做法是每人独立身份、最小权限与目标服务自己的认证，并记录谁在何时建立了哪条转发。对长期业务连接，不宜把个人工作站上的临时 SSH 隧道当作高可用生产链路。</p><p>端口转发还可能绕过原计划的网络分区。安全团队应明确允许哪些源、目标和端口，必要时限制跳板机向外连接。不能只因为“SSH 是加密的”就放行任意内部目标。</p></section>
 <section class="panel"><h2>一次排障</h2><p>连接失败先看 DNS 与 TCP 22，再看主机指纹、用户认证、服务器会话权限；端口转发失败则分段看本地监听、SSH 通道、跳板机到目标的 TCP、目标应用认证。用本机直连 `127.0.0.1:15432` 能建立 TCP，不证明数据库接受了用户登录。日志要区分 SSH 握手失败、转发请求被拒和数据库返回鉴权错误。</p><p>验收还要模拟 SSH 连接断开：本地隧道会失效，应用连接池如何感知并重连？如果会重放写请求，仍需要数据库事务或业务幂等设计。</p></section>
+<section class="panel" data-dry-goods><h2>主机密钥与认证方式</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>说明</th><th>关键点</th></tr></thead><tbody><tr><td>主机密钥（Host Key）</td><td>服务器证明自己身份</td><td>首次连接记录到 <code>~/.ssh/known_hosts</code>；变更会<b>强警告</b>（防 MITM）</td></tr><tr><td>主机密钥算法</td><td>ed25519 / ecdsa / rsa / dsa</td><td>推荐 <code>ed25519</code>（短、快、安全）；dsa 已废弃</td></tr><tr><td>密码认证</td><td>最简单</td><td>易被爆破，建议禁用 <code>PasswordAuthentication no</code></td></tr><tr><td>公钥认证</td><td><b>推荐</b></td><td>私钥留本地，公钥放 <code>~/.ssh/authorized_keys</code></td></tr><tr><td>证书认证</td><td>大规模场景</td><td>CA 签发的 SSH 证书，避免逐台分发公钥</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>StrictHostKeyChecking</th><th>行为</th><th>适用</th></tr></thead><tbody><tr><td><code>yes</code></td><td>未知主机<b>拒绝连接</b></td><td>生产/自动化（最安全）</td></tr><tr><td><code>accept-new</code>（默认较新版本）</td><td>未知主机自动接受并记录</td><td>日常使用</td></tr><tr><td><code>no</code></td><td>自动接受且<b>不检查变更</b></td><td>测试环境（有 MITM 风险）</td></tr></tbody></table></div><p><b>SSH 常用命令</b></p><pre><code># 生成密钥（推荐 ed25519）
+ssh-keygen -t ed25519 -C "me@example.com"
+ssh-copy-id user@host                  # 分发公钥
+
+# 权限必须正确，否则 SSH 会拒绝使用该密钥
+chmod 700 ~/.ssh &amp;&amp; chmod 600 ~/.ssh/id_ed25519 &amp;&amp; chmod 644 ~/.ssh/authorized_keys
+
+# 调试连接（看认证过程与卡在哪一步）
+ssh -vvv user@host
+# 常见输出：Offering public key → 被拒说明 authorized_keys 或权限有问题
+
+# 端口转发
+ssh -L 8080:127.0.0.1:80 user@host      # 本地转发：访问本机 8080 = 访问远端 80
+ssh -L 0.0.0.0:8080:10.0.0.5:80 user@host   # 允许他人访问（需 GatewayPorts）
+ssh -R 9000:127.0.0.1:3000 user@host    # 远程转发：把本机 3000 暴露到远端 9000
+ssh -D 1080 user@host                   # 动态转发（SOCKS5 代理）
+
+# 跳板机
+ssh -J jump@ bastion user@target
+# ~/.ssh/config
+# Host target
+#   ProxyJump bastion
+
+# 连接复用（避免每次重新握手）
+# Host *
+#   ControlMaster auto
+#   ControlPath ~/.ssh/cm-%r@%h:%p
+#   ControlPersist 10m</code></pre></section><section class="panel"><h2>安全加固与排障</h2><div class="table-wrap"><table><thead><tr><th>配置项</th><th>推荐值</th><th>作用</th></tr></thead><tbody><tr><td><code>PermitRootLogin</code></td><td><code>no</code> 或 <code>prohibit-password</code></td><td>禁止 root 直接登录</td></tr><tr><td><code>PasswordAuthentication</code></td><td><code>no</code></td><td>只允许密钥，杜绝爆破</td></tr><tr><td><code>PermitEmptyPasswords</code></td><td><code>no</code></td><td>禁空密码</td></tr><tr><td><code>Port</code></td><td>非 22（可选）</td><td>减少扫描与噪音（非安全措施）</td></tr><tr><td><code>MaxAuthTries</code></td><td><code>3</code></td><td>限制尝试次数</td></tr><tr><td><code>AllowUsers / AllowGroups</code></td><td>显式白名单</td><td>最小权限</td></tr><tr><td><code>ClientAliveInterval</code></td><td><code>60</code>（配 <code>ClientAliveCountMax 3</code>）</td><td>约 3 分钟断开无响应连接</td></tr><tr><td><code>LoginGraceTime</code></td><td><code>30</code></td><td>限制登录耗时</td></tr></tbody></table></div><ul><li><b>known_hosts 变更警告</b>：服务器重装/换 IP 后主机密钥变了，SSH 会报 <code>REMOTE HOST IDENTIFICATION HAS CHANGED</code> 并拒绝连接。确认是合法变更后用 <code>ssh-keygen -R host</code> 删除旧记录，<b>不要盲目删</b>（可能正遭受 MITM）。</li><li><b>权限问题是最常见的密钥认证失败原因</b>：<code>~/.ssh</code> 必须 700、私钥 600、authorized_keys 644，且家目录不能是全局可写。</li><li><b>端口转发的安全默认</b>：<code>-L</code> 默认只监听 127.0.0.1，监听 0.0.0.0 需要服务端 <code>GatewayPorts yes</code>，且等于把内网暴露出去，慎开。</li><li><b>连接挂死的常见原因</b>：中间 NAT/防火墙空闲超时（见 TCP keepalive 那篇）。解决：<code>ServerAliveInterval 60</code> 或服务端 <code>ClientAliveInterval 60</code>。</li><li><b>scp/rsync 的坑</b>：<code>scp</code> 已不推荐（协议老旧），改用 <code>rsync -avzP</code> 或 <code>sftp</code>；<code>rsync</code> 的 <code>-P</code> 等于 <code>--partial --progress</code>，支持断点续传。</li><li><b>排障顺序</b>：① <code>ssh -vvv</code> 看卡在哪（DNS？TCP？认证？）；② <code>telnet host 22</code> 或 <code>nc -vz host 22</code> 确认端口通；③ 服务端看 <code>/var/log/auth.log</code>。</li></ul><details><summary>为什么加了公钥还要输入密码？</summary><p>三种常见原因：① 服务端 <code>authorized_keys</code> 或 <code>.ssh</code> 权限不对；② 服务端 <code>PubkeyAuthentication</code> 被关或 <code>AuthorizedKeysFile</code> 路径不对；③ 本地有多个密钥，SSH 试完了不匹配的没试对的（用 <code>-i</code> 指定或在 config 里 <code>IdentityFile</code>）。</p></details><details><summary>SSH 隧道算不算 VPN？</summary><p><code>-D</code> 动态转发是 SOCKS5 代理，只能代理支持 SOCKS 的应用且要逐应用配置；VPN 是系统级三层隧道。临时访问内网用 <code>-L</code> 更直接，长期多资源访问才需要 VPN。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>SSH 本地端口转发成功，是否表示数据库无需再做认证？</summary><p>不表示。隧道只提供到目标的网络通道，数据库仍应独立验证用户与权限。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../../../05-end-to-end-flows/04-proxies/forward-reverse-proxy-connect.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

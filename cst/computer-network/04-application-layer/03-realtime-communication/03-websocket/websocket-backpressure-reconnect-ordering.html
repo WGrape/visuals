@@ -12,6 +12,25 @@
 <section class="panel"><h2>心跳和中间代理</h2><p>WebSocket 协议有 Ping/Pong 控制帧，服务端可用它检测传输层活性；浏览器脚本是否能直接发送协议 Ping 取决于 API 能力，业务层可另设计心跳。心跳收到回应不等于客户端 UI 已消费完消息，背压仍需观察队列。代理、负载均衡和 NAT 都可能在空闲时关闭连接，心跳间隔要兼顾它们的超时、电量与服务负担。</p><p>一些代理不支持或错误处理 WebSocket Upgrade、空闲超时太短或未转发认证头，表现为握手成功后很快断线。排查要记录代理层关闭码和时间，而不是只看浏览器 onclose。</p></section>
 <section class="panel"><h2>安全与隔离</h2><p>服务端握手时验证用户凭据和允许的 Origin，建立连接后也要在订阅频道和每条高影响消息上校验权限。用户权限被撤销或令牌过期时，长连接不能无限继续接收旧授权频道的数据。广播层必须按租户和频道隔离，错误订阅不能靠前端不显示来掩盖。消息大小、频率和总队列需要限额，防止恶意客户端发巨帧或不读数据耗尽资源。</p><p>如果聊天内容需要端到端加密，普通 WSS 只保护客户端到服务端这一段，服务端仍可读取应用正文。两者的信任模型不同，应按产品要求明确。</p></section>
 <section class="panel"><h2>验收清单</h2><p>模拟断线发生在“客户端发出但未获确认”“服务端推送但客户端未持久化”“补拉中又收到新消息”三个时点，检查无重复展示和无静默丢失。再让慢客户端持续不读，确认队列上限生效且正常客户端不受显著拖累。记录连接数、每连接缓冲、消息端到端延迟、重连率和缺口补拉成功率。</p><p>长连接的核心问题不只是握手能否成功，而是长期运行中的慢消费者、未知结果和恢复边界。</p></section>
+<section class="panel" data-dry-goods><h2>背压与缓冲的确切指标</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>位置</th><th>关键值</th><th>处理</th></tr></thead><tbody><tr><td><code>bufferedAmount</code></td><td>浏览器 WebSocket 对象</td><td>已排队但未发出的<b>字节数</b></td><td>超过阈值就暂停生产</td></tr><tr><td><code>bufferedAmountLowThreshold</code></td><td>浏览器</td><td>默认 <b>0</b>（必须手动设！）</td><td>设 64 KB 并监听 <code>onbufferedamountlow</code></td></tr><tr><td>服务端发送队列</td><td>应用进程</td><td><code>SO_SNDBUF</code> 满则 write 阻塞</td><td>用异步写 + 队列水位告警</td></tr><tr><td>内核发送缓冲</td><td>OS</td><td><code>ss -tm</code> 看 <code>w</code> 字段</td><td>长期满说明对端读得慢</td></tr></tbody></table></div><p><b>背压的本质</b>：生产快于消费时，数据会在某处堆积。WebSocket 是 TCP，不会丢消息，只会<b>越堆越多直到内存爆掉或延迟变得不可接受</b>。所以必须在应用层显式处理，而不是指望 TCP。</p><p><b>背压处理代码</b></p><pre><code>// 浏览器侧标准背压处理
+const ws = new WebSocket(url);
+const HIGH = 1024 * 1024;   // 1 MB 高水位
+const LOW  = 64 * 1024;     // 64 KB 低水位
+ws.bufferedAmountLowThreshold = LOW;
+let paused = false;
+
+function send(data) {
+  if (ws.bufferedAmount &gt; HIGH) { paused = true; queue.push(data); return; }
+  ws.send(data);
+}
+ws.onbufferedamountlow = () =&gt; {
+  paused = false;
+  while (queue.length &amp;&amp; ws.bufferedAmount &lt; LOW) ws.send(queue.shift());
+};
+
+// 服务端（Node ws 库）也有对应属性
+if (ws.bufferedAmount &gt; HIGH) { /* 暂停生产 */ }
+ws.on('drain', () =&gt; { /* 继续 */ });</code></pre><p class="muted"><code>bufferedAmountLowThreshold</code> <b>默认是 0</b>，也就是说 <code>onbufferedamountlow</code> 默认几乎不触发——这是最常见的背压实现 bug。</p></section><section class="panel"><h2>重连、有序与幂等</h2><ul><li><b>重连退避</b>：指数退避 + 抖动，如 <code>min(30s, 1s × 2^n) × (0.5 + random/2)</code>。服务端大面积重启时，不做抖动会有同步重连风暴。</li><li><b>消息序号</b>：每条消息带单调递增 <code>seq</code>；重连后客户端上报“最后收到的 seq”，服务端从断点补发（或全量快照）。不要假设“WebSocket 不断就不需要序号”。</li><li><b>顺序保证的边界</b>：WebSocket 在<b>单条 TCP 连接内</b>保证有序，但重连后是<b>新连接</b>，旧连接残留的消息与新消息的相对顺序无法保证。业务上要么容忍乱序（用状态版本号覆盖），要么重连后先拉全量快照再接增量。</li><li><b>幂等</b>：重连后重发的写请求必须带 <code>idempotency key</code>（客户端生成的唯一 ID），服务端去重。否则“消息发没发成功不知道 → 重发”会造成重复下单。</li><li><b>心跳</b>：WebSocket 有协议级 Ping/Pong 控制帧，但浏览器 JS <b>无法</b>主动发 Ping。常见做法是应用层定时发 <code>{type:'ping'}</code> 消息，30 s 一次，2 次超时判定断线。</li><li><b>服务端超时</b>：Nginx <code>proxy_read_timeout</code> 默认 <b>60 s</b>，比心跳过短会被代理切断 → 调到大于心跳间隔（如 3600 s）。</li></ul><details><summary>WebSocket 说是有序可靠，为什么还要自己做序号和补发？</summary><p>协议的有序性只在<b>一条连接</b>内成立。一旦断线重连，中间那些“发出去但不知道对端收没收到”的消息就丢失了，业务层无从判断。序号 + 补发/快照解决的是“连接切换时的语义连续性”。</p></details><details><summary>怎么判断是网络断了还是对端卡了？</summary><p>心跳超时说明端到端不可达（可能任一端问题）；若 Ping 有回但业务消息不回，多为服务端应用阻塞。可再加一个“业务健康检查”接口区分。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>一条 WebSocket 连接上的 TCP 有序，重连后就天然恰好一次吗？</summary><p>不是。断线时发送与确认结果可能未知，重连补发会重复；需要消息 ID、序号与去重。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="websocket-principle.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

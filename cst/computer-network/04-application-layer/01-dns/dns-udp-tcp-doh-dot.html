@@ -11,6 +11,26 @@
 <section class="panel"><h2>DNSSEC 解决的是另一问题</h2><p>DNSSEC 通过签名链让验证解析器检查 DNS 数据是否来自可信委派且未被篡改，它不加密查询名称。DoH/DoT 加密到递归解析器的通道，却不自动证明递归解析器返回的权威数据具备 DNSSEC 验证。可以同时使用二者，也可以只使用其中一者；不能把 DNSSEC 误叫成“DNS over HTTPS 的证书”。</p><p>DNSSEC 配置错误可能导致验证解析器返回 SERVFAIL，而未验证的路径看似正常。诊断要比较支持验证与不验证的解析器、DS/DNSKEY 链和权威响应，不能仅把 SERVFAIL 当作“域名不存在”。</p></section>
 <section class="panel"><h2>一次问题时间线</h2><p>用户访问某带 DNSSEC 大应答的域名：客户端先发 UDP 查询；递归回复带 TC 标志；客户端转 TCP 53，却被办公室出口防火墙拦截，于是域名访问失败。另一个客户端通过 DoH 向外部解析器查询可成功，表面上像“换浏览器就好了”。真正根因是内部 DNS 的 TCP 回退被挡，而不是该网站 HTTP 服务坏了。</p><p>若通过 DoH 成功但内部域名失败，则可能是解析器分流问题。两个现象方向相反，必须先查实际解析器和查询通道。排障抓包还要注意 DoH 内容经 TLS 加密，普通网络抓包只看得到 HTTPS 连接，需用浏览器或解析器日志观察查询结果。</p></section>
 <section class="panel"><h2>设计与验收</h2><p>为普通小记录、大 TXT/DNSSEC 记录、内部域名和不存在域名各准备样例，分别测 UDP、TCP 与加密解析路径。记录响应码、TC 标志、时延、最终地址和所用递归解析器。防火墙规则应允许必要的 DNS TCP 回退；加密解析策略要明确内部域名如何路由、谁维护解析器证书、日志如何保护隐私。</p><p>性能比较应区分冷连接和连接复用：DoH 首次连接要建 TLS，后续可复用；UDP 查询也可能命中本地缓存。只用一次冷启动延迟宣布某协议永远更快，会忽略缓存和并发。</p></section>
+<section class="panel" data-dry-goods><h2>四种传输方式与端口</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>传输层</th><th>端口</th><th>报文大小限制</th><th>特点</th></tr></thead><tbody><tr><td>传统 DNS</td><td>UDP（主）</td><td>53</td><td>512 B（无 EDNS）/ 4096 B（EDNS0）</td><td>快，但可被窃听与篡改</td></tr><tr><td>DNS over TCP</td><td>TCP</td><td>53</td><td>无（有长度前缀）</td><td>响应超 4096 B、区域传送 AXFR、或 UDP 被截断（TC 位）时使用</td></tr><tr><td>DoT（DNS over TLS）</td><td>TCP + TLS</td><td><b>853</b></td><td>同 TCP</td><td>整条链路加密，容易被防火墙识别并封锁</td></tr><tr><td>DoH（DNS over HTTPS）</td><td>HTTPS（HTTP/2）</td><td><b>443</b></td><td>同 TCP</td><td>混在普通 HTTPS 流量里，难被区分；浏览器原生支持</td></tr><tr><td>DoQ（DNS over QUIC）</td><td>QUIC</td><td>853（UDP）</td><td>同 QUIC</td><td>0-RTT、无队头阻塞，较新</td></tr></tbody></table></div><p><b>EDNS0（RFC 6891）</b>：通过 OPT 伪记录声明自己的 UDP 缓冲大小（常见 1232 或 4096），突破 512 字节限制。1232 是个精心选的值——能在多数网络（含 IPv6 + 隧道）下不分片地传输。</p><p><b>DoT/DoH 实测</b></p><pre><code># 强制用 TCP 查询
+dig +tcp example.com
+
+# 声明 EDNS 缓冲大小
+dig +bufsize=1232 example.com
+dig +noedns example.com          # 关闭 EDNS，退化到 512 字节限制
+
+# 看是否被截断（flags 里有 tc）
+dig example.com | grep -E 'flags|MSG SIZE'
+
+# DoT 查询（knot-dns-utils）
+kdig +tls @1.1.1.1 example.com
+kdig +tls @8.8.8.8 +tls-ca example.com
+
+# DoH 查询（HTTP 接口）
+curl -s -H 'accept: application/dns-json' \
+  'https://cloudflare-dns.com/dns-query?name=example.com&amp;type=A' | jq
+
+# 对比耗时
+dig example.com | grep 'Query time'</code></pre><p class="muted">UDP 响应里 <code>TC</code>（Truncated）标志位置 1 表示被截断，客户端应当<b>改用 TCP 重查</b>。大型 DNSSEC 响应、TXT（SPF/DKIM）记录最容易触发。</p></section><section class="panel"><h2>选型与安全排障</h2><ul><li><b>监听 53 的 UDP 是放大攻击重灾区</b>：开放递归解析器会被用来做 DNS 放大（60 字节查询 → 4000 字节响应，放大约 50 倍）。自建 DNS 务必限制递归只对内网开放（<code>recursion no</code> 或 ACL）。</li><li><b>DoH 的副作用</b>：企业/家庭网络的本地 DNS 策略、家长控制、内网域名解析会失效，因为查询绕过了本地解析器。Firefox 默认 DoH 曾引发大量企业内网故障。</li><li><b>选择建议</b>：内网服务发现用普通 DNS；公网客户端注重隐私用 DoH/DoT；移动端可用系统提供的 Private DNS（Android 的 DoT 设置填 <code>dns.google</code> 或 <code>1dot1dot1dot1.cloudflare-dns.com</code>）。</li><li><b>排障</b>：<code>dig +tcp</code> 能通而 UDP 不通 → 通常是 UDP 被限速或大包被丢；DoH 超时 → 检查 443 与证书；DoT 连不上 → 853 端口常被防火墙直接封。</li></ul><details><summary>DNS 为什么默认用 UDP 而不是 TCP？</summary><p>UDP 无连接、无握手，一次往返就完成，延迟低、服务器开销小。代价是 512/4096 字节的大小限制和可能丢包，所以协议规定了“TC 置位则改用 TCP 重查”的兜底。</p></details><details><summary>DoH 能防止别人知道我访问了哪些网站吗？</summary><p>只能防止链路上的观察者看到 DNS 查询，但 ① DoH 服务商自己知道；② TLS 握手的 SNI 和后续的 IP 流量仍会暴露目标。要真正隐藏目标需要 ECH（加密 SNI）+ VPN/代理。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>DoH 打开后，DNSSEC 就自动完成验证了吗？</summary><p>不会。DoH 保护到递归解析器的传输；DNSSEC 是另一个机制，用签名链验证 DNS 数据。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="dns-resolution.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

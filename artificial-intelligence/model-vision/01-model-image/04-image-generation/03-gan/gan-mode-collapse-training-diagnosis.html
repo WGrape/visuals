@@ -12,6 +12,47 @@
 <section class="panel"><h2>可试的缓解方向</h2><p>数据增强可让判别器在样本有限时更稳健；谱归一化、梯度惩罚等约束可缓解某些训练不稳定；调整生成器与判别器的学习率或更新步数可避免某一方长期压制另一方。不同 GAN 家族的损失和正则化细节并不通用，不能把某篇论文的超参数原样套到所有分辨率和数据集。每次改动只变少数因素，在相同随机种子组、样本预算和评估协议下比较。</p><p>如果任务是高保真但不需覆盖整个数据分布，例如固定角色风格，部分模式集中未必是问题；若任务是合成训练数据，漏掉少数类会让下游模型更偏。工程目标决定“多样性”要如何测量。</p></section>
 <section class="panel"><h2>与扩散模型怎样比较</h2><p>扩散模型通常按逐步去噪训练和采样，训练目标与 GAN 的双网络博弈不同，在许多图像生成任务上更易获得覆盖与稳定性的某些优势，但采样步骤、算力与延迟也有代价。不能简单说“扩散永远没有模式坍塌”：数据偏差、条件不足和采样策略仍可能让输出缺少某些模式。比较时应固定分辨率、数据集、采样预算和安全过滤条件，再看质量、多样性与推理成本。</p><p>GAN 仍可能适用于要求极低延迟的特定生成或图像变换场景。技术选型应由业务分布和验收指标驱动，而非按模型发布时间排序。</p></section>
 <section class="panel"><h2>验收一套可复现实验</h2><p>给黑白猫各 500 张训练图，固定若干随机种子和训练步检查点。每步保存 100 张固定 z 的网格，另外随机生成足够样本，统计黑白比例、身份或姿态多样性和人评质量。对照改变判别器更新频率前后，观察是否只是从“全黑猫”变成“全白猫”，而非真正覆盖两类。最后在未见过的验证集上计算分布指标，并展示原图与生成图的混排盲评。</p><p>写结论时明确是“质量差”“覆盖差”“训练振荡”中的哪一种，不要用一个 GAN loss 曲线解释所有失败。</p></section>
+<section class="panel" data-dry-goods><h2>GAN 训练的诊断信号与阈值</h2><div class="table-wrap"><table><thead><tr><th>信号</th><th>健康范围</th><th>异常含义</th></tr></thead><tbody><tr><td>判别器准确率 D(x)</td><td>训练中 <b>50%~80%</b></td><td><b>&gt; 95%</b> = D 太强，G 的梯度消失；<b>≈50%</b> 且生成质量差 = mode collapse</td></tr><tr><td><code>loss_D</code></td><td>抖动但趋势平稳</td><td>趋近 <b>0</b> = D 完美区分，G 学不动了</td></tr><tr><td><code>loss_G</code></td><td>有波动</td><td>单调下降到 0 = D 崩了；持续上升 = G 崩了</td></tr><tr><td>梯度范数（G）</td><td>不为 0</td><td><b>接近 0</b> = 梯度消失，D 太强</td></tr><tr><td>生成样本的多样性</td><td>类内差异明显</td><td>所有样本几乎一样 = <b>mode collapse</b></td></tr><tr><td>FID（有条件生成）</td><td>越小越好</td><td>训练中突然变差 = 崩了，回退 checkpoint</td></tr><tr><td>D 的参数量 / G</td><td>通常 <b>D 略小或相当</b></td><td>D 太强会压制 G</td></tr><tr><td>学习率（Adam）</td><td><b>1e-4 ~ 2e-4</b></td><td>GAN 对 LR 极敏感，<b>β₁=0.5</b> 是常用设置</td></tr></tbody></table></div><p><b>理论最优</b>：纳什均衡时 D 无法区分真假，准确率 = <b>50%</b>，此时 <code>loss_D = log 4 ≈ 1.386</code>、<code>loss_G = -log 4</code>。实际训练中达不到，但 <code>loss_D</code> 长期远离 1.386 说明训练失衡。</p></section><section class="panel"><h2>稳定训练的具体手段与代码</h2><pre><code># 1) 标签平滑：把真样本标签从 1.0 改成 0.9，防 D 过于自信
+real_labels = torch.full((b,), 0.9, device=device)     # 不再是 1.0
+fake_labels = torch.full((b,), 0.0, device=device)
+
+# 2) 单边标签平滑（更常用）：只平滑真的，不平滑假的
+# 3) 给 D 的输入加噪声，且噪声随训练衰减
+noise = torch.randn_like(real) * max(0.0, 0.1 * (1 - epoch / n_epochs))
+d_real = netD(real + noise)
+
+# 4) WGAN-GP：用梯度惩罚代替 weight clipping（最有效的稳定手段之一）
+def gradient_penalty(D, real, fake):
+    alpha = torch.rand(real.size(0), 1, 1, 1, device=real.device)
+    interp = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
+    d = D(interp)
+    grad = torch.autograd.grad(outputs=d, inputs=interp,
+                               grad_outputs=torch.ones_like(d),
+                               create_graph=True, retain_graph=True)[0]
+    return ((grad.norm(2, dim=1) - 1) ** 2).mean()     # 让梯度范数趋近 1
+loss_D = -(d_real.mean() - d_fake.mean()) + 10.0 * gp  # lambda=10
+
+# 5) 谱归一化（SNGAN）：约束 D 的 Lipschitz 常数，一行生效
+netD = torch.nn.utils.spectral_norm(netD)</code></pre><pre><code># 监测 mode collapse：统计生成样本的两两距离
+@torch.no_grad()
+def diversity_score(G, n=500, batch=50):
+    imgs = []
+    for _ in range(n // batch):
+        z = torch.randn(batch, nz, 1, 1, device=device)
+        imgs.append(G(z).flatten(1))
+    imgs = torch.cat(imgs)
+    d = torch.cdist(imgs, imgs)                 # 两两 L2 距离
+    return d.mean().item()                      # 崩塌时会显著下降
+
+# 训练中每 N 个 epoch 记录：
+#   - diversity_score（下降 = 正在崩塌）
+#   - D(real).mean(), D(fake).mean()（差距持续变大 = D 太强）
+#   - FID（上升 = 崩了，回退到上一次的 checkpoint）
+
+# 常用超参（DCGAN 基线）
+# lr = 2e-4, betas = (0.5, 0.999)   &lt;- β₁=0.5 是 GAN 的特殊设置，减少动量震荡
+# D 每步更新 1 次，G 每步更新 1 次；D 太强时才 k=2~5 次 D / 1 次 G</code></pre></section>
+<section class="panel"><h2>训练问题排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td><code>loss_D</code> 很快到 0</td><td>D 太强，梯度消失</td><td>减小 D 容量 / 加噪声 / 标签平滑 / 改用 WGAN-GP</td></tr><tr><td><code>loss_G</code> 一直上升</td><td>G 学不动，D 太强</td><td>同上；或降低 D 的学习率、减少 D 的更新次数</td></tr><tr><td>生成样本全一样</td><td><b>mode collapse</b></td><td>用 minibatch discrimination / unrolled GAN / WGAN；增加 G 的多样性约束</td></tr><tr><td>生成图有棋盘状伪影</td><td>转置卷积的「不均匀重叠」</td><td>改用 <b>上采样 + 卷积</b>；或 kernel 能被 stride 整除（如 4/2）</td></tr><tr><td>训练中期突然崩了</td><td>学习率过大 / D 与 G 失衡</td><td>保存 checkpoint 定期回退；加梯度裁剪；降低 LR</td></tr><tr><td>FID 先降后升</td><td>过拟合或训练不稳定</td><td>早停；或用 FID 最好的那个 checkpoint 而不是最后一个</td></tr><tr><td>显存不够</td><td>D 和 G 同时在显存</td><td>减小 batch；用梯度累积；<code>del</code> 中间变量 + <code>torch.cuda.empty_cache()</code></td></tr></tbody></table></div><p class="muted"><b>关于 β₁=0.5</b>：Adam 默认 β₁=0.9，但 GAN 训练中动量会造成震荡，DCGAN 论文把 β₁ 降到 0.5 后稳定性明显改善。这是 GAN 特有的经验设置。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>判别器准确率恰好 50%，就一定说明 GAN 已经学到真实分布吗？</summary><p>不一定。判别器也可能没有学会；还需检查生成质量、模式覆盖和训练时间线。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="gan-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

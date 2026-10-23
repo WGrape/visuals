@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -164,6 +182,49 @@
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>执行计划的读法（MySQL / PG 对照）</h2><div class="table-wrap"><table><thead><tr><th>MySQL 字段</th><th>PG 字段</th><th>含义与判读</th></tr></thead><tbody><tr><td><code>type</code></td><td><code>Node Type</code></td><td>访问方式：MySQL 看是否 ALL；PG 看是否 Seq Scan</td></tr><tr><td><code>rows</code></td><td><code>rows</code>（估算）</td><td><b>预估</b>扫描行数</td></tr><tr><td><code>filtered</code></td><td>—</td><td>过滤后剩余百分比</td></tr><tr><td>—</td><td><code>actual rows</code></td><td><b>实际</b>行数（需要 ANALYZE 才有）</td></tr><tr><td><code>Extra</code></td><td><code>Filter</code></td><td>补充信息；<code>Using filesort/temporary</code> 是红灯</td></tr><tr><td><code>key</code></td><td><code>Index Name</code></td><td>实际用的索引</td></tr><tr><td><code>key_len</code></td><td>—</td><td>用到的索引字节数（判断是否用全复合索引）</td></tr><tr><td><code>cost</code>（8.0.22+）</td><td><code>cost</code></td><td>优化器估算代价</td></tr><tr><td>—</td><td><code>loops</code></td><td>该节点执行次数；嵌套循环内层要乘</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>访问方式（从好到坏）</th><th>MySQL</th><th>PG</th></tr></thead><tbody><tr><td>最优</td><td><code>system / const</code></td><td><code>Index Only Scan</code></td></tr><tr><td>很好</td><td><code>eq_ref / ref</code></td><td><code>Index Scan</code></td></tr><tr><td>尚可</td><td><code>range</code></td><td><code>Bitmap Index Scan</code></td></tr><tr><td>较差</td><td><code>index</code>（全索引扫）</td><td><code>Seq Scan on small table</code></td></tr><tr><td><b>最差</b></td><td><code>ALL</code>（全表扫）</td><td><code>Seq Scan on big table</code></td></tr></tbody></table></div><p><b>读执行计划的三步法</b>：① <b>找最贵的节点</b>（cost 占比最大 或 actual time 最长）；② <b>看预估与实际是否差很多</b>（PG 的 <code>rows=10000 (actual=50)</code> 差 200 倍说明统计信息有问题）；③ <b>看是否用上了索引</b>，以及索引是否<b>被完整使用</b>（key_len）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>命令与实例</h2><pre><code>-- MySQL
+EXPLAIN SELECT * FROM orders WHERE user_id = 123 AND dt &gt; '2026-10-01';
+-- +----+-------------+--------+------+---------------+------+---------+------+------+-------------+
+-- | id | select_type | table  | type | possible_keys | key  | key_len | ref  | rows | Extra       |
+-- |  1 | SIMPLE      | orders | ref  | idx_user      | idx_user | 8   | const|   12 | Using where |
+-- 读法：type=ref（好），rows=12（扫得少），key_len=8（用了完整索引）
+
+-- MySQL 8.0.18+ 的 EXPLAIN ANALYZE（会真执行）
+EXPLAIN ANALYZE SELECT ...;
+-- -&gt; Index lookup on orders using idx_user (user_id=123) (cost=.. rows=12) (actual time=0.05..0.12 rows=12 loops=1)
+-- 注意：会真的执行，DML 别在生产跑
+
+-- PostgreSQL
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE user_id = 123;
+-- Index Scan using idx_user on orders  (cost=0.29..8.30 rows=12 width=40)
+--   (actual time=0.015..0.032 rows=12 loops=1)
+--   Buffers: shared hit=5
+-- 读法：
+--   rows=12 (actual=12)    预估准确 ✓
+--   Buffers: hit=5         缓存命中，没有读盘 ✓
+--   loops=1                只执行 1 次</code></pre><pre><code>-- 常见问题模式与对应信号
+-- 1) 全表扫：type=ALL / Seq Scan
+--    -&gt; 检查 WHERE 条件列是否有索引；或返回行数是否真的很多
+
+-- 2) 索引没被完整使用：key_len 小于预期
+--    idx(a,b,c) 但 key_len 只对应 a
+--    -&gt; 说明条件只用到 a（不满足最左前缀，或 b 上是范围查询）
+
+-- 3) Using filesort / Sort
+--    -&gt; 排序没走索引；建包含排序列的复合索引
+
+-- 4) Using temporary
+--    -&gt; GROUP BY / DISTINCT 需要临时表；加索引或调 tmp_table_size
+
+-- 5) 嵌套循环的内层很慢（PG 的 loops 很大）
+--    -&gt; 内层被外层循环执行 N 次；看是否该用 Hash Join
+--    SET enable_nestloop = off;  临时验证（会话级）
+
+-- 6) 预估与实际差 10 倍以上
+--    -&gt; ANALYZE 更新统计信息；或列之间有相关性（PG 用 CREATE STATISTICS）</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>有索引却全表扫</td><td>预估返回行数太多 / 条件上用了函数</td><td>优化条件写法；检查统计信息</td></tr><tr><td>key_len 比预期短</td><td>复合索引没用全</td><td>检查最左前缀；范围条件放最后</td></tr><tr><td>EXPLAIN 显示走索引但实际慢</td><td>回表代价大</td><td>用<b>覆盖索引</b>（Extra 出现 Using index）</td></tr><tr><td>预估与实际差很多</td><td>统计信息过期</td><td><code>ANALYZE</code>；调统计精度</td></tr><tr><td>看不懂哪个节点慢</td><td>没有 ANALYZE 的实际耗时</td><td>用 <code>EXPLAIN ANALYZE</code>（PG）或 <code>EXPLAIN FORMAT=JSON</code>（MySQL）</td></tr><tr><td>join 顺序不合理</td><td>基数估计错误</td><td>ANALYZE；或用 STRAIGHT_JOIN（MySQL）强制顺序</td></tr><tr><td>优化后反而变慢</td><td>优化器有自己的判断</td><td>对比 cost；不要盲目加 hint</td></tr></tbody></table></div><p class="muted"><b>最重要的一条习惯</b>：优化前先看执行计划，优化后再看一次对比。凭感觉改索引是低效且危险的——很多时候问题根本不在索引，而在<b>查询写法</b>（如对索引列加了函数）或<b>统计信息</b>。</p></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 执行计划 ·

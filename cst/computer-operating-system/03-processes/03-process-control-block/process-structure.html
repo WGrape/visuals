@@ -249,6 +249,24 @@
             .state-diagram { min-height: auto; flex-direction: row; flex-wrap: wrap; justify-content: center; }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -750,5 +768,36 @@
             </div>
         </div>
     </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Linux 的 PCB：task_struct 关键字段</h2><div class="table-wrap"><table><thead><tr><th>字段 / 概念</th><th>含义</th></tr></thead><tbody><tr><td><b>state</b></td><td>运行状态：TASK_RUNNING / INTERRUPTIBLE / UNINTERRUPTIBLE / STOPPED / ZOMBIE 等</td></tr><tr><td><b>pid / tgid</b></td><td>线程 ID / 线程组 ID（用户看到的进程 PID 实际是 tgid）</td></tr><tr><td><b>mm</b></td><td>指向 mm_struct（用户地址空间）。<b>内核线程该字段为 NULL</b></td></tr><tr><td><b>fs / files</b></td><td>文件系统信息与<b>打开的文件描述符表</b></td></tr><tr><td><b>thread</b></td><td>（thread_struct）保存<b>内核栈与 CPU 寄存器上下文</b>，切换时就是存/取这里</td></tr><tr><td><b>signal / sighand</b></td><td>信号处理相关；<b>同一进程内线程共享 sighand</b></td></tr><tr><td><b>parent / children</b></td><td>构成进程树，僵尸进程就是父进程没回收 children</td></tr><tr><td><b>cred</b></td><td>凭证（uid/gid/capabilities），权限检查的依据</td></tr></tbody></table></div><p><b>Linux 里线程和进程的区别就在「共享什么」</b>：线程共享 <code>mm</code>、<code>files</code>、<code>sighand</code>，各自有独立的 <code>thread</code>（栈和寄存器）和 <code>pid</code>。内核调度的基本单位是 <code>task_struct</code>，也就是线程——<b>进程不直接参与调度</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>状态机与开销数字</h2><p><b>状态转移</b></p><pre><code>Linux 进程状态简图：
+
+  fork ----&gt; TASK_RUNNING (就绪) --调度--&gt; TASK_RUNNING (运行)
+                   |                            |
+                   | 等事件                     | 主动阻塞 / 等 IO
+                   v                            v
+          TASK_INTERRUPTIBLE  &lt;----唤醒----  TASK_UNINTERRUPTIBLE
+           (可被信号打断)                    (不可打断，等 IO/磁盘)
+                   |
+                   | exit
+                   v
+              TASK_ZOMBIE  --父进程 wait()--&gt; 消失
+
+关键区别：
+  D 状态 (UNINTERRUPTIBLE) 连 kill -9 都杀不掉，因为它不响应信号
+  -&gt; 看到大量 D 状态进程，通常说明&lt;b&gt;存储/网络 IO 卡住了&lt;/b&gt;，不是 CPU 问题</code></pre><div class="table-wrap"><table><thead><tr><th>操作</th><th>量级</th><th>说明</th></tr></thead><tbody><tr><td><b>上下文切换</b></td><td>约 1~10 μs</td><td>包含寄存器保存/恢复、TLB 可能失效、缓存污染；<b>跨核迁移更贵</b></td></tr><tr><td><b>同进程内线程切换</b></td><td>比进程切换<b>便宜</b></td><td>不需要切换页表（CR3 不变），TLB 不用刷</td></tr><tr><td><b>系统调用</b></td><td>约 数十~数百 ns</td><td>只切特权级，不切换地址空间</td></tr><tr><td><b>fork</b></td><td>约 0.1~1 ms</td><td>靠<b>写时复制</b>（COW），不立即拷贝内存</td></tr><tr><td><b>协程 / goroutine 切换</b></td><td>约 数十~数百 ns</td><td>纯用户态，不进内核</td></tr></tbody></table></div><ul><li><b>为什么线程切换比进程切换快</b>：不换页表 → 不用刷 TLB → 缓存命中率不被破坏。这是「多线程优于多进程」在性能上的一条硬理由。</li><li><b>上下文切换的隐性成本</b>不止是保存寄存器，还有 TLB 失效和缓存变冷，所以高频切换会让吞吐显著下降（可用 <code>vmstat</code> 的 cs 列观察）。</li><li><b>僵尸进程</b>：已退出但父进程没 <code>wait()</code>，占一个 PID。数量不多无害，成灾说明父进程有 bug。</li><li><b>孤儿进程</b>：父进程先退出，被 <code>init</code>（PID 1）收养并回收。</li></ul><p><b>排查命令</b></p><pre><code># 观察进程状态与切换
+ps -eo pid,ppid,stat,pcpu,pmem,comm          # stat 列：R/S/D/Z/T
+top -H -p &lt;pid&gt;                              # 看进程内各线程
+cat /proc/&lt;pid&gt;/status                       # 详细状态字段
+cat /proc/&lt;pid&gt;/task/&lt;tid&gt;/stack             # 内核栈（需权限）
+ls /proc/&lt;pid&gt;/fd | wc -l                    # 打开的 fd 数（泄漏排查）
+cat /proc/&lt;pid&gt;/limits                       # 资源限制
+
+vmstat 1                                     # cs = 每秒上下文切换次数
+pidstat -w 1                                 # 每个进程的 voluntary/involuntary 切换
+sar -w 1                                     # 系统级切换统计
+
+# D 状态 / 僵尸定位
+ps -eo pid,stat,comm | awk '$2 ~ /D|Z/' </code></pre><details><summary>D 状态进程杀不掉怎么办？</summary><p>kill -9 对 D 状态无效，因为它不处理信号。只能等 IO 恢复，或者重启。定位方向：<code>cat /proc/&lt;pid&gt;/stack</code> 看卡在哪个内核路径，通常是 NFS/磁盘/网络存储。</p></details><details><summary>僵尸进程要清理吗？</summary><p>僵尸本身只占 PID 表项，不占内存。要清理得<b>杀父进程</b>或让父进程 wait。大量僵尸说明父进程的回收逻辑有 bug。</p></details><details><summary>线程数是不是越多越好？</summary><p>不是。超过 CPU 核数后，切换开销与合作失效会吃掉收益；IO 密集型可以多一些，CPU 密集型一般设为核数或核数+1。</p></details></div></section>
 </body>
 </html>

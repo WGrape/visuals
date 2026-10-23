@@ -8,6 +8,31 @@
 <section class="panel"><h2>从业务指标决定 schema</h2><p>假设要记录每台服务器的 CPU 使用率。measurement 可取 cpu；host、region 适合作为有限集合的标签，usage 作为 field，timestamp 表示采样时刻。若还记录进程 ID，先问是否真的要按每个短生命周期进程长期聚合；否则它可能让时间线数量膨胀。查询看板如果按地区求均值，region 作为 tag 有利于选择时间线；但更细的数据仍要注意系列数量与保留期。</p><div class="table-wrap"><table><thead><tr><th>字段</th><th>放置</th><th>理由</th></tr></thead><tbody><tr><td>cpu</td><td>measurement</td><td>指标类别与查询入口</td></tr><tr><td>host</td><td>tag</td><td>设备维度，常用于过滤</td></tr><tr><td>usage</td><td>field</td><td>每次采样变化的测量值</td></tr><tr><td>request_id</td><td>通常另存日志</td><td>高基数且少做时序聚合</td></tr></tbody></table></div></section>
 <section class="panel"><h2>类型、时间戳与重复点</h2><p>Line Protocol 对整数、浮点、布尔和字符串有不同写法；例如整数常需显式后缀，不能假设首次写成浮点后再次写成整数仍被相同 shard 接受。字段类型冲突可能让写入失败或查询出现跨 shard 的复杂结果。上线前用样本写入验证类型，并把 schema 约束放进采集端测试。</p><p>点的身份与 measurement、tag set 和 timestamp 有关。同一时间戳重复写入的字段可能被合并或覆盖，具体行为要按版本文档确认，不能用“重试必产生第二行”推断结果。客户端重试应记录批次 ID、部分失败情况和最终写入覆盖率。设备时间不可靠时要决定用设备事件时间还是服务端接收时间，并监控时钟漂移。</p></section>
 <section class="panel"><h2>版本边界与验收</h2><ol><li>明确本课适用的 InfluxDB 1.x/2.x TSM 模型；其他存储路线的索引与查询行为需要另行核对。</li><li>用真实标签组合估算活跃 series 与新 series 创建速率，尤其关注动态 ID。</li><li>对写入时间精度、字段类型、转义字符和批量部分失败做自动化样本测试。</li><li>验证常用查询在保留策略与时间范围下的扫描量，不只确认写入返回成功。</li></ol><p>练习：一条包含 host=app01、status=500、latency_ms=12.4、request_id=UUID 的请求指标，哪些维度适合 tag？哪些应保留在日志或追踪？请说明你的查询目标和基数预算。</p></section>
-<section class="panel"><h2>采集端的数据契约</h2><p>采集端应固定指标名称、tag 键、field 键、单位、类型、时间精度和缺测规则。例如温度 field 使用摄氏度浮点数，不能有些设备写摄氏、有些设备写华氏；否则查询聚合虽能成功，结果却没有物理意义。新增 tag 前估算独立值数和组合基数，新增 field 前检查是否会与历史类型冲突。将这些规则放在采集 SDK 或网关中验证，比上线后再清理脏点便宜。</p><p>若设备离线补传，时间戳应反映采样时刻还是到达时刻，需要业务明确。使用采样时刻有利于还原真实曲线，却会更新历史时间范围；使用到达时刻易于监控吞吐，却扭曲事件发生顺序。保留策略、降采样和告警都受此选择影响。批量写入时要区分整批成功、部分行失败和网络超时结果未知，并用可重试策略避免无声丢数。</p></section><section class="panel"><h2>自检</h2><details><summary>为什么不能把所有 field 都改成 tag 来加速过滤？</summary><p>高基数 tag 会增加 series 和索引成本，尤其是每次写入都变化的值。</p></details><details><summary>时间戳精度写错最容易造成什么现象？</summary><p>点落到错误时间范围，看板可能像“没有数据”，实际是写到了过去或未来。</p></details></section>
+<section class="panel"><h2>采集端的数据契约</h2><p>采集端应固定指标名称、tag 键、field 键、单位、类型、时间精度和缺测规则。例如温度 field 使用摄氏度浮点数，不能有些设备写摄氏、有些设备写华氏；否则查询聚合虽能成功，结果却没有物理意义。新增 tag 前估算独立值数和组合基数，新增 field 前检查是否会与历史类型冲突。将这些规则放在采集 SDK 或网关中验证，比上线后再清理脏点便宜。</p><p>若设备离线补传，时间戳应反映采样时刻还是到达时刻，需要业务明确。使用采样时刻有利于还原真实曲线，却会更新历史时间范围；使用到达时刻易于监控吞吐，却扭曲事件发生顺序。保留策略、降采样和告警都受此选择影响。批量写入时要区分整批成功、部分行失败和网络超时结果未知，并用可重试策略避免无声丢数。</p></section><section class="panel" data-dry-goods><h2>Line Protocol 语法与精度</h2><p><b>行协议格式</b></p><pre><code>measurement,tag_key=tag_value field_key=field_value,tag2=v2 timestamp
+
+# 实例
+cpu,host=web01,region=us-east usage_user=23.4,usage_sys=5.1 1699999999000000000
+
+# 三部分之间：逗号分隔 tag，空格分隔 field 组，空格后是时间戳
+# 时间戳单位默认纳秒（ns），省略则用服务端接收时间</code></pre><div class="table-wrap"><table><thead><tr><th>组成部分</th><th>是否索引</th><th>取值类型</th><th>数量建议</th></tr></thead><tbody><tr><td><b>measurement</b></td><td>是（表名）</td><td>字符串</td><td>按业务对象划分，如 cpu / http_requests</td></tr><tr><td><b>tag</b></td><td><b>是</b>（建倒排索引）</td><td><b>只存字符串</b></td><td>控制在 <b>10 个以内</b>，值基数要低</td></tr><tr><td><b>field</b></td><td><b>否</b></td><td>float / int / string / bool</td><td>无硬限制，但影响单行大小</td></tr><tr><td><b>timestamp</b></td><td>是（主索引）</td><td>整数（默认 ns）</td><td>每行必带，乱序写入允许</td></tr></tbody></table></div><p><b>最关键的取舍</b>：tag 建索引、field 不建索引。所以<strong>只有需要分组/过滤的维度才放 tag</strong>；把高基数放进 tag 会直接引爆 series 基数。</p></section><section class="panel"><h2>Series 基数：时序库的第一杀手</h2><p>series = measurement + tag 组合 + field key 的唯一组合数。基数 = 内存占用与索引大小的直接决定因素。</p><div class="table-wrap"><table><thead><tr><th>基数规模</th><th>内存占用量级</th><th>后果</th></tr></thead><tbody><tr><td>10 万</td><td>约 <b>100 MB</b></td><td>正常</td></tr><tr><td>100 万</td><td>约 <b>1 GB</b></td><td>需规划内存</td></tr><tr><td>1000 万</td><td>约 <b>10 GB</b>+</td><td>写入与查询都明显劣化，OOM 风险</td></tr></tbody></table></div><p><b>基数排查命令</b></p><pre><code># 查看当前 series 基数
+influx -execute 'SHOW SERIES CARDINALITY'
+influx -execute 'SHOW TAG VALUES CARDINALITY FROM cpu WITH KEY = host'
+
+# 高危模式：把高基数字段误当 tag
+#   ✗ http,user_id=88273,trace_id=abc... status=200   ← user_id/trace_id 基数无限
+#   ✓ http,service=api,status=200 duration=0.23       ← 只留低基数维度</code></pre><p class="muted">判据：tag 值的取值集合是否<strong>有界且可枚举</strong>（机房、服务名、状态码 → 适合）；用户 ID、请求 ID、时间戳 → 绝对不能做 tag。</p></section>
+<section class="panel"><h2>写入与保留策略配置</h2><p><b>写入与降采样</b></p><pre><code># 写入（HTTP API，注意 precision 参数必须显式声明）
+curl -i -XPOST 'http://localhost:8086/write?db=metrics&amp;precision=ms' \
+  --data-binary 'cpu,host=web01 usage=23.4 1699999999000'
+
+# 创建保留策略：保留 30 天，副本 1 份，设为默认
+CREATE RETENTION POLICY "rp_30d" ON "metrics" DURATION 30d REPLICATION 1 DEFAULT
+
+# 连续查询降采样：把原始精度聚合成 5 分钟均值长期保留
+CREATE CONTINUOUS QUERY "cq_5m" ON "metrics" BEGIN
+  SELECT mean(usage) INTO "metrics"."rp_30d"."cpu_5m" FROM "cpu" GROUP BY time(5m), host
+END</code></pre><ul><li><code>precision</code> 支持 <code>ns/u/ms/s/m/h</code>，<strong>不写默认 ns</strong>——用秒级时间戳写入却不声明是最常见的“数据查不到”原因。</li><li>降采样是控制成本的核心手段：原始精度留 7 天，5 分钟精度留 90 天，小时精度留 1 年。</li><li>删除 measurement 用 <code>DROP MEASUREMENT</code>，<strong>不可恢复</strong>，生产环境务必先确认 RP。</li></ul></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：数据写进去了但查不出来，先查什么？</summary><p>A：按这三步——① 时间戳精度是否匹配（写入声明秒、查询按纳秒解释会落到 1970 年）；② 保留策略是否已过期删除；③ 查询的时间范围是否写在 WHERE 里导致全表扫描超时。</p></details><details><summary>Q：tag 和 field 到底怎么分？</summary><p>A：问一句“我会不会按它 GROUP BY / WHERE 过滤”。会 → tag；只是记录数值 → field。反例最典型的是把 <code>status_code</code> 放进 field，导致无法按状态码聚合，只能全量扫描后过滤。</p></details><details><summary>Q：字符串值能放 field 吗？</summary><p>A：可以，但<strong>该 field 无法做聚合与范围查询</strong>，只能原样返回。放长文本（如错误堆栈）反而会撑大单行、拖慢扫描——这类信息应留在日志系统，时序库只存数值与低基数维度。</p></details><details><summary>Q：为什么加了新 tag 后写入突然变慢？</summary><p>A：新 tag 意味着 series 基数跳增，索引需要在内存中重建。写入延迟从毫秒级跳到百毫秒级，通常就是基数膨胀的信号。用 <code>SHOW SERIES CARDINALITY</code> 对比前后差值确认。</p></details></section>
+<section class="panel"><h2>自检</h2><details><summary>为什么不能把所有 field 都改成 tag 来加速过滤？</summary><p>高基数 tag 会增加 series 和索引成本，尤其是每次写入都变化的值。</p></details><details><summary>时间戳精度写错最容易造成什么现象？</summary><p>点落到错误时间范围，看板可能像“没有数据”，实际是写到了过去或未来。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/influxdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

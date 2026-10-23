@@ -11,6 +11,30 @@
 <section class="panel"><h2>隧道会吃掉 MTU</h2><p>如果物理路径 MTU 为 1500，外层 IP、UDP、加密等头部占用一部分，内层可用包尺寸就更小。源主机仍发送 1500 字节内层包时，网关可能分片、丢弃或依赖路径 MTU 反馈。若必要 ICMP 被挡，常出现“ping 小包能通、文件传输卡住”的 PMTU 黑洞。TCP 可在边界谨慎做 MSS 调整，UDP/QUIC 则需自己的包大小策略。</p><p>隧道内外可能有两次拥塞控制和不同队列，特别是 VPN 基于可靠传输再承载 TCP 时，外层重传与内层重传可能互相影响。应按实际 VPN 技术和链路条件测试，不可仅看虚拟网卡显示的标称速率。</p></section>
 <section class="panel"><h2>DNS 与身份边界</h2><p>企业内网域名可能只由内部 DNS 解析，VPN 客户端需把相关查询送到内网解析器。全隧道通常让查询随默认路径走企业；分流需要明确域名后缀、解析器与 DoH 策略。浏览器若启用外部 DoH，可能绕过系统内部解析，造成“命令行可解析、浏览器打不开”。</p><p>连接 VPN 的设备仍要验证用户与设备身份，密钥和证书需要更新与吊销。共享一个长期预共享密钥给所有人，会让离职、设备遗失时难以单独撤销。VPN 是连接手段，不是完整的零信任授权模型。</p></section>
 <section class="panel"><h2>故障排查与验收</h2><p>按“隧道握手—虚拟接口—路由表—DNS—目标端口—业务响应”顺序核对。分别访问内网 IP、内网域名和公网网站，观察它们走物理出口还是隧道。抓包时在物理口看到外层网关地址，在虚拟口看到内层目的；两个观察点不能混用。测试全隧道和分流策略时，还要检查用户所在家庭网段冲突、IPv6 是否绕过策略及断线后的流量行为。</p><p>上线验收包括密钥轮换、客户端断网重连、网关故障切换和大文件传输。只验证一次登录成功，会遗漏最常见的路由、DNS 与 MTU 问题。</p></section>
+<section class="panel" data-dry-goods><h2>主流 VPN 协议与开销</h2><div class="table-wrap"><table><thead><tr><th>协议</th><th>传输</th><th>端口</th><th>头部开销</th><th>典型 MTU</th><th>特点</th></tr></thead><tbody><tr><td>WireGuard</td><td>UDP</td><td><b>51820</b>（可改）</td><td><b>32 B</b>（IPv4）/ 52 B（IPv6）</td><td><b>1420 / 1400</b></td><td>极简、内核态、握手 1-RTT、Noise 协议</td></tr><tr><td>OpenVPN（UDP）</td><td>UDP</td><td><b>1194</b></td><td>约 41–57 B</td><td>1500（配 <code>tun-mtu</code>）</td><td>灵活、兼容好、用户态性能一般</td></tr><tr><td>OpenVPN（TCP）</td><td>TCP</td><td>1194 / 443</td><td>更大</td><td>建议 1400</td><td><b>TCP over TCP 有性能问题</b>，慎用</td></tr><tr><td>IPsec ESP 传输模式</td><td>IP proto 50</td><td>—</td><td>约 50 B</td><td>1450</td><td>端到端加密</td></tr><tr><td>IPsec ESP 隧道模式</td><td>IP proto 50</td><td>UDP 500 / 4500（NAT-T）</td><td>约 70–90 B</td><td>1400</td><td>站点到站点常用</td></tr><tr><td>L2TP/IPsec</td><td>UDP</td><td>500/4500/1701</td><td>更大</td><td>1400</td><td>兼容性好但臃肿</td></tr></tbody></table></div><p><b>WireGuard 的 1420 是怎么来的</b>：1500 − 20（外层 IPv4 头）− 8（UDP 头）− 32（WireGuard 头）= 1440，再留一点余量常配 <b>1420</b>。IPv6 外层头 40 字节 → 1400。若还有 PPPoE（−8）则再减到 <b>1412/1392</b>。</p><p><b>VPN 排查与分流</b></p><pre><code># WireGuard
+wg show                       # 看 peer、握手时间、收发字节
+wg show wg0 transfer
+ip link set mtu 1420 dev wg0
+# 配置里的 MTU 也可写在 [Interface] 段
+
+# IPsec（strongSwan）
+swanctl --list-sas
+ip xfrm state                 # 看 SA（含封装开销）
+ip xfrm policy
+
+# OpenVPN
+cat /etc/openvpn/server.conf | grep -E 'tun-mtu|mssfix'
+# tun-mtu 1400
+# mssfix 1360      ← 等价于 MSS clamping，强烈建议开启
+
+# 验证 MTU
+ping -M do -s 1392 10.8.0.1   # 1392+28=1420
+
+# 分流路由：只让特定网段走 VPN
+ip route add 10.0.0.0/8 dev wg0
+# 不要接受服务端推送的默认路由（OpenVPN）
+# pull-filter ignore redirect-gateway
+# 或 route-nopull + 手工加路由</code></pre></section><section class="panel"><h2>分流与常见坑</h2><ul><li><b>全局隧道 vs 分流</b>：服务端推送 <code>0.0.0.0/0</code>（OpenVPN 的 <code>redirect-gateway</code>、WireGuard 的 <code>AllowedIPs = 0.0.0.0/0</code>）会让<b>所有</b>流量走 VPN，包括访问国内网站、内网服务。分流只把需要的网段指进隧道，其余走本地出口。</li><li><b>AllowedIPs 的陷阱（WireGuard）</b>：它同时是<b>路由</b>和<b>允许通过的源地址过滤</b>。设成 <code>0.0.0.0/0</code> 时，WireGuard 会加一条默认路由并可能修改主表；多个 peer 都设 <code>0.0.0.0/0</code> 会冲突。分流应写具体网段，并设 <code>Table=off</code> 自行管理路由。</li><li><b>MTU 不匹配的典型症状</b>：VPN 连上了、小网站正常，但大页面卡住、SSH 能用但 scp 卡住、HTTPS 握手完成后无响应。解决：调小 MTU 或开 <code>mssfix</code> / MSS clamping。</li><li><b>TCP over TCP 的问题</b>：OpenVPN 用 TCP 模式时，内层 TCP 的重传与外层 TCP 的重传互相叠加，丢包时性能急剧恶化（timeout 重传风暴）。<b>能用 UDP 就用 UDP</b>。</li><li><b>DNS 泄漏</b>：分流时若 DNS 仍走本地解析器，访问的域名会暴露（且可能被污染）。应同时配置 DNS 走隧道，或按域名做分流（dnsmasq/ipset）。</li><li><b>排查顺序</b>：① <code>wg show</code> / <code>swanctl</code> 看隧道是否建立（握手时间是否更新）；② <code>ip route get</code> 看流量是否进隧道；③ <code>ping -M do</code> 测 MTU；④ 抓包看外层/内层包。</li></ul><details><summary>VPN 连上后访问内网正常，但公网网站变慢甚至不通？</summary><p>要么被全局隧道拉到远端出口绕路，要么 MTU 不匹配导致大包黑洞。先 <code>ip route get 8.8.8.8</code> 看走哪，再 <code>ping -M do -s 1472</code> 测 MTU。</p></details><details><summary>为什么 WireGuard 改了 AllowedIPs 就连不上？</summary><p><code>AllowedIPs</code> 决定哪些<b>源地址</b>的包被允许从该 peer 进来。如果设得太窄（比如只写了某个网段），对端回包源地址不在范围内就会被丢弃。peer 的公网地址要用 <code>Endpoint</code>，而不是塞进 AllowedIPs。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>VPN 显示已连接，就能证明内网域名和大文件都可访问吗？</summary><p>不能。还需检查分流路由、内部 DNS、回程策略和隧道有效 MTU。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../../02-ip/03-mtu-and-fragmentation/pmtud-blackhole-mss-clamping.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

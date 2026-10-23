@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -173,6 +191,49 @@ SELECT CAST(0.1 AS DECIMAL(10,2)) + CAST(0.2 AS DECIMAL(10,2));  -- 0.30 精确<
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>类型选择速查与代价</h2><div class="table-wrap"><table><thead><tr><th>用途</th><th>推荐</th><th>避免</th><th>理由</th></tr></thead><tbody><tr><td>主键</td><td><code>BIGINT</code>（MySQL）/ <code>bigint</code> 或 <code>uuid</code>（PG）</td><td><code>UUID</code> 做<b>聚簇</b>主键（MySQL）</td><td>MySQL InnoDB 主键是聚簇索引，UUID 无序导致页分裂、索引膨胀</td></tr><tr><td>金额</td><td><code>DECIMAL(p,s)</code></td><td><b><code>FLOAT</code>/<code>DOUBLE</code></b></td><td>浮点无法精确表示 0.1，累加会漂移</td></tr><tr><td>时间</td><td><code>DATETIME</code> / <code>TIMESTAMP</code>（MySQL）、<code>timestamptz</code>（PG）</td><td>用字符串存时间</td><td>无法比较、无法用索引范围扫描、时区混乱</td></tr><tr><td>状态/枚举</td><td><code>TINYINT</code> 或 <code>ENUM</code>（少量）</td><td><code>VARCHAR(255)</code></td><td>字符串比较慢、占空间大</td></tr><tr><td>布尔</td><td><code>TINYINT(1)</code> / <code>boolean</code></td><td><code>CHAR(1) 'Y'/'N'</code></td><td>前者可直接 <code>WHERE flag</code></td></tr><tr><td>大文本</td><td><code>TEXT</code>（单独存或拆表）</td><td><code>VARCHAR(8000)</code></td><td>MySQL 行长度限制、行溢出影响扫描</td></tr><tr><td>IP 地址</td><td><code>INT UNSIGNED</code>（IPv4）/<code>VARBINARY(16)</code></td><td><code>VARCHAR(15)</code></td><td>可用 <code>INET_ATON/NTOA</code>，省空间且能范围查</td></tr></tbody></table></div><p><b>高频陷阱</b></p><pre><code>-- 浮点陷阱（必看）
+SELECT 0.1 + 0.2 = 0.3;                    -- MySQL: 0 (false)！
+SELECT CAST(0.1 AS DECIMAL(10,2)) + CAST(0.2 AS DECIMAL(10,2));  -- 0.30
+--   正确：金额一律 DECIMAL，或存「分」为 BIGINT
+
+-- 隐式转换导致索引失效（最常见的慢查询原因之一）
+--   user_no 是 VARCHAR
+SELECT * FROM t WHERE user_no = 12345;     -- &lt;b&gt;索引失效&lt;/b&gt;：字符串列被转成数字比较
+SELECT * FROM t WHERE user_no = '12345';   -- 正常走索引
+--   判断方法：EXPLAIN 看 type=ALL 且 key=NULL
+
+-- 字符集/排序规则不一致导致 JOIN 变慢
+SELECT * FROM a JOIN b ON a.code = b.code;
+--   若 a.code 是 utf8mb4_general_ci、b.code 是 utf8mb4_0900_ai_ci -&gt; 索引不可用
+--   SHOW CREATE TABLE 检查，统一为 utf8mb4_0900_ai_ci
+
+-- NULL 比较陷阱
+SELECT * FROM t WHERE col = NULL;          -- 永远返回 0 行！
+SELECT * FROM t WHERE col IS NULL;         -- 正确
+SELECT * FROM t WHERE col != 'x';          -- &lt;b&gt;col 为 NULL 的行不会返回&lt;/b&gt;
+SELECT * FROM t WHERE col != 'x' OR col IS NULL;   -- 完整写法</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>比较语义与三值逻辑</h2><p>SQL 用<b>三值逻辑</b>：TRUE / FALSE / <b>UNKNOWN</b>。<code>NULL</code> 参与的比较结果是 UNKNOWN，而 <code>WHERE</code> 只保留 TRUE——这是所有 NULL 相关 bug 的根源。</p><div class="table-wrap"><table><thead><tr><th>表达式</th><th>结果</th><th>说明</th></tr></thead><tbody><tr><td><code>NULL = NULL</code></td><td><b>UNKNOWN</b></td><td>要用 <code>IS NULL</code></td></tr><tr><td><code>NULL &lt;&gt; 'x'</code></td><td><b>UNKNOWN</b></td><td>NULL 行会被过滤掉</td></tr><tr><td><code>NULL AND TRUE</code></td><td>UNKNOWN</td><td></td></tr><tr><td><code>NULL OR TRUE</code></td><td><b>TRUE</b></td><td>OR 里有一个 TRUE 就是 TRUE</td></tr><tr><td><code>NOT NULL</code></td><td>UNKNOWN</td><td></td></tr><tr><td><code>NULL IN (1,2)</code></td><td>UNKNOWN</td><td></td></tr><tr><td><code>NULL IN (NULL)</code></td><td>UNKNOWN</td><td></td></tr><tr><td><code>COUNT(col)</code></td><td>跳过 NULL</td><td><code>COUNT(*)</code> 不跳过</td></tr><tr><td><code>SUM(col)</code></td><td>跳过 NULL；全 NULL 返回 NULL</td><td>用 <code>COALESCE(SUM(col),0)</code></td></tr></tbody></table></div><p><b>三值逻辑实测</b></p><pre><code>-- 三值逻辑实测
+SELECT
+  (NULL = NULL)      AS a,   -- NULL
+  (NULL &lt;&gt; 'x')      AS b,   -- NULL
+  (NULL OR TRUE)     AS c,   -- 1 (TRUE)
+  (NULL AND FALSE)   AS d;   -- 0 (FALSE)   &lt;- AND 里有 FALSE 就是 FALSE
+
+-- NOT IN 的经典陷阱（子查询里有 NULL 会导致 0 行）
+SELECT * FROM t WHERE id NOT IN (SELECT id FROM s);
+--   若 s.id 有 NULL -&gt; 整个条件变成 UNKNOWN -&gt; &lt;b&gt;返回 0 行&lt;/b&gt;
+--   解法 1：SELECT * FROM t WHERE id NOT IN (SELECT id FROM s WHERE id IS NOT NULL)
+--   解法 2（推荐）：NOT EXISTS 不受 NULL 影响
+SELECT * FROM t WHERE NOT EXISTS (SELECT 1 FROM s WHERE s.id = t.id);
+
+-- 空字符串与 NULL 是两回事
+SELECT * FROM t WHERE col = '';     -- 只匹配空串
+SELECT * FROM t WHERE col IS NULL;  -- 只匹配 NULL
+
+-- 类型对齐（JOIN 慢的隐形杀手）
+--   两边类型不同（INT vs VARCHAR）-&gt; 隐式转换 -&gt; 索引失效
+--   SHOW CREATE TABLE t\G 对比字段类型</code></pre><ul><li><b>建表时把列设为 <code>NOT NULL</code> + 默认值</b>：能消除绝大多数三值逻辑问题，且索引和比较都更快。允许 NULL 的列要多 1 字节/null 位图。</li><li><b>金额用 DECIMAL 或「分」为单位的 BIGINT</b>，绝不用浮点。若已用浮点，聚合时要 <code>ROUND</code> 后再比对。</li><li><b>WHERE 条件里的列不要套函数</b>：<code>WHERE DATE(created_at) = '2026-01-01'</code> 会让索引失效，改成 <code>WHERE created_at &gt;= '2026-01-01' AND created_at &lt; '2026-01-02'</code>。</li><li><b>跨库迁移要检查类型映射</b>：MySQL <code>DATETIME</code>（无时区）vs PG <code>timestamp</code>（无时区）/<code>timestamptz</code>（有时区）；MySQL <code>TINYINT(1)</code> 常被误当 boolean。</li></ul><details><summary>为什么 <code>WHERE col != 'x'</code> 查不到 NULL 的行？</summary><p>因为 <code>NULL != 'x'</code> 的结果是 <b>UNKNOWN</b>，而 <code>WHERE</code> 只保留结果为 TRUE 的行。这不是 bug 而是 SQL 标准定义：<code>NULL</code> 表示「未知」，未知的值是否等于 'x' 也是未知的。所以业务上要显式写 <code>OR col IS NULL</code>，或者建表时就禁止 NULL。</p></details><details><summary>DECIMAL 和 FLOAT 该选哪个？</summary><p>金额、计量、任何需要精确比较的场景用 <b>DECIMAL</b>；科学计算、容忍误差且范围极大的场景用 FLOAT/DOUBLE。DECIMAL 在 MySQL 里是定点数（按字符串方式存），<code>DECIMAL(10,2)</code> 占约 5 字节，计算比浮点慢但精确。<b>另一个常见做法：金额存整数「分」</b>（BIGINT），既精确又快。</p></details><details><summary>VARCHAR 长度该设多少？</summary><p>UTF-8 下 MySQL 的 <code>VARCHAR(n)</code> 中 n 是<b>字符数</b>不是字节数（utf8mb4 每字符最多 4 字节）。设太长的代价：① 排序/临时表按<b>定义长度</b>分配内存（<code>VARCHAR(2000)</code> 参与排序会很吃内存）；② 行长度超限会溢出。建议按<b>实际最大长度的 1.5~2 倍</b>设，不要一律 255 或一律 8000。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / 数据类型 ·

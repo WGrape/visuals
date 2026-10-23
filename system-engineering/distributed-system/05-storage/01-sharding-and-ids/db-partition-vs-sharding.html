@@ -341,6 +341,24 @@
     .flow-arrow { transform: rotate(90deg); }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -716,5 +734,30 @@
   Made with ❤️ · 数据库分区 vs 分库分表 对比图
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>分区与分片的本质区别</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>分区（Partition）</b></th><th><b>分片（Sharding）</b></th></tr></thead><tbody><tr><td><b>分布位置</b></td><td><b>单实例内</b>，同一 MySQL 进程</td><td><b>跨实例/跨机器</b></td></tr><tr><td><b>是否透明</b></td><td><b>完全透明</b>，SQL 无需改</td><td>需路由，<strong>应用层或中间件感知</strong></td></tr><tr><td><b>解决什么</b></td><td><strong>单表太大</strong>导致的索引与维护问题</td><td><strong>单机容量/写入吞吐</strong>上限</td></tr><tr><td><b>跨片操作</b></td><td>无此问题</td><td><b>跨片 JOIN / 事务 / 排序都很痛</b></td></tr><tr><td><b>扩容方式</b></td><td>加分区（秒级）</td><td><b>数据迁移</b>，成本高</td></tr><tr><td><b>典型规模</b></td><td>单表千万~亿级</td><td>单表 <b>亿级以上</b>或写入打满单机</td></tr></tbody></table></div><p><b>选型判据</b>：先看瓶颈是<strong>容量</strong>还是<strong>吞吐</strong>。单表数据量大但读写压力单机扛得住 → <strong>分区</strong>足够（改造成本极低）；单机 CPU/IO/连接数打满 → 必须<strong>分片</strong>。很多项目过早分片，付出了跨片复杂度却没解决真正的瓶颈。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>分区的类型与限制</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>依据</th><th>典型用法</th><th>限制</th></tr></thead><tbody><tr><td><b>RANGE</b></td><td>连续区间</td><td><b>按日期</b>（最常用）</td><td>需预建分区，否则插入失败</td></tr><tr><td><b>LIST</b></td><td>离散枚举值</td><td>按地区/状态</td><td>新增枚举需改分区定义</td></tr><tr><td><b>HASH</b></td><td>哈希取模</td><td>均匀分布</td><td>无法按范围裁剪</td></tr><tr><td><b>KEY</b></td><td>MySQL 内部哈希</td><td>类似 HASH，支持非整型</td><td>同上</td></tr></tbody></table></div><p><b>分区定义</b></p><pre><code>-- 按日期 RANGE 分区（最常用）
+CREATE TABLE orders (
+  id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL,
+  amount DECIMAL(10,2),
+  PRIMARY KEY (id, created_at)          -- 分区键&lt;strong&gt;必须包含在主键内&lt;/strong&gt;
+) PARTITION BY RANGE COLUMNS(created_at) (
+  PARTITION p202610 VALUES LESS THAN ('2026-11-01'),
+  PARTITION p202611 VALUES LESS THAN ('2026-12-01'),
+  PARTITION pmax   VALUES LESS THAN (MAXVALUE)      -- 兜底分区，必须有
+);
+
+-- 关键限制（MySQL）：
+--   1) 分区键必须是主键/唯一键的一部分 → 无法只对 id 建主键
+--   2) 最多 8192 个分区（含子分区）
+--   3) 外键与分区不兼容
+--   4) 分区裁剪依赖 WHERE 命中分区键，否则全分区扫描
+
+-- 确认是否命中裁剪
+EXPLAIN PARTITIONS SELECT * FROM orders WHERE created_at &gt;= '2026-10-15';
+-- 输出 partitions 列只列出相关分区即命中</code></pre><p class="muted"><b>兜底分区 <code>pmax</code> 必须建</b>：否则超出范围的插入会直接报错（<code>Table has no partition for value</code>）。运维上要定期把 pmax 拆分并预建新分区。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>分片键选择与扩容代价</h2><div class="table-wrap"><table><thead><tr><th>分片键</th><th>优点</th><th>缺点</th><th>适用</th></tr></thead><tbody><tr><td><b>用户 ID</b></td><td>同用户数据集中，<strong>单用户查询快</strong></td><td>大客户数据倾斜</td><td><b>最常见</b>，C 端业务</td></tr><tr><td><b>订单 ID</b></td><td>分布均匀</td><td>按用户查要跨片</td><td>按 ID 点查为主</td></tr><tr><td><b>时间</b></td><td>便于归档与冷热分离</td><td><strong>热点集中在新片</strong></td><td>日志、流水</td></tr><tr><td><b>地域/租户</b></td><td>天然隔离</td><td>租户大小差异大</td><td>SaaS 多租户</td></tr></tbody></table></div><p><b>扩容的数据迁移量</b>：从 N 片扩到 2N 片，取模分片需要迁移 <strong>约 50%</strong> 的数据；一致性哈希只需迁移 <strong>1/N</strong>。这是选择分片算法的核心考量。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>扩容迁移量</th><th>实现复杂度</th></tr></thead><tbody><tr><td><b>取模</b> <code>id % N</code></td><td><b>约 50%</b></td><td>最简单</td></tr><tr><td><b>一致性哈希</b></td><td><b>1/N</b></td><td>中等（需虚拟节点）</td></tr><tr><td><b>预分片</b>（如 1024 逻辑片）</td><td><b>0</b>（只迁移逻辑片到新机）</td><td><b>推荐</b>，前期规划</td></tr></tbody></table></div><p class="muted"><b>预分片是最优解</b>：一开始就分 1024 个逻辑分片，物理上只放在 4 台机器。扩容时<strong>只搬逻辑分片</strong>，路由规则完全不变，无需数据重分布。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：什么时候该分表？</summary><p>A：看<strong>三个量化信号</strong>——① 单表数据量超过 <b>2000 万~5000 万行</b>（B+ 树层数增加，查询变慢）；② 单表物理大小超过 <b>几十 GB</b>（备份、DDL、索引维护困难）；③ 写入 TPS 接近单机上限。只满足一条可以先不拆，优先做索引优化与归档。注意<strong>分区能解决 ①②，但解决不了 ③</strong>——吞吐问题必须分片。</p></details><details><summary>Q：分片后跨片查询怎么办？</summary><p>A：三种策略。<strong>避免</strong>：把查询设计成都能带分片键（最有效）；<strong>聚合</strong>：在中间件层并行查各片再归并（排序、分组、分页都要在中间件做，代价高）；<strong>冗余</strong>：建<strong>全局索引表或异构索引</strong>（如按订单号查就单独维护一张 订单号→用户ID 的映射表）。跨片 JOIN 应尽量消灭在业务设计阶段。</p></details><details><summary>Q：分片后自增 ID 冲突怎么解决？</summary><p>A：不能再用数据库自增。四种方案——① <strong>雪花算法</strong>（64 位：符号位+41 位时间戳+10 位机器 ID+12 位序列，单机每毫秒 <b>4096</b> 个）；② <strong>号段模式</strong>（数据库批量分配区间，如一次取 1000 个，性能好但有空洞）；③ Redis <code>INCR</code>（简单但引入依赖）；④ UUID（无序，<strong>作主键会严重损害索引性能</strong>，不推荐）。生产最常用雪花与号段。</p></details><details><summary>Q：分区表的 DDL 会锁表吗？</summary><p>A：MySQL 5.6+ 的多数分区操作（ADD/REORGANIZE）是<strong>在线的</strong>，但仍会短暂拿元数据锁（MDL）。真正的痛点是<strong>大表的 ALTER TABLE</strong>——即使不锁表，重建索引也要很久。生产建议用 <code>pt-online-schema-change</code> 或 <code>gh-ost</code>（通过触发器或 binlog 同步到影子表再切换），把变更拆成可中断、可限速的步骤。</p></details></div></section>
 </body>
 </html>

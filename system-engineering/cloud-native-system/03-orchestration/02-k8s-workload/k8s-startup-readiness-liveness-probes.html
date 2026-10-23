@@ -12,6 +12,66 @@
 <section class="panel"><h2>参数不是越短越好</h2><p>`periodSeconds` 决定检查频率，`timeoutSeconds` 给单次探针响应上限，`failureThreshold` 决定连续失败门槛；`successThreshold` 对 readiness 的恢复也有作用，具体字段允许范围按 API 校验。阈值太敏感会因短时调度或网络抖动误判，太迟钝则让坏副本长时间接请求。要按服务启动分布、正常延迟、恢复时间和最小副本数设定。生产数据应观察 P95/P99 启动耗时，而非只看开发机最快一次。</p><p>若应用只在第一次启动时长，startup 窗口可覆盖冷启动，同时 liveness 运行期仍保持合理敏感度。变更探针参数后应实际模拟慢启动和死锁，两类情况都要通过。</p></section>
 <section class="panel"><h2>发布与终止的时间线</h2><p>新 Pod 调度、拉镜像、启动容器、startup 成功、readiness 成功后才适合承接 Service 新流量。删除旧 Pod 时，状态会转为终止，端点更新和应用 SIGTERM/预停止钩子并行发生；旧进程应停止接新请求、等待必要的在途请求结束，并在宽限期内退出。readiness 不是流量瞬时开关，客户端连接和负载均衡缓存也有传播延迟。部署策略的 maxUnavailable、maxSurge 和最小副本数决定滚动时的容量余量。</p><p>若新版本错误地把 readiness 永远设为失败，部署可能停滞；若把 readiness 过早设成功，用户会遇到“Pod 已 Ready 但首批请求很慢”。发布验收需同时看探针状态与真实业务成功率。</p></section>
 <section class="panel"><h2>排查清单</h2><p>记录 Pod 事件、探针失败日志、上次退出原因、容器启动时间和 readiness 变化时间。对慢启动，比较 startup 允许窗口与实际初始化最长耗时；对运行期短暂不就绪，核查是否错误触发 liveness；对只有某节点失败，检查节点网络和资源压力。最后用受控实验模拟 45 秒冷启动、短时数据库故障和进程死锁：期望分别是“等启动”“暂不接流量但不乱重启”“重启坏容器”。三条路径对应不同探针，不能只以 Pod 最终 Running 为验收。</p></section>
+<section class="panel" data-dry-goods><h2>三类探针的参数与语义</h2><div class="table-wrap"><table><thead><tr><th>探针</th><th>作用</th><th>失败后果</th></tr></thead><tbody><tr><td><b>startupProbe</b></td><td>容器是否已启动完成</td><td>失败则<b>不执行</b>其他探针；超过失败阈值则重启</td></tr><tr><td><b>readinessProbe</b></td><td>是否可接收流量</td><td>失败则从 Service 的 endpoints <b>摘除</b>（不重启）</td></tr><tr><td><b>livenessProbe</b></td><td>是否还活着</td><td>失败则<b>重启容器</b></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td><code>initialDelaySeconds</code></td><td>0</td><td>容器启动后多久开始探测</td></tr><tr><td><code>periodSeconds</code></td><td>10</td><td>探测间隔</td></tr><tr><td><code>timeoutSeconds</code></td><td>1</td><td>单次探测超时</td></tr><tr><td><code>successThreshold</code></td><td>1</td><td>连续成功几次算成功（liveness 必须为 1）</td></tr><tr><td><code>failureThreshold</code></td><td>3</td><td>连续失败几次算失败</td></tr><tr><td><code>terminationGracePeriodSeconds</code></td><td>30</td><td>优雅退出等待时长</td></tr></tbody></table></div><p><b>最重要的原则</b>：<code>livenessProbe</code> <b>绝对不要检查依赖</b>（DB、下游服务）。如果 liveness 检查 DB，DB 抖动会导致所有 Pod 被判定不健康并重启，<b>故障被放大</b>甚至引发雪崩。依赖检查只能放在 readiness 里。</p><p class="muted"><b>startupProbe 解决的是慢启动问题</b>：Java 应用启动可能要 60 秒，如果只用 liveness（failureThreshold=3 × periodSeconds=10 = 30 秒），会在启动完成前就被杀掉。<code>startupProbe</code> 允许设置单独的、更宽松的阈值。</p></section><section class="panel"><h2>配置模板</h2><pre><code>apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    ports: [{containerPort: 8080}]
+
+    # 1) 启动探针：给慢启动的应用足够时间
+    startupProbe:
+      httpGet: {path: /healthz, port: 8080}
+      periodSeconds: 5
+      failureThreshold: 30          # 30 × 5s = 最多等 150 秒启动
+    # 启动成功后，kubelet 才切换到 liveness/readiness
+
+    # 2) 存活探针：只检查进程是否活着，&lt;b&gt;不查依赖&lt;/b&gt;
+    livenessProbe:
+      httpGet: {path: /healthz, port: 8080}
+      initialDelaySeconds: 0        # 有 startupProbe 时可以设 0
+      periodSeconds: 10
+      timeoutSeconds: 1
+      failureThreshold: 3           # 连续 3 次失败 -&gt; 重启
+
+    # 3) 就绪探针：检查依赖，决定是否摘流量
+    readinessProbe:
+      httpGet: {path: /readyz, port: 8080}
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 2           # 连续 2 次失败 -&gt; 从 endpoints 摘除
+      successThreshold: 1           # 1 次成功即重新加入
+
+    # 4) 生命周期钩子：优雅退出
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 5"]   # 等 endpoint 传播完成
+  terminationGracePeriodSeconds: 45   # 必须 &gt; preStop sleep + 应用退出时间</code></pre><pre><code># 应用侧的探针实现（Go）
+mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+    // liveness：只判断进程是否存活，不加任何依赖检查
+    w.WriteHeader(200)
+    w.Write([]byte("ok"))
+})
+
+mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+    // readiness：检查关键依赖
+    ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+    defer cancel()
+    if err := db.PingContext(ctx); err != nil {
+        http.Error(w, "db unavailable", 503)
+        return
+    }
+    w.WriteHeader(200)
+    w.Write([]byte("ready"))
+})
+
+# 常用命令
+kubectl describe pod &lt;pod&gt; | grep -A5 -E 'Liveness|Readiness|Startup'
+kubectl get endpoints &lt;svc&gt;        # 看哪些 Pod 在 endpoints 里（readiness 生效情况）
+kubectl get events --sort-by=.lastTimestamp | grep -i probe</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>Pod 反复重启（CrashLoopBackOff）</td><td>liveness 太严格或启动慢</td><td>加 startupProbe；调大 initialDelaySeconds/failureThreshold</td></tr><tr><td>滚动更新时 502</td><td>Pod 被摘除前 endpoint 还没传播</td><td>加 preStop sleep 5s；terminationGracePeriodSeconds 设够</td></tr><tr><td>依赖抖动导致全部重启</td><td>liveness 检查了依赖</td><td><b>依赖检查只在 readiness</b>；liveness 只查进程</td></tr><tr><td>服务起来了但没流量</td><td>readiness 一直失败</td><td>看 <code>kubectl describe</code> 的探针失败原因；检查 /readyz 实现</td></tr><tr><td>探针本身消耗资源</td><td>探测太频繁或检查太重</td><td>readiness 的 periodSeconds 别小于 5；/readyz 要快（&lt;100ms）</td></tr><tr><td>重启后数据丢失</td><td>容器被强杀</td><td>应用要处理 SIGTERM 做优雅退出；用 preStop 钩子</td></tr><tr><td>启动探针通过了但应用还没真就绪</td><td>startupProbe 检查点太早</td><td>startupProbe 也用 readiness 的端点；或增加检查项</td></tr></tbody></table></div><p class="muted"><b>preStop sleep 是必须的</b>：kubelet 发送 SIGTERM 和 「从 endpoints 摘除」是<b>并行</b>发生的，摘除需要几秒才能传播到所有 kube-proxy。不加 sleep，Pod 已经开始关闭却还在接收流量，导致 502。这是滚动更新 502 的头号原因。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>下游数据库短暂变慢导致 readiness 失败，Kubernetes 会因此立即重启容器吗？</summary><p>不会。readiness 主要影响是否接收新流量；是否重启由 liveness、进程退出等机制决定。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="pod.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

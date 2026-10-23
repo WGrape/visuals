@@ -17,6 +17,61 @@
 <section class="panel" data-depth-note><h2>晚到事实与维度如何处理</h2><p>商品维度记录可能晚于订单事实到达。若维度键暂时找不到，直接丢弃事实会造成金额缺口；永久使用“未知商品”又会让后续报表一直不准。可以先以未知成员承接事实，并在维度到达后回填，或者把事实暂存等待，但要规定等待上限与补算流程。缓慢变化维度也有类似问题：事实晚到时，应按事件发生时间选择当时有效的维度版本，而不是默认绑定当前最新版本。每次补算都应重新核对日总额、行数和维度缺失率。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>一个有用的验收样本是“同一客户改名后又退货”。按历史属性统计时，原订单可能归到旧客户版本，退货事实则按业务规则归到原交易或当前客户。若没有明确的事件时间和维度版本规则，两张报表都看似合理，却无法互相对账。</p></section>
 <section class="panel" data-final-case><h2>补充判断</h2><p>在维度连接前后比较事实表的行数和总金额是一种快速哨兵检查。金额不变但行数变多，可能存在正负抵消的重复；因此行数、唯一键数与金额都要核对，不能只看一个总和。</p></section>
+<section class="panel" data-dry-goods><h2>星型模型的组成与代价</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>说明</th><th>例子</th></tr></thead><tbody><tr><td><b>事实表</b></td><td>存度量值（可聚合的数值）</td><td>订单金额、数量、时长</td></tr><tr><td><b>维度表</b></td><td>存描述属性（用于过滤分组）</td><td>时间、商品、用户、地区</td></tr><tr><td><b>星型模型</b></td><td>1 个事实表 + N 个维度表直接相连</td><td>维度<b>不规范化</b>（有冗余）</td></tr><tr><td><b>雪花模型</b></td><td>维度表再拆成子维度</td><td>规范化，省空间但 join 多</td></tr><tr><td><b>退化维度</b></td><td>维度属性直接放事实表</td><td>如订单号（无其他属性）</td></tr><tr><td><b>缓慢变化维（SCD）</b></td><td>维度属性随时间变化</td><td>Type 1/2/3 三种处理方式</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>SCD 类型</th><th>做法</th><th>适用</th></tr></thead><tbody><tr><td><b>Type 1</b></td><td><b>直接覆盖</b>，不保留历史</td><td>修正错误；不关心历史</td></tr><tr><td><b>Type 2</b></td><td><b>加新行</b>（加有效期间 + 版本号）</td><td><b>最常用</b>；保留完整历史</td></tr><tr><td><b>Type 3</b></td><td>加「旧值」列</td><td>只需保留上一次的值</td></tr><tr><td>Type 2 的关键列</td><td><code>valid_from / valid_to / is_current</code></td><td>查询时加时间条件</td></tr></tbody></table></div><p><b>星型 vs 雪花的选择</b>：星型的维度表是<b>反规范化</b>的（有冗余），换来的是<b>join 少一层</b>。列存 OLAP 里冗余的代价很小（压缩率高），而 join 的代价很大，<b>所以 OLAP 几乎都选星型</b>。这和 OLTP 的 3NF 设计思路完全相反。</p></section><section class="panel"><h2>建模实操</h2><pre><code>-- 事实表：只放外键 + 度量（尽量窄）
+CREATE TABLE fact_order (
+    dt          DATE,              -- 时间维度外键
+    product_id  INT,
+    user_id     BIGINT,
+    region_id   SMALLINT,
+    -- 度量（可聚合）
+    amount      DECIMAL(18,2),
+    qty         INT,
+    -- 退化维度
+    order_no    VARCHAR(32)
+)
+PARTITION BY dt
+DISTRIBUTED BY HASH(user_id) BUCKETS 32;
+
+-- 维度表：宽、行数少、可冗余
+CREATE TABLE dim_product (
+    product_id  INT,
+    name        VARCHAR(200),
+    category_l1 VARCHAR(50),      -- 冗余层级，避免再 join
+    category_l2 VARCHAR(50),
+    brand       VARCHAR(50),
+    price       DECIMAL(10,2)
+)
+DISTRIBUTED BY HASH(product_id) BUCKETS 4;
+
+-- 典型查询（星型 join）
+SELECT p.category_l1, SUM(f.amount) AS gmv
+FROM fact_order f
+JOIN dim_product p ON f.product_id = p.product_id
+JOIN dim_date d    ON f.dt = d.dt
+WHERE d.year = 2026 AND d.month = 10
+GROUP BY p.category_l1
+ORDER BY gmv DESC;</code></pre><pre><code>-- SCD Type 2 的实现（保留历史）
+CREATE TABLE dim_user (
+    user_key    BIGINT,            -- 代理键（surrogate key），自增
+    user_id     BIGINT,            -- 业务键（自然键）
+    city        VARCHAR(50),
+    level       VARCHAR(20),
+    valid_from  DATE,
+    valid_to    DATE,              -- 9999-12-31 表示当前
+    is_current  TINYINT
+);
+
+-- 查询「当时的维度值」（事实表记的是 user_key 不是 user_id）
+SELECT SUM(f.amount)
+FROM fact_order f JOIN dim_user u ON f.user_key = u.user_key
+WHERE u.city = '北京';
+-- 这样能正确反映下单时用户所在的城市
+
+-- 更新维度（Type 2）：关旧行 + 开新行
+UPDATE dim_user SET valid_to = '2026-10-21', is_current = 0
+WHERE user_id = 123 AND is_current = 1;
+INSERT INTO dim_user VALUES (NEW_KEY, 123, '上海', 'gold', '2026-10-22', '9999-12-31', 1);</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>指标对不上（重复计数）</td><td>join 到不唯一的维度表</td><td><b>join 前保证维度键唯一</b>；SCD Type2 要用代理键</td></tr><tr><td>用了 SCD Type2 后数字翻倍</td><td>同一 user_id 有多行历史</td><td>事实表必须存 <b>user_key（代理键）</b>而不是 user_id</td></tr><tr><td>维度表 join 慢</td><td>维度表太大 / 没 broadcast</td><td>小维度用 <b>broadcast join</b>；大维度要分桶对齐</td></tr><tr><td>事实表太宽</td><td>把描述属性放进了事实表</td><td>描述属性放维度表；事实表只留外键+度量</td></tr><tr><td>时间维度没建</td><td>每次用函数算年月</td><td><b>建 dim_date 表</b>（预生成 10 年的日期属性）</td></tr><tr><td>层次查询慢</td><td>雪花模型 join 太多</td><td>反规范化成星型；或冗余层级列</td></tr><tr><td>维度更新后历史数据变了</td><td>用了 Type 1（覆盖）</td><td>需要历史用 Type 2</td></tr></tbody></table></div><p class="muted"><b>事实表 grain（粒度）必须先定清楚</b>：一行代表什么？「一个订单」还是「一个订单的一个商品」？粒度决定了所有度量能否相加，<b>这是维度建模最重要的一步</b>。粒度不清晰的模型，后期所有指标都会出问题。</p></section>
 <section class="panel"><h2>自检</h2><details><summary>订单金额连接订单明细后变成两倍，先检查什么？</summary><p>先检查事实行粒度与连接基数，确认同一订单金额是否被每条明细重复带出。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/olap-vs-oltp.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

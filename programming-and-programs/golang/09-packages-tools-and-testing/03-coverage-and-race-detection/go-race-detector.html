@@ -71,6 +71,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -215,5 +233,54 @@ Goroutine 7 (running) created at:            <span class="cm">// ③ 两个 goro
 
 </div>
 <div class="footer"><a href="../../index.html">← 返回 Go 索引</a> · &copy; 2026 Visuals</div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Race Detector 的原理与代价</h2><p>Go 的竞态检测器基于 <strong>ThreadSanitizer（TSan）</strong> 算法，在编译期插桩，运行时记录每次内存访问并检测冲突。</p><div class="table-wrap"><table><thead><tr><th>维度</th><th>影响</th><th>说明</th></tr></thead><tbody><tr><td><b>CPU</b></td><td><b>慢 5~10 倍</b></td><td>每次内存访问都要查影子内存</td></tr><tr><td><b>内存</b></td><td><b>多 5~10 倍</b></td><td>维护访问历史的影子内存</td></tr><tr><td><b>检测能力</b></td><td><strong>只检测实际执行到的竞争</strong></td><td>没跑到的代码路径检测不到</td></tr><tr><td><b>误报</b></td><td><b>基本无</b></td><td>基于 happens-before，有竞争才报</td></tr></tbody></table></div><p><b>使用方法</b></p><pre><code># 开启竞态检测（测试与运行时都可）
+go test -race ./...
+go run -race main.go
+go build -race -o app ./cmd/app
+
+# 关键环境变量
+GORACE="halt_on_error=1"     # 发现第一个竞争就退出
+GORACE="history_size=7"      # 每个内存字保留的访问历史数，默认 2
+                              # 调大能发现"间隔较远"的竞争，但更耗内存
+
+# 输出解读
+#   WARNING: DATA RACE
+#   Write at 0x00c000112060 by goroutine 8:     ← 写操作在哪
+#   Previous read at 0x00c000112060 by goroutine 7:  ← 之前的读在哪
+#   +0x... github.com/x/y.(*T).method()         ← 完整调用栈
+# 两个栈都给出，定位非常直接</code></pre><p class="muted"><b>只在 CI 和压测环境开，不要上生产</b>：5~10 倍的性能损失无法接受。标准做法是<strong>本地开发 + CI 的 <code>go test -race</code> 必过</strong>，生产用正常构建。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>典型竞争模式与修复</h2><div class="table-wrap"><table><thead><tr><th>模式</th><th>示例</th><th>修复</th></tr></thead><tbody><tr><td><b>闭包捕获循环变量</b></td><td><code>for _, v := range xs { go func(){ use(v) }() }</code></td><td>Go 1.22 起已修复；旧版传参 <code>func(v T)</code></td></tr><tr><td><b>共享计数器</b></td><td>多 goroutine 直接 <code>cnt++</code></td><td><code>atomic.AddInt64</code> 或 mutex</td></tr><tr><td><b>并发读写 map</b></td><td>一个写、一个读</td><td><code>sync.RWMutex</code> 或 <code>sync.Map</code></td></tr><tr><td><b>延迟初始化</b></td><td>多 goroutine 检查 <code>if x == nil</code></td><td><code>sync.Once</code></td></tr><tr><td><b>结构体字段部分保护</b></td><td>锁了 A 字段没锁 B</td><td>明确哪些字段受哪把锁保护</td></tr><tr><td><b>接口值并发赋值</b></td><td>多 goroutine 给接口变量赋值</td><td>接口是两字结构，赋值非原子，需加锁</td></tr></tbody></table></div><p><b>并发 map 修复</b></p><pre><code>// ✗ 竞争：多个 goroutine 同时写 map
+// m[key] = value
+
+// ✓ 方案 1：RWMutex（读多写少）
+var mu sync.RWMutex
+mu.Lock();   m[key] = value;  mu.Unlock()
+mu.RLock();  v := m[key];     mu.RUnlock()
+
+// ✓ 方案 2：sync.Map（读写都很多、或 key 分散）
+var sm sync.Map
+sm.Store(key, value)
+if v, ok := sm.Load(key); ok { ... }
+
+// ✓ 方案 3：分片加锁（高并发下减少锁冲突）
+type ShardedMap []*shard     // 每个 shard 一把锁
+// 按 key hash 选 shard，把锁冲突降为 1/N
+
+// 注意：sync.Map 不是万能更快。
+// 若写多读少或 key 集中，普通 map + Mutex 反而更快。</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>覆盖率与竞态检测的配合</h2><div class="table-wrap"><table><thead><tr><th>命令</th><th>作用</th><th>说明</th></tr></thead><tbody><tr><td><code>go test -cover</code></td><td>语句覆盖率</td><td>看哪些代码没被测到</td></tr><tr><td><code>go test -coverprofile=c.out</code></td><td>生成覆盖率文件</td><td>配合 <code>go tool cover -html</code> 可视化</td></tr><tr><td><code>go test -race -cover</code></td><td><b>两者同时</b></td><td><strong>推荐 CI 配置</strong></td></tr><tr><td><code>go tool cover -func=c.out</code></td><td>按函数看覆盖率</td><td>快速定位盲区</td></tr></tbody></table></div><p><b>覆盖率配置</b></p><pre><code># 完整 CI 配置示例
+go test -race -coverprofile=coverage.out -covermode=atomic ./...
+go tool cover -func=coverage.out | tail -1     # 总覆盖率
+go tool cover -html=coverage.out -o cov.html   # 生成可视化报告
+
+# covermode 三种：
+#   set      是否执行过（默认，最快）
+#   count    执行了多少次（可看热点）
+#   atomic   并发安全计数，&lt;strong&gt;配合 -race 必须用这个&lt;/strong&gt;，否则计数本身也有竞争
+
+# 覆盖率目标：核心业务逻辑 &gt; 80%，
+# 但不要为了数字写无断言的测试——那只是“执行过”，不是“验证过”</code></pre><p><b>覆盖率与竞态检测的互补关系</b>：竞态检测器<strong>只能发现被实际执行到的竞争</strong>。所以低覆盖率的代码即使跑了 <code>-race</code> 也是安全的假象——逻辑没走到，竞争自然没暴露。<strong>提高覆盖率本身就是提升竞态检测有效性的手段</strong>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：为什么本地跑 <code>-race</code> 没报错，线上却出问题？</summary><p>A：三个原因——① <strong>没执行到</strong>：竞态检测只覆盖实际跑到的路径，并发时序没触发就不会报；② <strong>并发度不够</strong>：本地 goroutine 少、调度快，竞争窗口极窄；③ <strong>生产构建没有插桩</strong>：<code>-race</code> 是编译期插桩，生产二进制里根本没有检测代码。所以做法是<strong>用压测 + 高并发场景跑 <code>-race</code></strong>，而不是只跑单元测试。</p></details><details><summary>Q：<code>-race</code> 报了但我看不懂两个栈？</summary><p>A：看两个关键信息。<strong>操作类型</strong>：<code>Write at ... by goroutine 8</code> 说明是 goroutine 8 在写；<strong>另一个栈</strong>：<code>Previous read/write at ... by goroutine 7</code> 是冲突的另一方。两者访问同一个地址（<code>0x00c...</code>）且<strong>至少一方是写</strong>，且没有 happens-before 关系。修复思路：要么加同步（锁/原子/channel），要么改成不共享（每个 goroutine 用独立副本，最后归并）。</p></details><details><summary>Q：<code>atomic</code> 和 <code>mutex</code> 怎么选？</summary><p>A：判据是<strong>操作的复合程度</strong>。单个变量的读改写（<code>cnt++</code>、<code>flag = true</code>）用 <code>atomic</code>，它是一条 CPU 指令，无锁且快；<strong>多个变量要作为一个整体更新</strong>，或需要“检查再执行”（check-then-act）时，必须用 <code>mutex</code>——因为 atomic 只能保证单变量的原子性，组合起来仍有竞态。另外 atomic 存在 ABA 问题与内存序理解成本，逻辑复杂时别硬用。</p></details><details><summary>Q：覆盖率 100% 就安全了吗？</summary><p>A：<strong>远远不够</strong>。语句覆盖率 100% 只说明每行都执行过，不代表<strong>分支组合</strong>都覆盖（分支覆盖率才是），更不代表<strong>并发时序</strong>被覆盖。典型反例：一个函数被单线程测过 100% 覆盖，但多 goroutine 同时调用时仍有竞态——语句覆盖率完全看不出来。所以并发代码要额外做<strong>并发压力测试</strong>（<code>-race</code> + 高并发 + 多次重复）。</p></details></div></section>
 </body>
 </html>

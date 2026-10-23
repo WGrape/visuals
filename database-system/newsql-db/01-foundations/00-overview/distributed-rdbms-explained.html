@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -319,6 +337,19 @@
   </div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>三条技术路线对照</h2><div class="table-wrap"><table><thead><tr><th>路线</th><th>代表</th><th>核心思路</th><th>代价</th></tr></thead><tbody><tr><td><b>分库分表中间件</b></td><td>ShardingSphere、MyCat、TDDL</td><td>在应用层/代理层做路由，底层还是单机 MySQL</td><td>分布式事务、跨片 JOIN、扩容迁移都要业务参与</td></tr><tr><td><b>原生分布式（NewSQL）</b></td><td>TiDB、CockroachDB、OceanBase</td><td>存储与计算分离/分片内置，对应用表现为单一库</td><td>运维体系不同、写入延迟高于单机 MySQL</td></tr><tr><td><b>共享存储（云原生）</b></td><td>Aurora、PolarDB</td><td>计算节点可扩，<b>共享一份分布式存储</b></td><td>写仍集中在单点（一写多读），写扩展有限</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>能力</th><th>分库分表</th><th>NewSQL</th><th>共享存储</th></tr></thead><tbody><tr><td>应用改造</td><td><b>大</b>（要选分片键）</td><td>小（基本透明）</td><td><b>最小</b>（兼容 MySQL）</td></tr><tr><td>写扩展</td><td>好（可加片）</td><td>好</td><td><b>有限</b>（单点写）</td></tr><tr><td>跨片 JOIN</td><td><b>差</b>（需业务规避）</td><td>中（优化器支持，但有代价）</td><td>好（同一份数据）</td></tr><tr><td>分布式事务</td><td>需 XA / 柔性事务</td><td><b>原生支持</b>（Percolator / Raft）</td><td>单机事务</td></tr><tr><td>扩容</td><td>需数据迁移</td><td>自动 rebalance</td><td>加只读节点快</td></tr><tr><td>运维复杂度</td><td>高（分片规则、数据校验）</td><td>中（新组件、新监控）</td><td><b>低</b>（最接近 RDS）</td></tr></tbody></table></div><p><b>选型的关键不是「谁更强」，而是三个硬约束</b>：① 单库数据量是否真的超过单机上限（一般 &gt; 2~5TB 且有明显增长）；② 写 QPS 是否超过单机能力；③ 是否能接受改分片键与业务 SQL。三个都是否定的话，<b>先别上分布式</b>——单机 + 读写分离 + 归档往往够用很久。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>上手前必知的量化事实</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>典型值 / 事实</th></tr></thead><tbody><tr><td>单机 MySQL 舒适区</td><td>数据量 &lt; 2TB、写 QPS &lt; 3000~5000（视硬件与索引而定）</td></tr><tr><td>分片键选择</td><td>必须选<b>高基数、查询高频、分布均匀</b>的列；选错等于把压力还压在一片上</td></tr><tr><td>跨片查询代价</td><td>N 片的全表扫描 = N 次并行的片内扫描 + 汇总，<b>没有分片键条件的查询会打满所有片</b></td></tr><tr><td>分布式事务延迟</td><td>2PC / Percolator 至少多一轮网络 RTT，跨地域时延迟会显著放大</td></tr><tr><td>自增主键</td><td>分布式下<b>不能用单机自增</b>，要用雪花/Trend/号段（否则冲突或热点）</td></tr><tr><td>热点</td><td>按时间/租户分片容易出现「最新一片是热点」，需加哈希后缀打散</td></tr></tbody></table></div><p><b>SQL 注意事项</b></p><pre><code>-- 分库分表下最典型的“不能写”的 SQL（ShardingSphere 场景）
+SELECT * FROM orders WHERE user_id = ?;                 -- ✅ 带分片键，路由到单片
+SELECT * FROM orders WHERE order_no = ?;                -- ⚠ 非分片键，全片扫描（需要建映射表或基因法）
+SELECT a.*, b.* FROM orders a JOIN users b ON ...;      -- ⚠ 跨片 JOIN，尽量改成“先查再拼”或冗余字段
+SELECT COUNT(*) FROM orders;                            -- ⚠ 全片聚合，考虑维护计数表
+SELECT * FROM orders ORDER BY create_time LIMIT 10;     -- ⚠ 跨片排序，需在中间层归并
+
+-- NewSQL（TiDB 为例）看执行计划时重点关注
+EXPLAIN ANALYZE SELECT ...;   -- 看是否出现全表扫（TableFullScan）与估算行数偏差
+SHOW TABLE regions;           -- 看数据分布是否倾斜
+SELECT * FROM information_schema.tiflash_replica;   -- 列存副本是否就绪</code></pre><details><summary>什么时候真的需要分布式？</summary><p>数据量或写吞吐单机撑不住，且已做过索引优化、归档、读写分离。分布式库带来的复杂度是<b>数量级</b>的，别为了「技术先进」上车。</p></details><details><summary>分片键怎么选？</summary><p>先列 top 10 高频查询，找一个能覆盖最多的列；再看分布是否均匀（用 <code>COUNT(*) GROUP BY</code> 验）；最后确认它没有单调递增导致的写热点。</p></details><details><summary>能不改代码迁移吗？</summary><p>共享存储路线（Aurora/PolarDB）几乎可以；NewSQL 兼容性较好但需验证 SQL 与事务语义；分库分表通常要改 SQL 与分片设计。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / NewSQL 分布式关系型数据库 ·

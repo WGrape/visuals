@@ -11,6 +11,24 @@
 <section class="panel"><h2>超时为什么更严重</h2><p>若没有足够后续段触发快速重传，发送方可能等待重传超时 RTO。经典教学模型在 cwnd=12 时超时，设置 ssthresh 约为 6，并把 cwnd 降回很小的起始窗口，再重新慢启动。相比快速恢复，超时会暂停更久，因此同样一个丢包位置可能对小流与大流造成不同影响。RTO 根据 RTT 估计和波动调整，不是固定等于一个 RTT。</p><p>这里的“减半”和“降到 1 MSS”是某类算法的抽象，实际 CUBIC、BBR、Reno 等对速率、排队和损失的反应不同。考试题若明确“按 Tahoe/Reno 模型”，就按题设计算；性能排查则要先确认内核算法与版本。</p></section>
 <section class="panel"><h2>链路容量与窗口的关系</h2><p>若路径带宽 100 Mbps、RTT 80 ms，时延带宽积约为 1 MB。要让单条连接充分利用无损路径，通常需要足够的在途数据，并有接收窗口与发送缓存支持。cwnd 远小于该量时吞吐受窗口限制；cwnd 过大而瓶颈设备缓存又很深，则可能形成排队时延。性能优化不能只追求“窗口越大越好”。</p><p>同一时间有多条连接竞争带宽，每条 cwnd 的增长与回退会互相影响。一个流的 RTT 高、丢包多，可能获得较低吞吐；公平性还取决于拥塞控制算法和队列管理。业务验收应同时看总吞吐、每流分布和延迟。</p></section>
 <section class="panel"><h2>手工验算与实测</h2><p>画表格列出 RTT 编号、cwnd、ssthresh、rwnd、事件：1→2→4→8→9→10；在 12 发生三次重复 ACK 时，把门槛约设 6，并标明快速恢复；在另一条实验里用 RTO 比较恢复时间。若表中窗口增长过门槛后仍每 RTT 翻倍，说明混淆了阶段。</p><p>抓包或内核统计可提供 RTT、重传、拥塞窗口和接收窗口线索，但不同工具采样时点不同，无法直接把每一个观察值对到教学表。先解释趋势与事件，再比较实现细节，避免凭一张曲线断言服务端应用有故障。</p></section>
+<section class="panel" data-dry-goods><h2>Reno/CUBIC 的状态机与关键数值</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>触发条件</th><th>cwnd 变化</th><th>退出条件</th></tr></thead><tbody><tr><td>慢启动 Slow Start</td><td>连接开始或超时重传后</td><td>每收到一个 ACK，cwnd += 1 MSS（每 RTT 翻倍）</td><td>cwnd ≥ ssthresh</td></tr><tr><td>拥塞避免 Congestion Avoidance</td><td>cwnd ≥ ssthresh</td><td>每 RTT 只 +1 MSS（线性增长）</td><td>检测到丢包</td></tr><tr><td>快速重传 Fast Retransmit</td><td>收到 3 个重复 ACK</td><td>立即重传，不等 RTO</td><td>进入快速恢复</td></tr><tr><td>快速恢复 Fast Recovery</td><td>快速重传后</td><td>ssthresh = cwnd/2，cwnd = ssthresh + 3</td><td>收到新数据的 ACK 后回到拥塞避免</td></tr><tr><td>超时重传 RTO</td><td>重传定时器超时（最严重）</td><td>ssthresh = cwnd/2，cwnd 直接回到 1 MSS（initcwnd）</td><td>重新慢启动</td></tr></tbody></table></div><p>Linux 的几个可直接验证的默认值：</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td>initcwnd（初始拥塞窗口）</td><td>10 个 MSS</td><td>RFC 6928 IW10，约 14.6 KB（MSS 1460）</td></tr><tr><td>initrwnd（初始接收窗口）</td><td>10 个 MSS</td><td>影响对端一开始能发多少</td></tr><tr><td>ssthresh 初始值</td><td>无穷大（实际按路由缓存学习）</td><td>首次连接直接进入慢启动</td></tr><tr><td>MSS（以太网）</td><td>1460 字节</td><td>1500 MTU − 20 IP 头 − 20 TCP 头</td></tr><tr><td>默认拥塞算法</td><td>CUBIC（5.x+ 内核）</td><td>BBR 可手动切换</td></tr></tbody></table></div><p><b>查看与验证 cwnd/ssthresh</b></p><pre><code># 查看/切换拥塞控制算法
+sysctl net.ipv4.tcp_congestion_control        # cubic
+sysctl net.ipv4.tcp_available_congestion_control
+sysctl -w net.ipv4.tcp_congestion_control=bbr
+
+# 实时看某条连接的 cwnd、rtt、retrans
+ss -ti '( dport :443 )'
+# 输出示例关键字段：
+#   cwnd:10  ssthresh:2147483647  rtt:20.4/2.1  retrans:0/3  lost:1
+
+# 设置某条路由的初始拥塞窗口（老内核用 ip route change initcwnd 10）
+ip route show default</code></pre></section><section class="panel"><h2>吞吐上限算例与排障</h2><p><b>算例</b>：RTT = 20 ms，接收窗口 rwnd = 64 KB，则这条连接的<b>理论吞吐上限</b> = rwnd / RTT = 65536 B / 0.02 s ≈ 3.3 MB/s ≈ <b>26 Mbps</b>。即使带宽是 1 Gbps，只要窗口只有 64 KB 且 RTT 20 ms，就跑不满——这就是<b>带宽时延积 BDP</b> 的约束。</p><div class="table-wrap"><table><thead><tr><th>RTT</th><th>要跑满 1 Gbps 需要的窗口</th><th>说明</th></tr></thead><tbody><tr><td>1 ms（同机房）</td><td>约 128 KB</td><td>默认自动调优通常够用</td></tr><tr><td>20 ms（同城/省内）</td><td>约 2.5 MB</td><td>必须开窗口缩放 + 调大缓冲</td></tr><tr><td>100 ms（跨洋）</td><td>约 12.5 MB</td><td>需要 tcp_rmem 上限 ≥ 16 MB 且 sock 自动调优</td></tr><tr><td>200 ms（卫星/弱网）</td><td>约 25 MB</td><td>长肥管道，必须调参，否则带宽利用率极低</td></tr></tbody></table></div><p><b>把窗口调到 BDP 之上</b></p><pre><code># Linux 自动调优的缓冲区间（min default max，单位字节）
+cat /proc/sys/net/ipv4/tcp_rmem   # 4096  131072  6291456
+cat /proc/sys/net/ipv4/tcp_wmem
+# 长肥管道调大上限（如跨洋 100ms 满 1Gbps）
+sysctl -w net.ipv4.tcp_rmem="4096 131072 16777216"
+sysctl -w net.ipv4.tcp_wmem="4096 131072 16777216"
+sysctl -w net.ipv4.tcp_window_scaling=1      # 必须开，否则窗口最大 65535</code></pre><ul><li><b>丢包即降窗</b>是 CUBIC/BBR 之前的根本约束：1% 丢包率下 CUBIC 吞吐大致按 <code>≈ MSS / (RTT × √p)</code> 衰减，长 RTT 链路会非常难看。</li><li><b>BBR</b> 不再以丢包为拥塞信号，而是测瓶颈带宽与最小 RTT；弱网/长 RTT 收益明显，但需要配合 <code>tc qdisc fq</code> 才稳定。</li><li><b>initcwnd 太小</b>会让首屏多花 1 个 RTT：10 个 MSS 意味着首个 RTT 最多发约 14 KB，大页面/大 TLS 证书会拖慢首包。</li><li><b>排障顺序</b>：先看 <code>ss -ti</code> 的 <code>retrans/lost</code> → 有丢包查链路与队列；<code>cwnd</code> 长期贴着 <code>ssthresh</code> 且接近 rwnd → 查接收窗口与自动调优。</li></ul><details><summary>cwnd 和 rwnd 谁说了算？</summary><p>发送方实际能发的是 <code>min(cwnd, rwnd)</code>：cwnd 管网络拥塞（自己算），rwnd 管对端接收能力（对端通告）。两者都受限时分别对应“网络堵”和“接收方处理慢”。</p></details><details><summary>为什么丢一个包有时只降一半，有时直接从 1 开始？</summary><p>收到 3 个重复 ACK 触发快速重传/快速恢复，说明后续包还能到达，只需减半（乘性减小）；重传定时器超时说明网络很可能中断，TCP 认为必须重新探测，于是 cwnd 重置为 initcwnd。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>cwnd=12 MSS 时 rwnd=6 MSS，发送端最多能保持约多少 MSS 在途？</summary><p>大致受两者较小值限制，约 6 MSS；实际还受已有在途数据、MSS 与实现影响。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
-<footer>继续阅读：<a href="tcp_congestion_control.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<footer>继续阅读：<a href="tcp-congestion-control.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

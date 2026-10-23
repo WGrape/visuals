@@ -70,6 +70,24 @@
   .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
   .fade.in{opacity:1;transform:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <nav class="toc" id="toc"></nav>
@@ -214,6 +232,60 @@
   </div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>前向与反向传播的计算量</h2><div class="table-wrap"><table><thead><tr><th>量</th><th>关系</th><th>说明</th></tr></thead><tbody><tr><td>前向计算量</td><td><b>1 倍</b></td><td>每层的矩阵乘 + 激活</td></tr><tr><td>反向计算量</td><td><b>约 2 倍</b></td><td>要算输入的梯度（1 次）和权重的梯度（1 次）</td></tr><tr><td>总训练计算量</td><td><b>约 3 倍</b>前向</td><td>所以常说的「FLOPs」通常指前向，训练要乘 3</td></tr><tr><td>激活值显存</td><td><b>O(batch × 各层输出)</b></td><td>反向要用，所以前向的激活必须<b>全部保留</b></td></tr><tr><td>权重显存</td><td>参数量 × 精度字节</td><td>7B 模型 FP16 = <b>14 GB</b></td></tr><tr><td>梯度显存</td><td>与权重同大小</td><td>再加 <b>14 GB</b></td></tr><tr><td>优化器状态（Adam）</td><td><b>2 倍</b>参数（m 和 v）</td><td>再加 <b>28 GB</b></td></tr><tr><td>混合精度训练的 master weights</td><td>FP32 副本</td><td>再加 <b>28 GB</b></td></tr></tbody></table></div><p><b>训练 7B 模型的显存账本</b>（FP16 + Adam + 混合精度）：权重 14GB + 梯度 14GB + Adam 状态 28GB + FP32 主权重 28GB = <b>84 GB</b>，加上激活值，<b>单卡 80GB 都装不下</b>。这就是为什么需要 ZeRO/DeepSpeed 来做优化器状态分片——<b>ZeRO-3 把这三部分都分片到多卡，显存降到 1/N</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>手算与代码</h2><pre><code># 两层网络的手算（理解反向传播）
+import numpy as np
+
+# 前向
+x = np.array([1.0, 2.0])              # 输入 (2,)
+W1 = np.array([[0.1, 0.2], [0.3, 0.4]])   # (2,2)
+b1 = np.array([0.1, 0.1])
+z1 = W1 @ x + b1                       # (2,) = [0.1+0.6+0.1, 0.2+0.8+0.1] = [0.8, 1.1]
+a1 = np.maximum(0, z1)                 # ReLU -&gt; [0.8, 1.1]
+
+W2 = np.array([[0.5, 0.6]])            # (1,2)
+z2 = W2 @ a1                           # = 0.5*0.8 + 0.6*1.1 = 1.06
+y_pred = 1 / (1 + np.exp(-z2))         # sigmoid -&gt; 0.743
+loss = 0.5 * (y_pred - 1.0) ** 2       # MSE，真实标签=1.0
+
+# 反向（链式法则，从后往前）
+dL_dy  = y_pred - 1.0                          # = -0.257
+dy_dz2 = y_pred * (1 - y_pred)                 # sigmoid 导数 = 0.191
+dL_dz2 = dL_dy * dy_dz2                        # = -0.0491
+
+dL_dW2 = dL_dz2 * a1                           # (2,) 外积关系
+dL_da1 = W2.T * dL_dz2                         # (2,) 传回上一层
+dL_dz1 = dL_da1 * (z1 &gt; 0)                     # ReLU 导数：&gt;0 为 1，否则 0
+dL_dW1 = np.outer(dL_dz1, x)                   # (2,2)
+
+# 关键：每一层的梯度 = (上游梯度) × (本层局部导数)
+# 这就是为什么 autograd 只需要记录计算图就能自动求导</code></pre><pre><code># 用 PyTorch 验证手算
+import torch
+x = torch.tensor([1.0, 2.0])
+W1 = torch.tensor([[0.1, 0.2], [0.3, 0.4]], requires_grad=True)
+W2 = torch.tensor([[0.5, 0.6]], requires_grad=True)
+
+a1 = torch.relu(W1 @ x + 0.1)
+y  = torch.sigmoid(W2 @ a1)
+loss = 0.5 * (y - 1.0) ** 2
+loss.backward()
+print(W1.grad, W2.grad)      # 与手算一致
+
+# 梯度检查（ numerical gradient check，调试必备）
+def gradcheck(f, x, eps=1e-5):
+    """用 (f(x+e)-f(x-e))/(2e) 验证解析梯度"""
+    analytic = x.grad.clone()
+    numeric = torch.zeros_like(x)
+    for i in range(x.numel()):
+        old = x.flat[i].item()
+        x.flat[i] = old + eps; f1 = f().item()
+        x.flat[i] = old - eps; f2 = f().item()
+        x.flat[i] = old
+        numeric.flat[i] = (f1 - f2) / (2 * eps)
+    return torch.allclose(analytic, numeric, atol=1e-4)
+# 写自定义层时&lt;b&gt;必须&lt;/b&gt;做梯度检查，否则可能有隐性 bug</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>loss 不降</td><td>学习率太大/太小；梯度消失</td><td>试 1e-3 → 1e-5；检查梯度范数是否为 0</td></tr><tr><td>梯度爆炸（nan）</td><td>学习率太大 / 没做梯度裁剪</td><td><code>clip_grad_norm_(1.0)</code>；降学习率</td></tr><tr><td>梯度消失</td><td>深层网络 + sigmoid/tanh</td><td>换 ReLU/GELU；加残差连接；用 LayerNorm</td></tr><tr><td>显存 OOM</td><td>激活值占大头（batch 太大）</td><td>降 batch；用<b>梯度检查点</b>（时间换空间，显存降到 1/√n）</td></tr><tr><td>训练慢</td><td>前向+反向 3 倍计算</td><td>混合精度（FP16/BF16，快 2~3 倍）；加大 batch 提高 GPU 利用率</td></tr><tr><td>自定义层结果不对</td><td>反向传播写错了</td><td><b>做数值梯度检查</b></td></tr><tr><td>推理时结果不对</td><td>忘了 <code>model.eval()</code></td><td>Dropout/BatchNorm 在训练与推理行为不同</td></tr></tbody></table></div><p class="muted"><b>梯度检查点（gradient checkpointing）</b>：训练时不保存所有层的激活，只在需要时重新计算。<b>显存从 O(n) 降到 O(√n)</b>，代价是<b>多一次前向计算（约慢 30%）</b>。这是显存不够时最有效的手段。</p></div></section>
 <footer><p>Visuals · 模型基础 / 神经网络地基</p></footer>
 
 <script>

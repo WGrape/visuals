@@ -440,6 +440,24 @@
             }
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="bg-particles"></div>
@@ -822,6 +840,34 @@
                 这就是为什么 Zset 能同时支持"排行榜"（ZRANGE）和"实时分数"（ZSCORE）两种高频场景。
             </p>
         </section>
+<section class="skiplist-section" data-dry-goods><div class="x-dry"><h2>ZSet 的两种编码与阈值</h2><div class="table-wrap"><table><thead><tr><th>编码</th><th>底层</th><th>触发条件</th><th>复杂度</th><th>特点</th></tr></thead><tbody><tr><td><b>listpack</b></td><td>紧凑连续内存（member 与 score 相邻存放，按 score 排序）</td><td>元素数 ≤ <code>zset-max-listpack-entries</code>（<b>128</b>）且 member 长度 ≤ <code>zset-max-listpack-value</code>（<b>64 字节</b>）</td><td>插入 O(n)</td><td><b>极省内存</b>，小集合首选</td></tr><tr><td><b>skiplist + dict</b></td><td>跳表（按 score 有序）+ 哈希表（member → score，O(1) 查分）</td><td>任一条件超出</td><td>插入/删除/按分查 <b>O(log n)</b>；按 member 查 <b>O(1)</b></td><td>功能完整，内存开销大</td></tr></tbody></table></div><p><b>为什么要同时用跳表和哈希表</b>：跳表负责“按 score 范围/排名查询”（<code>ZRANGEBYSCORE</code>、<code>ZRANK</code> O(log n)）；哈希表负责“按 member 查分数”（<code>ZSCORE</code> O(1)）。两者指向<b>同一份 member/score 数据</b>（共享指针），所以内存只多了一份索引结构，不是两份数据。</p><div class="table-wrap"><table><thead><tr><th>跳表参数</th><th>值</th><th>含义</th></tr></thead><tbody><tr><td><b>最大层数</b></td><td><b>32</b>（<code>ZSKIPLIST_MAXLEVEL</code>）</td><td>最多 32 层索引</td></tr><tr><td><b>晋升概率 p</b></td><td><b>0.25</b>（1/4）</td><td>每层节点数是下层的 1/4，比 1/2 更省内存</td></tr><tr><td>平均层数</td><td>约 1.33</td><td>p=0.25 时每个节点平均只有 1.33 层</td></tr><tr><td>百万元素查找</td><td>约 <b>20 次</b>比较</td><td>log₄(10⁶) ≈ 10，加上每层少量比较</td></tr></tbody></table></div><p><b>ZSet 编码与命令</b></p><pre><code># 阈值配置
+CONFIG GET zset-max-listpack-entries     # 128
+CONFIG GET zset-max-listpack-value       # 64
+
+# 观察编码转换
+ZADD z1 1 a 2 b
+OBJECT ENCODING z1          # "listpack"
+# 加到 129 个元素
+redis-cli EVAL "for i=1,129 do redis.call('ZADD', KEYS[1], i, 'm'..i) end return 1" 1 z1
+OBJECT ENCODING z1          # "skiplist"
+# 关键：转换不可逆，删回少量元素也不变回 listpack
+
+# 常见命令复杂度
+# ZADD / ZREM / ZSCORE / ZRANK     : O(log n)（ZSCORE 走 dict 是 O(1)）
+# ZRANGE / ZREVRANGE               : O(log n + m)，m 为返回元素数
+# ZRANGEBYSCORE                     : O(log n + m)
+# ZRANGEBYLEX                       : O(log n + m)
+# ZCARD                             : O(1)
+# ZCOUNT / ZLEXCOUNT                : O(log n)
+
+# 排行榜典型用法
+ZADD leaderboard 100 "player1"
+ZINCRBY leaderboard 50 "player1"
+ZREVRANGE leaderboard 0 9 WITHSCORES        # Top 10
+ZREVRANK leaderboard "player1"              # 我的排名（从 0 开始）
+ZSCORE leaderboard "player1"</code></pre></div></section>
+<section class="skiplist-section" ><div class="x-dry"><h2>典型场景与坑</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>做法</th><th>说明</th></tr></thead><tbody><tr><td>排行榜</td><td><code>ZADD</code> + <code>ZREVRANGE</code> + <code>ZREVRANK</code></td><td>同分按 member 字典序排</td></tr><tr><td>延迟队列</td><td>score = 执行时间戳，<code>ZRANGEBYSCORE 0 now</code> 捞到期任务</td><td>比 List 灵活（可任意时间点）</td></tr><tr><td>优先级队列</td><td>score = 优先级</td><td>配合 <code>ZPOPMIN</code>（Redis 5+）</td></tr><tr><td>时间线/滑动窗口统计</td><td>score = 时间戳，<code>ZREMRANGEBYSCORE</code> 清理旧数据</td><td>如“最近 1 小时的访问记录”</td></tr><tr><td>分页 + 排序</td><td><code>ZRANGE ... WITHSCORES</code></td><td>注意大 offset 的开销 O(log n + m)</td></tr></tbody></table></div><ul><li><b>编码转换不可逆</b>：同 Hash。一旦超过 128 个元素或 member 超过 64 字节就永久变 skiplist。做延迟队列时元素数必然超阈值，所以编码必然是 skiplist——不要指望 listpack 省内存。</li><li><b>ZRANGEBYSCORE 的 LIMIT offset 陷阱</b>：大 offset（如跳过 10 万条）需要先遍历 10 万个节点，虽是 O(log n + m) 但 m 很大时依然慢。深分页要用<b>游标</b>（记上次的 score）而不是 offset。</li><li><b>score 是双精度浮点数</b>：只有 <b>53 位</b>精度。超过 2^53（约 9×10^15）的整数会丢失精度，时间戳用毫秒没问题（1.7×10^12），但微秒/纳秒要注意。同分时按 member 的字典序排。</li><li><b>大 ZSet 的删除</b>：几百万成员的 ZSet 用 <code>DEL</code> 会阻塞。用 <code>UNLINK</code> 或 <code>ZREMRANGEBYRANK</code> 分批删。</li><li><b>内存优化</b>：member 尽量短（短 member 才能用 listpack）；不需要精确排名时可用 Hash 代替；超大排行榜要拆分（如按时间段分片）。</li><li><b>排障</b>：<code>OBJECT ENCODING</code> → <code>ZCARD</code> 看元素数 → <code>MEMORY USAGE</code> → 慢查询日志看是否有大 offset 的 ZRANGE。</li></ul><details><summary>为什么 ZSet 不用红黑树而用跳表？</summary><p>跳表实现简单（不用处理复杂的再平衡）、支持高效的范围查询（找到起点后沿底层链表顺序扫即可，红黑树要中序遍历）、且可以通过调 p 在内存与性能间权衡。Redis 作者明确说明跳表“更简单且性能足够”。</p></details><details><summary>ZSet 和 Set 该怎么选？</summary><p>需要<b>排序、按分数范围查、取 TopN</b> → ZSet；只需要<b>去重与存在性判断</b> → Set（更省内存，Set 也有 intset/listpack 编码的紧凑优化）。</p></details></div></section>
+
     </div>
 
     <script>

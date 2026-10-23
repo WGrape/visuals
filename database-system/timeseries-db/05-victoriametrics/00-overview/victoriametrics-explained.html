@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VictoriaMetrics：Prometheus 的远端存储方案</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>VictoriaMetrics：Prometheus 的远端存储方案</h1>
+  <p>单机版与集群版怎么选、vminsert/vmselect/vmstorage 的分工、与 Thanos/Mimir 的路径差异</p>
+  <span class="tag">VictoriaMetrics</span><span class="tag">remote_write</span><span class="tag">vminsert</span><span class="tag">vmselect</span><span class="tag">vmstorage</span><span class="tag">MetricsQL</span>
+</header>
+<nav>
+  <a href="#what">① 解决什么问题</a>
+  <a href="#arch">② 集群架构</a>
+  <a href="#single">③ 版本选择</a>
+  <a href="#diff">④ 与同类对比</a>
+  <a href="#use">⑤ 落地要点</a>
+</nav>
+<main>
+<section id="what">
+<h2><span class="n">01</span>它解决 Prometheus 的什么问题</h2>
+
+<p>VictoriaMetrics 最常见的用法是<strong>作为 Prometheus 的远端存储</strong>：Prometheus 继续负责抓取和告警判定，把样本通过 remote_write 转发给它长期保存。它可以在单机上吃下比 Prometheus 本地存储大得多的数据量，同时保持不错的查询性能。</p>
+<div class="grid">
+  <div class="card"><strong>两种形态</strong>
+    <ul>
+      <li><strong>单机版</strong>：一个二进制，同时做写入、存储、查询。<strong>中小规模优先选它</strong>——运维简单，单机能撑的规模往往已经够用</li>
+      <li><strong>集群版</strong>：拆成 vminsert / vmselect / vmstorage 三类组件，写入与查询各自横向扩展</li>
+    </ul>
+  </div>
+  <div class="card"><strong>兼容什么</strong>
+    <ul>
+      <li>写入：Prometheus remote_write、InfluxDB line protocol、OpenTSDB、Graphite、CSV 等</li>
+      <li>查询：<strong>PromQL 兼容</strong>，Grafana 基本可以直接换数据源</li>
+      <li>扩展：MetricsQL 在 PromQL 之上增加了一批函数与语法糖</li>
+    </ul>
+  </div>
+</div>
+<div class="lead warn"><strong>关于「省资源 N 倍」这类宣传</strong>：厂商与社区给出的对比数字（内存、磁盘占用）依赖具体的数据集、基数分布和版本，<strong>不同测试口径结论差异很大</strong>。把它当作「值得实测的候选」而不是「既定事实」，在你自己的数据上压一遍再下结论。</div>
+
+</section>
+
+<section id="arch">
+<h2><span class="n">02</span>集群版架构</h2>
+<div class="fig">
+<svg width="880" height="330" viewBox="0 0 880 330">
+  <text x="440" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#d2a8ff">VictoriaMetrics 集群版架构</text>
+
+  <rect x="30" y="60" width="150" height="56" rx="9" fill="#171b26" stroke="#7ee787"/>
+  <text x="105" y="84" text-anchor="middle" font-size="12" font-weight="700" fill="#7ee787">Prometheus</text>
+  <text x="105" y="102" text-anchor="middle" font-size="10" fill="#94a3b8">remote_write</text>
+
+  <rect x="230" y="56" width="160" height="64" rx="10" fill="#1f2433" stroke="#6ea8fe"/>
+  <text x="310" y="80" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6ea8fe">vminsert</text>
+  <text x="310" y="98" text-anchor="middle" font-size="10.5" fill="#94a3b8">写入入口（无状态）</text>
+  <text x="310" y="114" text-anchor="middle" font-size="10.5" fill="#94a3b8">按一致性哈希分片</text>
+
+  <rect x="440" y="56" width="180" height="64" rx="10" fill="#1f2433" stroke="#d2a8ff"/>
+  <text x="530" y="80" text-anchor="middle" font-size="12.5" font-weight="700" fill="#d2a8ff">vmstorage</text>
+  <text x="530" y="98" text-anchor="middle" font-size="10.5" fill="#94a3b8">有状态，存原始数据</text>
+  <text x="530" y="114" text-anchor="middle" font-size="10.5" fill="#94a3b8">可多副本</text>
+
+  <rect x="670" y="56" width="160" height="64" rx="10" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="750" y="80" text-anchor="middle" font-size="12.5" font-weight="700" fill="#56d4dd">vmselect</text>
+  <text x="750" y="98" text-anchor="middle" font-size="10.5" fill="#94a3b8">查询入口（无状态）</text>
+  <text x="750" y="114" text-anchor="middle" font-size="10.5" fill="#94a3b8">扇出后聚合结果</text>
+
+  <g stroke="#6ea8fe" stroke-width="1.6" fill="none" marker-end="url(#b2)">
+    <path d="M180,88 L226,88"/>
+    <path d="M390,88 L436,88"/>
+    <path d="M620,88 L666,88"/>
+  </g>
+  <defs><marker id="b2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#6ea8fe"/></marker></defs>
+
+  <rect x="700" y="170" width="150" height="52" rx="9" fill="#171b26" stroke="#2b3142"/>
+  <text x="775" y="194" text-anchor="middle" font-size="11.5" fill="#e2e8f0">Grafana</text>
+  <text x="775" y="212" text-anchor="middle" font-size="10" fill="#94a3b8">PromQL / MetricsQL</text>
+  <path d="M750,120 L750,166" fill="none" stroke="#56d4dd" stroke-width="1.5" marker-end="url(#c2)"/>
+  <defs><marker id="c2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#56d4dd"/></marker></defs>
+
+  <rect x="30" y="170" width="620" height="140" rx="9" fill="#171b26" stroke="#2b3142"/>
+  <text x="46" y="194" font-size="11.5" font-weight="700" fill="#f0a868">三个组件都能独立扩缩容</text>
+  <text x="46" y="216" font-size="10.5" fill="#94a3b8">· vminsert / vmselect <text font-weight="700">无状态</text>，写入压力大就加 insert，查询压力大就加 select</text>
+  <text x="46" y="236" font-size="10.5" fill="#94a3b8">· vmstorage <text font-weight="700">有状态</text>，扩容涉及数据迁移与重新分片，要提前规划</text>
+  <text x="46" y="256" font-size="10.5" fill="#94a3b8">· 副本由 vmstorage 层保证：写 N 份，读时去重</text>
+  <text x="46" y="280" font-size="10.5" fill="#ff7b72">· 单机版（single-node）没有这三个组件，一个二进制全干，中小规模优先用它</text>
+  <text x="46" y="300" font-size="10.5" fill="#94a3b8">· 兼容 Prometheus 的 remote_write 协议，也支持 InfluxDB line protocol 等多种写入协议</text>
+</svg>
+<div class="cap">写入与查询分离，各自无状态可横向扩展；vmstorage 负责持久化和副本。</div>
+</div>
+<div class="lead ok"><strong>为什么要把写入和查询拆开？</strong>因为两者的压力来源完全不同：写入压力取决于采集规模和抓取频率，查询压力取决于仪表盘数量和查询复杂度。拆开后可以<strong>只扩你缺的那一侧</strong>，而不是整体扩容。</div>
+
+</section>
+
+<section id="single">
+<h2><span class="n">03</span>单机版 vs 集群版怎么选</h2>
+
+<table>
+  <tr><th>考量</th><th>单机版</th><th>集群版</th></tr>
+  <tr><td>运维复杂度</td><td>低，一个进程</td><td>高，三类组件 + 分片 + 副本</td></tr>
+  <tr><td>扩容方式</td><td>垂直扩容（加 CPU / 内存 / 磁盘）</td><td>水平扩容</td></tr>
+  <tr><td>多副本 / HA</td><td>靠外部手段（双写、存储层冗余）</td><td>原生支持，vmstorage 可配副本数</td></tr>
+  <tr><td>适用规模</td><td>百万级活跃时间线以内通常够用</td><td>超出单机能力、或需要 HA 时</td></tr>
+  <tr><td>建议</td><td><strong>默认起点</strong></td><td>确需时再迁，不要一上来就上集群</td></tr>
+</table>
+<div class="lead warn">「先上集群」是常见的过度设计。单机版能撑的规模往往远超预期，而集群版带来的组件数量、分片规划和故障排查复杂度是实打实的成本。<strong>先单机，监控住资源水位，撑不住了再迁。</strong></div>
+
+</section>
+
+<section id="diff">
+<h2><span class="n">04</span>与 Prometheus / Thanos / Mimir 的关系</h2>
+
+<table>
+  <tr><th>方案</th><th>定位</th><th>思路</th></tr>
+  <tr><td><strong>VictoriaMetrics</strong></td><td>一体化时序存储（也可独立部署）</td><td>自研存储引擎，单机吃下尽可能多的数据；集群版再横向扩展</td></tr>
+  <tr><td><strong>Thanos</strong></td><td>Prometheus 的旁路增强</td><td>保留 Prometheus 本地存储，用 Sidecar + 对象存储做全局查询与长期留存</td></tr>
+  <tr><td><strong>Mimir</strong></td><td>Prometheus 的分布式版本</td><td>重写存储层为微服务架构，面向多租户与超大规模</td></tr>
+</table>
+<div class="lead">三者解决的都是「Prometheus 单机不够用」，但路径不同：VictoriaMetrics 是<strong>换掉存储</strong>，Thanos 是<strong>在外面加一层</strong>，Mimir 是<strong>重写 Prometheus 本身</strong>。已有 Prometheus 且不想大改 → Thanos；新建且追求简单 → VictoriaMetrics；多租户超大规模 → Mimir。</div>
+
+</section>
+
+<section id="use">
+<h2><span class="n">05</span>落地要点</h2>
+
+<ol>
+  <li><strong>Prometheus 侧保留期可以设短</strong>（比如几小时到一两天），本地只做热数据，历史全在 VictoriaMetrics。但要注意本地保留太短时，远端故障期间的数据就真的没了。</li>
+  <li><strong>监控 remote_write 本身</strong>：队列堆积、写入失败率、落后程度。远端写入是异步的，静默丢数是这类架构最常见的坑。</li>
+  <li><strong>降采样</strong>：长期数据用降采样保留，原始精度只留近期。这是控制成本最有效的手段。</li>
+  <li><strong>基数治理照样要做</strong>：换存储不会让高基数变便宜，只是让同样的基数更便宜。<code>user_id</code> 当 label 在任何时序库里都是错的。</li>
+  <li><strong>先小范围灰度</strong>：把一部分 job 的 remote_write 指向 VictoriaMetrics，对比两边查询结果一致后再全量切。</li>
+</ol>
+<div class="lead bad"><strong>版本与协议相关提示</strong>：组件名称、支持的写入协议、MetricsQL 函数集合、降采样配置方式都随版本演进。<strong>请以你使用版本的官方文档为准。</strong></div>
+
+</section>
+
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>关键参数与默认值的量化对照</h2><p>下列参数是单机版/集群版最常用的落地开关，默认值决定是否踩坑：</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>作用与调优要点</th></tr></thead><tbody><tr><td><code>-retentionPeriod</code></td><td>1（月）</td><td>保留期，支持 <code>d/w/y</code>。<b>只能延长不能缩短</b>：设小了不会立刻删旧数据</td></tr><tr><td><code>-memory.allowedPercent</code></td><td>60</td><td>允许占用主机/容器内存的百分比，容器里按 <code>limit</code> 计算</td></tr><tr><td><code>-search.maxUniqueTimeseries</code></td><td>300000</td><td>单条查询可扫描的序列数上限，超限直接报错而非慢查询</td></tr><tr><td><code>-search.maxPointsPerSeries</code></td><td>30000</td><td>单序列返回点数上限，长区间查询需先降采样</td></tr><tr><td><code>-search.maxQueryDuration</code></td><td>30s</td><td>查询超时，被中断的查询仍计费 CPU</td></tr><tr><td><code>-search.maxQueueDuration</code></td><td>10s</td><td>并发打满时排队上限，超过直接拒绝</td></tr><tr><td><code>-maxLabelsPerTimeseries</code></td><td>30</td><td>单条序列 label 数上限，高基数 label 会被丢弃</td></tr><tr><td><code>-dedup.minScrapeInterval</code></td><td>0（关闭）</td><td>设为 <code>scrape_interval</code> 可去掉重复抓取的样本</td></tr><tr><td><code>-insert.maxQueueDuration</code></td><td>60s</td><td>写入队列缓冲时长，调大可扛短暂尖峰但吃内存</td></tr></tbody></table></div><p class="muted">集群版同名参数要分别加到 <code>vminsert/vmselect/vmstorage</code> 上，只有 <code>vmstorage</code> 侧的 <code>-retentionPeriod</code> 决定数据生命周期。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>部署、迁移与验证的可执行命令</h2><p><b>部署与迁移</b></p><pre><code># 单机版：立即能跑的最小部署（数据落 ./vm-data）
+docker run -d --name vm -p 8428:8428 \
+  -v $(pwd)/vm-data:/victoria-metrics-data \
+  victoriametrics/victoria-metrics:v1.102.0 \
+  -retentionPeriod=12 -memory.allowedPercent=70 \
+  -search.maxUniqueTimeseries=1000000
+
+# Prometheus 侧把样本转发过去
+remote_write:
+  - url: http://vm:8428/api/v1/write
+    queue_config:
+      max_samples_per_send: 10000      # 单请求样本数
+      max_shards: 30                   # 并发分片
+      capacity: 100000                 # 队列容量（内存缓冲）
+      min_backoff: 30ms
+      max_backoff: 100ms
+
+# 从 Prometheus 本地存储迁历史数据（限速避免打爆写入）
+./vmctl prometheus --prom-snapshot=/path/to/snap \
+  --vm-addr=http://vm:8428 --vm-concurrency=4 --vm-batch-size=500000</code></pre><p><b>验证与运维</b></p><pre><code># 看写入健康度：活跃序列数、每秒写入点数
+curl -s http://vm:8428/api/v1/status/tsdb | python3 -m json.tool
+
+# 查询是否触碰上限（返回 422 且带 limits 字样即为超限）
+curl -s 'http://vm:8428/api/v1/query_range?query=up&amp;start=-1h&amp;end=now&amp;step=60'
+
+# 按 label 删除序列（先 dryRun=1 确认影响面）
+curl -s 'http://vm:8428/api/v1/admin/tsdb/delete_series?match[]={job="old"}&amp;dryRun=1'
+
+# 打快照并备份（快照是硬链接，几乎不占额外空间）
+curl -s http://vm:8428/snapshot/create &gt; snap.json
+curl -s 'http://vm:8428/api/v1/export?match[]={__name__=~".+"}' -o backup.jsonl</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>容量估算：从序列数推内存和磁盘</h2><p>容量可以按下面两条公式粗算，误差通常在一个数量级内：</p><div class="table-wrap"><table><thead><tr><th>项目</th><th>估算公式</th><th>示例</th></tr></thead><tbody><tr><td>内存</td><td>活跃序列数 × 0.5~1 KB + 查询峰值缓存</td><td>100 万活跃序列约 0.5~1 GB 常驻，复杂聚合查询另加缓存</td></tr><tr><td>磁盘</td><td>样本点总数 × 1~2 字节（压缩后）</td><td>100 万序列 × 30s 采样 = 2.88 亿点/天 ≈ 0.4~0.6 GB/天</td></tr><tr><td>点速率</td><td>活跃序列数 ÷ 采样间隔</td><td>100 万序列 / 15s ≈ 6.7 万点/秒</td></tr><tr><td>查询代价</td><td>扫描序列数 × 时间跨度点数</td><td>30 万序列 × 1 天(2880 点) = 8.6 亿点，必须降采样</td></tr></tbody></table></div><ul><li><b>先压测再定规格</b>：用真实 <code>remote_write</code> 灌 24 小时，读 <code>/api/v1/status/tsdb</code> 的序列数与磁盘。</li><li><b>保留期与磁盘线性相关</b>：保留期从 1 个月延长到 12 个月，磁盘需求约 ×12。</li><li><b>降采样是查询侧的救星</b>：集群版可对超过 <code>-downsampling.period</code> 的数据做聚合，历史查询扫的点数下降 1~2 个数量级。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单：症状 → 原因 → 动作</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>最可能的原因</th><th>处理动作</th></tr></thead><tbody><tr><td>写入返回 429 / 队列满</td><td>并发或批太小，队列积压</td><td>调大 <code>max_shards</code> 与 <code>capacity</code>；或 <code>-insert.maxQueueDuration</code> 放宽</td></tr><tr><td>查询报 too many timeseries</td><td>label 基数过高或未加范围限定</td><td>加 <code>job/instance</code> 过滤；或提高 <code>-search.maxUniqueTimeseries</code></td></tr><tr><td>改小保留期后磁盘没降</td><td>保留期收缩只影响新写入</td><td>确认 <code>-retentionPeriod</code> 生效；需要立刻回收才删序列</td></tr><tr><td>容器被 OOM kill</td><td>limit 小于 <code>-memory.allowedPercent</code> 推算值</td><td>把 limit 提到估算内存的 1.5 倍，或调低该百分比</td></tr><tr><td>Grafana 面板变慢</td><td>长区间原始点扫描</td><td>用 <code>rate()</code> 聚合 + 降采样；避免 <code>step</code> 小于采集间隔</td></tr><tr><td>数据出现重复/跳变</td><td>多副本 Prometheus 同时写</td><td>设 <code>-dedup.minScrapeInterval</code> = 抓取间隔</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>把 <code>-retentionPeriod</code> 从 12 改成 1，磁盘会立刻释放吗？</summary><p>不会。保留期收缩只对新写入生效，已有数据仍按旧策略保留。要立刻回收空间必须显式删除序列，或重建实例并导入需要保留的数据。</p></details><details><summary>单机版什么时候必须换集群版？</summary><p>三个信号：活跃序列数超过单机内存能承载的量级、写入点速率持续打满单机 CPU、或需要写入与查询分别扩容/多租户隔离。只因为“想做HA”不必上集群版——单机版可用双写 + 双读实现高可用。</p></details><details><summary>为什么 <code>remote_write</code> 已经通了，Grafana 查不到数据？</summary><p>先确认查询走的是 VM 的 <code>/api/v1/query</code>（PromQL 兼容）。常见坑是数据源填了 Prometheus 端口、查询时间范围超出保留期、或 <code>-search.maxPointsPerSeries</code> 截断返回。</p></details><details><summary>VictoriaMetrics 的 MetricsQL 相对 PromQL 多了什么实用能力？</summary><p>典型包括 <code>rollup_* / decrease_over_time</code> 等窗口聚合、负 offset 与更宽松的时间语法、<code>keep_metric_names</code> 保留指标名。写法与 PromQL 不完全等价，迁移前应对关键告警规则逐条验证。</p></details><details><summary>如何验证迁移后数据没丢？</summary><p>对比两端的活跃序列数与关键指标在重叠时间窗的采样点数：在原 Prometheus 与新 VM 上跑同一条 <code>count_over_time</code>，差异应在 1% 以内（抓取抖动导致）。</p></details></div></section>
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 / VictoriaMetrics ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

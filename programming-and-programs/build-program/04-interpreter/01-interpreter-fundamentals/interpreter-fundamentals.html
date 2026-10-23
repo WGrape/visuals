@@ -56,6 +56,24 @@
   .footer { margin-top:60px; padding:30px 20px; text-align:center; font-size:12.5px; color:var(--text-secondary); border-top:1px solid var(--gray-200); }
   .footer a { color:var(--blue-600); text-decoration:none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -171,5 +189,49 @@
     <p>&copy; 2026 Visuals &middot; <a href="../../index.html">返回构建程序</a> &middot; <a href="../../../../index.html#subjects">返回知识地图</a></p>
   </div>
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>解释器的实现方式与代价</h2><div class="table-wrap"><table><thead><tr><th>实现方式</th><th>原理</th><th>性能 / 代表</th></tr></thead><tbody><tr><td><b>直接解释 AST</b></td><td>递归遍历语法树执行</td><td>最慢（约 <b>50~100×</b> 慢于 C），适合教学/配置语言</td></tr><tr><td><b>字节码 + 栈式 VM</b></td><td>先编译成字节码，VM 循环执行</td><td><b>10~50×</b> 慢于 C；CPython、Lua 5.0 前、JVM 也是栈式</td></tr><tr><td><b>字节码 + 寄存器 VM</b></td><td>指令带操作数索引</td><td>比栈式 <b>快 20~30%</b>（少 push/pop）；Lua 5.0+、Dalvik</td></tr><tr><td><b>线程化代码</b>（threaded code）</td><td>用 goto 跳转代替 switch 分发</td><td>再快 <b>10~20%</b>；减少分支预测失败</td></tr><tr><td><b>内联缓存</b></td><td>缓存上次查找的结果（如属性位置）</td><td>动态语言属性访问可快 <b>2~5×</b>；V8、PyPy</td></tr><tr><td><b>JIT 编译</b></td><td>热点代码编译成机器码</td><td>接近 C 的 <b>0.5~2×</b>；V8、PyPy、LuaJIT、HotSpot</td></tr><tr><td><b>AOT 编译</b></td><td>运行前全编译</td><td>最快启动，但失去动态性</td></tr></tbody></table></div><p><b>栈式 VM 的指令示例</b>：表达式 <code>a + b * 2</code> 编译为：</p><pre><code>LOAD  a      ; 栈: [a]
+LOAD  b      ; 栈: [a, b]
+PUSH  2      ; 栈: [a, b, 2]
+MUL          ; 栈: [a, b*2]     &lt;- 弹出两个压回一个
+ADD          ; 栈: [a + b*2]
+; 栈式指令短（无操作数），但指令条数多；
+; 寄存器式：MUL r1, b, 2 ; ADD r0, a, r1  &lt;- 2 条搞定，但指令编码更长</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>最小字节码 VM 实现</h2><pre><code># 栈式 VM：约 40 行可跑
+from enum import Enum
+class Op(Enum):
+    PUSH = 1; ADD = 2; MUL = 3; LOAD = 4; HALT = 5
+
+def run(code, consts, env):
+    stack, pc = [], 0
+    while True:
+        op = code[pc]; pc += 1
+        if op == Op.PUSH:
+            stack.append(consts[code[pc]]); pc += 1
+        elif op == Op.LOAD:
+            stack.append(env[consts[code[pc]]]); pc += 1     # 变量查表 = 慢的根源
+        elif op == Op.ADD:
+            b = stack.pop(); a = stack.pop(); stack.append(a + b)
+        elif op == Op.MUL:
+            b = stack.pop(); a = stack.pop(); stack.append(a * b)
+        elif op == Op.HALT:
+            return stack.pop()
+
+# a + b * 2  (env: a=3, b=4)
+code = [Op.LOAD, 0, Op.LOAD, 1, Op.PUSH, 2, Op.MUL, Op.ADD, Op.HALT]
+print(run(code, ["a", "b", 2], {"a": 3, "b": 4}))    # 11</code></pre><pre><code>// 性能优化 1：线程化代码（用 goto 消除 switch 的分支预测失败）
+// GCC/Clang 支持 computed goto：&amp;&amp;LABEL 取标签地址
+static void* dispatch[] = {&amp;&amp;L_PUSH, &amp;&amp;L_ADD, &amp;&amp;L_MUL, &amp;&amp;L_HALT};
+#define DISPATCH() goto *dispatch[op = code[pc++]]
+L_PUSH: stack[sp++] = consts[code[pc++]]; DISPATCH();
+L_ADD:  stack[sp-2] = stack[sp-2] + stack[sp-1]; sp--; DISPATCH();
+L_MUL:  stack[sp-2] = stack[sp-2] * stack[sp-1]; sp--; DISPATCH();
+L_HALT: return stack[0];
+// 实测比 switch 快 10~20%（解释器基准测试常见结论）
+
+// 性能优化 2：内联缓存（避免每次查哈希表）
+// 属性访问 obj.x：第一次走完整查表，之后缓存 "shape/隐藏类 -&gt; 偏移量"
+// 若 shape 未变，直接用偏移量取，省掉哈希查找</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>解释器排查清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>解释器很慢</td><td>每次访问变量都查哈希 / 每次执行都遍历 AST</td><td>先编译成字节码；再做内联缓存；最后考虑 JIT</td></tr><tr><td>加了一层循环就慢 10 倍</td><td>循环体里的变量查找、类型判断被重复执行</td><td>做<b>循环不变量外提</b>；缓存查找结果（内联缓存）</td></tr><tr><td>递归报栈溢出</td><td>宿主语言（如 C/Python）的栈被递归耗尽</td><td>改写为显式栈；或做<b>尾调用优化</b>（需要语言明确支持）</td></tr><tr><td>内存占用大</td><td>每个值都装箱成对象（Python 小整数除外）</td><td>用<b>指针标记</b>（tagged pointer）把小整数直接编码进指针；或 NaN-boxing</td></tr><tr><td>GC 停顿明显</td><td>对象分配太快</td><td>对象复用、分代 GC；或用引用计数 + 循环检测</td></tr><tr><td>错误行号不对</td><td>字节码没记录源码位置</td><td>每条指令附带行号；或用「行号表」压缩存储</td></tr><tr><td>调试困难</td><td>字节码不可读</td><td>实现 <code>dis</code> 反汇编；Python 有 <code>dis模块</code> 可直接参考</td></tr></tbody></table></div><p class="muted"><b>CPython 为什么慢</b>：① 字节码是栈式的；② 所有值都是 PyObject，整数加法要拆箱再装箱；③ 每次属性/全局查找都走字典；④ GIL 限制多核。PyPy 靠 JIT + 类型特化做到 <b>4~10×</b> 加速。</p></div></section>
 </body>
 </html>

@@ -58,6 +58,24 @@
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
   .tree { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 18px 22px; font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto; margin: 12px 0; white-space: pre; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -330,5 +348,31 @@ bg := context.<span class="fn">WithoutCancel</span>(l.ctx)   <span class="cm">//
   go-zero ctx 传递规范 · 系列教程之一 · 与 svc 深度解析 / 全局变量 / 初始化专题互补
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>ctx 该装什么、不该装什么</h2><div class="table-wrap"><table><thead><tr><th>内容</th><th>装不装</th><th>理由</th></tr></thead><tbody><tr><td><b>取消信号 / 超时</b></td><td>✅ 必须</td><td>这是 context 存在的第一理由</td></tr><tr><td><b>请求级追踪 ID</b></td><td>✅ 推荐</td><td>全链路串联，日志与链路追踪都需要</td></tr><tr><td><b>用户身份（uid、租户）</b></td><td>✅ 推荐</td><td>请求级数据的典型例子</td></tr><tr><td><b>本服务透传的元数据</b></td><td>✅ 可以</td><td>如灰度标、来源渠道</td></tr><tr><td><b>可选参数 / 开关</b></td><td>❌ 不要</td><td>应该是函数参数，塞 ctx 会让签名失去信息</td></tr><tr><td><b>数据库连接、Model、RPC client</b></td><td>❌ 绝对不要</td><td>那是 ServiceContext 的职责，是进程级的</td></tr><tr><td><b>可变对象（map/slice）</b></td><td>❌ 不要</td><td>ctx 会被并发读，改它会有数据竞争</td></tr><tr><td><b>业务返回值</b></td><td>❌ 不要</td><td>用返回值，别用 ctx 当出参</td></tr></tbody></table></div><p><b>一句话判据</b>：<b>「这个东西的生命周期是一次请求吗？」</b>是 → 放 ctx；不是 → 放 ServiceContext 或函数参数。另一个判据：<b>「去掉它，函数还能正确工作吗？」</b>如果不能，它应该是显式参数而不是 ctx 里的值。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>超时传递与写法</h2><p><b>超时与 value</b></p><pre><code>// ✅ 正确：ctx 一路传下去，超时会沿链路收缩
+func (l *OrderLogic) Create(req *types.CreateReq) error {
+    ctx, cancel := context.WithTimeout(l.ctx, 800*time.Millisecond)
+    defer cancel()                       // 必须 defer，否则泄漏
+    return l.svcCtx.OrderRpc.CreateOrder(ctx, &amp;pb.CreateReq{...})
+}
+
+// ❌ 反例 1：用 Background 重新起一个 ctx，上游取消传不下来
+resp, _ := l.svcCtx.OrderRpc.CreateOrder(context.Background(), req)   // ❌
+
+// ❌ 反例 2：忘了 defer cancel（定时器会存活到超时时刻）
+ctx, cancel := context.WithTimeout(l.ctx, time.Second)
+_ = ctx    // 没有 cancel -&gt; 泄漏
+
+// ✅ 读写 value 用自定义类型作 key，避免冲突
+type ctxKey string
+const keyUID ctxKey = "uid"
+
+ctx := context.WithValue(parent, keyUID, int64(1001))
+uid, ok := ctx.Value(keyUID).(int64)     // 一定要做类型断言的 ok 判断
+
+// go-zero 里自带的：logx 会把 trace id 注入 ctx，直接透传即可
+//   logx.WithContext(ctx).Infof("...")   // 日志自动带上 trace
+//   l.svcCtx.UserModel.FindOne(l.ctx, id)  // model 方法接收 ctx，用于超时与链路</code></pre><div class="table-wrap"><table><thead><tr><th>问题</th><th>说明</th></tr></thead><tbody><tr><td><b>超时收缩</b></td><td>上游 1s、下游 RPC 设 800ms，留 200ms 给本层处理；层层递减才能避免上游超时后下游还在空跑</td></tr><tr><td><b>ctx 取消的效果</b></td><td>ctx 被取消时，阻塞在该 ctx 上的 DB 查询、HTTP 请求、RPC 调用都会返回错误，资源被回收</td></tr><tr><td><b>err 判断</b></td><td><code>errors.Is(err, context.DeadlineExceeded)</code> / <code>context.Canceled</code></td></tr><tr><td><b>value 的 key</b></td><td>用<b>自定义不可导出类型</b>，不要用裸 string；否则不同包之间会撞 key</td></tr><tr><td><b>ctx 不可变</b></td><td>每次 WithXxx 都返回<b>新的</b> ctx，父 ctx 不受影响；不要把新 ctx 存到结构体里长期持有</td></tr></tbody></table></div><ul><li><b>不要把 ctx 存进结构体</b>：ctx 的生命周期是一次请求，存进长期对象会导致取消信号错乱和资源泄漏。Go 官方明确要求 ctx 作为<b>第一个参数</b>传递。</li><li><b>goroutine 里用 ctx 要小心</b>：异步任务别直接用请求 ctx（请求结束就被取消）。要么复制一份去掉取消（<code>context.WithoutCancel</code>，Go 1.21+），要么用独立的后台 ctx。</li><li><b>超时不是重试的理由</b>：ctx 超时说明整体预算用完了，此时重试只会雪上加霜。</li><li><b>value 只用于「请求范围内的元数据」</b>：任何影响函数行为的参数都应该显式写在签名里。</li></ul><details><summary>为什么不能用 Background 起新 ctx？</summary><p>会把上游的取消和超时信号<b>切断</b>：用户已经取消请求了，下游还在继续查库、继续扣款。表现就是「用户以为取消了，后台其实还在跑」。</p></details><details><summary>ctx.Value 该用在什么地方？</summary><p>只用于<b>横切关注点</b>的数据：trace id、用户身份、灰度标。业务逻辑需要的参数一律走函数签名——ctx.Value 是编译期无检查的，滥用会让代码无法静态理解。</p></details><details><summary>超时设多长？</summary><p>按「下游预算 = 上游剩余时间 - 本层开销」计算，并给下游留重试余量。常见配置：网关 3s → 业务服务 1s → 单个 RPC 800ms → 单次 DB 300ms。</p></details></div></section>
 </body>
 </html>

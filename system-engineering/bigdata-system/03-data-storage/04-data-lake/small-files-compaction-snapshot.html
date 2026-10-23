@@ -11,6 +11,49 @@
 <section class="panel"><h2>数据正确性不能只看文件数</h2><p>压实应该改变物理布局，不改变逻辑行集。输入若有 100 万条有效记录，压实后读取同一表快照的行数、主键集合和关键汇总应保持一致；如果表格式同时承载删除文件、更新或合并语义，读取时还要正确应用这些变更。只把数据文件字节拼接成大文件并不能保留列式格式和删除语义。</p><p>可构造一个测试：读者 R 在快照 S 开始查询，压实任务提交 S+1，再让 R 继续读取。R 应稳定看到 S 的结果；新读者读取 S+1，逻辑结果相同但文件计划不同。接着并发插入 100 条新记录，核对下一快照逻辑行数增加 100，压实没有覆盖新写入。</p></section>
 <section class="panel"><h2>分区、聚簇和压实不同</h2><p>分区按日期或地区缩小查询候选范围；聚簇或排序把相关值靠近，帮助数据跳过；压实主要把很多小文件改写成较合适的物理文件。这些动作可一起执行，但各有不同目标。对一个高基数字段逐值分区会产生海量分区和小文件，后期压实很难完全弥补错误分区设计。先看典型过滤条件与分区基数，再制定写入和压实策略。</p><p>若上游每条事件都提交一个独立表快照，除了小文件还会产生大量元数据版本。应考虑微批写入与快照过期策略。保留期不能只为省存储而设得极短：长查询、回滚审计和故障恢复都需要一定历史。根据读任务最长运行时间和业务追溯需求决定最短安全窗口。</p></section>
 <section class="panel"><h2>运营指标与练习</h2><p>每天记录每分区文件数、文件大小分布、小文件占比、查询计划文件数、对象存储请求、压实输入/输出字节、失败重试数和孤儿文件积压。优化前后比较查询 P95 与写入延迟，避免“查询省 20 秒，写入慢 2 分钟”。压实属于持续治理，写入模式不改，文件数还会再次增长。</p><p>练习：某分区有 10000 个 1 MB 文件，目标 128 MB。粗估合并后的文件数量，再说明为什么提交新快照后不能立即删除全部旧文件，以及哪些读者可能仍需要它们。</p></section>
+<section class="panel" data-dry-goods><h2>小文件问题的量化与危害</h2><p>「小文件」不是感觉，是能算出来的：<b>文件数远超合理值、平均大小远低于目标值</b>。危害也是可量化的。</p><p><b>目标值与判据</b></p><pre><code># 目标文件大小（各格式的经验值）
+#   HDFS / Hive 表      128 MB ~ 512 MB（对齐 block size）
+#   Parquet / ORC       128 MB ~ 1 GB（列式，太小则压缩与索引都失效）
+#   Iceberg / Delta     128 MB ~ 512 MB（官方推荐 128MB 左右）
+#
+# 判据：
+#   平均文件大小 &lt; 目标值的 1/4      -&gt; 该合并
+#   单分区文件数 &gt; 1000              -&gt; 元数据压力大
+#   单次查询要打开的文件数 &gt; 10000   -&gt; 必崩或极慢</code></pre><div class="table-wrap"><table><thead><tr><th>危害</th><th>量化表现</th><th>为什么</th></tr></thead><tbody><tr><td><b>元数据爆炸</b></td><td>NameNode 每个文件约 <b>150~300 字节</b>内存；1 亿小文件 = 数十 GB</td><td>HDFS NameNode 全内存存元数据，是硬上限</td></tr><tr><td><b>查询变慢</b></td><td>每个文件一次 open + seek，10000 个文件 = 上万次 IO</td><td>打开文件、读 footer、建 reader 的固定开销无法摊销</td></tr><tr><td><b>压缩与索引失效</b></td><td>几十 KB 的 Parquet 无法有效压缩，字典编码收益趋近 0</td><td>列式格式的优势依赖足够的行数</td></tr><tr><td><b>调度压力</b></td><td>Spark 默认<b>一个文件一个 task</b>，1 万小文件 = 1 万 task</td><td>task 调度开销可能超过实际计算</td></tr><tr><td><b>成本上升</b></td><td>对象存储按<b>请求次数</b>计费，读 1 万个小文件比读 10 个大文件贵得多</td><td>云上尤其明显</td></tr></tbody></table></div><p><b>诊断命令</b></p><pre><code># 诊断：统计分区下的文件数与平均大小（HDFS）
+hdfs dfs -count -q -h /warehouse/db/table
+hdfs fsck /warehouse/db/table -files -blocks | grep 'Total size' 
+hdfs dfs -ls /warehouse/db/table/dt=2026-10-01 | awk '{s+=$5; n++} END {print "files="n, "avgMB="s/n/1048576}'
+
+# Spark 侧看 task 数（与文件数正相关）
+spark.sql.adaptive.coalescePartitions.enabled=true   # AQE 自动合并小分区
+spark.sql.files.maxPartitionBytes=134217728          # 默认 128MB，即单个 task 的目标输入量</code></pre></section><section class="panel"><h2>合并策略：为什么不能直接删旧对象</h2><p>在数据湖里删除文件不像删本地文件——<b>快照/元数据还在引用它</b>。直接删会导致正在读的查询失败、或表直接损坏。</p><div class="table-wrap"><table><thead><tr><th>层面</th><th>能不能直接删</th><th>原因</th></tr></thead><tbody><tr><td>HDFS 文件</td><td><b>不能</b></td><td>正在运行的 task 持有 lease；删除会让读任务失败</td></tr><tr><td>Hive 分区目录</td><td><b>不能</b></td><td>Hive metastore 里还有分区元数据；删了就查不到（或报文件不存在）</td></tr><tr><td>Iceberg / Delta / Hudi</td><td><b>不能</b></td><td><b>快照（snapshot）仍指向这些文件</b>，直接删 = 破坏时间旅行和并发读</td></tr><tr><td>对象存储（S3/OSS）</td><td>技术上能删，但<b>绝不能手动删</b></td><td>同上，且没有回收站</td></tr></tbody></table></div><p><b>合并与清理命令</b></p><pre><code># Iceberg 的标准做法（推荐）
+#   1) 合并文件（产出新文件，旧文件还被旧快照引用）
+spark.sql("""
+  CALL catalog.system.rewrite_data_files(
+    table =&gt; 'db.orders',
+    strategy =&gt; 'binpack',
+    options =&gt; map('target-file-size-bytes','134217728',
+                   'min-file-size-bytes','67108864',
+                   'max-concurrent-file-group-rewrites','20')
+  )
+""")
+#   2) 清理不再被引用的旧文件（关键：只删「没有任何快照引用」的）
+spark.sql("CALL catalog.system.expire_snapshots(
+             table =&gt; 'db.orders', older_than =&gt; TIMESTAMP '...', retain_last =&gt; 5)")
+spark.sql("CALL catalog.system.remove_orphan_files(table =&gt; 'db.orders')")
+#      ^^^ 这一步才真正删物理文件，安全
+
+# Hive 的合并（覆盖写）
+INSERT OVERWRITE TABLE t PARTITION(dt='2026-10-01')
+SELECT * FROM t WHERE dt='2026-10-01';
+#   配合合并参数
+SET hive.merge.mapfiles=true;
+SET hive.merge.smallfiles.avgsize=134217728;   # 平均小于 128MB 才合并
+
+# Spark 侧减少产出小文件（源头治理，最重要）
+spark.sql.shuffle.partitions=200              # 别用默认 200 处理小数据
+df.repartition(10).write.partitionBy("dt").parquet(path)
+df.coalesce(1).write...                       # 小心：coalesce 会导致单 task 压力</code></pre><ul><li><b>源头治理优先于事后合并</b>：控制写入分区数（<code>repartition</code> 按数据量算）、开启 AQE、用流式写入的<b>检查点间隔</b>控制（Flink 的 <code>checkpoint.interval</code> 太小会产生大量小文件）。</li><li><b>合并要在低峰做</b>：rewrite_data_files 会重写全部数据，IO 和 CPU 开销大，且会产生新快照。</li><li><b>保留快照的时间 = 你能回滚的窗口</b>：<code>expire_snapshots</code> 的 <code>older_than</code> 通常设 3~7 天。保留期间旧文件占着存储，这是「可回滚」的成本，要算进预算。</li><li><b>分区粒度别太细</b>：按小时分区 + 低频写入 = 天然小文件。改成按天分区，或用 Iceberg 的<b>隐藏分区</b>（hour(ts)）让元数据更轻。</li></ul><details><summary>为什么 Iceberg 不能直接删文件？</summary><p>因为 Iceberg 是<b>快照隔离</b>的：每次提交生成一个新快照，快照里是一份 manifest 列表，manifest 里记录具体文件路径。<b>旧快照仍然指向旧文件</b>，以支持时间旅行（<code>VERSION AS OF</code>）和并发读（正在读的事务持有旧快照）。直接删文件会让这些读操作失败。正确顺序是 <b>rewrite → commit 新快照 → expire 旧快照 → remove_orphan_files</b>，最后一步才真正删物理文件。</p></details><details><summary>合并会不会影响正在运行的查询？</summary><p>取决于表格式。<b>Iceberg/Delta</b> 不会：合并是原子提交，读者要么看到旧快照（含旧文件），要么看到新快照，不会读到中间状态（这就是 MVCC + 快照隔离的价值）。<b>Hive</b> 会：<code>INSERT OVERWRITE</code> 过程中分区目录被替换，正在读的查询可能失败或读到空——这是 Hive 表没有事务保证的硬伤，也是往 Iceberg 迁移的主要动因之一。</p></details><details><summary>小文件合并的收益有多大？</summary><p>实测上通常：查询耗时降 <b>50%~90%</b>（主要来自 open 次数和 task 数减少），存储降 10%~30%（压缩率提升），NameNode/元数据压力降一个数量级。投入产出比很高，是数据湖治理里<b>优先级最高</b>的一项。但如果查询本身只扫描少数分区，收益会小很多——先定位是哪些表/分区在拖后腿。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>新大文件写完后，为什么不能立即删除所有旧小文件？</summary><p>旧快照或正在运行的查询仍可能引用旧文件；应在元数据提交和安全保留期之后清理。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="table-format-comparison.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

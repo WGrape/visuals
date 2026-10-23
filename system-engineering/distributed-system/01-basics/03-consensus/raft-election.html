@@ -316,6 +316,24 @@
       border-top: 1px solid #1e293b;
     }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -768,6 +786,41 @@
   </p>
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 三个角色与两个超时</h2><p>Raft 的选举只需要记住三件事：<b>三种角色</b>（Leader/Follower/Candidate）、<b>两个超时</b>（选举超时、心跳间隔）、<b>任期号 Term</b> 作为逻辑时钟。</p><div class="table-wrap"><table><thead><tr><th>概念</th><th>取值 / 默认值</th><th>作用</th></tr></thead><tbody><tr><td><b>Term（任期）</b></td><td>单调递增整数</td><td>逻辑时钟；每个 Term 最多一个 Leader</td></tr><tr><td><b>选举超时</b></td><td><b>150~300ms 随机</b></td><td>Follower 多久没收到心跳就自己参选</td></tr><tr><td><b>心跳间隔</b></td><td>通常 <b>50ms</b> 左右</td><td>Leader 广播 AppendEntries 的间隔</td></tr><tr><td><b>投票约束</b></td><td>每 Term 每节点<b>只投一票</b>，且<b>先到先得</b></td><td>防止同 Term 出现两个 Leader</td></tr><tr><td><b>当选条件</b></td><td>获得<b>多数派</b>（&gt; N/2）选票</td><td>保证新旧 Leader 的 Term 有交集</td></tr></tbody></table></div><ul><li><b>为什么选举超时要随机</b>：避免多个 Follower 同时超时、同时参选导致<b>选票瓜分</b>（split vote）。随机化让某个节点大概率先超时并快速拿到多数票。这是 Raft 相比早期算法最实用的工程改进。</li><li><b>为什么心跳间隔要远小于选举超时</b>：经验法则是 <b>心跳 ≪ 选举超时/3</b>。典型配置：心跳 50ms，选举超时 150~300ms。这样能容忍 1~2 个心跳包丢失而不误触发选举。</li><li><b>关键的安全约束</b>：Candidate 只有在其日志「至少和自己一样新」时才投票给对方。日志新旧由<b>最后一条日志的 Term + Index</b> 比较决定。这条保证了<b>选出的 Leader 一定包含所有已提交的日志</b>。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数、状态与故障恢复命令</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>典型值</th><th>调大的影响</th><th>调小的影响</th></tr></thead><tbody><tr><td><code>election-timeout</code></td><td>1000ms（etcd 默认）</td><td>故障检测慢，但误选举少</td><td><b>易误选举</b>（网络抖动就重选）</td></tr><tr><td><code>heartbeat-interval</code></td><td>100ms（etcd 默认）</td><td>网络开销小，故障检测慢</td><td><b>网络压力大</b>，CPU 占用高</td></tr><tr><td><code>--listen-peer-urls</code></td><td>2380</td><td>—</td><td>—</td></tr><tr><td><code>--listen-client-urls</code></td><td>2379</td><td>—</td><td>—</td></tr><tr><td><code>--quota-backend-bytes</code></td><td>2GB（etcd 默认）</td><td>可存更多数据</td><td>超配额会<b>拒绝写入</b>！</td></tr></tbody></table></div><p><b>etcd 运维命令</b></p><pre><code># —— etcd 运维（Raft 最典型的实现）——
+# 1) 看集群成员与 Leader
+ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint status \
+    --write-out=table
+#   关键列：IS LEADER(true/false)、RAFT TERM、RAFT INDEX、DB SIZE
+
+etcdctl member list --write-out=table     # 成员列表与 peer URL
+
+# 2) 看健康与延迟
+etcdctl endpoint health --write-out=table
+#   慢节点会显示 "unhealthy" 或高 delay
+
+# 3) 手动转移 Leader（滚动重启前必做，避免选举抖动）
+etcdctl move-leader &lt;member-id&gt;
+
+# 4) 成员变更（务必一次只加/删一个！）
+etcdctl member add new-node --peer-urls=http://10.0.0.4:2380
+etcdctl member remove &lt;member-id&gt;
+
+# 5) 快照与恢复
+etcdctl snapshot save /tmp/snap.db
+etcdctl snapshot restore /tmp/snap.db --data-dir=/var/lib/etcd-restore
+
+# 6) 碎片整理（DB 增长后必做，否则占满配额）
+etcdctl defrag --endpoints=http://127.0.0.1:2379
+
+# —— 关键告警指标 ——
+#   etcd_server_leader_changes_seen_total      频繁变化 = 不稳定
+#   etcd_server_is_leader                       同时多个 true = 脑裂（不该发生）
+#   etcd_disk_wal_fsync_duration_seconds        &gt;10ms 说明磁盘慢，会拖垮选举
+#   etcd_network_peer_round_trip_time_seconds   跨地域部署要重点看</code></pre><p class="muted">Raft 集群规模必须是<b>奇数</b>（3/5/7）。因为多数派是 <code>N/2+1</code>：3 节点容忍 1 故障，5 节点容忍 2 故障，<b>4 节点同样只容忍 1 故障</b>却要多花钱多耗网络——所以偶数没有意义。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b>频繁重新选举（Leader 不停换）</b> → 90% 是<b>磁盘 fsync 慢</b>或<b>网络延迟高</b>。Raft 要求 Leader 在写入前把日志 fsync 落盘，磁盘一慢心跳就发不出去。检查 <code>etcd_disk_wal_fsync_duration_seconds</code>（P99 应 &lt;10ms）。用 SSD，别用网络盘。</li><li><b>两个节点同时认为自己是 Leader</b> → 理论上不可能（多数派保证）。若观察到，一定是<b>成员配置变更时跳过了 joint consensus</b>，或用了错误的成员列表。检查 <code>member list</code> 与实际的 <code>--initial-cluster</code> 是否一致。</li><li><b>集群一直选不出 Leader（反复 split vote）</b> → 检查：① 节点数是否为奇数且 ≥3；② 各节点的 <code>--initial-cluster</code> 配置是否完全一致；③ 随机超时范围是否配置正确（有些实现被错误配成了固定值）。</li><li><b>节点加入后集群不可用</b> → 常见错误是<b>一次加多个节点</b>。Raft 的成员变更必须<b>一次一个</b>（或用 joint consensus），一次加 2 个可能形成两个互不重叠的多数派。etcd 会拒绝这种操作。</li><li><b>DB 达到配额后集群只读</b> → etcd 默认 <code>--quota-backend-bytes=2GB</code>，满了会切到只读模式（<code>alarm: NOSPACE</code>）。处理：<code>etcdctl compact</code> + <code>etcdctl defrag</code> + <code>etcdctl alarm disarm</code>。生产要<b>配置自动压缩</b>（<code>--auto-compaction-retention=1h</code>）。</li><li><b>跨地域部署延迟高</b> → Raft 的每次写入要等<b>多数派确认</b>，跨地域 RTT 会直接叠加到写入延迟。3 节点跨 3 个地域意味着每次写入都要 1 次跨城 RTT。解法：要么接受延迟，要么用<b>5 节点把多数派放在主地域</b>（如 3 主地域 + 2 备地域），要么改用更适合跨地域的协议。</li><li><b>滚动重启导致选举抖动</b> → 重启前先 <code>move-leader</code> 把 Leader 转到最后重启的节点，且<b>一次只重启一个</b>，等集群健康后再下一个。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>Raft 的两个核心安全保证，靠的是两条精妙的规则：<b>① 选出的 Leader 一定包含所有已提交日志</b>（日志新旧比较）；<b>② 一条日志一旦提交，后续 Leader 一定有它</b>（提交只推进当前 Term）。</p><ul><li><b>规则一：投票时的日志比较</b>。Candidate 请求投票时会带上自己最后一条日志的 <code>(lastTerm, lastIndex)</code>。Follower 只在「对方日志不比自己旧」时才投票。因为一条日志要被提交，必须存在<b>多数派</b>节点上有它；而候选人要当选也要拿到<b>多数派</b>选票——两个多数派<b>必然有交集</b>，交集里一定有持有该日志的节点，它会拒绝日志更旧的候选人。所以<b>当选者必定已含全部已提交日志</b>。这就是「多数派交集」论证，是 Raft 正确性的基石。</li><li><b>规则二：只提交当前 Term 的日志</b>。Leader 只能通过「当前 Term 的日志被多数派复制」来推进 commitIndex；<b>绝不</b>因为旧 Term 的日志达到多数派就单独提交它。因为旧 Term 的日志可能在未来被覆盖（Leader 变更后）。这条规则堵住了一个非常隐蔽的正确性漏洞——早期 Raft 实现曾在这里出过 bug。</li><li><b>为什么是「多数派」而不是「全部」</b>：因为<b>可用性与一致性的权衡</b>。要求全部节点确认 → 一致性最强但任一节点故障就不可用（可用性差）；要求多数派 → 容忍 <code>(N−1)/2</code> 个故障，且<b>数学上保证了任意两个多数派必有交集</b>，一致性依然成立。这是分布式共识的最优折中。</li><li><b>Raft vs Paxos</b>：Raft 的正确性与 Multi-Paxos 等价，但通过「强 Leader + 任期号 + 日志连续性」把状态空间大幅简化，从而<b>可理解、可实现、可调试</b>。这也是它成为 etcd/Consul/TiKV 首选的原因——工程上「能被正确实现」往往比「理论更优雅」更重要。</li></ul><div class="table-wrap"><table><thead><tr><th>集群规模</th><th>多数派</th><th>容忍故障</th><th>写入延迟（需确认节点）</th></tr></thead><tbody><tr><td>1</td><td>1</td><td><b>0</b></td><td>最低（无副本）</td></tr><tr><td>3</td><td>2</td><td><b>1</b></td><td>1 次 RTT（到最近的第二个节点）</td></tr><tr><td>5</td><td>3</td><td><b>2</b></td><td>1 次 RTT（第三个确认）</td></tr><tr><td>7</td><td>4</td><td><b>3</b></td><td>1 次 RTT，但网络消息更多</td></tr><tr><td>4（不推荐）</td><td>3</td><td><b>1</b></td><td>与 3 节点同样只容忍 1 故障，成本更高</td></tr></tbody></table></div><details><summary>为什么 4 节点集群不比 3 节点更可靠？</summary><p>因为容忍故障数由「多数派」而非总数决定。3 节点的多数派是 2，挂 1 个还剩 2 → 可用；4 节点的多数派是 3，挂 1 个剩 3 → 可用，但<b>挂 2 个就只剩 2，不足 3</b> → 不可用。所以 4 节点和 3 节点<b>都只容忍 1 个故障</b>，但 4 节点要多买一台机器、每次写入要多等一个确认（网络开销更大）、出问题的概率反而更高（节点越多越可能有一个挂）。结论：<b>永远用奇数</b>。同理，5 节点容忍 2 故障，7 节点容忍 3 故障——代价是写入延迟和网络消息数线性增长，所以实践中最常见的是 <b>3 节点（普通）</b>和 <b>5 节点（重要）</b>，7 节点就很少见了。</p></details><details><summary>选举超时和心跳间隔该怎么配？</summary><p>遵循两个不等式：① <b>广播时间 ≪ 选举超时 ≪ 平均故障间隔</b>（论文原话）；② 实践中取 <b>心跳 × 3~5 ≤ 选举超时下限</b>。具体：etcd 默认心跳 100ms、选举超时 1000ms（比例 10×，偏保守）。如果部署在<b>同机房低延迟网络</b>（RTT &lt;1ms），可以激进些：心跳 50ms、选举超时 150~300ms，故障切换更快；如果<b>跨地域</b>（RTT 几十毫秒），必须放宽：心跳 500ms、选举超时 3~5s，否则一次网络抖动就会触发不必要的选举。判断标准：<b>观察 <code>leader_changes_seen_total</code>，健康的集群这个值应该长期为 0 或极低</b>——如果它经常涨，说明超时配得太紧了。</p></details><details><summary>Raft 的写入到底有多快？瓶颈在哪？</summary><p>一次写入的延迟 = Leader 收到请求 → <b>fsync 落盘</b> → 发给 Follower → Follower <b>fsync 落盘</b>并回复 → Leader 收到多数派回复 → <b>提交并 fsync</b> → 返回客户端。所以端到端是 <b>1 次网络 RTT + 2~3 次磁盘 fsync</b>。瓶颈几乎总是在<b>磁盘 fsync</b> 而不是网络：机械盘 fsync 约 10ms，SSD 约 0.1~1ms，NVMe 可到 &lt;0.1ms。这就是为什么 etcd 官方文档强调「必须用 SSD」且监控 <code>wal_fsync_duration_seconds</code>。优化手段：① 用 NVMe；② 批量提交（把多个写请求合并成一次 fsync）；③ 用 <code>linearizable=false</code> 的读（绕开 Leader 确认，牺牲强一致换吞吐）。实测：NVMe + 3 节点同机房，etcd 单写延迟约 1~3ms，吞吐可达数千~上万 QPS。</p></details></div></section>
 <footer>Raft Paper: "In Search of an Understandable Consensus Algorithm" — Diego Ongaro & John Ousterhout (2014)</footer>
 
 </body>

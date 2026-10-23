@@ -11,6 +11,52 @@
 <section class="panel"><h2>过滤子查询 NULL 的另一种办法</h2><p>若业务确认 B.id 的 NULL 不代表有意义的黑名单条目，可在子查询中显式 `WHERE B.id IS NOT NULL`，再使用 NOT IN。更稳妥的是从数据模型上对本应必填的黑名单 ID 加 NOT NULL 约束，阻止脏数据入表。不过若 NULL 表示“尚未确认的全局限制”一类特殊业务语义，直接过滤可能掩盖真实规则；先明确 NULL 从何而来。</p><p>对包含重复值的 B，IN 与 EXISTS 的结果通常仍按存在性判断，重复行不会让 A 多返回几次。直接 LEFT JOIN 再查右侧 IS NULL 也能表达某些反连接，但必须小心连接条件、右表可空列和重复行；选 `NOT EXISTS` 往往更直观。</p></section>
 <section class="panel"><h2>SQL 语义与执行性能分开验收</h2><p>先用四行玩具数据验证结果，再看执行计划与索引。B.id 上有索引时，优化器可能高效判断存在性；B 非常大且缺索引时，NOT EXISTS 也可能慢。`NOT IN` 的 NULL 安全处理可能影响优化器改写，但不能为追求速度牺牲正确性。实务上应给连接键明确约束、更新统计信息并查看实际行数。</p><p>某些方言提供 `IS DISTINCT FROM` 等空值安全比较，它把 NULL 当成可比较的状态，适合特定需求，但不能不加说明地替代所有反连接。设计时先写出 A.id 为 NULL、B.id 为 NULL、B 为空三种边界的期望答案。</p></section>
 <section class="panel"><h2>自己复核</h2><p>把 B 中的 NULL 删除，只保留 2，NOT IN 应返回 1、3；把 B 改为空，三个非空候选均应返回；再给 A 添一行 NULL，对比 NOT IN 与 NOT EXISTS 的结果。若结果与业务定义不同，修改谓词和约束，不要用 `COALESCE(id,-1)` 草率统一空值：-1 可能是真实 ID，哨兵值也会污染索引与统计。</p><p>练习：为什么 `1 NOT IN (2,NULL)` 不是 TRUE？为什么 `NOT EXISTS (SELECT 1 FROM B WHERE B.id=1)` 却是 TRUE？请逐项写出等号比较的真值。</p></section>
+<section class="panel" data-dry-goods><h2>三值逻辑真值表（NULL 的根源）</h2><div class="table-wrap"><table><thead><tr><th>表达式</th><th>结果</th><th>说明</th></tr></thead><tbody><tr><td><code>1 = 1</code></td><td>TRUE</td><td>—</td></tr><tr><td><code>1 = 2</code></td><td>FALSE</td><td>—</td></tr><tr><td><code>1 = NULL</code></td><td><b>UNKNOWN</b></td><td>与 NULL 比较永远是 UNKNOWN，不是 TRUE 也不是 FALSE</td></tr><tr><td><code>NOT TRUE</code></td><td>FALSE</td><td>—</td></tr><tr><td><code>NOT FALSE</code></td><td>TRUE</td><td>—</td></tr><tr><td><code>NOT UNKNOWN</code></td><td><b>UNKNOWN</b></td><td><b>这是 NOT IN 陷阱的根源</b></td></tr><tr><td><code>WHERE UNKNOWN</code></td><td>行被过滤掉</td><td>WHERE 只保留 TRUE</td></tr></tbody></table></div><p><code>x NOT IN (a, b, NULL)</code> 等价于 <code>NOT(x=a OR x=b OR x=NULL)</code>：只要列表里有 NULL，<code>x=NULL</code> 恒为 UNKNOWN，整个 OR 永不为 TRUE，于是 <code>NOT</code> 后也永不为 TRUE，<b>结果集为空</b>。</p></section><section class="panel"><h2>三种写法的语义与性能对照</h2><div class="table-wrap"><table><thead><tr><th>写法</th><th>遇到 NULL 时</th><th>执行计划（MySQL 8.0）</th><th>适用</th></tr></thead><tbody><tr><td><code>NOT IN (子查询)</code></td><td><b>返回空集</b></td><td>可被优化为 anti join（8.0.17+ 且有索引时）</td><td>子查询列确定 NOT NULL 时</td></tr><tr><td><code>NOT EXISTS (子查询)</code></td><td>正确（NULL 安全）</td><td>anti semi join，可用索引</td><td>推荐：语义与性能都好</td></tr><tr><td><code>LEFT JOIN ... IS NULL</code></td><td>正确</td><td>hash/merge anti join，需注意重复行</td><td>需要顺便取右表列时</td></tr></tbody></table></div><p><b>改写</b></p><pre><code>-- 陷阱复现：子查询里有一个 NULL，结果为空
+SELECT * FROM users
+ WHERE id NOT IN (SELECT user_id FROM orders);      -- orders.user_id 含 NULL -&gt; 空集！
+
+-- 写法 1：排除 NULL（最小改动）
+SELECT * FROM users
+ WHERE id NOT IN (SELECT user_id FROM orders WHERE user_id IS NOT NULL);
+
+-- 写法 2：NOT EXISTS（推荐，NULL 安全）
+SELECT * FROM users u
+ WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id);
+
+-- 写法 3：LEFT JOIN + IS NULL（注意右表重复会造成行数放大，必要时 DISTINCT）
+SELECT u.* FROM users u
+  LEFT JOIN orders o ON o.user_id = u.id
+ WHERE o.user_id IS NULL;</code></pre><p><b>执行计划</b></p><pre><code>-- 看优化器怎么执行（MySQL 8.0.18+）
+EXPLAIN FORMAT=TREE
+SELECT * FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id);
+--   典型输出含“Anti-join”或“Nested loop anti-join”，说明用了 anti join
+
+-- 看是否走了索引、扫描了多少行
+EXPLAIN ANALYZE SELECT ...;
+--   关注 actual rows / actual time，以及是否 Using index
+
+-- 打开优化器追踪看改写过程（排障用）
+SET optimizer_trace = 'enabled=on';
+SELECT ...;
+SELECT * FROM information_schema.OPTIMIZER_TRACE\G</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>NOT IN 返回 0 行</td><td>子查询列含 NULL</td><td>加 <code>IS NOT NULL</code> 或改用 NOT EXISTS</td></tr><tr><td>加了索引还是慢</td><td>子查询列可为 NULL 时优化器无法转 anti join</td><td>把列改成 NOT NULL；或改写为 NOT EXISTS</td></tr><tr><td>LEFT JOIN 写法行数变多</td><td>右表一个键多行</td><td>用 NOT EXISTS，或对右表先去重</td></tr><tr><td>NOT IN 常量列表也出问题</td><td>列表里有 NULL 字面量</td><td>剔除 NULL；或用 NOT EXISTS</td></tr><tr><td>类型不一致导致结果错</td><td>隐式类型转换（如字符串 vs 数字）</td><td>统一类型；检查 <code>EXPLAIN</code> 的 warnings</td></tr><tr><td>结果与预期差几行</td><td>NULL 语义理解偏差</td><td>先单独统计 <code>COUNT(*) - COUNT(col)</code> 看有多少 NULL</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么 NOT IN 遇到 NULL 会返回空集？</summary><p>因为 SQL 是三值逻辑：<code>x NOT IN (…, NULL)</code> 展开为 <code>NOT(x=a OR … OR x=NULL)</code>。其中 <code>x=NULL</code> 恒为 UNKNOWN，而 <code>TRUE OR UNKNOWN = TRUE</code>、<code>FALSE OR UNKNOWN = UNKNOWN</code>——只要 x 不等于列表里任何非 NULL 值，整个表达式就是 UNKNOWN，取 NOT 后仍是 UNKNOWN，WHERE 不保留 UNKNOWN，于是没有任何行返回。</p></details><details><summary>NOT EXISTS 为什么没有这个问题？</summary><p>因为 NOT EXISTS 判断的是「子查询是否返回行」，而子查询里的等值条件 <code>o.user_id = u.id</code> 在遇到 NULL 时得到 UNKNOWN，该行不产生匹配——这是<b>逐行存在性判断</b>，语义上恰好就是我们要的「没有匹配的行」，因此 NULL 安全。</p></details><details><summary>性能上 NOT IN 和 NOT EXISTS 谁更快？</summary><p>现代优化器（MySQL 8.0.17+、PostgreSQL、Oracle）通常把两者都改写成 anti semi join，加上合适索引后性能接近。但在旧版本或子查询列可为 NULL 时，NOT IN 更容易退化成逐行判断。因此实践中推荐 NOT EXISTS，语义正确且不依赖优化器版本。</p></details><details><summary>LEFT JOIN ... IS NULL 有什么坑？</summary><p>右表一个键对应多行时会让结果行数放大（重复左表行），需要 DISTINCT 或先对右表去重。此外它的可读性不如 NOT EXISTS，优化器改写也不如 NOT EXISTS 直接。优点是能顺便取右表的列。</p></details><details><summary>怎么快速判断一个查询是不是被 NULL 坑了？</summary><p>先统计 <code>COUNT(*) - COUNT(col)</code> 看该列有多少 NULL；再把 NOT IN 改写成 NOT EXISTS 对比行数。若两者差异明显，基本就能确认是 NULL 语义问题，而不是数据本身的问题。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>B={2,NULL}，A.id=1，`A.id NOT IN B` 会返回 TRUE 吗？</summary><p>不会。1 与 NULL 的比较为 UNKNOWN，NOT IN 整体为 UNKNOWN，WHERE 不保留。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第一层 · 概念与判定：三者的语义差异</h2><p>这三者看起来都是「在 A 但不在 B」，但遇到 <b>NULL</b> 时行为完全不同——这是 SQL 里最经典的陷阱之一。</p><div class="table-wrap"><table><thead><tr><th>写法</th><th>语义</th><th>遇到 NULL 时</th><th>推荐</th></tr></thead><tbody><tr><td><code>NOT IN (子查询)</code></td><td>不在子查询结果集里</td><td><b>子查询含 NULL → 结果恒为空！</b></td><td>❌ 避免使用</td></tr><tr><td><code>NOT EXISTS</code></td><td>不存在满足条件的行</td><td>安全（NULL 不影响）</td><td>✅ <b>首选</b></td></tr><tr><td><code>LEFT JOIN + IS NULL</code></td><td>左连接后右表无匹配</td><td>安全</td><td>✅ 需要取右表字段时</td></tr></tbody></table></div><p><b>为什么 NOT IN 遇 NULL 会返回空？</b>因为 SQL 的三值逻辑：<code>x NOT IN (1, 2, NULL)</code> 会被展开为 <code>x&lt;&gt;1 AND x&lt;&gt;2 AND x&lt;&gt;NULL</code>，而 <code>x&lt;&gt;NULL</code> 的结果是 <b>UNKNOWN</b>，整个 AND 表达式即为 UNKNOWN，不会被 WHERE 选中——于是<b>一行都返回不了</b>。</p><ul><li>信号一：<code>NOT IN</code> 突然返回 0 行，但明明有数据 → 子查询里有 NULL。</li><li>信号二：子查询的列没加 NOT NULL 约束 → 隐患。</li><li>信号三：要「在 A 不在 B」→ 一律用 <code>NOT EXISTS</code>。</li></ul><p><b>三种写法与 NULL 陷阱</b></p><pre><code>-- 危险：如果 b.id 里有 NULL，整个查询返回 0 行
+SELECT * FROM a WHERE a.id NOT IN (SELECT id FROM b);
+
+-- 安全写法一：NOT EXISTS（推荐）
+SELECT * FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.id = a.id);
+
+-- 安全写法二：LEFT JOIN + IS NULL
+SELECT a.* FROM a LEFT JOIN b ON b.id = a.id WHERE b.id IS NULL;
+
+-- 安全写法三：过滤掉 NULL 后再 NOT IN
+SELECT * FROM a WHERE a.id NOT IN (SELECT id FROM b WHERE id IS NOT NULL);
+
+-- 验证：检查子查询里有没有 NULL
+SELECT COUNT(*) FROM b WHERE id IS NULL;   -- 非 0 就是隐患</code></pre><p class="muted">性能提示：<b>NOT EXISTS 通常比 NOT IN 快</b>，因为它一旦找到匹配就停止扫描该行（半连接语义），而 NOT IN 需要先物化整个子查询结果。MySQL 5.6+ 对两者都做了优化，但 NOT EXISTS 仍是更稳的选择。</p></section>
+<section class="panel"><h2>第四层 · 原理与取舍：三值逻辑与性能</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>说明</th><th>影响</th></tr></thead><tbody><tr><td><b>三值逻辑</b></td><td>TRUE / FALSE / <b>UNKNOWN</b></td><td>NULL 参与比较得到 UNKNOWN</td></tr><tr><td>WHERE 的行为</td><td><b>只保留 TRUE</b>，UNKNOWN 与 FALSE 都被过滤</td><td>NOT IN 遇 NULL 全军覆没</td></tr><tr><td>NULL 的比较</td><td><code>NULL = NULL</code> 是 UNKNOWN，不是 TRUE</td><td>必须用 <code>IS NULL</code> 判断</td></tr><tr><td><code>IN</code>（正向）</td><td>遇 NULL 不会全空</td><td>只有 NOT IN 有这个陷阱</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>写法</th><th>性能</th><th>NULL 安全</th><th>能否取右表字段</th><th>适用</th></tr></thead><tbody><tr><td><code>NOT IN</code></td><td>中（需物化子查询）</td><td>❌</td><td>❌</td><td>确定无 NULL 的小集合</td></tr><tr><td><code>NOT EXISTS</code></td><td><b>好（可提前终止）</b></td><td>✅</td><td>❌</td><td><b>首选</b></td></tr><tr><td><code>LEFT JOIN + IS NULL</code></td><td>好</td><td>✅</td><td>✅</td><td>需要右表字段时</td></tr></tbody></table></div><details><summary>为什么 IN 没有这个 NULL 问题？</summary><p>因为 <code>x IN (1, NULL)</code> 展开是 <code>x=1 OR x=NULL</code>。只要有一个为 TRUE，OR 就是 TRUE；UNKNOWN 只在不匹配时出现，不影响已匹配的行。<b>OR 容忍 UNKNOWN，AND 不容忍</b>——这就是 NOT IN（全是 AND）中招的原因。</p></details><details><summary>NOT EXISTS 里为什么写 SELECT 1？</summary><p>因为 EXISTS 只关心「有没有行」，不关心行的内容。写 <code>SELECT 1</code>、<code>SELECT *</code>、<code>SELECT NULL</code> 效果完全一样，优化器都会忽略选择列表。写 1 是为了表明「我不在乎内容」。</p></details><details><summary>怎么彻底避免这个坑？</summary><p>两条：① 团队规范上<b>禁用 NOT IN (子查询)</b>，一律用 NOT EXISTS；② 给参与关联列加 <code>NOT NULL</code> 约束，从源头消除 NULL。</p></details></section>
 <footer>继续阅读：<a href="null-and-outer-joins.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

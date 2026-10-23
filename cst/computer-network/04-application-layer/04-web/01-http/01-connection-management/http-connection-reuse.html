@@ -328,6 +328,24 @@
   .anim-in-d2 { animation-delay: .2s; }
   .anim-in-d3 { animation-delay: .3s; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -848,5 +866,37 @@ document.querySelectorAll('.compare-card, .stat-box, .pipeline-svg, .code-block'
 });
 </script>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>连接复用的关键数值</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>数值</th><th>说明</th></tr></thead><tbody><tr><td>TCP 握手耗时</td><td><b>1 RTT</b></td><td>三次握手；TLS 1.2 再 +2 RTT，TLS 1.3 只 +1 RTT</td></tr><tr><td>TLS 1.3 握手</td><td><b>1 RTT</b>（0-RTT 恢复会话）</td><td>比 TLS 1.2 的 2 RTT 省一半</td></tr><tr><td>跨地域 RTT</td><td>同城 <b>1~5ms</b>，跨省 <b>20~40ms</b>，跨国 <b>150~300ms</b></td><td>连接复用的收益与 RTT 成正比</td></tr><tr><td>HTTP/1.1 并发连接数</td><td>浏览器每域名 <b>6</b> 个</td><td>超过就排队，这是域名分片（sharding）的由来</td></tr><tr><td>HTTP/2</td><td><b>单连接多路复用</b></td><td>省掉握手，但仍有 <b>队头阻塞</b>（TCP 层）</td></tr><tr><td>HTTP/3 (QUIC)</td><td>基于 UDP，<b>0-RTT</b> 恢复</td><td>彻底消除 TCP 队头阻塞；丢包时只影响单个 stream</td></tr><tr><td>Keep-Alive 空闲超时</td><td>Nginx <b>75s</b>，Apache <b>5s</b></td><td>后端要大于前端，否则会出现「刚复用就已被关」</td></tr><tr><td>Go 连接池 MaxIdleConns</td><td>默认 <b>100</b>（全局），每 host <b>2</b></td><td>默认太小，高并发必须调</td></tr><tr><td>TIME_WAIT 时长</td><td><b>2 × MSL = 60s</b>（Linux）</td><td><b>主动关闭方</b>才进入 TIME_WAIT</td></tr></tbody></table></div><p><b>复用能省多少</b>：一次 HTTPS 请求若重新建连，需要 TCP 握手 1 RTT + TLS 1.2 握手 2 RTT = <b>3 RTT</b>。跨省 30ms RTT 下就是 <b>90ms</b> 纯握手开销，而查询本身可能只要 10ms。<b>复用后这 90ms 完全消失</b>——这是性能优化里性价比最高的一项。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>配置与代码</h2><pre><code># Nginx：keepalive 的超时与复用上限
+upstream backend {
+    server 127.0.0.1:8080;
+    keepalive 32;              # 每个 worker 保持的空闲上游连接数
+}
+server {
+    keepalive_timeout 75s;     # 客户端连接空闲超时（默认 75s）
+    keepalive_requests 1000;   # 单连接最多处理多少请求后关闭（防内存泄漏累积）
+    location /api/ {
+        proxy_http_version 1.1;         # 必须 1.1，否则不支持 keepalive
+        proxy_set_header Connection ""; # 清掉客户端传来的 close/keep-alive
+        proxy_pass http://backend;
+    }
+}</code></pre><pre><code>// Go：默认连接池太小，是高并发下最常见的瓶颈
+tr := &amp;http.Transport{
+    MaxIdleConns:        1000,        // 全局最大空闲连接（默认 100）
+    MaxIdleConnsPerHost: 100,         // 每个 host（默认只有 2！）
+    MaxConnsPerHost:     200,         // 每个 host 的连接总数上限
+    IdleConnTimeout:     90 * time.Second,  // 要大于服务端的 keepalive_timeout
+    // 关键：必须复用 client，不要每次请求 new 一个
+}
+client := &amp;http.Client{Transport: tr, Timeout: 5 * time.Second}
+
+// 必须读完并关闭 body，否则连接不会被归还到池中！
+resp, err := client.Get(url)
+if err != nil { return err }
+defer resp.Body.Close()
+io.Copy(io.Discard, resp.Body)     // 读完才能复用；不读完连接会被丢弃
+_ = err</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>连接问题排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>压测 QPS 上不去，大量 TIME_WAIT</td><td>短连接：客户端主动关闭，TIME_WAIT 堆在客户端</td><td>开启连接池复用；调 <code>net.ipv4.ip_local_port_range</code> 与 <code>tcp_tw_reuse</code></td></tr><tr><td>连接数暴涨到几万</td><td>连接池配置太大或没复用</td><td>每 host 连接数 ≈ <code>QPS × RT</code>；设上限并监控</td></tr><tr><td>偶发 <code>connection reset by peer</code></td><td>服务端先关了空闲连接，客户端正好复用它</td><td><b>客户端 IdleConnTimeout 要小于服务端 keepalive_timeout</b>；加<b>重试</b>兜底</td></tr><tr><td>HTTP/2 下反而更慢</td><td>单连接多路复用时丢包造成全连接阻塞</td><td>弱网下 HTTP/3(QUIC) 更好；或调大 <code>SETTINGS_MAX_CONCURRENT_STREAMS</code></td></tr><tr><td>Nginx 报 <code>upstream prematurely closed</code></td><td>上游提前关闭</td><td>检查上游 <code>keepalive_timeout</code>；保证 <code>proxy_http_version 1.1</code></td></tr><tr><td>TIME_WAIT 在服务端堆积</td><td>服务端主动关闭（如短连接模式）</td><td>让<b>客户端</b>主动关闭；或开 keepalive</td></tr><tr><td>握手耗时占比高</td><td>首次访问/连接被频繁重建</td><td>开 keepalive + 会话复用；TLS 1.3 的 0-RTT；用 <code>preconnect</code></td></tr></tbody></table></div><p class="muted"><b>连接池大小的算法</b>：<code>连接数 = QPS × 平均响应时间</code>。QPS 1000、RT 50ms → 需要 <code>1000 × 0.05 = 50</code> 个并发连接。池子小于这个值就会成为吞吐瓶颈（Little's Law）。</p></div></section>
 </body>
 </html>

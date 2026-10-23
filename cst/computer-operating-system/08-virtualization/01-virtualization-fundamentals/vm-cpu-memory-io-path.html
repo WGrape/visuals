@@ -16,6 +16,28 @@ Guest 应用发起 read，Guest 文件系统查缓存，未命中时经虚拟块
 容器共享宿主内核，主要依靠 namespaces、cgroups 与其他安全机制划分进程视图和资源；虚拟机运行独立 Guest 内核，隔离边界不同。容器启动快、资源开销通常小，但内核漏洞可能影响同一宿主上的其他容器。虚拟机也不是绝对安全，仍需补丁、设备隔离和镜像治理。二者可以组合：在虚拟机里运行容器，为租户提供更明确的内核边界。</h2><p>容器中的 CPU 限额与虚拟机的 vCPU 分配都可能出现等待，但观察指标和控制点不同。选择运行方式要看安全域、操作系统需求、部署密度和运维能力，而非仅比较启动秒数。</p></section>
 <section class="panel"><h2>如何定位性能瓶颈
 压测时记录 Guest 内应用 P95/P99、CPU、缺页和 I/O 队列，同时记录宿主 vCPU 等待、VM exit、内存压力、设备队列和存储延迟。逐层排除：如果 Guest 的 CPU 使用不高但宿主调度等待高，先查 CPU 超卖；如果 Guest 缺页与宿主交换同时上升，先查内存；如果存储本身健康而虚拟设备队列积压，检查驱动和并发配置。</h2><p>不要只用一次空闲宿主的 microbenchmark 宣称生产可达性能。多租户竞争、备份与热迁移都会改变尾延迟。每项优化都应在目标工作负载下测前后对照，并保留回退设置。</p></section>
+<section class="panel" data-dry-goods><h2>三条路径的开销量化</h2><div class="table-wrap"><table><thead><tr><th>路径</th><th>机制</th><th>关键开销</th><th>典型代价</th></tr></thead><tbody><tr><td><b>CPU 虚拟化</b></td><td>VT-x 的 VMX root / non-root 模式</td><td><b>VM-Exit</b>（特权指令/中断触发）</td><td>每次 <b>1000 – 5000 cycles</b>，约 1–2 μs</td></tr><tr><td><b>内存虚拟化</b></td><td>EPT（Intel）/ NPT（AMD）二级页表</td><td>每次 TLB miss 要<b>走两级页表</b></td><td>TLB miss 代价从约 10 cycles 涨到 <b>数十 cycles</b></td></tr><tr><td><b>IO 全虚拟化</b></td><td>QEMU 模拟设备（e1000、IDE）</td><td>每次 MMIO/PIO 触发 VM-Exit + 软件模拟</td><td><b>最慢</b>，PPS 只有几万</td></tr><tr><td><b>IO 半虚拟化</b></td><td>virtio（前后端环形队列）</td><td>批量提交，减少 VM-Exit 次数</td><td><b>主流方案</b>，约 10–30 万 PPS</td></tr><tr><td><b>IO 直通</b></td><td>SR-IOV / PCI passthrough（VT-d）</td><td>绕过宿主机，DMA 直达</td><td><b>接近裸机</b>，延迟 &lt; 10 μs</td></tr></tbody></table></div><p><b>虚拟化性能排查</b></p><pre><code># 确认硬件虚拟化支持
+grep -E 'vmx|svm' /proc/cpuinfo | head -1        # vmx=Intel, svm=AMD
+lscpu | grep Virtualization
+ls /dev/kvm                                      # KVM 设备存在说明可用
+
+# 看 VM-Exit 的统计与原因（最有用的性能工具）
+perf kvm stat live          # 实时看 exit 原因占比与时延
+perf kvm stat report        # 事后的汇总报告
+# 常见高频 exit 原因：
+#   HLT          - guest 空闲（正常，可用 halt polling 优化）
+#   EPT_VIOLATION / EPT_MISCONFIG - 内存访问（可用巨页优化）
+#   IO_INSTRUCTION / CPUID / MSR_READ - 设备与指令模拟（可用 virtio/直通优化）
+#   EXTERNAL_INTERRUPT - 中断注入
+
+# 查看虚拟机的 vCPU 与内存
+virsh vcpuinfo &lt;vm&gt;
+virsh dominfo &lt;vm&gt;
+virsh domstats &lt;vm&gt;
+
+# 大页（减少 EPT 页表级数，显著降低 TLB miss）
+cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+echo 4096 &gt; /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages</code></pre></section><section class="panel"><h2>三种 IO 方案对比与调优</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>吞吐（PPS）</th><th>延迟</th><th>CPU 占用</th><th>是否支持热迁移</th></tr></thead><tbody><tr><td>QEMU 全模拟（e1000）</td><td>几万</td><td>高（数百 μs）</td><td><b>高</b></td><td>支持</td></tr><tr><td><b>virtio-net</b></td><td>10–30 万</td><td>中（数十 μs）</td><td>中</td><td><b>支持</b></td></tr><tr><td>vhost-net（内核卸载）</td><td>50–100 万</td><td>较低</td><td>较低</td><td>支持</td></tr><tr><td>vhost-user（DPDK）</td><td>数百万</td><td>低</td><td>需独占核</td><td>支持（需配合）</td></tr><tr><td><b>SR-IOV / 直通</b></td><td><b>千万级</b></td><td><b>最低（&lt; 10 μs）</b></td><td><b>最低</b></td><td><b>不支持/受限</b></td></tr></tbody></table></div><ul><li><b>vhost-net 的价值</b>：把 virtio 的数据面从 QEMU 用户态挪到内核态，减少一次数据拷贝和上下文切换，PPS 能提升数倍。生产环境默认应开 <code>vhost=on</code>。</li><li><b>巨页（Huge Page）是性价比最高的优化</b>：2 MB 巨页能让 EPT 页表少一级，TLB 覆盖率提升 512 倍（4 KB → 2 MB）。内存密集型负载常能提升 5–15%。条件允许用 1 GB 巨页。</li><li><b>CPU 绑定的取舍</b>：<code>vcpupin</code> 把 vCPU 绑到物理核能减少调度抖动、提升缓存命中，但会降低资源利用率。低延迟场景绑，高密度场景不绑。</li><li><b>NUMA 对齐</b>：虚拟机的内存和 vCPU 必须在<b>同一个 NUMA 节点</b>，否则每次内存访问都要跨节点（延迟翻倍）。KVM 会自动做 NUMA 均衡，但直通设备时会失效，需手工对齐。</li><li><b>排障顺序</b>：① <code>perf kvm stat</code> 看哪种 VM-Exit 最多；② HLT 多 → 开 halt polling 或检查 idle 配置；③ EPT_VIOLATION 多 → 上巨页；④ IO 指令多 → 换 virtio/vhost；⑤ 仍不够 → SR-IOV。</li><li><b>容器不是虚拟化</b>：容器共享宿主机内核，没有 VM-Exit 和二级页表开销，所以性能接近裸机（唯一开销是 namespace/cgroup 带来的隔离成本）。要性能选容器，要强隔离选虚拟机。</li></ul><details><summary>为什么虚拟机的网络延迟比物理机高这么多？</summary><p>数据包要经过 guest 驱动 → virtio 队列 → VM-Exit → 宿主机 vhost → 物理网卡，每一步都有开销（队列通知、VM-Exit 约 1 μs、上下文切换）。优化路径：virtio → vhost-net → SR-IOV 直通，逐步去掉中间环节。</p></details><details><summary>嵌套虚拟化（在 VM 里再跑 VM）能用吗？</summary><p>能，但性能损失明显：第二层的 VM-Exit 要被第一层再截获一次（或靠硬件的 VMCS shadowing 优化）。Intel 的 VMCS Shadowing 和 AMD 的 Nested VMCB 能显著降低开销，但仍不建议生产用。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>Guest 中发起一次系统调用，就必然发生一次 VM exit 吗？</summary><p>不必然。用户态进入 Guest 内核与退出到 Hypervisor 是两种不同切换；具体是否退出取决于特权操作和硬件配置。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="virtualization-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

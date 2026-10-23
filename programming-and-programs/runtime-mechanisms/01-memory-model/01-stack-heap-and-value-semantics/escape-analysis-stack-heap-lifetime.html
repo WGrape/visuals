@@ -11,6 +11,32 @@
 <section class="panel"><h2>栈快不等于堆一定慢</h2><p>栈分配通常只需移动栈指针或复用栈槽，回收随着函数栈帧结束；堆分配需要分配器管理，还可能增加垃圾回收或引用计数压力。但栈对象过大也可能带来栈增长或缓存压力；堆对象若复用得好，也不一定是性能瓶颈。对象数量、生命周期、访问局部性和分配器实现共同决定成本。</p><p>为减少逃逸而把共享对象复制很多次，可能反而增加内存带宽与 CPU；为了“零分配”引入复杂池化，还可能造成持有过久、GC 根增多或并发错误。优化前先用分配剖析与 CPU profile 找到真正热点。</p></section>
 <section class="panel"><h2>如何验证 Go 与托管运行时</h2><p>以 Go 为例，可查看编译器的逃逸分析诊断与基准测试分配次数；返回局部变量地址并不自动成为悬垂引用，因为编译器会为需要延长生命周期的值选择合适位置。以 JVM 为例，JIT 可能通过逃逸分析与标量替换减少对象分配，但是否发生依赖运行时、热度和优化条件。Python 常见实现中的对象通常由解释器堆管理，不能把 Go 的栈堆优化结论直接套用到 Python 局部变量。</p><p>诊断输出需要结合实际机器码和分配指标解读：某变量“逃逸”不一定是性能问题；没有显式堆分配也不等于运行时没有其他分配。基准测试应避免编译器把整段工作消除，设置真实使用结果并多次测量。</p></section>
 <section class="panel"><h2>生命周期与所有权更重要</h2><p>程序正确性的核心是引用有效、共享修改受控和释放时机清楚。C/C++ 使用悬垂指针可能破坏内存安全；Go、Java、Python 等语言用不同的运行时与编译器机制保证对象在可达期间存活，但可能带来 GC 或引用计数开销。逃逸分析是优化与安全实现的一环，不是手工为每个变量贴“栈/堆”标签的游戏。</p><p>练习：一个 Go 函数创建局部结构体并返回其指针；一个 C 函数返回自动局部结构体的地址。两者的安全性为何不同？请分别指出对象生命周期由谁保证。</p></section>
+<section class="panel" data-dry-goods><h2>Go 栈与堆的关键数字</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>数值</th><th>含义</th></tr></thead><tbody><tr><td>goroutine 初始栈</td><td>2 KB</td><td>极大降低并发成本（对比 pthread 默认 MB 级）</td></tr><tr><td>栈最大（64 位）</td><td>默认 1 GB</td><td>分段栈/连续栈按需增长，超上限 panic</td></tr><tr><td>栈增长方式</td><td>morestack 拷贝扩容（Go 1.4+ 连续栈）</td><td>扩容时拷贝旧栈，指针需调整</td></tr><tr><td>堆分配代价</td><td>需 GC 回收 + 分配器查找 span</td><td>比栈分配慢 1~2 个数量级</td></tr><tr><td><code>GOGC</code></td><td>默认 100</td><td>堆增长到上次存活堆的 2 倍时触发 GC</td></tr><tr><td>GOMAXPROCS</td><td>默认等于 CPU 逻辑核数</td><td>影响 P 的数量与并行度</td></tr></tbody></table></div><p>逃逸分析是<b>编译器</b>决定：若变量的生命周期能被证明不超出函数作用域，就分配在栈上；否则逃逸到堆。它是编译期决策，与 <code>new</code>/<code>make</code> 的写法无关。</p></section><section class="panel"><h2>常见逃逸场景对照</h2><div class="table-wrap"><table><thead><tr><th>写法</th><th>是否逃逸</th><th>原因</th></tr></thead><tbody><tr><td><code>return &T{}</code></td><td><b>逃逸</b></td><td>指针被返回，生命周期超出函数</td></tr><tr><td><code>x := new(T); 局部使用</code></td><td>通常不逃逸</td><td>编译器能证明不外泄</td></tr><tr><td>闭包捕获并在外部调用</td><td><b>逃逸</b></td><td>闭包可能活得更久</td></tr><tr><td>赋值给 <code>interface{}</code></td><td>常逃逸</td><td>装箱后编译器难以跟踪</td></tr><tr><td><code>make([]int, n)</code> 且 n 为变量</td><td>常逃逸</td><td>编译期无法确定大小</td></tr><tr><td><code>make([]int, 64)</code> 常量小切片</td><td>可能不逃逸</td><td>大小已知且足够小</td></tr><tr><td>大数组（如 <code>[1&lt;&lt;20]byte</code>）</td><td>常逃逸</td><td>超过栈上分配阈值</td></tr><tr><td><code>fmt.Println(x)</code></td><td>常逃逸</td><td>参数是 <code>...interface{}</code>，发生装箱</td></tr></tbody></table></div><p><b>示例</b></p><pre><code>package main
+
+func stack() int { x := 1; return x }        // 不逃逸
+func heap()  *int { x := 1; return &amp;x }      // 逃逸：返回局部变量地址
+func boxed() any  { x := 1; return x }       // 逃逸：装箱为 interface{}
+
+// 看逃逸分析结果
+// go build -gcflags='-m' main.go
+//   ./main.go:5:6: can inline stack
+//   ./main.go:6:2: moved to heap: x      &lt;- 这一行就是逃逸
+// 加 -m -m 可看更详细的原因</code></pre></section>
+<section class="panel"><h2>量化验证：分配次数与内存</h2><p><b>命令</b></p><pre><code># 1) 逃逸分析（按行号给出原因）
+go build -gcflags='-m' ./...
+go build -gcflags='-m -m' ./...      # 更详细
+
+# 2) 基准测试里看每次操作的分配次数与字节数
+go test -bench=BenchmarkX -benchmem
+#   BenchmarkX-8   1000000   1234 ns/op   512 B/op   4 allocs/op
+#                                          ^每次分配字节  ^每次分配次数
+#   allocs/op 从 4 降到 0 通常意味着消除了堆分配
+
+# 3) 运行时堆与 GC 统计
+GODEBUG=gctrace=1 ./yourprog      # 每次 GC 打印一行：活堆、目标、暂停时间
+go tool pprof -alloc_space ./yourprog heap.prof   # 看累计分配来源</code></pre><div class="table-wrap"><table><thead><tr><th>指标</th><th>怎么看</th><th>优化目标</th></tr></thead><tbody><tr><td><code>allocs/op</code></td><td>benchmem 输出</td><td>热路径尽量降到 0~1</td></tr><tr><td><code>B/op</code></td><td>benchmem 输出</td><td>减少每次操作的分配字节</td></tr><tr><td><code>moved to heap</code></td><td>-gcflags -m</td><td>确认哪些变量逃逸及原因</td></tr><tr><td>GC 暂停</td><td><code>GODEBUG=gctrace=1</code> 的 pause 列</td><td>目标通常在毫秒以下</td></tr><tr><td>堆存活大小</td><td>gctrace 的 live heap</td><td>下降说明对象复用有效</td></tr></tbody></table></div></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>benchmem 里 allocs/op 偏高</td><td>热路径有堆分配</td><td>预分配 slice 容量、用值类型、复用对象</td></tr><tr><td>GC 频繁、CPU 被 GC 吃掉</td><td>短命对象太多</td><td><code>sync.Pool</code> 复用；减少装箱；调大 GOGC（换内存换 CPU）</td></tr><tr><td>逃逸分析结果看不懂</td><td>编译器原因描述较简略</td><td>加第二个 <code>-m</code>；逐个函数最小化复现</td></tr><tr><td>同步后仍逃逸</td><td>赋值给接口 / 传入可变参数</td><td>避免 <code>fmt</code> 热路径；用具体类型替代 any</td></tr><tr><td>slice 频繁扩容</td><td>append 时容量翻倍重新分配</td><td><code>make([]T, 0, n)</code> 预分配</td></tr><tr><td>大对象导致栈扩容</td><td>栈上放了大数组</td><td>改为堆分配（切片）或减小尺寸</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>用 new 分配就一定在堆上吗？</summary><p>不一定。Go 的 new/make 只表示“分配”，最终位置由<b>逃逸分析</b>决定。若编译器能证明指针不会逃出函数，对象可以留在栈上；反过来，即使没有 new，只要地址外泄（如返回指针、装箱、被闭包捕获），也会分配在堆上。</p></details><details><summary>逃逸分析是在运行时做的吗？</summary><p>不是，是编译期静态分析。编译器构建逃逸图，判断变量是否可能被函数外访问。它是保守的：无法证明不外泄时就分配到堆，所以有些看起来“应该”在栈上的变量仍会逃逸。</p></details><details><summary>goroutine 栈为什么可以只给 2 KB？</summary><p>因为 Go 的栈是可增长的连续栈：函数调用前检查剩余空间，不足时分配更大的栈并把旧栈拷贝过去（指针被调整为新地址）。所以初始开销只需 2 KB，而不是像固定栈线程那样预留 MB 级。</p></details><details><summary>怎么量化“逃逸”带来的代价？</summary><p>看 <code>go test -benchmem</code> 的 <code>allocs/op</code> 与 <code>B/op</code>：堆分配会增加分配器开销与 GC 压力。把热路径的 allocs/op 从多次降到 0，通常能带来显著吞吐提升；再用 <code>GODEBUG=gctrace=1</code> 看 GC 频率与暂停是否下降。</p></details><details><summary>sync.Pool 能解决所有分配问题吗？</summary><p>不能。Pool 里的对象会在 GC 时被清空（victim cache 可缓一轮），不适合持有需要长期复用的大对象；也不适合有状态且未重置的对象（取出后必须手动清零）。它适合高频、短命、可重置的临时对象（如 buffer）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>Go 返回局部结构体的指针，是否必然产生悬垂栈指针？</summary><p>不会。安全语言的编译器/运行时须保证对象在引用仍可用时存活，常见做法是让它逃逸到堆。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="memory-concepts.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

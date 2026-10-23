@@ -67,6 +67,16 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,34 +86,117 @@
   <p>行版本 xmin/xmax、四种隔离级别，以及 PG 的“真可重复读”与 SSI 可串行化。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#t1">MVCC 行版本</a><a href="#t2">隔离级别</a><a href="#t3">与 MySQL 对比</a><a href="#t4">事务ID回卷</a></nav>
+  <nav class="toc"><a href="#s1">① 事务与 ACID 在 PG 中的落地</a><a href="#s2">② MVCC 的核心：xmin / xmax / 快照</a><a href="#s3">③ 四种隔离级别与三种异常</a><a href="#s4">④ 与 MySQL InnoDB MVCC 的对比</a><a href="#s5">⑤ 长事务的危害与排查</a><a href="#s6">⑥ 常见问法</a></nav>
   <main class="content">
-<section id="t1"><h2>① MVCC：每行有多个版本</h2>
-<p>PG 用 <strong>多版本并发控制</strong>：UPDATE 不原地改，而是插入新版本行，旧版本靠 <code>xmin</code>（创建事务ID）与 <code>xmax</code>（删除/更新事务ID）标记可见性。读不加锁，写不阻塞读——快照读永远看到事务开始时的快照。</p>
-<div class="callout note"><b>可见性规则：</b>一个事务只能看见 <code>xmin &lt;= 自己</code> 且 <code>xmax</code> 未提交或 &gt; 自己的版本。这正是“读不阻塞写、写不阻塞读”的来源。</div>
+<section id="s1"><h2>① 事务与 ACID 在 PG 中的落地</h2>
+
+<div class="grid3">
+<div class="card3"><h4>原子性 A</h4><p>事务 ID + clog（提交日志）标记；回滚时无需 undo，因为旧版本本来就在</p></div>
+<div class="card3"><h4>一致性 C</h4><p>约束、触发器、外键、唯一索引在事务内检查</p></div>
+<div class="card3"><h4>隔离性 I</h4><p><strong>MVCC</strong>：每行多个版本 + 快照（Snapshot）判断可见性</p></div>
+<div class="card3"><h4>持久性 D</h4><p><strong>WAL</strong> 先落盘 + 检查点，崩溃后重放</p></div>
+</div>
+<p>注意一个与其他数据库的重要差异：<strong>PG 没有 undo 表空间</strong>。回滚时不需要「反向操作」，因为旧版本一直留在堆表里，只是不被新快照看见——代价就是<strong>需要 VACUUM</strong>。</p>
+
 </section>
-<section id="t2"><h2>② 四种隔离级别</h2>
-<table>
-  <tr><th>级别</th><th>脏读</th><th>不可重复读</th><th>幻读</th><th>PG 实现</th></tr>
-  <tr><td>Read Uncommitted</td><td>防</td><td>可能</td><td>可能</td><td>同 RC（PG 无真未提交读）</td></tr>
-  <tr><td>Read Committed（默认）</td><td>防</td><td>可能</td><td>可能</td><td>每条语句新建快照</td></tr>
-  <tr><td>Repeatable Read</td><td>防</td><td>防</td><td>防</td><td>事务级快照 + 写冲突检测</td></tr>
-  <tr><td>Serializable</td><td>防</td><td>防</td><td>防</td><td>SSI 可串行化快照隔离</td></tr>
-</table>
-<p><b>关键差异：</b>PG 的 <code>Repeatable Read</code> 通过 <strong>事务开始时的单一快照 + 写-写冲突检测</strong> 真正防止幻读；MySQL 的 RR 靠 MVCC + Next-Key Lock。PG 的 <code>Serializable</code> 用 SSI（Serializable Snapshot Isolation），无需全程加锁即可检测串行化冲突。</p>
-</section>
-<section id="t3"><h2>③ 与 MySQL 对比</h2>
+<section id="s2"><h2>② MVCC 的核心：xmin / xmax / 快照</h2>
+
+<figure class="fig">
+<svg viewBox="0 0 700 200" role="img" aria-label="MVCC 行版本与快照可见性">
+  <text x="350" y="22" fill="#e6edf3" font-size="13" text-anchor="middle">同一行的多个版本（UPDATE 两次）</text>
+  <rect x="40" y="45" width="180" height="60" rx="6" fill="rgba(248,81,73,.16)" stroke="#f85149"/>
+  <text x="130" y="66" fill="#e6edf3" font-size="12" text-anchor="middle">版本 v1（最旧）</text>
+  <text x="130" y="88" fill="#8b949e" font-size="11" text-anchor="middle">xmin=100, xmax=110</text>
+  <rect x="240" y="45" width="180" height="60" rx="6" fill="rgba(210,153,34,.16)" stroke="#d29922"/>
+  <text x="330" y="66" fill="#e6edf3" font-size="12" text-anchor="middle">版本 v2</text>
+  <text x="330" y="88" fill="#8b949e" font-size="11" text-anchor="middle">xmin=110, xmax=120</text>
+  <rect x="440" y="45" width="180" height="60" rx="6" fill="rgba(63,185,80,.16)" stroke="#3fb950"/>
+  <text x="530" y="66" fill="#e6edf3" font-size="12" text-anchor="middle">版本 v3（当前）</text>
+  <text x="530" y="88" fill="#8b949e" font-size="11" text-anchor="middle">xmin=120, xmax=0</text>
+  <path d="M220,75 L238,75" stroke="#8b949e" marker-end="url(#mv1)"/>
+  <path d="M420,75 L438,75" stroke="#8b949e" marker-end="url(#mv1)"/>
+  <text x="229" y="66" fill="#8b949e" font-size="10">ctid</text>
+  <text x="429" y="66" fill="#8b949e" font-size="10">ctid</text>
+  <line x1="30" y1="125" x2="670" y2="125" stroke="#30363d"/>
+  <text x="350" y="148" fill="#e6edf3" font-size="12" text-anchor="middle">事务 115 读这行：快照包含 100（已提交）、不含 110/120 → 看到 v1</text>
+  <text x="350" y="170" fill="#e6edf3" font-size="12" text-anchor="middle">事务 130 读这行：快照含 100、110，不含 120 → 看到 v2</text>
+  <text x="350" y="192" fill="#8b949e" font-size="11" text-anchor="middle">可见性规则：xmin 已提交且 &lt; 快照 → 可见；xmax 未提交或 &gt; 快照 → 未被删除</text>
+  <defs><marker id="mv1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8b949e"/></marker></defs>
+</svg>
+<figcaption>MVCC：行的多个版本 + 事务快照决定「你能看到哪一版」</figcaption>
+</figure>
+<p>可见性判断简化为两条规则（配合 clog 中事务的提交状态）：</p>
 <ul>
-  <li>MySQL RR 是默认；PG RC 是默认。</li>
-  <li>PG 没有“间隙锁”（Gap Lock），靠快照+冲突重试防幻读，锁竞争更小。</li>
-  <li>PG 的 SSI 在可串行化下仍能高并发，不像 MySQL SERIALIZABLE 退化为大量加锁。</li>
+<li><strong>插入可见</strong>：xmin 对应的事务<strong>已提交</strong>，且 xmin 在快照中「可见」（即事务在本快照开始前已提交）；</li>
+<li><strong>删除/更新不可见</strong>：xmax = 0（未删），或 xmax 对应事务<strong>未提交 / 在本快照之后才开始</strong>。</li>
 </ul>
+
 </section>
-<section id="t4"><h2>④ 事务 ID 回卷（wraparound）</h2>
-<p>事务 ID 是 32 位，会循环。若旧事务 ID 太老，MVCC 可见性判断会出错。PG 靠 <strong>VACUUM 冻结（freeze）</strong> 老版本的事务 ID 来规避——这也是 vacuum 必须常跑的原因之一。</p>
-<div class="callout warn"><b>警告：</b><code>autovacuum</code> 卡住可能导致 <code>database is not accepting commands</code> 的紧急停写，务必监控 <code>age(datfrozenxid)</code>。</div>
+<section id="s3"><h2>③ 四种隔离级别与三种异常</h2>
+
+<table>
+<tr><th>隔离级别</th><th>脏读</th><th>不可重复读</th><th>幻读</th><th>写偏斜</th></tr>
+<tr><td>Read Uncommitted</td><td>❌ 不可能（PG 视为 Read Committed）</td><td>可能</td><td>可能</td><td>可能</td></tr>
+<tr><td><strong>Read Committed（默认）</strong></td><td>不可能</td><td>可能</td><td>可能</td><td>可能</td></tr>
+<tr><td>Repeatable Read</td><td>不可能</td><td>不可能</td><td><strong>不可能</strong>（PG 的快照隔离更强）</td><td>可能</td></tr>
+<tr><td>Serializable</td><td>不可能</td><td>不可能</td><td>不可能</td><td><strong>不可能</strong>（SSI）</td></tr>
+</table>
+<div class="grid3">
+<div class="card3"><h4>脏读</h4><p>读到别人未提交的数据。PG 在任何级别都不会发生</p></div>
+<div class="card3"><h4>不可重复读</h4><p>同一事务内两次读同一行，值变了（别人已提交的 UPDATE）</p></div>
+<div class="card3"><h4>幻读</h4><p>同一事务内两次范围查询，多了/少了行（别人已提交的 INSERT）</p></div>
+<div class="card3"><h4>写偏斜 write skew</h4><p>两个事务各自读同一组数据、写<strong>不同</strong>的行，合起来破坏了约束（如两名医生同时下班导致无人值班）</p></div>
+</div>
+<div class="callout note"><b>PG 的一个亮点：</b>它的 <strong>Repeatable Read 实际是快照隔离（SI）</strong>，<strong>已经能防止幻读</strong>（比 SQL 标准要求更强）；而 <strong>Serializable 采用 SSI（可串行化快照隔离）</strong>，通过跟踪读写依赖图检测「危险结构」，在<strong>不加全表锁</strong>的前提下防止写偏斜——性能远好于传统的两阶段锁（S2PL）。</div>
+
 </section>
-</main>
+<section id="s4"><h2>④ 与 MySQL InnoDB MVCC 的对比</h2>
+
+<table>
+<tr><th>维度</th><th>PostgreSQL</th><th>MySQL InnoDB</th></tr>
+<tr><td>旧版本存放</td><td><strong>留在堆表内</strong>（同页或同文件）</td><td><strong>undo 表空间</strong>（回滚段）</td></tr>
+<tr><td>回滚</td><td>无需 undo，旧版本本来就在</td><td>需要 undo 回滚</td></tr>
+<tr><td>清理机制</td><td><strong>VACUUM</strong>（需关注 autovacuum）</td><td><strong>purge 线程</strong>（关注 history list length）</td></tr>
+<tr><td>主键组织</td><td><strong>堆表</strong>（索引存 ctid 指针）</td><td><strong>聚簇索引</strong>（索引即数据）</td></tr>
+<tr><td>UPDATE 代价</td><td>写新版本 + 旧版本留原地（索引可能也要更新）</td><td>原地更新 + undo（主键索引不变）</td></tr>
+<tr><td>表膨胀</td><td>明显（需 VACUUM FULL / pg_repack）</td><td>较轻（但 undo 与二级索引可能膨胀）</td></tr>
+<tr><td>事务 ID 回卷</td><td>存在（需 freeze）</td><td>存在（undo 的 trx_id，需 purge）</td></tr>
+</table>
+<div class="callout tip"><b>实践差异：</b>PG 调优重点是 <strong>autovacuum 与 bloat</strong>；MySQL 调优重点是 <strong>undo 表空间、history list length 与聚簇索引设计</strong>。两者都不要有长事务。</div>
+
+</section>
+<section id="s5"><h2>⑤ 长事务的危害与排查</h2>
+
+<p>长事务（尤其 <strong>idle in transaction</strong>）是 PG 的头号隐形杀手：</p>
+<ul>
+<li><strong>阻止 VACUUM 回收死元组</strong> → 表与索引膨胀；</li>
+<li><strong>阻止 freeze</strong> → 事务 ID 年龄增长，接近回卷风险；</li>
+<li>持有锁 → 阻塞 DDL 与其它 DML；</li>
+<li>延长 WAL 保留（复制槽场景）→ 磁盘压力。</li>
+</ul>
+<pre><code>-- 找出长事务
+SELECT pid, state, xact_start, now() - xact_start AS dur,
+       wait_event_type, wait_event, left(query, 80) AS q
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL AND now() - xact_start &gt; interval '60 seconds'
+ORDER BY xact_start;
+
+-- 常见根因：应用开启了事务却忘了提交（ORM 的自动事务、异常分支未提交）
+-- 防护参数
+SET idle_in_transaction_session_timeout = '60s';   -- 自动断开空闲长事务
+SET statement_timeout = '30s';                     -- 单条语句超时
+SET lock_timeout = '3s';                           -- 等锁超时</code></pre>
+
+</section>
+<section id="s6"><h2>⑥ 常见问法</h2>
+<div class="qa"><b>Q：PostgreSQL 的 MVCC 是怎么实现的？</b><p>A：每行有隐藏字段 <strong>xmin（插入该版本的事务 ID）、xmax（删除/更新该版本的事务 ID）、ctid（物理位置）</strong>。UPDATE 等于「插入新版本 + 给旧版本打 xmax」，旧版本留在堆表中。事务读取时根据自己的<strong>快照（Snapshot：记录当时活跃事务集合）</strong>判断每个版本是否可见：<strong>xmin 已提交且早于快照 → 可见；xmax 未提交或晚于快照 → 未被删除</strong>。旧版本由 <strong>VACUUM</strong> 回收。<strong>核心特点：没有 undo 表空间，读者不加锁。</strong></p></div>
+<div class="qa"><b>Q：PG 的 Repeatable Read 为什么能防幻读？</b><p>A：因为 PG 的 Repeatable Read 实际实现的是<strong>快照隔离（Snapshot Isolation）</strong>：事务在<strong>第一条语句执行时</strong>取得一个快照，之后所有读都基于该快照，因此别人<strong>后续插入并提交的新行不在快照中</strong>，不会出现幻读。这比 SQL 标准对 RR 的要求<strong>更强</strong>（标准只要求防不可重复读）。<strong>但快照隔离防不了写偏斜</strong>——那是 Serializable（SSI）的职责。</p></div>
+<div class="qa"><b>Q：什么是写偏斜？Serializable 如何解决？</b><p>A：<strong>写偏斜（write skew）</strong>：两个并发事务读取<strong>同一组</strong>数据，然后各自修改<strong>不同的行</strong>，单独看都合法，合起来却破坏了全局约束（例：医院要求至少一名医生值班，两名医生同时读到「还有 2 人」后同时请假）。PG 的 <strong>Serializable 用 SSI（可串行化快照隔离）</strong>解决：跟踪事务间的<strong>读写依赖（rw-conflict）</strong>，在依赖图中检测「危险环」结构，发现就把其中一个事务<strong>中止（40001）</strong>。<strong>代价：需要重试逻辑，且 Serializable 下 SELECT 也可能产生 SIReadLock 开销。</strong></p></div>
+<div class="qa"><b>Q：Read Committed 下有什么并发陷阱？</b><p>A：最典型的是<strong>「读-判断-写」竞态</strong>：两个事务都读到库存 = 1，都判断「够」，都扣减，结果库存变 -1。<strong>解法三选一</strong>：① <strong>原子 UPDATE</strong>：<code>UPDATE s SET qty=qty-1 WHERE id=1 AND qty&gt;0;</code>（检查影响行数）——最推荐，无需显式加锁；② <code>SELECT ... FOR UPDATE</code> 先锁后改；③ 提高隔离级别到 Repeatable Read 并处理重试。<strong>记住：Read Committed 下每条语句都取新快照，所以两次读之间数据可能已变。</strong></p></div>
+<div class="qa"><b>Q：长事务到底有什么危害？</b><p>A：四点：① <strong>阻止 VACUUM 回收死元组</strong>——只要事务的快照比死元组更老，这些死元组就不能回收，导致表膨胀；② <strong>阻止 freeze</strong>，使 <code>age(relfrozenxid)</code> 增长，逼近事务 ID 回卷风险；③ <strong>持有锁</strong>，让 DDL 排队并连锁阻塞后续所有查询；④ 在流复制场景下<strong>保留 WAL 与旧版本</strong>。<strong>防护</strong>：设 <code>idle_in_transaction_session_timeout</code>、监控 <code>pg_stat_activity.xact_start</code>、ORM 中避免「开了事务不提交」的异常分支。</p></div>
+<div class="qa"><b>Q：PG 与 MySQL 的 MVCC 主要差别是什么？</b><p>A：<strong>旧版本存放位置不同</strong>：PG 把旧版本<strong>留在堆表内</strong>，靠 VACUUM 回收，因此表会膨胀，调优重点是 autovacuum 与 bloat；InnoDB 把旧版本放入 <strong>undo 表空间</strong>并用 purge 线程清理，聚簇索引里是原地更新，因此表膨胀较轻，调优重点是 undo 与 history list length。<strong>另一个差别</strong>：PG 是堆表（索引存 ctid 指针，UPDATE 改 ctid 时索引可能也要更新，除非 HOT），InnoDB 是聚簇索引（主键索引即数据）。<strong>共同点：都不能有长事务。</strong></p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Redis 连接资源数据结构</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    padding: 30px 20px;
+    min-height: 100vh;
+  }
+  h1 {
+    text-align: center;
+    color: #ff6b6b;
+    font-size: 22px;
+    margin-bottom: 6px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #888;
+    font-size: 13px;
+    margin-bottom: 30px;
+  }
+
+  /* ===== 整体布局 ===== */
+  .page {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+  }
+
+  /* ===== 区块卡片 ===== */
+  .card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3e;
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+  .card-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #7eb8f7;
+    margin-bottom: 14px;
+    padding-left: 10px;
+    border-left: 3px solid #7eb8f7;
+    letter-spacing: 0.5px;
+  }
+
+  /* ===== redisClient 结构体 ===== */
+  .struct-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media(max-width: 700px) { .struct-grid { grid-template-columns: 1fr; } }
+
+  .field-row {
+    display: flex;
+    align-items: flex-start;
+    background: #12141e;
+    border: 1px solid #2a2d3e;
+    border-radius: 8px;
+    padding: 10px 14px;
+    gap: 10px;
+    transition: border-color 0.2s;
+  }
+  .field-row:hover { border-color: #7eb8f7; }
+  .field-type {
+    color: #f0a500;
+    font-size: 11px;
+    font-family: 'Fira Mono', monospace;
+    white-space: nowrap;
+    min-width: 80px;
+    padding-top: 2px;
+  }
+  .field-body {}
+  .field-name {
+    color: #79e0a0;
+    font-size: 13px;
+    font-family: 'Fira Mono', monospace;
+    font-weight: 600;
+  }
+  .field-desc {
+    color: #999;
+    font-size: 11px;
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .field-row.highlight { border-color: #ff6b6b44; background: #1f1520; }
+  .field-row.highlight .field-name { color: #ff9090; }
+
+  /* ===== 网络 IO 模型图 ===== */
+  .io-diagram {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding: 10px 0;
+  }
+  .io-box {
+    background: #12141e;
+    border: 1px solid #3a3d50;
+    border-radius: 8px;
+    padding: 10px 18px;
+    text-align: center;
+    min-width: 100px;
+  }
+  .io-box .io-label { font-size: 12px; color: #aaa; margin-top: 3px; }
+  .io-box .io-name { font-size: 13px; font-weight: 700; color: #79e0a0; }
+  .io-box.red .io-name { color: #ff9090; }
+  .io-box.blue .io-name { color: #7eb8f7; }
+  .io-box.yellow .io-name { color: #f0c060; }
+  .arrow {
+    color: #555;
+    font-size: 22px;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+  .arrow-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 4px;
+  }
+  .arrow-label .al-text {
+    font-size: 10px;
+    color: #666;
+    white-space: nowrap;
+  }
+
+  /* ===== 连接池结构 ===== */
+  .pool-wrap {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .pool-box {
+    flex: 1;
+    min-width: 200px;
+    background: #12141e;
+    border: 1px solid #2a2d3e;
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .pool-box-title {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+  .pool-item {
+    background: #1a1d27;
+    border: 1px solid #2a2d3e;
+    border-radius: 5px;
+    padding: 5px 10px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .pool-item .pi-key { color: #7eb8f7; font-family: monospace; }
+  .pool-item .pi-val { color: #f0c060; }
+  .pool-status {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+  }
+  .ps-free { background: #1a3a1a; color: #79e0a0; }
+  .ps-busy { background: #3a1a1a; color: #ff9090; }
+  .ps-wait { background: #3a2a00; color: #f0c060; }
+
+  /* ===== 链表 / 哈希表 关系图 ===== */
+  .linked-list {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+  .ll-node {
+    background: #12141e;
+    border: 1px solid #3a3d50;
+    border-radius: 6px;
+    padding: 8px 14px;
+    white-space: nowrap;
+    font-size: 12px;
+    color: #e0e0e0;
+    flex-shrink: 0;
+  }
+  .ll-node span { color: #79e0a0; font-family: monospace; }
+  .ll-null {
+    padding: 8px 12px;
+    color: #555;
+    font-size: 12px;
+    font-family: monospace;
+    flex-shrink: 0;
+  }
+  .ll-arrow {
+    color: #444;
+    font-size: 18px;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+
+  /* ===== 内存布局图 ===== */
+  .mem-layout {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .mem-col {
+    flex: 1;
+    min-width: 200px;
+  }
+  .mem-col-title { font-size: 12px; color: #888; margin-bottom: 8px; font-weight: 600; }
+  .mem-block {
+    border-radius: 5px;
+    padding: 7px 12px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    font-family: monospace;
+  }
+  .mb-kernel { background: #1a2a3a; color: #7eb8f7; }
+  .mb-userspace { background: #1a2a1a; color: #79e0a0; }
+  .mb-heap { background: #2a1a1a; color: #ff9090; }
+  .mb-stack { background: #2a2a1a; color: #f0c060; }
+
+  /* ===== 字段说明浮层 ===== */
+  .note-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .note-item {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    background: #12141e;
+    border-left: 3px solid #3a3d50;
+    border-radius: 0 6px 6px 0;
+    padding: 8px 12px;
+  }
+  .note-tag {
+    font-size: 11px;
+    font-family: monospace;
+    color: #f0a500;
+    white-space: nowrap;
+    min-width: 120px;
+  }
+  .note-text { font-size: 12px; color: #bbb; line-height: 1.6; }
+
+  /* ===== 颜色 legend ===== */
+  .legend {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    padding: 10px 0 0;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #888; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div>
+    <h1>⚡ Redis 连接资源数据结构</h1>
+    <p class="subtitle">一个 TCP 连接在 Redis 服务端对应的完整内存对象模型</p>
+  </div>
+
+  <!-- ===== 1. 核心结构体 redisClient ===== -->
+  <div class="card">
+    <div class="card-title">① 核心结构体 — redisClient（client）</div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b"></div> 网络 / IO 相关</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#79e0a0"></div> 协议解析</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#7eb8f7"></div> 状态 / 元信息</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f0a500"></div> 执行上下文</div>
+    </div>
+    <br>
+    <div class="struct-grid">
+
+      <div class="field-row highlight">
+        <div class="field-type">int</div>
+        <div class="field-body">
+          <div class="field-name">fd</div>
+          <div class="field-desc">TCP 套接字文件描述符，操作系统内核分配<br>-1 表示 fake client（AOF 加载用）</div>
+        </div>
+      </div>
+
+      <div class="field-row highlight">
+        <div class="field-type">connection *</div>
+        <div class="field-body">
+          <div class="field-name">conn</div>
+          <div class="field-desc">封装 fd 的连接对象，含 TLS/普通 TCP 两种实现<br>包含 read/write handler 函数指针</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">sds</div>
+        <div class="field-body">
+          <div class="field-name">querybuf</div>
+          <div class="field-desc">接收缓冲区（动态字符串），存放未解析的原始字节<br>超过 client-query-buffer-limit (1GB) 会被强制关闭</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">size_t</div>
+        <div class="field-body">
+          <div class="field-name">querybuf_peak</div>
+          <div class="field-desc">接收缓冲区历史峰值，用于诊断内存占用</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">int</div>
+        <div class="field-body">
+          <div class="field-name">argc / argv[]</div>
+          <div class="field-desc">已解析的 RESP 命令参数个数与参数数组<br>argv 是 robj* 指针数组，指向共享对象或新建对象</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">struct redisCommand *</div>
+        <div class="field-body">
+          <div class="field-name">cmd / lastcmd</div>
+          <div class="field-desc">当前/上一条命令指针，指向命令表中的函数</div>
+        </div>
+      </div>
+
+      <div class="field-row highlight">
+        <div class="field-type">list *</div>
+        <div class="field-body">
+          <div class="field-name">reply</div>
+          <div class="field-desc">发送响应链表，每个节点是一个 clientReplyBlock<br>当 buf 写满后溢出到此链表</div>
+        </div>
+      </div>
+
+      <div class="field-row highlight">
+        <div class="field-type">char[]</div>
+        <div class="field-body">
+          <div class="field-name">buf[PROTO_REPLY_CHUNK_BYTES]</div>
+          <div class="field-desc">静态发送缓冲区（默认 16KB）<br>小响应直接写入此处，避免链表分配</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">uint64_t</div>
+        <div class="field-body">
+          <div class="field-name">id</div>
+          <div class="field-desc">全局自增连接 ID，CLIENT LIST 可见</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">redisDb *</div>
+        <div class="field-body">
+          <div class="field-name">db</div>
+          <div class="field-desc">当前 SELECT 的数据库指针（默认 db[0]）</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">sds</div>
+        <div class="field-body">
+          <div class="field-name">name</div>
+          <div class="field-desc">CLIENT SETNAME 设置的连接名称</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">time_t</div>
+        <div class="field-body">
+          <div class="field-name">lastinteraction</div>
+          <div class="field-desc">上次交互时间，用于 timeout 检测</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">uint64_t</div>
+        <div class="field-body">
+          <div class="field-name">flags</div>
+          <div class="field-desc">状态位掩码：SLAVE / PUBSUB / BLOCKED<br>MULTI / READONLY / CLOSE_ASAP 等</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">multiState</div>
+        <div class="field-body">
+          <div class="field-name">mstate</div>
+          <div class="field-desc">MULTI/EXEC 事务队列，存储排队命令</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">list *</div>
+        <div class="field-body">
+          <div class="field-name">watched_keys</div>
+          <div class="field-desc">WATCH 监视的 key 列表，用于 CAS 事务</div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-type">dict *</div>
+        <div class="field-body">
+          <div class="field-name">pubsub_channels</div>
+          <div class="field-desc">订阅的频道哈希表（Pub/Sub）</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== 2. 连接在内存中的布局 ===== -->
+  <div class="card">
+    <div class="card-title">② 单条连接的内存区域分布</div>
+    <div class="mem-layout">
+      <div class="mem-col">
+        <div class="mem-col-title">内核空间（Kernel Space）</div>
+        <div class="mem-block mb-kernel">Socket 接收缓冲区（sk_rcvbuf）</div>
+        <div class="mem-block mb-kernel">Socket 发送缓冲区（sk_sndbuf）</div>
+        <div class="mem-block mb-kernel">fd（文件描述符表）</div>
+        <div class="mem-block mb-kernel">TCP 状态机 / 序号 / ACK</div>
+      </div>
+      <div class="mem-col">
+        <div class="mem-col-title">用户空间 — 堆（Heap）</div>
+        <div class="mem-block mb-heap">client 结构体（zmalloc 分配）</div>
+        <div class="mem-block mb-heap">querybuf（SDS 动态字符串）</div>
+        <div class="mem-block mb-heap">reply 链表节点（clientReplyBlock）</div>
+        <div class="mem-block mb-heap">argv 数组 + robj 对象</div>
+        <div class="mem-block mb-heap">name、pubsub_channels、watched_keys…</div>
+      </div>
+      <div class="mem-col">
+        <div class="mem-col-title">用户空间 — 静态 / 栈</div>
+        <div class="mem-block mb-stack">buf[16384]（内嵌静态缓冲区）</div>
+        <div class="mem-block mb-userspace">事件循环注册（aeEventLoop）</div>
+        <div class="mem-block mb-userspace">epoll/kqueue 监听 fd 读写事件</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 3. 服务端连接管理：链表 + 哈希表 ===== -->
+  <div class="card">
+    <div class="card-title">③ 服务端如何管理所有连接 — 双向链表 × 哈希表</div>
+
+    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+      Redis server 维护两个全局结构追踪所有客户端：
+      <code style="color:#f0c060">server.clients</code>（双向链表，遍历用）
+      和 <code style="color:#f0c060">server.clients_index</code>（哈希表，按 id 快速查找）
+    </p>
+
+    <div style="margin-bottom:10px;">
+      <div style="font-size:12px;color:#888;margin-bottom:8px;">双向链表（listNode）：</div>
+      <div class="linked-list">
+        <div class="ll-node" style="border-color:#7eb8f7;color:#7eb8f7;">server.clients<br><span style="font-size:10px">head</span></div>
+        <div class="ll-arrow">→</div>
+        <div class="ll-node"><span>client#1</span><br><div style="font-size:10px;color:#555">fd=10, id=1</div></div>
+        <div class="ll-arrow">⇄</div>
+        <div class="ll-node"><span>client#2</span><br><div style="font-size:10px;color:#555">fd=11, id=2</div></div>
+        <div class="ll-arrow">⇄</div>
+        <div class="ll-node"><span>client#3</span><br><div style="font-size:10px;color:#555">fd=12, id=3</div></div>
+        <div class="ll-arrow">⇄</div>
+        <div class="ll-node">…</div>
+        <div class="ll-null">→ NULL</div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size:12px;color:#888;margin-bottom:8px;">哈希表（clients_index，key=id, value=client*）：</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <div class="ll-node" style="background:#12141e;border-color:#f0a500;">
+          <span style="color:#f0a500">id=1</span> → <span style="color:#79e0a0">client#1*</span>
+        </div>
+        <div class="ll-node" style="background:#12141e;border-color:#f0a500;">
+          <span style="color:#f0a500">id=2</span> → <span style="color:#79e0a0">client#2*</span>
+        </div>
+        <div class="ll-node" style="background:#12141e;border-color:#f0a500;">
+          <span style="color:#f0a500">id=3</span> → <span style="color:#79e0a0">client#3*</span>
+        </div>
+        <div class="ll-node" style="background:#12141e;border-color:#555;">
+          <span style="color:#555">…</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 4. 网络 IO 读写流程 ===== -->
+  <div class="card">
+    <div class="card-title">④ 一次命令请求的完整 IO 流程</div>
+    <div class="io-diagram">
+      <div class="io-box">
+        <div class="io-name">客户端</div>
+        <div class="io-label">send() RESP</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">TCP</div>
+      </div>
+      <div class="io-box red">
+        <div class="io-name">内核缓冲区</div>
+        <div class="io-label">sk_rcvbuf</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">epoll 触发</div>
+      </div>
+      <div class="io-box yellow">
+        <div class="io-name">readQueryFromClient</div>
+        <div class="io-label">read() → querybuf</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">processInputBuffer</div>
+      </div>
+      <div class="io-box yellow">
+        <div class="io-name">RESP 解析</div>
+        <div class="io-label">填充 argc/argv</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">processCommand</div>
+      </div>
+      <div class="io-box blue">
+        <div class="io-name">命令执行</div>
+        <div class="io-label">调用 cmd.proc()</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">addReply</div>
+      </div>
+      <div class="io-box yellow">
+        <div class="io-name">写入 buf/reply</div>
+        <div class="io-label">等待可写事件</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">sendReplyToClient</div>
+      </div>
+      <div class="io-box red">
+        <div class="io-name">内核发送缓冲</div>
+        <div class="io-label">sk_sndbuf</div>
+      </div>
+      <div class="arrow-label">
+        <div style="color:#444;font-size:20px">→</div>
+        <div class="al-text">TCP</div>
+      </div>
+      <div class="io-box">
+        <div class="io-name">客户端</div>
+        <div class="io-label">recv() 响应</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 5. 连接池（客户端侧）===== -->
+  <div class="card">
+    <div class="card-title">⑤ 客户端连接池（以 Jedis / go-redis 为例）</div>
+    <div class="pool-wrap">
+      <div class="pool-box">
+        <div class="pool-box-title">连接池核心参数</div>
+        <div class="pool-item"><span class="pi-key">maxTotal</span><span class="pi-val">最大连接数（默认8）</span></div>
+        <div class="pool-item"><span class="pi-key">maxIdle</span><span class="pi-val">最大空闲连接</span></div>
+        <div class="pool-item"><span class="pi-key">minIdle</span><span class="pi-val">最小空闲连接</span></div>
+        <div class="pool-item"><span class="pi-key">maxWaitMillis</span><span class="pi-val">借用超时时间</span></div>
+        <div class="pool-item"><span class="pi-key">testOnBorrow</span><span class="pi-val">借用前 PING 检测</span></div>
+      </div>
+      <div class="pool-box">
+        <div class="pool-box-title">连接池内部队列状态</div>
+        <div class="pool-item">
+          <span class="pi-key">conn#1</span>
+          <span><span class="pool-status ps-free">空闲</span></span>
+        </div>
+        <div class="pool-item">
+          <span class="pi-key">conn#2</span>
+          <span><span class="pool-status ps-busy">使用中</span></span>
+        </div>
+        <div class="pool-item">
+          <span class="pi-key">conn#3</span>
+          <span><span class="pool-status ps-busy">使用中</span></span>
+        </div>
+        <div class="pool-item">
+          <span class="pi-key">conn#4</span>
+          <span><span class="pool-status ps-free">空闲</span></span>
+        </div>
+        <div class="pool-item">
+          <span class="pi-key">等待请求</span>
+          <span><span class="pool-status ps-wait">排队中×2</span></span>
+        </div>
+      </div>
+      <div class="pool-box">
+        <div class="pool-box-title">连接对象核心字段</div>
+        <div class="pool-item"><span class="pi-key">socket / fd</span><span class="pi-val">TCP 套接字</span></div>
+        <div class="pool-item"><span class="pi-key">inputStream</span><span class="pi-val">读取响应流</span></div>
+        <div class="pool-item"><span class="pi-key">outputStream</span><span class="pi-val">发送命令流</span></div>
+        <div class="pool-item"><span class="pi-key">broken</span><span class="pi-val">连接是否损坏标志</span></div>
+        <div class="pool-item"><span class="pi-key">lastUsedAt</span><span class="pi-val">最后使用时间</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 6. 重要参数说明 ===== -->
+  <div class="card">
+    <div class="card-title">⑥ 连接相关重要配置参数（服务端）</div>
+    <div class="note-list">
+      <div class="note-item">
+        <div class="note-tag">maxclients</div>
+        <div class="note-text">最大并发连接数，默认 10000。超出后新连接返回 "ERR max number of clients reached"</div>
+      </div>
+      <div class="note-item">
+        <div class="note-tag">tcp-backlog</div>
+        <div class="note-text">TCP 握手队列长度（默认511），高并发下需同步提高 somaxconn 内核参数</div>
+      </div>
+      <div class="note-item">
+        <div class="note-tag">timeout</div>
+        <div class="note-text">连接空闲超时（秒），0=永不超时；生产建议设 300，防止僵尸连接积累</div>
+      </div>
+      <div class="note-item">
+        <div class="note-tag">tcp-keepalive</div>
+        <div class="note-text">TCP KeepAlive 探测间隔（秒，默认300）。操作系统层面检测死连接</div>
+      </div>
+      <div class="note-item">
+        <div class="note-tag">client-query-buffer-limit</div>
+        <div class="note-text">单客户端接收缓冲上限（默认1GB），超出强制断开，防止单连接耗尽内存</div>
+      </div>
+      <div class="note-item">
+        <div class="note-tag">client-output-buffer-limit</div>
+        <div class="note-text">输出缓冲限制，分三类：normal / slave / pubsub。Pub/Sub 慢消费者超限会被强制断开</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="text-align:center;color:#555;font-size:11px;padding:10px 0 5px;">
+    数据来源：Redis 源码 src/server.h (client struct) · src/networking.c
+  </div>
+
+</div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>连接相关的全部默认值（生产必调项）</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th><th>生产建议</th></tr></thead><tbody><tr><td><b>maxclients</b></td><td><b>10000</b></td><td>最大客户端连接数</td><td>按 <code>ulimit -n</code> 调，留 20% 余量</td></tr><tr><td><b>timeout</b></td><td><b>0</b>（永不断开）</td><td>空闲连接超时秒数</td><td>设 <b>300</b>，回收泄漏的连接</td></tr><tr><td><b>tcp-keepalive</b></td><td><b>300 s</b></td><td>TCP 层保活</td><td>保持默认；网络有 NAT 时调小到 60</td></tr><tr><td>tcp-backlog</td><td>511</td><td>已完成队列长度</td><td>高并发调到 <b>1024+</b>，配合系统 <code>somaxconn</code></td></tr><tr><td><b>输入缓冲区上限</b></td><td><b>1 GB</b>（硬编码）</td><td>超限直接关闭连接</td><td>客户端别发超大命令</td></tr><tr><td><b>输出缓冲区软限制</b></td><td>见下方三类</td><td>超限后断开</td><td>重点防 pubsub/slave 撑爆</td></tr></tbody></table></div><p><b>连接参数与排障</b></p><pre><code># 输出缓冲区三类限制（这是最常被撑爆的地方）
+client-output-buffer-limit normal 0 0 0              # 普通客户端：不限（危险！大 key 会撑爆）
+client-output-buffer-limit slave   256mb 64mb 60     # 主从：硬256MB / 软64MB持续60s
+client-output-buffer-limit pubsub  32mb  8mb  60     # 订阅：硬32MB / 软8MB持续60s
+
+# 含义：软限制 64MB 且持续 60 秒 -&gt; 断开；或硬限制 256MB -&gt; 立即断开
+# 典型故障：订阅者消费慢 -&gt; pubsub 缓冲区涨到 32MB -&gt; 被踢 -&gt; 消息丢失
+
+# 查看连接状态
+redis-cli INFO clients
+# connected_clients:1247        当前连接数
+# blocked_clients:3             被 BLPOP 等阻塞的
+# client_recent_max_input_buffer:20480    输入缓冲区峰值
+# client_recent_max_output_buffer:0       输出缓冲区峰值
+
+# 找出最耗内存的客户端（排障神器）
+redis-cli CLIENT LIST | awk '{print $5, $12, $16}' | sort -k2 -rn | head
+# 字段：obl(输出缓冲长度) oll(输出链表长度) omem(输出缓冲内存)
+redis-cli CLIENT LIST | grep -E "omem=[0-9]{7,}"    # 找出占用 &gt; 10MB 的
+
+# 踢掉问题连接
+redis-cli CLIENT KILL ADDR 10.0.0.5:52341
+redis-cli CLIENT KILL TYPE normal          # 按类型批量踢</code></pre><p class="muted"><b>最经典的坑</b>：一个 <code>KEYS *</code> 或返回百万元素的 <code>LRANGE</code>，输出缓冲区会瞬间涨到几百 MB——<b>Redis 是单线程的，这个大响应会阻塞所有其他客户端</b>。所以生产必须<b>禁用 <code>KEYS</code></b>（用 <code>SCAN</code>），且限制返回条数。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>连接池该怎么配（客户端侧）</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>经验公式</th><th>示例（QPS 1 万、耗时 1 ms）</th></tr></thead><tbody><tr><td><b>最小连接数</b></td><td>常驻，避免冷启动</td><td>5 – 10</td></tr><tr><td><b>最大连接数</b></td><td><code>QPS × 平均耗时(ms) / 1000 × 冗余系数(2~3)</code></td><td>1万 × 1 / 1000 × 3 = <b>30</b></td></tr><tr><td><b>空闲超时</b></td><td>60 – 300 s</td><td>180 s</td></tr><tr><td><b>获取连接超时</b></td><td><b>必须设</b>，防止雪崩时无限等待</td><td>1 – 3 s</td></tr><tr><td><b>单实例上限</b></td><td>连接池数 × 应用实例数 &lt; maxclients × 0.8</td><td>30 × 10 = 300 &lt; 8000 ✓</td></tr></tbody></table></div><p><b>连接池配置</b></p><pre><code># Go: go-redis 连接池配置
+rdb := redis.NewClient(&amp;redis.Options{
+    Addr:         "localhost:6379",
+    PoolSize:     30,                  // 最大连接数（默认 10 * CPU 核数）
+    MinIdleConns: 10,                  // 最小空闲连接，避免每次新建
+    MaxConnAge:   30 * time.Minute,     // 连接存活上限，防止长连接老化
+    PoolTimeout:  3 * time.Second,      // 连接池满了等待多久（必须设！）
+    IdleTimeout:  5 * time.Minute,      // 空闲多久回收
+    DialTimeout:  5 * time.Second,
+    ReadTimeout:  3 * time.Second,      // 必须设，防止慢查询拖死
+    WriteTimeout: 3 * time.Second,
+})
+
+# 关键：PoolTimeout 不设的话，连接池耗尽时请求会无限等待
+#       表现为"服务卡死"，实际上是所有 goroutine 都在等 Redis 连接
+
+# Java: Lettuce 连接池
+#   lettuce.pool.max-active=30  max-idle=10  min-idle=5  max-wait=3s</code></pre><p><b>连接池不是越大越好</b>：Redis 是单线程处理命令，连接数超过一定值后<b>上下文切换和内存反而成为负担</b>。经验上限：<b>单实例总连接数 &lt; 1 万</b>，且单客户端池 &lt; 100。真正的吞吐瓶颈是<b>网络 RTT</b>，提升手段是 <b>pipeline / MGET / Lua 脚本</b>而不是加连接。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>pipeline 与批量命令：吞吐提升的关键</h2><div class="table-wrap"><table><thead><tr><th>手段</th><th>原理</th><th>提升倍数</th><th>注意</th></tr></thead><tbody><tr><td><b>Pipeline</b></td><td>多条命令<b>打包一次 RTT</b></td><td><b>5 – 10×</b></td><td>不宜超过 <b>1 万条</b>/批，会阻塞</td></tr><tr><td><b>MGET/MSET</b></td><td>单命令多个 key</td><td>接近 pipeline</td><td>只适用于同类型</td></tr><tr><td><b>Lua 脚本</b></td><td>服务端原子执行多命令</td><td>省 RTT + 原子性</td><td>脚本要短，别跑长循环</td></tr><tr><td><b>事务 MULTI</b></td><td>打包但<b>不省 RTT</b>（只是保证顺序）</td><td><b>0</b>（不提速）</td><td>常被误用为提速手段</td></tr></tbody></table></div><p><b>pipeline 与 Lua</b></p><pre><code># 实测：pipeline 的收益（同机房 RTT 0.2ms）
+redis-benchmark -t set -n 100000 -q          # 无 pipeline：约 6-10 万 QPS
+redis-benchmark -t set -n 100000 -P 16 -q    # pipeline 16：约 50-100 万 QPS
+
+# Go: pipeline 正确用法
+pipe := rdb.Pipeline()
+for i := 0; i &lt; 1000; i++ {
+    pipe.Set(ctx, fmt.Sprintf("k%d", i), i, 0)
+}
+_, err := pipe.Exec(ctx)     // 一次 RTT 完成 1000 条
+
+# 分批控制（避免一次塞太多导致阻塞）
+const batch = 500
+for i := 0; i &lt; len(keys); i += batch {
+    end := min(i+batch, len(keys))
+    pipe := rdb.Pipeline()
+    for _, k := range keys[i:end] { pipe.Set(ctx, k, val, 0) }
+    pipe.Exec(ctx)
+}
+
+# Lua 脚本：原子地做"读-判断-写"（避免并发竞态）
+const script = `
+local cur = redis.call('GET', KEYS[1])
+if cur and tonumber(cur) &gt; tonumber(ARGV[1]) then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', 60)
+return 1
+`
+rdb.Eval(ctx, script, []string{"maxid"}, newID)</code></pre><p class="muted"><b>MULTI/EXEC 不提升性能</b>——它只是把命令排队，每条仍要一次 RTT。很多人误以为事务能加速，实际上<b>只有 pipeline 能省 RTT</b>。（Jedis 等客户端的“事务 + pipeline”合并模式才会既原子又快速。）</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>为什么 Redis 单线程还能支撑 10 万 QPS？</summary><p>因为瓶颈不在 CPU。<b>纯内存操作约 100 ns</b>，而网络 RTT 是 <b>0.2 ms = 20 万 ns</b>——也就是说 <b>99.95% 的时间花在网络 IO 上</b>，CPU 大部分时候是空闲的。单线程 + <b>IO 多路复用（epoll）</b>足以把网络 IO 跑满。多线程的收益极小，却要付出锁竞争、缓存一致性、复杂度的代价。（Redis 6.0 的多线程只用来做<b>网络读写和协议解析</b>，命令执行仍是单线程。）</p></details><details><summary>连接数突然暴涨怎么排查？</summary><p>四步：① <code>INFO clients</code> 确认规模；② <code>CLIENT LIST</code> 按 <code>addr</code> 聚合，看是哪个应用实例；③ 看 <code>cmd=</code> 字段——如果大量停在 <code>blpop</code>/<code>brpop</code>，说明是阻塞订阅没设超时；④ 检查客户端是否<b>每次请求新建连接</b>（没用连接池）。最常见的两个原因：<b>连接池配置错误</b>和<b>应用重启后旧连接没释放</b>（设 <code>timeout</code> 可自愈）。</p></details><details><summary>慢查询怎么定位？</summary><p>三步：① 用 <code>SLOWLOG GET 10</code> 看最近慢命令（默认记录 <b>&gt; 10 ms</b> 的，不含网络 IO 时间）；② <code>CONFIG SET slowlog-log-slower-than 5000</code> 调阈值；③ 用 <code>LATENCY DOCTOR</code> 看延迟诊断。最常见的三类慢查询：<b><code>KEYS *</code></b>（全库扫描）、<b>大 key 的一次性读取</b>（百万元素的 LRANGE/HGETALL）、<b>时间复杂度误用</b>（对大集合做 SUNION、ZRANGE 大范围）。</p></details><details><summary>客户端缓存（client-side caching）值得用吗？</summary><p>值得，尤其对<b>热点 key</b>。Redis 6.0+ 的 <code>CLIENT TRACKING</code> 让服务端在 key 被修改时<b>主动推送失效通知</b>，客户端维护本地缓存，可以把热点读的延迟从 <b>0.2 ms</b> 降到 <b>微秒级</b>，并大幅降低 Redis 压力。代价：① 客户端库要支持（Lettuce/Jedis 支持，go-redis 部分支持）；② 需要额外的连接接收失效消息；③ 一致性是<b>失效通知驱动</b>，网络问题会导致短暂不一致。适合读多写少的配置类、字典类数据。</p></details></div></section>
+</body>
+</html>

@@ -11,6 +11,23 @@
 <section class="panel"><h2>AQM 与公平队列做什么</h2><p>主动队列管理可在队列形成较大持续延迟前丢弃或标记部分包，给拥塞控制反馈；公平队列把不同流量分开调度，避免一个大流长期压住小流。它们要配合发送端拥塞控制，不能凭一个参数保证所有应用零延迟。某些实时流不按拥塞信号减速时，限速与准入控制仍是必要的。</p><p>ECN 可通过显式拥塞标记反馈，而不一定要丢包；是否有效取决于端点与路径支持。TCP 与 QUIC 等协议如何响应丢包或 ECN 也会影响队列恢复。排障需要看设备实际启用的队列算法、丢包或标记率、每类流量延迟，不能只看“QoS 已开启”四个字。</p></section>
 <section class="panel"><h2>如何区分排队与传播</h2><p>空闲时测到的 RTT 接近路径的传播、处理和基本发送开销；负载下 RTT 减去空闲 RTT，可粗略反映额外排队和其他负载效应。实验可同时进行受控大流上传与小包 ping，记录 RTT 的 P50、P95、P99 和丢包。若上传一启动尾延迟剧增，停止后很快恢复，优先怀疑瓶颈队列。再用多点测量确认是在家庭网关、接入链路还是远端路径。</p><p>ICMP ping 可能被路由器限速或低优先级处理，不能仅凭中间一跳 ping 变慢就断言转发数据也同样变慢。结合端到端业务时延和接口队列统计，结论更稳妥。</p></section>
 <section class="panel"><h2>优化后的验收</h2><p>先给出两个目标：下载或上传吞吐不低于业务底线，同时交互流在负载下的 P95/P99 延迟不超过约定值。对照测试前后同样的客户端、时间窗、并发和负载，记录丢包、ECN、队列长度和整形速率。若降低速率后延迟改善但吞吐下降过多，逐步调节瓶颈前整形与队列参数。</p><p>不要无限增加设备缓冲来“消灭丢包”。队列只是把丢包推迟成等待，对实时业务未必更好。选择要基于实际应用的时延与吞吐目标，而非单一的链路利用率。</p></section>
+<section class="panel" data-dry-goods><h2>排队延迟的量化</h2><div class="table-wrap"><table><thead><tr><th>链路利用率 ρ</th><th>平均排队中的包数</th><th>相对空队列的延迟倍数</th><th>体感</th></tr></thead><tbody><tr><td>50%</td><td>1</td><td>2×</td><td>正常</td></tr><tr><td>70%</td><td>2.3</td><td>3.3×</td><td>可接受</td></tr><tr><td>80%</td><td>4</td><td>5×</td><td>开始明显</td></tr><tr><td>90%</td><td>9</td><td>10×</td><td><b>明显变慢</b></td></tr><tr><td>95%</td><td>19</td><td>20×</td><td>接近不可用</td></tr><tr><td>99%</td><td>99</td><td>100×</td><td><b>排队爆炸</b></td></tr></tbody></table></div><p>上表按 M/M/1 排队模型：<b>系统中的平均包数 L = ρ/(1−ρ)</b>，延迟随利用率<b>非线性</b>上升。这就是“带宽明明够用，一到高峰期就卡”的数学解释——不是带宽不够，是队列排队。</p><p><b>Bufferbloat（缓冲膨胀）</b>：队列缓冲<b>太大</b>时，突发流量把缓冲填满却迟迟排不出去，延迟从几毫秒涨到<b>几百毫秒甚至数秒</b>，而吞吐量看起来仍是满的。典型场景：家用路由器一边下载一边视频通话，通话卡成 PPT。</p><div class="table-wrap"><table><thead><tr><th>队列大小</th><th>后果</th><th>适用</th></tr></thead><tbody><tr><td>太小（&lt; BDP）</td><td>丢包多，带宽跑不满</td><td>低吞吐场景</td></tr><tr><td>= BDP</td><td><b>理想</b>：既能跑满带宽又不额外排队</td><td>理论上界</td></tr><tr><td>太大（&gt;&gt; BDP）</td><td><b>Bufferbloat</b>：延迟飙升</td><td>大多数默认配置的现状</td></tr></tbody></table></div><p><b>BDP（带宽时延积）</b> = 带宽 × RTT。例：1 Gbps × 20 ms = <b>2.5 MB</b>。队列缓冲超过这个值就是纯粹的延迟负担。</p><p><b>排队延迟实测</b></p><pre><code># 测空载延迟 vs 满载延迟（判断 bufferbloat）
+ping -c 20 8.8.8.8                      # 空载基线（如 10 ms）
+#  同时跑满带宽：
+iperf3 -c server -P 8 -t 60 &amp;
+ping -c 20 8.8.8.8                      # 满载时延（若涨到 500ms+ 就是 bufferbloat）
+
+# 现代队列管理（fq_codel / CAKE）
+tc qdisc replace dev eth0 root fq_codel
+tc qdisc replace dev eth0 root cake bandwidth 100mbit nat
+tc -s qdisc show dev eth0
+
+# 限速 + 抗 bufferbloat（家宽/网关常用）
+tc qdisc add dev eth0 root cake bandwidth 100mbit besteffort
+
+# 看队列丢包与积压
+tc -s qdisc show dev eth0     # 看 dropped、backlog
+cat /proc/net/softnet_stat    # 看软中断丢包（第 2 列）</code></pre></section><section class="panel"><h2>缓解手段与排障</h2><ul><li><b>根本解法是主动队列管理（AQM）</b>：<code>fq_codel</code>（默认已集成在多数 Linux）或 <code>CAKE</code>。它们在队列还没满时就主动丢包/标记 ECN，向 TCP 发出拥塞信号，让发送方降速——<b>用少量丢包换极低延迟</b>。</li><li><b>ECN（显式拥塞通知）</b>：不丢包，而是在 IP 头打标记告知拥塞。需两端都开启（<code>sysctl net.ipv4.tcp_ecn=1</code>），配合 AQM 效果最好。</li><li><b>不要把缓冲调大来解决丢包</b>。丢包是拥塞的<b>信号</b>，加大缓冲只是把信号藏起来，让延迟恶化。这条对交换机、网卡 ring buffer、socket buffer 都适用。</li><li><b>网卡 ring buffer</b>：<code>ethtool -g eth0</code> 看；突发流量场景适当调大（<code>ethtool -G eth0 rx 4096</code>），但同样别无脑加大。</li><li><b>排障顺序</b>：① 空载 vs 满载延迟对比，确认是否 bufferbloat；② <code>tc -s qdisc</code> 看 backlog 与 dropped；③ 换 fq_codel/CAKE 复测；④ 检查是否有不必要的多层限速（如 tc + 硬件队列）。</li><li><b>应用层配合</b>：BBR 拥塞控制对深缓冲链路比 CUBIC 友好（它测最小 RTT，能感知到排队）；<code>sysctl -w net.ipv4.tcp_congestion_control=bbr</code>。</li></ul><details><summary>带宽跑满了但延迟只有几十毫秒，是 bufferbloat 吗？</summary><p>不算。判断标准是<b>空载与满载延迟的比值</b>：延迟增加 5–10 倍、达到数百毫秒才算典型的 bufferbloat。几十毫秒可能是正常的排队与串行化时延。</p></details><details><summary>为什么限速反而让网络感觉更快？</summary><p>把瓶颈从“运营商/设备的巨大缓冲”移到你自己可控的队列（CAKE/tbf）后，队列长度变短、延迟下降。交互式应用（游戏、语音）会明显变流畅，代价是总吞吐略降。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>把语音流从 TCP 改为 UDP，就一定能避开链路上的排队吗？</summary><p>不能。UDP 包同样经过瓶颈队列；还需速率控制、公平调度或合适的队列管理。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../01-metrics/network-performance-metrics.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

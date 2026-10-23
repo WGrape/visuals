@@ -16,6 +16,53 @@
 当支付延迟升高时，订单线程池很快被等待占满。并发上限或舱壁把对支付的等待限制在可控范围，拒绝多余请求并尽早反馈。熔断器根据近期失败和慢调用暂时减少请求，并让少量探测请求确认恢复；它不能替代超时和容量规划。限流规则要区分租户和关键交易，避免一个批量任务耗尽所有用户的额度。</h2><p>这些机制需在同一个延迟预算中配合。若熔断器统计的是客户端主动取消，也可能误判下游故障；若重试请求不计入限流，又会放大拥塞。以端到端成功率、P95/P99、重试放大倍数和下游饱和度观察整体效果，而不是分别看每个库的仪表盘。</p></section>
 <section class="panel"><h2>上线与复盘清单
 上线前通过故障注入测试响应丢失、慢响应、连接失败、服务端已提交但客户端超时四种情形。用同一幂等键连续发送请求，检查只产生一次扣款并返回同一业务结果。记录 trace ID、幂等键的安全摘要、各服务截止时间和状态转移，避免日志泄漏支付敏感字段。</h2><p>复盘时把用户看到的结果、订单状态、支付记录和库存记录对齐。若只能从单一服务日志猜测全局结果，说明状态查询或对账能力不足。契约要写进接口文档和自动化校验，并由调用方与提供方共同维护。</p></section>
+<section class="panel" data-dry-goods><h2>服务契约的要素清单</h2><div class="table-wrap"><table><thead><tr><th>要素</th><th>内容</th><th>反例（常见坑）</th></tr></thead><tbody><tr><td>接口定义</td><td>IDL（Protobuf / OpenAPI）+ 版本策略</td><td>口头约定、只靠字段注释</td></tr><tr><td><b>错误码</b></td><td>业务码 + HTTP/gRPC 状态 + 是否可重试</td><td>全部返回 200，错误塞在 body 里</td></tr><tr><td><b>超时</b></td><td>每个接口声明推荐超时与 SLO</td><td>不声明，调用方瞎猜</td></tr><tr><td><b>幂等性</b></td><td>明确哪些操作幂等、幂等键怎么传</td><td>POST 接口幂等性未知</td></tr><tr><td><b>限流配额</b></td><td>QPS 上限、突发额度、超限行为</td><td>没有配额，靠“应该够用”</td></tr><tr><td>兼容策略</td><td>向后兼容规则、废弃周期</td><td>直接删字段、改语义</td></tr><tr><td><b>可观测</b></td><td>统一的 request-id、指标、日志字段</td><td>各服务各打各的，串不起来</td></tr></tbody></table></div><p><b>契约的超时预算示例</b>（一个简单的商品详情页）：</p><div class="table-wrap"><table><thead><tr><th>调用</th><th>P99 延迟</th><th>超时设置</th><th>是否重试</th></tr></thead><tbody><tr><td>网关 → 聚合服务</td><td>150 ms</td><td><b>800 ms</b></td><td>否（网关层不再重试）</td></tr><tr><td>聚合 → 商品服务</td><td>30 ms</td><td><b>200 ms</b></td><td>是（幂等读）</td></tr><tr><td>聚合 → 库存服务</td><td>50 ms</td><td><b>300 ms</b></td><td>是（幂等读）</td></tr><tr><td>聚合 → 推荐服务</td><td>80 ms</td><td><b>400 ms</b> + 降级</td><td><b>否</b>（超时直接走兜底）</td></tr><tr><td>整体 deadline</td><td>—</td><td><b>1 s</b></td><td>—</td></tr></tbody></table></div><p><b>超时传递</b></p><pre><code># 契约里必须写清的超时传递（gRPC 示例）
+# 客户端：ctx 带 deadline，会通过 grpc-timeout 元数据传给服务端
+ctx, cancel := context.WithTimeout(parentCtx, 200*time.Millisecond)
+defer cancel()
+resp, err := client.GetProduct(ctx, req)
+if status.Code(err) == codes.DeadlineExceeded { /* 超时处理 */ }
+
+# 服务端：用 ctx.Done() 感知取消，避免无效工作
+select {
+case &lt;-ctx.Done():
+    return nil, ctx.Err()
+case result := &lt;-doWork():
+    return result, nil
+}
+
+# HTTP 侧：用 header 传递剩余预算（ Istio/Envoy 用 B3 或 W3C traceparent）
+curl -H 'X-Request-Id: abc-123' -H 'X-B3-TraceId: ...' --max-time 1 https://api/</code></pre></section><section class="panel"><h2>重试与幂等的实现</h2><p><b>幂等键的标准做法</b>：客户端生成唯一 ID，服务端用<b>唯一索引</b>保证只执行一次。</p><p><b>幂等与重试代码</b></p><pre><code># 服务端幂等实现（以创建订单为例）
+# 1) 建表时给幂等键加唯一索引
+# CREATE TABLE orders (
+#   id BIGINT PRIMARY KEY,
+#   idempotency_key VARCHAR(64) NOT NULL UNIQUE,
+#   ...
+# );
+
+# 2) 处理逻辑：先插后查，冲突即返回已有结果
+# INSERT INTO orders (...) VALUES (...);
+#   若报 DuplicateKey → SELECT 已有订单直接返回（并返回相同响应）
+# 关键：唯一索引 + 冲突即返回，而不是"先查再插"（有竞态）
+
+# 客户端重试判定（Go 伪代码）
+retryable := map[int]bool{429: true, 502: true, 503: true, 504: true}
+for attempt := 0; attempt &lt; 3; attempt++ {
+    resp, err := call()
+    if err == nil &amp;&amp; resp.Code &lt; 500 { break }
+    if !retryable[resp.Code] { break }
+    if !isIdempotent(req) { break }         // 非幂等不重试
+    delay := backoff(attempt)               // 指数退避 + 抖动
+    time.Sleep(delay)
+}
+
+func backoff(n int) time.Duration {
+    base := 100 * time.Millisecond
+    cap  := 30 * time.Second
+    d := base &lt;&lt; n
+    if d &gt; cap { d = cap }
+    return time.Duration(float64(d) * (0.5 + rand.Float64()/2))  // 抖动
+}</code></pre><ul><li><b>契约测试</b>：用 Pact / Spring Cloud Contract 做消费者驱动的契约测试——消费者写期望，生产者的 CI 验证是否满足。这能在<b>不启动完整环境</b>的情况下发现接口不兼容。</li><li><b>向后兼容的硬规则</b>：① 只<b>加</b>字段，不改/删已有字段的编号与语义；② Protobuf 的字段号一旦用过就<b>永久保留</b>（用 <code>reserved</code> 标记）；③ 新增必填字段要分两阶段发布（先可选 → 全量升级 → 改必填）。</li><li><b>版本策略</b>：URL 版本（<code>/v1/</code>）简单但扩散快；header 版本更灵活但调试麻烦。首选<b>向后兼容的无版本演进</b>，只有破坏性变更才升版本。</li><li><b>重试必须三思</b>：只有幂等 + 可重试错误码 + 未超出重试预算时才重试。并且<b>重试要在调用链的单一层做</b>（多层重试会把 1 次请求放大成 9 次）。</li><li><b>排障</b>：① 看 P99 与各层超时是否递减；② 看超时错误是 connect 还是 read（connect 超时多为网络/端口，read 超时多为服务慢）；③ 看重试放大倍率（下钻到单次 trace 的实际调用次数）。</li></ul><details><summary>契约里写“超时 200ms”，调用方不遵守怎么办？</summary><p>靠平台强制：服务网格（Istio）可以在 sidecar 层统一注入超时与重试策略，业务代码不遵守也没用。这是把契约<b>从文档变成可执行规则</b>的有效手段。</p></details><details><summary>为什么非幂等接口不能重试？</summary><p>因为超时不代表没执行——请求可能已经到达并成功了，只是响应丢了。重试会造成重复创建（两张订单、两次扣款）。必须先做幂等（唯一键/去重表）才能安全重试。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>支付接口超时后能直接提示用户扣款失败吗？</summary><p>不能。服务端可能已提交，只是响应丢失；应使用同一幂等键查询最终状态并在未知时显示处理中。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="microservices.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

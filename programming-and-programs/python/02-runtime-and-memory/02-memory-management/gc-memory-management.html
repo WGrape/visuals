@@ -77,6 +77,24 @@
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
   .footer a { color: var(--blue-600); text-decoration: none; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -163,5 +181,48 @@ cache = <span class="typ">WeakValueDictionary</span>()   <span class="cm"># 值�
   }, { rootMargin: '-45% 0px -50% 0px' });
   Object.keys(map).forEach(id => obs.observe(document.getElementById(id)));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>引用计数 + 分代回收的双机制参数</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>默认参数</th><th>含义</th></tr></thead><tbody><tr><td>引用计数</td><td>每个对象维护 ob_refcnt</td><td>归零立即释放（确定性），但无法处理循环引用</td></tr><tr><td>分代回收 gen0 阈值</td><td>700</td><td>gen0 对象数减去上次回收后存活数超过 700 时触发 gen0 回收</td></tr><tr><td>gen1 阈值</td><td>10</td><td>gen0 被回收 10 次后触发一次 gen1</td></tr><tr><td>gen2 阈值</td><td>10</td><td>gen1 被回收 10 次后触发一次 gen2（全量）</td></tr><tr><td>查看/修改</td><td><code>gc.get_threshold()</code> / <code>gc.set_threshold(a,b,c)</code></td><td>返回 (700, 10, 10)</td></tr><tr><td>手动回收</td><td><code>gc.collect(gen)</code></td><td>gen=2 为全量回收</td></tr><tr><td>关闭/冻结</td><td><code>gc.freeze()</code></td><td>把当前对象移出 GC 追踪，减少后续扫描量</td></tr></tbody></table></div><p>分代假设：<b>越年轻的对象越可能死</b>。新对象进 gen0，存活过一次回收就升代。绝大多数对象活不过 gen0，所以扫描 gen0 就能回收大部分垃圾，代价很低。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>能被 GC 回收的对象范围</h2><div class="table-wrap"><table><thead><tr><th>对象类型</th><th>引用计数</th><th>分代 GC 是否追踪</th><th>说明</th></tr></thead><tbody><tr><td>int / float / str</td><td>是</td><td>否</td><td>不可变、不可能形成环</td></tr><tr><td>list / dict / set</td><td>是</td><td><b>是</b></td><td>容器可以持有自身形成环</td></tr><tr><td>自定义类实例</td><td>是</td><td><b>是</b></td><td>可能有环</td></tr><tr><td>tuple</td><td>是</td><td>视内容而定</td><td>含容器元素时会被追踪</td></tr><tr><td>带 <code>__del__</code> 的环</td><td>是</td><td>是（但 3.4+ 可解）</td><td>PEP 442 后大部分环可被回收，但资源释放时机不确定</td></tr></tbody></table></div><p><b>GC 观测</b></p><pre><code>python - &lt;&lt;'PY'
+import gc, sys
+print("thresholds:", gc.get_threshold())          # (700, 10, 10)
+print("counts:", gc.get_count())                  # (gen0数, gen1数, gen2数)
+
+class Node:
+    def __init__(self): self.ref = None
+
+a, b = Node(), Node()
+a.ref = b; b.ref = a                              # 循环引用
+print("referrers before del:", len(gc.get_referrers(a)))
+del a, b                                          # 引用计数不归零，靠 GC 回收
+print("collected:", gc.collect())                 # 返回回收的对象数
+
+# 哪些对象在被追踪
+print("tracked objects:", len(gc.get_objects()))
+gc.freeze()                                       # 启动后冻结，减少后续扫描
+print("after freeze, gen0:", gc.get_count())
+PY</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>定位内存问题的工具链</h2><p><b>tracemalloc</b></p><pre><code># 1) tracemalloc：定位"谁分配了最多内存"
+python - &lt;&lt;'PY'
+import tracemalloc
+tracemalloc.start(25)                # 保留 25 层栈
+snapshot1 = tracemalloc.take_snapshot()
+data = [bytes(1024) * 1024 for _ in range(200)]     # 约 200 MB
+snapshot2 = tracemalloc.take_snapshot()
+for stat in snapshot2.compare_to(snapshot1, "lineno")[:5]:
+    print(stat)
+PY</code></pre><p><b>objgraph / RSS</b></p><pre><code># 2) 看对象数量与引用链（需要 objgraph）
+# pip install objgraph
+python - &lt;&lt;'PY'
+import objgraph
+objgraph.show_growth(limit=10)          # 两次调用之间增长最多的类型
+objgraph.show_backrefs(objgraph.by_type("MyClass")[0], max_depth=5)   # 谁在引用它
+PY
+
+# 3) 系统层：常驻内存（RSS）与堆分配
+/usr/bin/time -l python your_script.py 2&gt;&amp;1 | grep -E "maximum resident|page reclaims"
+python -c "import resource,runpy; runpy.run_path('s.py'); print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss//1024, 'MB')"</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>del 之后内存没降</td><td>对象被 free list / arena 持有，内存归还给解释器而非 OS</td><td>看 RSS 不一定降；用 pymalloc 的 arena 统计或换 tracemalloc 看分配</td></tr><tr><td>内存只涨不降</td><td>全局缓存/容器无限增长，或循环引用未解</td><td>加容量上限；<code>gc.collect()</code>；用 weakref</td></tr><tr><td>GC 停顿明显</td><td>gen2 全量扫描对象太多</td><td><code>gc.freeze()</code> 冻结启动期对象；调大 gen0 阈值减少频率</td></tr><tr><td>带 __del__ 的对象不释放</td><td>旧版本无法回收带终结器的环（3.4+ 已改善）</td><td>用上下文管理器显式释放资源，别依赖 __del__</td></tr><tr><td>大量短命小对象</td><td>分配/回收开销占比高</td><td>复用对象、用数组（array/bytes）代替 list of int</td></tr><tr><td>字典/集合占内存大</td><td>负载因子与扩容策略</td><td>3.11+ dict 更紧凑；大量只读数据可用 tuple 或 intern</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>引用计数已经能回收垃圾，为什么还要分代 GC？</summary><p>因为引用计数处理不了循环引用：a.ref = b 且 b.ref = a 时，即使外部都不再使用，两个对象的计数也都不为零。分代 GC 用可达性分析专门清理这类环。</p></details><details><summary>三个阈值 700/10/10 怎么理解？</summary><p>gen0 阈值 700：距上次 gen0 回收后新创建并被追踪的对象数超过 700 就触发 gen0 回收；gen1 阈值 10：gen0 回收累计 10 次触发一次 gen1；gen2 阈值 10：gen1 累计 10 次触发全量。用 gc.get_count() 可看当前计数。</p></details><details><summary>gc.collect() 应该经常调用吗？</summary><p>一般不该。手动全量回收要遍历所有被追踪对象，代价高，而且会打乱分代策略。典型用法是在明确的阶段边界（如批处理结束、fork 子进程前）调用一次，或配合 gc.freeze() 减少常驻对象被反复扫描。</p></details><details><summary>为什么 del 之后 RSS 不下降？</summary><p>CPython 的 pymalloc 把内存按 arena/pool 管理，归还给解释器内的空闲链表后通常不立即还给操作系统（尤其碎片化时），所以进程 RSS 看起来不降但内存可被后续分配复用。判断内存是否泄露要看趋势与 tracemalloc 的分配来源，而不是单次 RSS。</p></details><details><summary>如何判断是不是真的内存泄漏？</summary><p>两步：① 用 objgraph.show_growth() 在多次请求/迭代间比较，持续增长的类型就是嫌疑；② 用 tracemalloc 比较两次快照，拿到具体分配栈。若增长类型数稳定、GC 后回落，则只是缓存膨胀而非泄漏。</p></details></div></section>
 </body>
 </html>

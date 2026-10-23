@@ -136,6 +136,24 @@
     .hero h1{font-size:1.6rem;}
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -379,6 +397,34 @@
   <p style="margin-top:8px">&copy; 2026 Visuals · 大模型 / 任务规划 · <a href="../../index.html">← 返回 大语言模型</a></p>
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>主流分解范式对照</h2><div class="table-wrap"><table><thead><tr><th>范式</th><th>结构</th><th>适合</th><th>代价</th></tr></thead><tbody><tr><td><b>CoT</b></td><td>线性链条，一步接一步</td><td>单路径推理（算术、简单逻辑）</td><td>一旦某步走错无法回退</td></tr><tr><td><b>Least-to-Most</b></td><td>先拆子问题，再按依赖顺序逐个解</td><td>可显式拆分且子问题有依赖</td><td>需要一次额外的分解调用</td></tr><tr><td><b>Plan-and-Solve</b></td><td>先出完整计划，再执行，可中途修订计划</td><td>多步工具调用、长任务</td><td>计划本身可能错，需允许修订</td></tr><tr><td><b>ToT（思维树）</b></td><td>分支展开 + 评估剪枝</td><td>搜索空间明确、需要试探的题</td><td><b>算力开销最大</b>，多次展开与打分</td></tr><tr><td><b>ReAct</b></td><td>Thought → Action → Observation 循环</td><td>需要外部工具 / 环境反馈</td><td>依赖工具可靠性；容易陷入循环</td></tr><tr><td><b>DAG / 并行分解</b></td><td>把子任务组织成无环图并行执行</td><td>子任务间依赖少的场景</td><td>需要调度与结果合并</td></tr></tbody></table></div><p><b>先问一句：这题真的需要分解吗？</b>分解的收益来自「把一个超出单次推理能力的任务降到单次能力之内」。如果任务本来就在能力内，分解只会带来额外的调用开销和错误传播机会。经验判据：<b>单步准确率 ≥ 90% 时，5 步链的整体准确率只有约 0.9⁵ ≈ 59%</b>——这就是为什么要拆（把每步拉到 98% 以上）以及为什么要加校验。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>ReAct / Plan-and-Solve 的可执行骨架</h2><p><b>伪代码</b></p><pre><code># ReAct 循环（带步数上限与重复动作检测 —— 生产必需的两个护栏）
+history, seen = [], set()
+for step in range(MAX_STEPS):              # 硬上限，常见 8~15 步
+    thought = llm_think(task, history)     # 让模型先想
+    action  = llm_act(thought)             # 再产出结构化动作
+
+    key = (action.tool, json.dumps(action.args, sort_keys=True))
+    if key in seen:                        # 检测到重复动作 -&gt; 说明卡住了
+        return fallback_or_ask_user(history)
+    seen.add(key)
+
+    obs = call_tool(action)                # 工具返回 Observation
+    history.append((thought, action, obs))
+
+    if action.tool == "finish":
+        return action.answer
+return fallback_or_ask_user(history)       # 超步数也要有出口，别静默截断
+
+# Plan-and-Solve：计划显式化，允许执行中修订
+plan = llm_plan(task)                      # ["step1", "step2", ...]
+for i, s in enumerate(plan):
+    res = execute(s)
+    if res.failed:                         # 失败就重规划，而不是硬重试
+        plan = llm_replan(task, plan, i, res.error)
+</code></pre><ul><li><b>必须有步数上限</b>：没有上限的 Agent 循环在工具出错时会无限转圈，成本失控。</li><li><b>必须有重复动作检测</b>：连续两次相同的 (tool, args) 基本等于卡死。</li><li><b>结构化输出</b>：动作用 JSON Schema 约束，别让模型自由文本输出后再正则解析。</li><li><b>失败要重规划而不是重试</b>：同样的计划重试三次还是失败，重规划才有信息增益。</li><li><b>子任务结果要幂等</b>：重跑一次不应该产生副作用（尤其是写操作）。</li></ul><p class="muted">分解质量是可量化的：统计「子任务执行成功率」和「最终结果成功率」。如果子任务都成功了但最终失败，问题在<b>合并</b>环节；如果子任务就大量失败，问题在<b>分解粒度</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检</h2><details><summary>分解粒度怎么定？</summary><p>标准是每个子任务<b>单次调用就能高置信完成</b>。太粗等于没分解，太细则错误传播和成本都上升。实践上先用 3~7 个子任务，看子任务成功率再调。</p></details><details><summary>ToT 值得上吗？</summary><p>只在「错了能判出来」的场景值得——ToT 的核心是评估剪枝，如果没法给中间状态打分，就退化成昂贵的多次采样，还不如 self-consistency。</p></details><details><summary>为什么我的 Agent 老是兜圈子？</summary><p>三个高频原因：工具返回的错误信息不够具体（模型不知道错在哪）、没有把失败的 Observation 完整写回历史（模型以为成功了）、缺少重复动作检测。</p></details></div></section>
 </main>
 </div>
 

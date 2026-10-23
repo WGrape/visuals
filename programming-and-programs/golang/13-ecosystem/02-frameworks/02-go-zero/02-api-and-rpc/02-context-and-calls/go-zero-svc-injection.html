@@ -57,6 +57,24 @@
   .keyline { border-left: 3px solid var(--blue-400); padding-left: 16px; margin: 16px 0; }
   .keyline p { font-size: 14px; color: var(--text); line-height: 1.8; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -276,5 +294,53 @@ fx.Invoke(<span class="kw">func</span>(s *UserService) { ... })</pre>
   go-zero svc 注入解析 &nbsp;|&nbsp; 同系列：基础能力 / 规范 / 微服务 / RPC / 命令
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>ServiceContext 是什么、怎么写</h2><p><b>标准写法</b></p><pre><code>// svc/servicecontext.go —— goctl 生成的依赖容器
+type ServiceContext struct {
+    Config         config.Config
+    UserModel      model.UserModel          // 数据访问
+    OrderRpc       orderclient.Order        // 下游 RPC 客户端
+    Redis          *redis.Redis
+    // ... 其他依赖
+}
+
+func NewServiceContext(c config.Config) *ServiceContext {
+    rds := redis.MustNewRedis(c.Redis)
+    conn := sqlx.NewMysql(c.Mysql.DataSource)
+    return &amp;ServiceContext{
+        Config:    c,
+        UserModel: model.NewUserModel(conn, c.CacheRedis),
+        OrderRpc:  orderclient.NewOrder(zrpc.MustNewClient(c.OrderRpc)),
+        Redis:     rds,
+    }
+}
+
+// logic 里通过 svcCtx 拿依赖，不需要自己 new
+func (l *GetUserLogic) GetUser(req *types.GetUserReq) (*types.GetUserResp, error) {
+    u, err := l.svcCtx.UserModel.FindOne(l.ctx, req.Id)
+    if err != nil {
+        return nil, err
+    }
+    return &amp;types.GetUserResp{Name: u.Name}, nil
+}</code></pre><div class="table-wrap"><table><thead><tr><th>问题</th><th>答案</th></tr></thead><tbody><tr><td>它是什么技术</td><td><b>手写构造函数注入</b>（不是反射容器、不是 wire、不是 fx）</td></tr><tr><td>生命周期</td><td>进程启动时创建<b>一次</b>，全局单例，与请求无关</td></tr><tr><td>谁创建</td><td><code>main</code> 里调用 <code>NewServiceContext(cfg)</code>，再传给 handler</td></tr><tr><td>解决了什么</td><td>依赖集中创建 + 集中持有 + 显式传递，避免到处 <code>new</code> 和全局变量</td></tr><tr><td>测试时怎么办</td><td>直接手工构造一个 <code>ServiceContext</code>，塞入 mock 的 Model / RPC</td></tr></tbody></table></div><p><b>它的本质是「组合根」（Composition Root）</b>：所有依赖在这里一次性装配好，下游只管用。好处是依赖图清晰可见、启动失败立即暴露（比如 DB 连不上）、测试时可以整体替换。代价是没有自动化的依赖解析，加依赖要手动改结构体。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>使用边界与常见坑</h2><ul><li><b>不要在 ServiceContext 里放请求级状态</b>：它是全局单例，放用户信息/请求 ID 会跨请求串数据，这是最危险的误用。请求级数据一律放 <code>ctx</code>。</li><li><b>不要放可变缓存而不加锁</b>：多个请求并发读写同一个 map 会 panic（concurrent map writes）。</li><li><b>构造函数里做「会失败」的初始化</b>：用 <code>MustNewXxx</code> 让启动即失败——早失败远好过运行时才发现。</li><li><b>依赖过多时拆分层</b>：一个 ServiceContext 塞几十个字段说明服务边界太宽，考虑拆分。</li><li><b>接口优于具体类型</b>：把字段声明成接口（如 <code>model.UserModel</code> 本身是接口），测试时才能塞 mock。</li></ul><p><b>测试替换</b></p><pre><code>// 测试时替换依赖：因为字段是接口，直接塞 mock 即可
+type mockUserModel struct{ u *model.User }
+
+func (m *mockUserModel) FindOne(ctx context.Context, id int64) (*model.User, error) {
+    return m.u, nil
+}
+
+func TestGetUser(t *testing.T) {
+    svcCtx := &amp;svc.ServiceContext{
+        UserModel: &amp;mockUserModel{u: &amp;model.User{Id: 1, Name: "tom"}},
+    }
+    l := logic.NewGetUserLogic(context.Background(), svcCtx)
+    resp, err := l.GetUser(&amp;types.GetUserReq{Id: 1})
+    assert.NoError(t, err)
+    assert.Equal(t, "tom", resp.Name)
+}
+
+// 如果想上 wire（编译期 DI），ServiceContext 也能平滑接入
+//   go.uber.org/dig 或 google/wire 都是在「组合根」这一层工作，不冲突</code></pre><details><summary>和 Spring 的 @Autowired 有什么区别？</summary><p>Spring 是<b>反射 + 容器自动装配</b>（运行时解析依赖图）；go-zero 是<b>编译期手写</b>。后者更快、错误在编译期暴露、依赖图一目了然，代价是加依赖要改代码。</p></details><details><summary>能否在运行时替换依赖（比如热切换下游）？</summary><p>不建议直接改 ServiceContext 字段（有并发风险）。正确做法是在字段里放一个<b>可热更新的代理</b>，由代理内部做切换并加锁。</p></details><details><summary>为什么不用全局变量代替它？</summary><p>全局变量让依赖隐式化：测试无法替换、初始化顺序不可控、依赖来源看不出来。ServiceContext 的全部价值就在于把这些变成显式。</p></details></div></section>
 </body>
 </html>

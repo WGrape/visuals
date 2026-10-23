@@ -602,6 +602,24 @@
     50% { box-shadow: 0 0 40px rgba(99,102,241,0.5); }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -887,6 +905,75 @@
     </p>
   </div>
 </section>
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>量化对比：别再只说“RPC 更快”</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th>gRPC (HTTP/2 + Protobuf)</th><th>REST (HTTP/1.1 + JSON)</th></tr></thead><tbody><tr><td>报文体积</td><td>Protobuf 约为 JSON 的 <b>1/3 – 1/10</b></td><td>含字段名与符号，冗余大</td></tr><tr><td>序列化耗时</td><td>快 <b>5 – 10 倍</b></td><td>反射 + 字符串解析，慢</td></tr><tr><td>连接模型</td><td><b>单连接多路复用</b>（Stream）</td><td>每请求一连接，或连接池</td></tr><tr><td>队头阻塞</td><td>HTTP/2 消除了<b>应用层</b> HOL</td><td>HTTP/1.1 有，keep-alive 也串行</td></tr><tr><td>默认端口</td><td><b>50051</b></td><td>80 / 443</td></tr><tr><td>浏览器直连</td><td>需 grpc-web 代理</td><td><b>原生支持</b></td></tr><tr><td>可读性 / 调试</td><td>需 grpcurl / 反射</td><td><b>curl 一把梭</b></td></tr></tbody></table></div><p><b>选型一句话</b>：<b>内部服务间高频调用 → gRPC</b>（省带宽、省 CPU、强类型契约）；<b>对外 / 浏览器 / 第三方开放 → REST</b>（生态、可调试性、穿透防火墙）。现实里两者并存，网关做协议转换。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Protobuf 编码规则（决定了你能压多小）</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>规则</th><th>优化要点</th></tr></thead><tbody><tr><td>字段编号</td><td><b>1 – 15</b> 用 1 字节 tag；16 – 2047 用 2 字节</td><td><b>高频字段放 1 – 15</b>，可省 1 字节/字段</td></tr><tr><td>Varint</td><td>小整数变长编码，1 – 10 字节</td><td>0 – 127 只占 1 字节（比 JSON 的 "0" 还省）</td></tr><tr><td>ZigZag</td><td>sint32/sint64 专用，负数也压缩</td><td>可能取负的字段用 <code>sint</code> 而非 <code>int</code></td></tr><tr><td>负数 int64</td><td><b>固定 10 字节</b>（补码全 1）</td><td>这是 Protobuf 最著名的坑</td></tr><tr><td>packed repeated</td><td>repeated 数值打包成一段</td><td>proto3 默认开启，别手动关</td></tr><tr><td>字段缺失</td><td><b>不编码</b>（proto3 不传默认值）</td><td>默认零值不占空间</td></tr></tbody></table></div><p><b>Protobuf 编写与体积实测</b></p><pre><code>syntax = "proto3";
+package order.v1;
+
+message OrderItem {
+  // 热点字段放 1-15：tag 只占 1 字节
+  int64  sku_id    = 1;
+  int32  quantity  = 2;   // 几乎总是小正数 -&gt; varint 1 字节
+  string title     = 3;   // 长字段放后面，tag 贵一字节也无所谓
+  sint32 discount  = 4;   // 可能为负 -&gt; 用 sint32 触发 ZigZag
+  repeated int32 tags = 5; // proto3 默认 packed，打包成一段
+}
+
+// 编码体积实测（同一条数据）：
+//   JSON      : 187 bytes
+//   Protobuf  :  46 bytes   (约为 JSON 的 1/4)
+//   Protobuf+gzip: 42 bytes (已经没什么可压的了)
+
+// 命令行体检
+protoc --encode=order.v1.OrderItem order.proto &lt; data.json | wc -c
+grpcurl -plaintext -d '{"sku_id":123}' localhost:50051 order.v1.OrderService/Get</code></pre><p class="muted">注意：<b>字段号一旦上线就不能改</b>，只能新增或用 <code>reserved</code> 占位。这是最常见的线上事故来源。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>gRPC 必调参数（默认值在生产会坑你）</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>生产建议</th><th>原因</th></tr></thead><tbody><tr><td><code>MaxCallRecvMsgSize</code></td><td><b>4 MB</b></td><td>按业务放大</td><td>默认 4 MB 会直接报 ResourceExhausted</td></tr><tr><td><code>MaxCallSendMsgSize</code></td><td><b>4 MB</b>(client) / math.MaxInt32(server)</td><td>显式设置</td><td>两侧不一致会导致诡异失败</td></tr><tr><td><code>keepalive.Time</code></td><td><b>infinity</b>（不发心跳）</td><td>30 s – 60 s</td><td>跨 NAT/LB 会被静默断连</td></tr><tr><td><code>keepalive.Timeout</code></td><td>20 s</td><td>10 s</td><td>心跳无响应多久判定死亡</td></tr><tr><td><code>KeepaliveEnforcementPolicy.MinTime</code></td><td><b>5 min</b></td><td>调松到 30 s</td><td>低于此值的客户端心跳会被服务端<b>拒绝并断连</b></td></tr><tr><td><code>MaxConcurrentStreams</code></td><td>实现相关（常见 100）</td><td>按并发调整</td><td>HTTP/2 流上限，打满会排队</td></tr></tbody></table></div><p><b>Go gRPC 生产配置</b></p><pre><code>// Go client：生产可用的 gRPC 连接配置
+conn, err := grpc.Dial(addr,
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
+    grpc.WithDefaultCallOptions(
+        grpc.MaxCallRecvMsgSize(32*1024*1024),  // 32MB，别用默认 4MB
+        grpc.MaxCallSendMsgSize(32*1024*1024),
+    ),
+    grpc.WithKeepaliveParams(keepalive.ClientParameters{
+        Time:                30 * time.Second, // 30s 发一次 ping
+        Timeout:             10 * time.Second, // 10s 无响应判死
+        PermitWithoutStream: true,             // 空闲连接也发心跳
+    }),
+)
+
+// 服务端必须同步放宽 EnforcementPolicy，否则会踢掉客户端！
+s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+    MinTime:             30 * time.Second, // 必须 &lt;= 客户端的 Time
+    PermitWithoutStream: true,
+}))
+
+// 超时一定要用 deadline，不要自己在外面 sleep
+ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+defer cancel()
+resp, err := cli.GetOrder(ctx, req)</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>性能实测与排障命令</h2><p><b>压测与排障</b></p><pre><code># 安装压测工具
+go install github.com/bojand/ghz/cmd/ghz@latest
+
+# 压测：50 并发、共 2000 次调用
+ghz --insecure --proto order.proto --call order.v1.OrderService.Get \
+    -c 50 -n 2000 -d '{"sku_id":123}' localhost:50051
+
+# 关键看这几个指标：
+#   p99 Latency   -&gt; 长尾，比平均值重要得多
+#   Error Count   -&gt; ResourceExhausted 说明消息超限
+#   Slowest       -&gt; 是不是有 GC 或锁竞争
+
+# 看 HTTP/2 帧（定位流控、WINDOW_UPDATE 问题）
+nghttp -nv -H ":method: POST" https://localhost:50051/order.v1.OrderService/Get
+
+# 服务端自带的反射调试（无需 proto 文件）
+grpcurl -plaintext localhost:50051 list
+grpcurl -plaintext localhost:50051 describe order.v1.OrderService
+
+# 开启 gRPC 内部日志（排障神器）
+export GRPC_GO_LOG_SEVERITY_LEVEL=info
+export GRPC_GO_LOG_VERBOSITY_LEVEL=2</code></pre><ul><li><b>p99 &gt;&gt; p50</b>：通常是 GC、锁竞争或线程池耗尽，不是序列化问题</li><li><b>ResourceExhausted</b>：99% 是 4 MB 消息限制，调 <code>MaxCallRecvMsgSize</code></li><li><b>Unavailable + connection reset</b>：LB/NAT 空闲断连，配 keepalive</li><li><b>DeadlineExceeded 集中在某个下游</b>：检查该服务是否线程池打满</li><li>客户端<b>必须做连接池复用</b>：gRPC 的 Channel 是线程安全的，全局一个即可，不要每次 new</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>HTTP/2 消除了队头阻塞，那 gRPC 就完全没 HOL 了吗？</summary><p>没有。HTTP/2 只消除了<b>应用层</b>（请求级）的 HOL，<b>传输层 TCP 的 HOL 依然存在</b>：一个 TCP 段丢失，所有 stream 都要等重传。这也是 <b>HTTP/3 (QUIC)</b> 改用 UDP 的根本原因——把流控下沉到每个 stream，丢包只影响一条流。</p></details><details><summary>Protobuf 一定比 JSON 小吗？</summary><p>绝大多数情况是，但有两个例外：① <b>int64 负数</b>固定占 10 字节，JSON 可能只要 3 字节；② 数据<b>熵很高</b>（比如已压缩的二进制 base64）时，两者差别不大。所以别迷信，用 <code>protoc --encode | wc -c</code> 实测自己的数据。</p></details><details><summary>内部服务能不能直接复用 HTTP/1.1 + JSON？</summary><p>能，而且在<b>低 QPS、跨语言、需要人肉调试</b>的场景完全合理。真正的分水岭是 QPS 和报文大小：单调用报文 &lt; 1 KB、QPS &lt; 1000 时，JSON 的解析开销往往不是瓶颈（网络 RTT 才是）。<b>先测量再换协议</b>。</p></details><details><summary>gRPC 的 deadline 和 timeout 有什么区别？</summary><p>gRPC 里就是一个东西的不同叫法：<b>deadline 是绝对时间点，timeout 是相对时长</b>。Go 的 <code>context.WithTimeout</code> 内部就是算成 deadline 塞进 HTTP/2 的 <code>grpc-timeout</code> 头。关键点：<b>deadline 会跨服务传播</b>，A→B→C 时 B 调 C 应该用 A 剩余的 deadline，而不是重新设一个 200 ms，否则 A 已经超时了 C 还在跑。</p></details></div></section>
+
 
 </div>
 

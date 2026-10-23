@@ -16,6 +16,38 @@
 十万台设备每十秒一条，每天约八亿六千万条记录；再乘字段宽度、压缩比例、副本数和索引开销，才能估算磁盘。压缩比取决于采样连续性与数据类型，不能直接套用宣传值。设计保留期时区分原始点、分钟聚合和长期报表。原始记录保存七天、小时聚合保存一年是一种可能组合，但要由审计和回溯要求决定。</h2><p>网络断开时设备可能批量补传。写入端应限制单批大小，监测部分失败和超时后结果未知，避免重试产生重复或漏点。时间戳冲突时数据库和业务如何处理同设备同时间的两条记录，需要明确。持续观察写入延迟、磁盘增长、压缩效果和分片热点，而非只在空库压测。</p></section>
 <section class="panel"><h2>验证和迁移
 先取一周真实设备数据做样本，保留极端温度、缺字段、乱序、跨时区和离线补传。建立超级表后验证按设备、按工厂、按型号的代表性查询，并比较扫描范围、延迟与聚合结果。升级字段类型或标签定义前，检查旧固件是否仍会上报旧格式，安排兼容与回填窗口。</h2><p>迁移完成的标准不是“数据写进来了”，还包括统计总点数、按设备抽样核对、计算报表与旧系统差异、演练回退路径。尤其注意时间单位：秒与毫秒错位会让数据出现在错误年代，却不一定立刻报错。另要核对时区展示和夏令时边界，避免同一个采样时刻在报表中被误认成两个时间点。</p></section>
+<section class="panel" data-dry-goods><h2>超级表模型的硬参数</h2><div class="table-wrap"><table><thead><tr><th>限制项</th><th>数值</th><th>说明</th></tr></thead><tbody><tr><td>标签（TAG）数量上限</td><td><b>128 个</b></td><td>每个超级表最多定义 128 个标签</td></tr><tr><td>标签总长度</td><td><b>16 KB</b>（v3 起更宽）</td><td>所有标签值加起来的长度上限</td></tr><tr><td>列数上限</td><td><b>4096 列</b>（含标签列）</td><td>超级表定义的列总数</td></tr><tr><td>表名长度</td><td><b>192 字节</b></td><td>子表名长度上限</td></tr><tr><td>单条记录大小</td><td><b>64 KB</b></td><td>一行数据的上限</td></tr><tr><td>每表最大行数</td><td>无硬限制</td><td>由磁盘决定</td></tr><tr><td>数据库数量</td><td>无硬性小限制</td><td>按需创建</td></tr></tbody></table></div><p><b>TDengine 超级表操作</b></p><pre><code>-- 建超级表：采集列 + 标签列（TAGS）
+CREATE STABLE meters (
+    ts TIMESTAMP,
+    current FLOAT,
+    voltage INT,
+    phase FLOAT
+) TAGS (
+    location BINARY(64),     -- 标签必须指定长度(BINARY/NCHAR)
+    group_id INT
+);
+
+-- 自动建子表并写入（USING 语法是核心）
+INSERT INTO d1001 USING meters TAGS ('Beijing.Chaoyang', 1)
+  VALUES (NOW, 10.2, 220, 0.23);
+-- 后续写入无需重复标签（子表已存在）
+INSERT INTO d1001 VALUES (NOW, 11.5, 221, 0.31);
+
+-- 批量按标签聚合（这是 TDengine 的强项）
+SELECT AVG(current), MAX(voltage)
+  FROM meters
+  WHERE location LIKE 'Beijing%' AND ts &gt; NOW - 1d
+  GROUP BY location;
+
+-- 只看某个标签下的最新值（LAST ROW 优化）
+SELECT LAST(*) FROM meters GROUP BY location;
+
+-- 标签操作
+ALTER STABLE meters ADD TAG city BINARY(32);
+ALTER STABLE meters DROP TAG group_id;
+ALTER TABLE d1001 SET TAG location = 'Shanghai.Pudong';
+SHOW TABLES LIKE 'd%';          -- 看子表
+SHOW STABLES;</code></pre></section><section class="panel"><h2>存储参数与建模建议</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th><th>调优建议</th></tr></thead><tbody><tr><td><b>MAXROWS</b></td><td><b>4096</b></td><td>每个数据块的最大行数</td><td>高频采集可调大（如 8192）提高压缩率</td></tr><tr><td><b>MINROWS</b></td><td><b>100</b></td><td>每个数据块的最小行数</td><td>调大可以减少块数、降低元数据开销</td></tr><tr><td><b>KEEP</b></td><td><b>3650 天</b></td><td>数据保留时长</td><td>按存储成本设定，可多档（KEEP 365,30）</td></tr><tr><td><b>DURATION</b></td><td>10 天</td><td>单个数据文件的时长跨度</td><td>影响文件数量与查询效率</td></tr><tr><td><b>COMP</b></td><td>2（默认压缩）</td><td>压缩等级 0/1/2</td><td>列式 + 差分 + 游程编码，实测压缩比常达 <b>10:1</b> 以上</td></tr><tr><td><b>WAL_LEVEL</b></td><td>1</td><td>WAL 级别</td><td>2 = 更高可靠性，性能略降</td></tr></tbody></table></div><ul><li><b>核心建模原则：一个采集点一张子表</b>。这样同一设备的数据物理上连续存储，压缩率高、按设备查询极快。如果用“一张大表 + 设备 ID 列”，压缩率和查询性能都会显著下降。</li><li><b>标签要选“稳定不变”的维度</b>：位置、型号、分组等。经常变化的属性（如状态）应该放采集列而不是标签——因为标签变更需要 <code>ALTER TABLE SET TAG</code>，代价高。</li><li><b>标签的基数（cardinality）要控制</b>：标签用于分组查询，基数过高（如把设备 ID 当标签，几十万个值）会拖慢 <code>GROUP BY</code>。高基数维度放在子表名里更合适。</li><li><b>常见坑 1</b>：<code>BINARY</code>/<code>NCHAR</code> 标签<b>必须指定长度</b>，不写会报错。写太短会截断、太长浪费存储。</li><li><b>常见坑 2</b>：标签值里不要用特殊字符（如 <code>.</code> 在部分版本有语义），且标签值区分大小写。</li><li><b>常见坑 3</b>：时间戳必须<b>递增写入</b>（或至少不倒退太多），乱序数据会触发新的数据块，降低压缩率。</li><li><b>排障顺序</b>：① <code>SHOW STABLES</code> 确认超级表；② <code>SHOW TABLES</code> 看子表是否自动创建（写错标签会导致建错表）；③ 用 <code>EXPLAIN</code> 看是否走了标签过滤；④ 看 <code>information_schema.ins_tables</code> 查表级统计。</li></ul><details><summary>为什么不直接用一张大表存所有设备？</summary><p>时序数据的价值在压缩与按设备扫描。一设备一表后，同设备数据物理连续，列式压缩（差分 + 游程）能压到 1/10 甚至更小；且按设备查只需扫一个文件。大表方案要扫全表再过滤，成本高一个数量级。</p></details><details><summary>标签和字段（列）该怎么选？</summary><p>判断标准：<b>是否频繁变化 + 是否用于分组</b>。稳定、用于分组/筛选的维度 → 标签；随时间变化的测量值 → 采集列。模糊地带（如“设备状态”）若查询常用就放标签，若每秒变就放列。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>设备当前车间写在标签中，就能正确查询它过去所属的车间吗？</summary><p>不一定。标签变化后历史归属可能被覆盖或按当前值解释；需要按时点保存归属或建立维度历史。</p></details><p>练习：选一个真实业务样本，写出输入、预期结果、一次失败时的证据，以及可以复现实验的验收标准。</p></section>
 <footer>继续阅读：<a href="../00-overview/tdengine-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

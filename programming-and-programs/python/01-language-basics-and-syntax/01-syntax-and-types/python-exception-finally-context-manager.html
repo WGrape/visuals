@@ -11,6 +11,58 @@
 <section class="panel"><h2>文件写入与原子替换</h2><p>若目标是“生成完整配置文件后对外可见”，直接 `with open(target, &#x27;w&#x27;)` 写入虽然会正确关闭句柄，但中途失败可能留下截断文件。更合适的流程是写到同目录临时文件，写完并校验后按文件系统语义原子替换目标；需要抗断电持久化时，还要考虑 fsync 文件与目录及文件系统保证。资源清理与数据原子发布是两个不同要求。</p><p>数据库事务也类似：上下文管理器可能在成功时提交、异常时回滚，但具体行为由驱动或封装决定。不要从 `with connection` 语法推断所有库都自动关闭连接或回滚。明确查该对象的 `__enter__`、`__exit__` 契约，并在异常路径写测试。</p></section>
 <section class="panel"><h2>异常链帮助定位根因</h2><p>处理底层异常后需要给上层更有意义的业务错误，可用 `raise DomainError(...) from original_error` 保留直接原因。若仅重新抛出，用裸 `raise` 保留当前异常栈；重新构造相同类型而不传原因，可能丢掉关键现场。日志也不要在每一层重复打印同一栈，造成噪声；在真正处理或边界处记录一次，并带上请求 ID、资源名等上下文。</p><p>只捕获预期可恢复的异常，例如文件不存在后创建默认配置；权限不足、磁盘满则不应被当作“没有配置”处理。捕获太宽会把编程错误和运行环境故障伪装成业务空值。finally 的任务是释放已取得的资源，不负责把所有错误吞掉。</p></section>
 <section class="panel"><h2>三个小实验</h2><p>先写一个函数，try 中 `return 1`，finally 只打印“cleanup”，确认返回 1；再把 finally 改成 `return 2`，观察结果变 2。第二个实验让 try 抛 ValueError、finally 做清理并不返回，观察 ValueError 向外传播。第三个实验写自定义上下文管理器，让退出方法分别返回 False 和 True，观察 with 块内异常是否被抑制。每次都检查清理计数恰好一次。</p><p>练习：写配置文件时中途抛错，但 with 已经关闭文件。为什么仍不能说配置文件“写入成功且完整”？请分别指出文件句柄清理与原子发布各需要什么。</p></section>
+<section class="panel" data-dry-goods><h2>执行顺序的完整矩阵</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>except</th><th>else</th><th>finally</th><th>最终返回/抛出</th></tr></thead><tbody><tr><td>无异常</td><td>跳过</td><td><b>执行</b></td><td><b>执行</b></td><td>以 try 块的 return 值为准</td></tr><tr><td>有异常且被捕获</td><td><b>执行</b></td><td>跳过</td><td><b>执行</b></td><td>以 except 块的 return 值为准</td></tr><tr><td>有异常未捕获</td><td>不匹配则跳过</td><td>跳过</td><td><b>执行</b></td><td>异常继续向外传播</td></tr><tr><td>finally 里有 return</td><td>—</td><td>—</td><td><b>执行并直接返回</b></td><td><b>异常被吞掉</b></td></tr><tr><td>try 里 return，finally 改值</td><td>—</td><td>—</td><td>执行</td><td>返回的是 return 时已绑定的值（finally 改名字不影响）</td></tr></tbody></table></div><p class="muted">两条硬规则：① <code>finally</code> 无论是否异常都会执行（即使 try 里有 return、break、continue）；② <b>不要在 finally 里写 return</b>，它会吞掉正在传播的异常。</p></section><section class="panel"><h2>异常开销与实现机制的量化</h2><div class="table-wrap"><table><thead><tr><th>项目</th><th>数值 / 行为</th><th>说明</th></tr></thead><tbody><tr><td>try 块本身（不抛异常）</td><td>几乎零成本（3.11+ 零开销异常）</td><td>3.11 起异常表取代了块栈指令</td></tr><tr><td>抛出并捕获一次异常</td><td>约 1~10 μs 量级</td><td>比一次函数调用慢 1~2 个数量级</td></tr><tr><td><code>raise</code> 带 <code>from</code></td><td>设置 <code>__cause__</code></td><td>保留原始异常链</td></tr><tr><td>异常链字段</td><td><code>__context__</code> / <code>__cause__</code> / <code>__suppress_context__</code></td><td>决定 traceback 里 “During handling” 的显示</td></tr></tbody></table></div><p><b>字节码</b></p><pre><code># 看 3.11+ 的零开销异常表（try 块不再有 SETUP_FINALLY 指令）
+python - &lt;&lt;'PY'
+import dis
+def f():
+    try:
+        return 1
+    finally:
+        print("cleanup")
+dis.dis(f)          # 3.11+ 输出里会出现 ExceptionTable 而不是块指令
+PY</code></pre></section>
+<section class="panel"><h2>上下文管理器的实现与等价写法</h2><p><b>类实现</b></p><pre><code>class Resource:
+    def __enter__(self):
+        print("acquire"); return self
+    def __exit__(self, exc_type, exc, tb):
+        print("release", exc_type)
+        return False      # 返回 True 会吞掉异常；False 或 None 让异常继续传播
+
+with Resource() as r:
+    raise ValueError("boom")        # 会看到 “release &lt;class ValueError&gt;” 然后异常继续抛出
+
+# 等价的手写形式（with 的本质）
+r = Resource()
+try:
+    _ = r.__enter__()
+    raise ValueError("boom")
+except BaseException as e:
+    if not r.__exit__(type(e), e, e.__traceback__):
+        raise
+else:
+    r.__exit__(None, None, None)</code></pre><p><b>contextlib</b></p><pre><code>from contextlib import contextmanager, ExitStack, suppress
+
+@contextmanager
+def managed():
+    print("acquire")
+    try:
+        yield "resource"          # yield 处执行 with 体
+    finally:
+        print("release")          # 退出时必定执行
+
+with managed() as r:
+    print(r)
+
+# 动态管理多个资源（数量在运行时才知道）
+with ExitStack() as stack:
+    files = [stack.enter_context(open(f)) for f in ["a.txt", "b.txt"]]
+    ...
+
+# 明确忽略某类异常
+with suppress(FileNotFoundError):
+    open("maybe.txt").close()</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>异常凭空消失</td><td><code>finally</code> 或 <code>__exit__</code> 里 return/吞异常</td><td>去掉 return；<code>__exit__</code> 返回 False</td></tr><tr><td>except 没捕获到</td><td>异常类型不匹配或 except 顺序错了</td><td>子类写在前；或用元组 <code>except (A, B)</code></td></tr><tr><td>KeyboardInterrupt 被吃掉</td><td>捕获了 <code>BaseException</code> 或裸 <code>except:</code></td><td>只捕获 <code>Exception</code>，必要时单独处理 <code>BaseException</code> 后 re-raise</td></tr><tr><td>原始异常丢失</td><td>在 except 里直接 raise 新异常</td><td>用 <code>raise New(...) from e</code> 保留 <code>__cause__</code></td></tr><tr><td>资源没关闭</td><td>没用 with，或 open 与 close 之间异常</td><td>统一用 with；<code>contextlib.closing</code> 包装老接口</td></tr><tr><td>生成器版上下文管理器没释放</td><td><code>yield</code> 后没有 try/finally</td><td>@contextmanager 里 yield 必须包在 try/finally 中</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>try 里有 return，finally 还会执行吗？</summary><p>会。finally 在控制流离开 try 块之前执行，包括 return、break、continue 甚至异常传播。这也是释放资源必须放 finally 的原因。</p></details><details><summary>finally 里修改返回值会生效吗？</summary><p>要看改的是名字还是对象：return 时返回值已经绑定，finally 里给变量重新赋值不会改变已绑定的返回值；但如果返回的是可变对象并在 finally 里修改其内容，调用方会看到改动。</p></details><details><summary>__exit__ 返回 True 和 False 有什么区别？</summary><p>返回 True 表示“异常已处理”，with 语句吞掉该异常继续往下执行；返回 False 或 None 则异常继续向外传播。多数资源管理类应返回 False，避免意外吞错。</p></details><details><summary>什么时候用 @contextmanager，什么时候写类？</summary><p>简单的一次性资源（获取-释放成对）用 @contextmanager 更短；需要复用、需要状态、或要在多处使用则写类实现 __enter__/__exit__。用 @contextmanager 时注意 yield 必须包在 try/finally 里，否则异常路径不会释放。</p></details><details><summary>异常处理的性能代价有多大？</summary><p>现代 CPython（3.11+ 零开销异常）里，try 块本身几乎不花成本，成本发生在抛出与捕获（构造 traceback、遍历栈帧），量级约微秒级，比一次函数调用慢 1~2 个数量级。因此异常适合错误处理，不适合做正常的控制流。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>`try: return 1`，`finally: return 2`，调用方得到什么？原异常又会怎样？</summary><p>得到 2；finally 的 return 会覆盖 try 的返回值，也可能压掉原异常，因此应避免这样写。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="control-flow.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -11,6 +11,27 @@
 <section class="panel"><h2>CNAME 链和多种 TTL</h2><p>若 www.example.test CNAME 到 edge.example.test，解析链中的别名与目标 A/AAAA 记录可以各自有 TTL。改变 CNAME 目标与改变目标地址是两种操作；旧 CNAME 或旧目标记录都可能继续被缓存。CDN 切换时尤其要看完整链路，不能只 `dig` 最后一个 IP 就断言权威配置已全局生效。</p><p>多条 A/AAAA 记录也可能被不同解析器以不同顺序返回，客户端还有自己的选择逻辑。若只从本机抽样一次，容易错把负载均衡的多答案行为看成缓存未更新。固定查询的 DNS 服务器和记录类型，多次比较权威与几个代表性递归解析器，更能解释差异。</p></section>
 <section class="panel"><h2>为什么 TTL 不是强一致承诺</h2><p>缓存实现可能设置最小或最大 TTL；某些系统还会在上游故障时提供过期答案。操作系统、应用和代理也可能超出 DNS 规范地持有连接或解析结果。TTL 是设计切换窗口的重要参数，却不是全球所有用户绝对同步的开关。对重要迁移应保留旧目标可用、监测两端流量并设置可回退时间。</p><p>DNSSEC 用于验证 DNS 数据来源与完整性，但不会把 TTL 变成实时推送。HTTPS 证书、源站 Host 路由和负载均衡配置也必须覆盖新旧路径。域名解析正确而 TLS 证书不匹配，会把 DNS 迁移误表现为网站整体不可用。</p></section>
 <section class="panel"><h2>诊断与验收</h2><p>分别查询权威服务器和常用递归解析器的 A、AAAA、CNAME，记录 TTL 剩余值、响应码与最终地址。再用客户端实际连接日志或抓包查看访问的是哪个 IP。若本机 DNS 已返回 B，但连接仍向 A，检查连接池、浏览器缓存或应用固定解析；若递归返回旧记录，看其 TTL 是否仍有效。</p><p>切换验收应包括旧地址过渡期间仍能服务、部分用户解析到 B 后业务正常、负缓存样本可恢复以及回滚演练。不要在解析尚未收敛时删除旧服务器或撤销旧证书。</p></section>
+<section class="panel" data-dry-goods><h2>TTL 取值与负缓存的确切规则</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>推荐 TTL</th><th>理由</th></tr></thead><tbody><tr><td>稳定不变的记录（主站 A）</td><td>3600 – 86400 s</td><td>减少递归查询压力</td></tr><tr><td>准备切换/灰度中的记录</td><td>60 – 300 s</td><td>快速回滚；切换前至少一个旧 TTL 周期就要改</td></tr><tr><td>CDN / 负载均衡后的 CNAME</td><td>300 – 3600 s</td><td>交给 CDN 自己的调度</td></tr><tr><td>MX / TXT（邮件相关）</td><td>3600 s 以上</td><td>避免邮件服务频繁查询</td></tr><tr><td>故障演练 / 蓝绿切换</td><td>30 – 60 s</td><td>代价是递归查询量翻几十倍</td></tr></tbody></table></div><p><b>负缓存（Negative Caching）</b>：查询一个不存在的域名（NXDOMAIN）或类型不存在（NODATA）时，递归服务器也会缓存这个“不存在”的结果，时长取 <b>SOA 记录中 MINIMUM 字段</b>与 SOA 自身 TTL 的<b>较小值</b>（RFC 2308）。这就是为什么“刚创建的域名立刻查不到”——上一次的 NXDOMAIN 还在被缓存。</p><p><b>查看 TTL 与清缓存</b></p><pre><code># 查看权威返回的 TTL（第二列就是剩余 TTL，会递减）
+dig example.com
+# ;; ANSWER SECTION:
+# example.com.        300     IN      A       93.184.216.34
+#                     ^^^ 剩余缓存秒数
+
+# 看负缓存时长：查 SOA 的最后一个字段
+dig example.com SOA +multiline | grep -i minimum
+# 或用一个肯定不存在的名字看 SOA 返回
+dig this-does-not-exist-xyz123.example.com
+# 返回的 AUTHORITY SECTION 里的 SOA 就带负缓存 TTL
+
+# 逐级对比，判断是缓存还是权威问题
+dig @8.8.8.8   example.com +short
+dig @1.1.1.1   example.com +short
+dig @ns1.example.com example.com +short   # 权威直查，绕过所有缓存
+
+# 清本机缓存
+sudo systemd-resolve --flush-caches        # systemd-resolved
+sudo dscacheutil -flushcache               # macOS
+ipconfig /flushdns                         # Windows</code></pre><p class="muted"><code>dig</code> 输出里的 TTL 是<b>递归服务器处的剩余时间</b>，不是权威设定的原值；想看原值要直连权威服务器查询（<code>dig @ns</code>）。</p></section><section class="panel"><h2>缓存层级与常见坑</h2><div class="table-wrap"><table><thead><tr><th>层级</th><th>是否受 TTL 控制</th><th>备注</th></tr></thead><tbody><tr><td>浏览器缓存</td><td>部分（Chrome 有独立 DNS 缓存，约 60 s）</td><td><code>chrome://net-internals/#dns</code> 可清</td></tr><tr><td>操作系统 / stub resolver</td><td>是</td><td>systemd-resolved、nscd、dnsmasq</td></tr><tr><td>本地递归 DNS（路由器/运营商）</td><td>是，但可能强制最小值</td><td>部分 ISP 无视短 TTL</td></tr><tr><td>公共 DNS（8.8.8.8 / 1.1.1.1）</td><td>是</td><td>通常较守规矩</td></tr><tr><td>Java JVM</td><td>默认<b>永久缓存</b>（networkaddress.cache.ttl）</td><td>需设 <code>-Dsun.net.inetaddr.ttl=60</code>，否则服务重启才生效</td></tr></tbody></table></div><ul><li><b>Java 的大坑</b>：JVM 默认无限缓存 DNS 结果（安全策略），导致 DNS 切换后 Java 服务<b>永远</b>连老 IP，必须重启。生产上务必设置 <code>networkaddress.cache.ttl=60</code>（正数=秒）。</li><li><b>TTL=0 的坏处</b>：每次解析都递归一次，DNS 成为可用性依赖项；递归服务器挂了就等于域名全挂。</li><li><b>轮询负载不均</b>：多条 A 记录做轮询时，客户端往往只用第一个，且被各级缓存“锁死”，流量分布极不均匀。要真正的负载均衡请用 LB 或 CDN。</li><li><b>排障步骤</b>：① 直连权威确认数据对；② 换多个公共 DNS 对比；③ 看 SOA MINIMUM 判断负缓存；④ 查本机/浏览器/JVM 缓存。</li></ul><details><summary>域名刚解析好，立刻 dig 却报 NXDOMAIN？</summary><p>典型的<b>负缓存</b>：上一次查询的不存在结果被按 SOA MINIMUM 缓存了。等缓存过期或换一台递归 DNS 查即可。避免在正式解析前用不存在名字做过探测。</p></details><details><summary>为什么相同 TTL 的两条 A 记录，返回的剩余 TTL 不一样？</summary><p>因为它们是在不同时刻被缓存进递归服务器的，剩余时间各自递减。这是正常的，也说明解析结果来自缓存而非实时权威查询。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>先把 TTL 从一小时改成五分钟，是否能立即让所有旧缓存五分钟后失效？</summary><p>不能。已缓存的旧记录仍按当时取得的一小时 TTL 倒计时；应提前降 TTL 并等待旧缓存过期。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="dns-resolution.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

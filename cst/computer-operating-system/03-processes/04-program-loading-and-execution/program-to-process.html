@@ -118,6 +118,24 @@ table.cmp th{background:rgba(255,255,255,.05)}
 .click-hint{font-size:.78rem;color:var(--muted);margin-top:6px;text-align:center}
 @media(max-width:680px){.hero h1{font-size:1.5rem}.proc .pbox{width:100%}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header><nav>
@@ -471,5 +489,44 @@ sRows.forEach(r=>r.addEventListener('click',()=>{
   stackD.textContent=r.dataset.d;
 }));
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>程序加载的关键数值与步骤</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>数值 / 说明</th><th>要点</th></tr></thead><tbody><tr><td>ELF 文件头</td><td><b>64 字节</b>（64位）</td><td><code>readelf -h</code> 可看；魔数 <code>7f 45 4c 46</code></td></tr><tr><td><code>execve</code> 系统调用</td><td>替换整个地址空间</td><td>PID 不变，代码/数据/堆栈全换</td></tr><tr><td>默认栈大小</td><td><b>8 MB</b>（Linux <code>ulimit -s</code>）</td><td>协程/线程栈远小于此</td></tr><tr><td>线程栈默认</td><td><b>8 MB</b>（pthread 默认，Go 初始 <b>2 KB</b> 可增长到 1GB）</td><td>Go 的栈是分段栈/连续栈可增长</td></tr><tr><td><code>brk</code>/<code>mmap</code> 堆</td><td>按需分配</td><td><code>malloc</code> 小内存走 brk，&gt; <b>128 KB</b> 走 mmap（<code>M_MMAP_THRESHOLD</code>）</td></tr><tr><td>页大小</td><td><b>4 KB</b>（大页 2MB/1GB）</td><td>缺页一次读入 4KB</td></tr><tr><td>写时复制（COW）</td><td><code>fork</code> 后父子共享</td><td>任一进程写入才真正复制，所以 fork 很快</td></tr><tr><td>动态链接器</td><td><code>ld.so</code>（如 <code>/lib64/ld-linux-x86-64.so.2</code>）</td><td>负责加载 .so 并重定位</td></tr><tr><td>地址空间随机化 ASLR</td><td>栈/堆/mmap 基址随机</td><td>防返回地址攻击；<code>setarch -R</code> 可关（调试用）</td></tr></tbody></table></div><p><b>execve 做了什么</b>：① 检查权限与格式；② 读 ELF 头找到程序头表；③ <code>mmap</code> 把各段（.text 只读可执行、.data 读写）映射到新地址空间（<b>此时还没真正读入</b>）；④ 若有 <code>INTERP</code> 段则先加载 <code>ld.so</code>；⑤ 设置栈（argc/argv/envp/auxv）；⑥ 跳转到入口（<code>_start</code>，不是 main）。<b>真正的代码是在缺页异常时按需读入的</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>观察加载过程的命令</h2><pre><code># 看 ELF 结构
+readelf -h a.out        # 文件头：类型、入口地址 Entry point address
+readelf -l a.out        # 程序头表：各段的 VirtAddr/FileSiz/MemSiz/Flags
+readelf -d a.out        # 动态段：依赖哪些 .so
+ldd a.out               # 列出依赖的动态库及实际路径
+
+# 看进程的地址空间布局
+cat /proc/$$/maps
+# 00400000-00401000 r-xp ... /bin/bash      &lt;- .text 只读可执行
+# 00600000-00601000 rw-p ... /bin/bash      &lt;- .data 可写
+# 7ffd1a3f0000-7ffd1a41000 rw-p [stack]     &lt;- 栈
+# 7f2b4c000000-7f2b4c021000 r-xp libc.so    &lt;- 共享库
+
+# 追踪 execve 与 mmap
+strace -e trace=execve,mmap,openat ./a.out
+
+# 看缺页次数（验证按需加载）
+/usr/bin/time -v ./a.out 2&gt;&amp;1 | grep -E 'Minor|Major'
+# Minor (reclaiming a frame) / Major (需要读盘) page faults</code></pre><pre><code>// 验证地址空间布局（打印各类变量地址）
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+int g_init = 1;          // .data
+int g_uninit;            // .bss
+int main(int argc, char** argv) {
+    static int s = 2;                    // .data
+    int stack_var;                       // 栈
+    int* heap = malloc(4);               // 堆
+    printf("text=%p\n", (void*)main);
+    printf("data=%p bss=%p\n", &amp;g_init, &amp;g_uninit);
+    printf("heap=%p\n", heap);
+    printf("stack=%p\n", &amp;stack_var);
+    printf("argv=%p env=%p\n", argv, environ);   // 栈的高地址区
+    return 0;
+}
+// 典型输出（x86-64）：text 0x55.. &lt; data 0x55..(更高) &lt; heap 0x55..(再高) &lt;&lt; stack 0x7ffd..
+// 栈在高地址、向低地址增长；堆在低地址、向高地址增长</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>加载与内存排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td><code>error while loading shared libraries: libxxx.so</code></td><td>动态库找不到</td><td>看 <code>ldd</code> 的 not found；<code>LD_LIBRARY_PATH</code> 或 <code>/etc/ld.so.conf</code> + <code>ldconfig</code></td></tr><tr><td><code>version `GLIBC_2.xx' not found</code></td><td>在低版本系统跑高版本编译的二进制</td><td>在最低目标系统上编译；或静态链接（<code>-static</code>，Go 默认静态）</td></tr><tr><td>启动很慢</td><td>动态库多、符号重定位多</td><td><code>LD_DEBUG=statistics</code> 看耗时；用 <code>prelink</code> 或减少依赖</td></tr><tr><td>fork 后变慢</td><td>COW 导致大量页复制（尤其大内存进程）</td><td>避免大内存进程 fork（如 Python+fork 的服务）；用 posix_spawn</td></tr><tr><td><code>Segmentation fault</code></td><td>访问未映射地址 / 栈溢出 / 空指针</td><td><code>ulimit -c unlimited</code> + gdb 看 core；栈溢出看递归深度</td></tr><tr><td>栈溢出（递归太深）</td><td>默认栈 8MB，每层帧 100B 时约 <b>8 万层</b></td><td>改迭代；或 <code>pthread_attr_setstacksize</code> 加大；Go 栈会自动增长到 1GB</td></tr><tr><td>内存占用远超预期</td><td>malloc 的碎片 / 未归还 OS（glibc 的 trim 阈值 <b>128KB</b>）</td><td><code>malloc_trim(0)</code>；或换 jemalloc/tcmalloc</td></tr></tbody></table></div><p class="muted"><b>fork + exec 为什么要分开</b>：因为 <code>fork</code> 之后可以在子进程里做重定向、改 <code>ulimit</code>、切换用户等准备工作再 <code>exec</code>，这就是 shell 能实现管道和重定向的原因。现代系统提供了 <code>posix_spawn</code> 合并二者，避免大进程 fork 的 COW 开销。</p></div></section>
 </body>
 </html>

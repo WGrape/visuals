@@ -11,6 +11,26 @@
 <section class="panel"><h2>排障顺序</h2><p>同 VLAN 不通，检查终端 IP/掩码、Access VLAN、Trunk 允许列表、MAC 学习与 ARP。只有跨 VLAN 不通时，重点查两侧网关接口是否启用、是否有路由、ACL 或防火墙是否放行。不要把 Trunk 正常等同于跨 VLAN 路由正常，它只传多种二层 VLAN。也不要把能 ping 网关等同于业务端口已通。</p><p>看现象时按“同交换机同 VLAN—跨交换机同 VLAN—跨 VLAN”三组测试，差异能缩小故障范围。若 VLAN 10 跨交换机通、VLAN 20 不通，优先查 Trunk 允许列表及两侧 VLAN 20 配置，少去改全网路由。</p></section>
 <section class="panel"><h2>VLAN 标签与安全边界</h2><p>802.1Q 标签携带 VLAN ID，但不会加密或验证业务身份。把终端可控端口误配为 Trunk，或对 Native VLAN 处理不一致，会扩大可进入的 VLAN 范围。接入端口应按需要限制类型，交换机管理面也要单独保护。VLAN hopping 等风险具体取决于交换机配置，不能把所有带标签帧都简单看作攻击成功。</p><p>若使用 VXLAN 等 overlay，外层又加入新的网络封装；物理交换机看到的可能是隧道端点而非原始租户 MAC。此时故障定位要区分 underlay 物理网络和 overlay 虚拟广播域，不要用一个 VLAN ID 解释整个数据中心。</p></section>
 <section class="panel"><h2>配置变更如何验收</h2><p>变更前记录端口所属 VLAN、Trunk 允许列表、网关地址和 ACL。变更后分别测试同 VLAN 单播、ARP 广播范围、跨 VLAN 业务端口和不能访问的目标。对不应互通的两部门，拒绝测试与放行测试同样重要。若只测一个 ping 成功，不能证明隔离和业务流量都符合预期。</p><p>搬迁主机后还要检查交换机 MAC 表是否收敛到新端口，以及 DHCP 地址是否来自正确 VLAN。旧 MAC 表项、错误 DHCP 中继或 DNS 缓存都可能使“换端口后不通”看起来像同一个故障。</p></section>
+<section class="panel" data-dry-goods><h2>802.1Q 与 VLAN ID</h2><div class="table-wrap"><table><thead><tr><th>字段</th><th>位数</th><th>说明</th></tr></thead><tbody><tr><td>TPID</td><td>16 bit</td><td>固定 <code>0x8100</code>，标识这是 802.1Q 帧</td></tr><tr><td>PCP（优先级）</td><td>3 bit</td><td>0–7，用于 QoS（802.1p）</td></tr><tr><td>DEI（丢弃合格指示）</td><td>1 bit</td><td>原 CFI，拥塞时可优先丢弃</td></tr><tr><td>VID（VLAN ID）</td><td><b>12 bit</b></td><td><b>1 – 4094</b>，0 和 4095 保留</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>端口类型</th><th>收发帧</th><th>典型连接</th><th>说明</th></tr></thead><tbody><tr><td><b>Access</b></td><td>收 untagged，发 untagged</td><td>PC、打印机、服务器</td><td>只属于一个 VLAN（PVID）</td></tr><tr><td><b>Trunk</b></td><td>收 tagged，发 tagged（Native VLAN 除外）</td><td>交换机之间、到路由器</td><td>承载多个 VLAN</td></tr><tr><td><b>Hybrid</b></td><td>可同时收 tagged 与 untagged</td><td>虚拟化/特殊场景</td><td>Linux bridge、华为设备的常见形态</td></tr></tbody></table></div><p><b>Native VLAN 的坑</b>：Trunk 上 Native VLAN（默认 <b>VLAN 1</b>）的帧<b>不打 tag</b>。两端 Native VLAN 不一致会导致 VLAN 1 的流量“串”到另一个 VLAN —— 既是故障源也是安全漏洞（VLAN hopping 攻击）。最佳实践：① 两端显式配置一致；② 把 Native VLAN 改成一个不使用的 ID；③ 开启 <code>vlan dot1q tag native</code>（全局打 tag）。</p><p><b>VLAN 配置与验证</b></p><pre><code># Linux 上创建 VLAN 子接口
+ip link add link eth0 name eth0.100 type vlan id 100
+ip addr add 192.168.100.1/24 dev eth0.100
+ip link set eth0.100 up
+
+# 看 VLAN 配置
+ip -d link show eth0.100         # -d 显示 vlan 协议与 id
+cat /proc/net/vlan/config
+
+# 网桥 VLAN 过滤（现代做法）
+ip link add br0 type bridge vlan_filtering 1
+bridge vlan add dev eth0 vid 100
+bridge vlan show
+
+# 抓带 tag 的帧
+tcpdump -i eth0 -nn -e 'vlan 100'
+tcpdump -i eth0 -nn -e 'vlan and ip'
+
+# 测试 VLAN 间是否隔离
+arping -I eth0.100 192.168.100.5</code></pre></section><section class="panel"><h2>VLAN 间路由与故障排查</h2><p><b>VLAN 隔离广播域</b>，所以不同 VLAN 之间二层不通，要互通必须走三层（路由器或三层交换机）。三种做法：</p><div class="table-wrap"><table><thead><tr><th>方式</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td>单臂路由（Router-on-a-Stick）</td><td>路由器一个口做 Trunk，起子接口</td><td>省端口</td><td>所有跨 VLAN 流量挤一条链路，带宽瓶颈</td></tr><tr><td>三层交换机 SVI</td><td>交换机上为每个 VLAN 起 VLANIF 接口</td><td><b>线速转发，推荐</b></td><td>需要三层交换机</td></tr><tr><td>每条 VLAN 一条物理链路</td><td>路由器多口分别接不同 VLAN</td><td>简单直观</td><td>浪费端口，规模受限</td></tr></tbody></table></div><ul><li><b>VLAN 1 不要瞎用</b>：它是默认 VLAN、默认 Native VLAN，且很多管理协议（STP、CDP）默认跑在上面。用业务 VLAN 承载数据，管理 VLAN 单独一个。</li><li><b>VLAN 数量规划</b>：4094 个看似很多，但要考虑 STP 实例数（每 VLAN 一个 STP 实例会拖垮设备，所以用 MSTP 把多个 VLAN 映射到一个实例）。</li><li><b>常见故障 1</b>：配了 VLAN 但不通 → 检查中间所有 Trunk 是否都<b>放行了该 VLAN</b>（交换机默认可能只放 VLAN 1）。</li><li><b>常见故障 2</b>：部分 VLAN 通部分不通 → Native VLAN 不匹配，或 Trunk 的 allowed VLAN 列表不一致。</li><li><b>常见故障 3</b>：能 ping 通网关但访问不了别的 VLAN → 网关没开路由，或对方主机防火墙拦了。</li><li><b>私有 VLAN（PVLAN）</b>：同一网段内再隔离（如酒店/IDC 多租户），isolated 端口之间不能互访但都能访问网关。</li></ul><details><summary>VLAN 能隔离攻击吗？</summary><p>能隔离<b>广播</b>和二层泛洪，但跨 VLAN 的三层流量仍会被防火墙/路由器看到。真正的安全隔离要靠 ACL 和防火墙策略，VLAN 只是最基础的划分手段。另外 VLAN hopping 攻击（利用 Native VLAN 或 DTP 自动协商）可以跨越 VLAN，需关闭 DTP、固定端口模式。</p></details><details><summary>为什么服务器网卡要打 tag？</summary><p>服务器需要承载多个 VLAN 的业务（如管理网、业务网、存储网各一个 VLAN）。在网卡上起多个 VLAN 子接口，一根线就能跑多个逻辑网络，节省网卡和交换机端口。虚拟化/K8s 环境尤其常见。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>把两台主机放在不同 VLAN，仅配置 Trunk 就能互相通信吗？</summary><p>不能。Trunk 只传送多个二层 VLAN；跨 VLAN 的 IP 通信还需要三层网关、路由和相应放行策略。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../00-overview/ethernet-frame-switch-learning.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

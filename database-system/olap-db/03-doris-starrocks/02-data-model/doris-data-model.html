@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -182,6 +200,52 @@ DISTRIBUTED BY HASH(user_id) BUCKETS 8;</code></pre>
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Doris/StarRocks 三种数据模型</h2><div class="table-wrap"><table><thead><tr><th>模型</th><th>特点</th><th>适用 / 限制</th></tr></thead><tbody><tr><td><b>Duplicate（明细）</b></td><td><b>不聚合</b>，原样存储所有行</td><td>日志、明细查询；<b>无主键去重</b>，存储最大</td></tr><tr><td><b>Aggregate（聚合）</b></td><td>按 key 预聚合，value 用 SUM/REPLACE/MAX 等</td><td>报表、指标；<b>查询时再聚合一次</b>，且只能查聚合列</td></tr><tr><td><b>Unique（主键）</b></td><td>按主键保留最新（本质是 REPLACE 聚合）</td><td>需要 update 的维表；<b>查询有 merge 开销</b></td></tr><tr><td><b>Primary Key（StarRocks 3.x）</b></td><td>真正的行级更新 + 主键索引</td><td>需要频繁 update/delete；内存存主键索引（<b>约 10B/行</b>）</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值 / 建议</th><th>说明</th></tr></thead><tbody><tr><td><code>replication_num</code></td><td><b>3</b></td><td>副本数；单机测试设 1</td></tr><tr><td>分桶数 <code>BUCKETS</code></td><td>建议 <b>每分区 10~30</b></td><td>分桶数 ≈ 数据行数 / (压缩后单桶 1~10GB)</td></tr><tr><td>分区粒度</td><td>按<b>天/月</b></td><td>时序数据必分区，便于 TTL 与裁剪</td></tr><tr><td><code>storage_format</code></td><td>V2</td><td>支持 Bitmap/HLL 等新类型</td></tr><tr><td><code>enable_light_schema_change</code></td><td>true</td><td>3.x 起加列是秒级</td></tr><tr><td>单表分区数建议</td><td><b>&lt; 1000</b></td><td>太多元数据压力大</td></tr><tr><td><code>compaction</code></td><td>自动</td><td>Accumulative + Base compaction；写入频繁时要监控堆积</td></tr></tbody></table></div><p><b>分桶数怎么定</b>：目标是每个 tablet（分桶）压缩后 <b>1~10 GB</b>。例如一天 300GB 原始数据、压缩比 5:1 = 60GB，则分桶数 = <code>60 / 5 ≈ 12</code>。分桶太少并行度不够，太多元数据膨胀、导入变慢。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>建表与导入</h2><pre><code>-- Aggregate 模型：按 dt/site 预聚合 pv，UV 用 HLL 近似去重
+CREATE TABLE site_pv (
+    dt       DATE,
+    site_id  INT,
+    pv       BIGINT SUM DEFAULT '0',      -- SUM 聚合
+    uv       HLL HLL_UNION,               -- 近似去重，误差约 1~2%
+    max_rt   INT MAX                      -- 取最大值
+) AGGREGATE KEY(dt, site_id)
+PARTITION BY RANGE(dt) (
+    PARTITION p202610 VALUES [('2026-10-01'), ('2026-11-01'))
+)
+DISTRIBUTED BY HASH(site_id) BUCKETS 12
+PROPERTIES ("replication_num" = "3");
+
+-- Unique 模型：维表，需要更新
+CREATE TABLE dim_user (
+    user_id   BIGINT,
+    name      VARCHAR(64),
+    city      VARCHAR(32),
+    updated_at DATETIME
+) UNIQUE KEY(user_id)
+DISTRIBUTED BY HASH(user_id) BUCKETS 10
+PROPERTIES ("replication_num" = "3", "enable_unique_key_merge_on_write" = "true");
+-- merge_on_write=true（2.0+）可让 Unique 表的查询不走 merge，性能接近 Duplicate</code></pre><pre><code>-- 导入方式
+-- 1) Stream Load（HTTP，最常用，同步返回）
+curl -X PUT http://fe:8030/api/db/tbl/_stream_load \
+  -H "label:load_20261022" -H "column_separator:," \
+  -T data.csv
+-- 返回记好 Label，可用于幂等重投（相同 Label 会去重）
+
+-- 2) Routine Load（持续消费 Kafka）
+CREATE ROUTINE LOAD db.job ON tbl
+COLUMNS(dt, site_id, pv)
+PROPERTIES ("desired_concurrent_number"="3", "max_batch_interval"="20")
+FROM KAFKA ("kafka_broker_list"="broker:9092", "kafka_topic"="topic",
+            "property.group.id"="g1", "property.kafka_default_offsets"="OFFSET_BEGINNING");
+
+-- 3) Broker Load（从 HDFS/S3 大批量）
+LOAD LABEL db.l1 (DATA INFILE("hdfs://path/*") INTO TABLE tbl)
+WITH BROKER broker_name;
+
+-- 查看导入状态
+SHOW LOAD WHERE LABEL = "load_20261022";</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>Aggregate 模型查明细查不到</td><td>数据已被预聚合，明细行不存在</td><td>需要明细就用 Duplicate 模型；或保留两份表</td></tr><tr><td>聚合结果看着不对</td><td>查询时又聚合了一次（二次聚合）</td><td>理解：<b>存储时聚合 + 查询时再聚合</b>；COUNT 要用 SUM 而不是 COUNT(*)</td></tr><tr><td>导入报 <code>too many filtered rows</code></td><td>数据格式/类型不匹配</td><td>看 <code>SHOW LOAD</code> 的 <code>ErrorLogUrls</code>；设 <code>max_filter_ratio</code></td></tr><tr><td>查询慢</td><td>没命中分区/分桶裁剪；或分桶数不合理</td><td>看 <code>EXPLAIN</code> 是否裁剪；调整分桶列（选高基数、常用于 join/过滤的列）</td></tr><tr><td>Unique 表查询慢</td><td>查询时要 merge 多版本</td><td>开 <code>enable_unique_key_merge_on_write</code>；或升级到 Primary Key 模型</td></tr><tr><td>Compaction 堆积</td><td>写入频率高、版本多</td><td>看 <code>SHOW PROC '/compaction'</code>；增加 compaction 线程；降低小批量写入频率</td></tr><tr><td>小文件多导入慢</td><td>每次导入生成一个版本</td><td><b>攒批写入</b>（单次 ≥ 1万行，间隔 ≥ 10s）</td></tr></tbody></table></div><p class="muted"><b>Aggregate 模型最常见的坑</b>：建表时 <code>COUNT</code> 类型的指标要写成 <code>BIGINT SUM</code>，查询时用 <code>SUM(cnt)</code>，用 <code>COUNT(*)</code> 会得到<b>行数</b>而不是<b>总和</b>。</p></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / SQL 核心 / Doris / StarRocks · 数据模型 ·

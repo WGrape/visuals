@@ -67,6 +67,16 @@
   .card2 h4 { color: var(--green); margin-bottom: 8px; }
   footer { text-align: center; padding: 30px; border-top: 1px solid var(--border); color: var(--text2); font-size: .85rem; }
   footer a { color: var(--blue); text-decoration: none; }
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:0 0 18px;}
+  .card3{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+  .card3 h4{color:var(--green);margin-bottom:6px;font-size:.98rem;}
+  .card3 p{color:var(--text2);font-size:.88rem;margin:0;}
+  .qa{border-left:3px solid var(--purple);background:rgba(188,140,255,.07);border-radius:8px;padding:12px 16px;margin:0 0 14px;}
+  .qa b{color:var(--text);}
+  .qa p{color:var(--text2);margin:4px 0 0;font-size:.9rem;}
+  .cmp td:first-child{color:var(--text);}
+  .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -76,35 +86,112 @@
   <p>LIMIT/OFFSET 的陷阱，以及 keyset（游标）分页为什么更快更稳。</p>
 </div>
 <div class="layout">
-  <nav class="toc"><a href="#p1">OFFSET 的问题</a><a href="#p2">keyset 游标</a><a href="#p3">服务端游标</a><a href="#p4">对比</a></nav>
+  <nav class="toc"><a href="#s1">① OFFSET 分页为什么会慢</a><a href="#s2">② Keyset（游标）分页：正确的深翻页姿势</a><a href="#s3">③ COUNT(*) 慢怎么办</a><a href="#s4">④ 其他实用技巧</a><a href="#s5">⑤ 常见问法</a></nav>
   <main class="content">
-<section id="p1"><h2>① LIMIT/OFFSET 的深翻页陷阱</h2>
-<p><code>OFFSET 100000</code> 时，数据库仍要 <strong>先读出并跳过前 10 万行</strong> 才能返回第 10 万行之后的数据——越翻越慢。并且在并发写入时，OFFSET 还会导致 <strong>重复或漏读</strong>（插入使行整体平移）。</p>
-<pre><code>SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 100000;  -- 慢且可能漂移</code></pre>
+<section id="s1"><h2>① OFFSET 分页为什么会慢</h2>
+
+<p>最常见的写法 <code>LIMIT n OFFSET m</code> 有个致命问题：<strong>数据库必须先扫描并丢弃前 m 行</strong>。页码越深，丢弃越多，代价线性增长。</p>
+<pre><code>EXPLAIN ANALYZE
+SELECT * FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 100000;
+-- Limit (cost=...) (actual time=...) 
+--   -&gt;  Index Scan ... (actual rows=100020)   ← 读了 10 万行只返回 20 行</code></pre>
+<figure class="fig">
+<svg viewBox="0 0 700 170" role="img" aria-label="OFFSET 与 Keyset 分页对比">
+  <text x="170" y="24" fill="#e6edf3" font-size="13" text-anchor="middle">OFFSET 分页：丢弃前面所有行</text>
+  <rect x="40" y="45" width="260" height="30" fill="rgba(248,81,73,.25)" stroke="#f85149"/>
+  <text x="170" y="65" fill="#e6edf3" font-size="12" text-anchor="middle">扫描并丢弃 OFFSET 行（代价随页码线性增长）</text>
+  <rect x="40" y="80" width="80" height="30" fill="rgba(63,185,80,.3)" stroke="#3fb950"/>
+  <text x="80" y="100" fill="#e6edf3" font-size="11" text-anchor="middle">返回 20 行</text>
+  <text x="170" y="135" fill="#f85149" font-size="12" text-anchor="middle">第 5000 页 = 扫 10 万行</text>
+  <text x="170" y="158" fill="#8b949e" font-size="11" text-anchor="middle">代价 O(offset + limit)</text>
+  <text x="510" y="24" fill="#e6edf3" font-size="13" text-anchor="middle">Keyset 分页：直接从锚点继续</text>
+  <rect x="390" y="45" width="40" height="30" fill="rgba(88,166,255,.3)" stroke="#58a6ff"/>
+  <text x="410" y="65" fill="#e6edf3" font-size="11" text-anchor="middle">锚点</text>
+  <path d="M430,60 L500,60" stroke="#58a6ff" marker-end="url(#pgp1)"/>
+  <rect x="510" y="45" width="80" height="30" fill="rgba(63,185,80,.3)" stroke="#3fb950"/>
+  <text x="550" y="65" fill="#e6edf3" font-size="11" text-anchor="middle">返回 20 行</text>
+  <text x="510" y="135" fill="#3fb950" font-size="12" text-anchor="middle">无论第几页都只读 20 行</text>
+  <text x="510" y="158" fill="#8b949e" font-size="11" text-anchor="middle">代价 O(limit)，与页码无关</text>
+  <defs><marker id="pgp1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#58a6ff"/></marker></defs>
+</svg>
+<figcaption>OFFSET 需要丢弃前 N 行；Keyset 用索引直接定位到锚点</figcaption>
+</figure>
+<div class="callout warn"><b>另一个问题：OFFSET 分页会「漂移」。</b>翻页期间若有新数据插入（或删除），用户会看到<strong>重复行或漏行</strong>。这在「按时间倒序」的列表里尤其常见。</div>
+
 </section>
-<section id="p2"><h2>② keyset（游标 / Seek）分页</h2>
-<p>改为 <strong>记住上一页最后一行的值</strong>，用索引条件定位：</p>
-<pre><code>SELECT * FROM orders
-WHERE id &lt; :last_id          -- 上一页最后一条的 id
-ORDER BY id DESC LIMIT 20;</code></pre>
-<p>这个条件走 B-tree 索引 <strong>直接定位</strong>，不扫描跳过前面的行；且插入不影响结果集（基于有序键，稳定）。</p>
-<div class="callout tip"><b>要点：</b>keyset 必须基于 <strong>唯一且有序</strong> 的列（如 <code>id</code> 或 <code>(created_at, id)</code> 复合），否则边界行会重复。</div>
+<section id="s2"><h2>② Keyset（游标）分页：正确的深翻页姿势</h2>
+
+<p>思路：记住<strong>上一页最后一行的排序键</strong>，下一页用 <code>WHERE</code> 直接从它之后开始取——让索引直接定位。</p>
+<pre><code>-- 第一页
+SELECT * FROM orders ORDER BY created_at DESC, id DESC LIMIT 20;
+-- 记下最后一行的 (created_at, id) = ('2026-10-01 09:00:00', 12345)
+
+-- 后续页（关键：用元组比较，且带上唯一键 id 保证确定性）
+SELECT * FROM orders
+WHERE (created_at, id) &lt; ('2026-10-01 09:00:00', 12345)
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+
+-- 对应的索引（列顺序与 ORDER BY 一致！）
+CREATE INDEX idx_orders_created_id ON orders (created_at DESC, id DESC);</code></pre>
+<div class="grid3">
+<div class="card3"><h4>优点</h4><p>代价与页码无关（始终 O(limit)）；不受插入/删除影响，不会漂移</p></div>
+<div class="card3"><h4>代价</h4><p>只能「下一页/上一页」，<strong>不能跳到第 N 页</strong>；需要客户端保存游标</p></div>
+<div class="card3"><h4>必须带唯一键</h4><p>排序键可能重复（同时间创建多行），加 <code>id</code> 作为 tie-breaker 才能严格单调</p></div>
+<div class="card3"><h4>元组比较</h4><p>PG 支持 <code>(a, b) &lt; (x, y)</code>，配合复合索引可高效走索引</p></div>
+</div>
+<div class="callout note"><b>排序方向要统一：</b>若索引是 <code>(created_at DESC, id DESC)</code>，查询也要 <code>ORDER BY created_at DESC, id DESC</code>。方向混用（一个 DESC 一个 ASC）会导致无法使用该索引做有序扫描，退化成排序。</div>
+
 </section>
-<section id="p3"><h2>③ 服务端游标</h2>
-<p>对真正需要“翻很多页”的场景，可用 <code>DECLARE CURSOR</code> 在服务端维持游标，分批 <code>FETCH</code>。代价是占用连接与事务，需配合连接池谨慎使用。</p>
-<pre><code>BEGIN; DECLARE c CURSOR FOR SELECT * FROM orders ORDER BY id;
-FETCH 20 FROM c;  -- 翻页
-CLOSE c; COMMIT;</code></pre>
-</section>
-<section id="p4"><h2>④ 方案对比</h2>
+<section id="s3"><h2>③ COUNT(*) 慢怎么办</h2>
+
+<p>分页组件总要显示「共 N 条」，但 <code>SELECT count(*) FROM t WHERE ...</code> 在某些条件下需要<strong>全表扫描</strong>（没有索引能覆盖时），大表上可能几秒甚至几十秒。</p>
 <table>
-  <tr><th>方案</th><th>深翻性能</th><th>数据稳定性</th><th>适用</th></tr>
-  <tr><td>OFFSET</td><td>差（随深度恶化）</td><td>差（并发漂移）</td><td>浅翻、后台</td></tr>
-  <tr><td>keyset</td><td>优（O(log n)）</td><td>好</td><td>无限滚动、API</td></tr>
-  <tr><td>服务端游标</td><td>优</td><td>好</td><td>大批量导出</td></tr>
+<tr><th>方案</th><th>做法</th><th>适用</th></tr>
+<tr><td>精确计数</td><td>直接 <code>count(*)</code> + 合适索引</td><td>数据量小或条件可走索引</td></tr>
+<tr><td>估算值</td><td><code>SELECT reltuples FROM pg_class WHERE relname='orders';</code></td><td>「约 12 万条」够用的场景</td></tr>
+<tr><td>EXPLAIN 估算</td><td><code>EXPLAIN SELECT ...</code> 读 rows</td><td>带条件的近似估算</td></tr>
+<tr><td>计数表</td><td>用触发器/异步任务维护计数</td><td>高频读取、容忍短暂不准</td></tr>
+<tr><td>不显示总数</td><td>改为「加载更多」/ 无限滚动</td><td>信息流、时间线类产品</td></tr>
+<tr><td>index-only scan</td><td>建覆盖索引 + 保证 VM 已 VACUUM</td><td>条件简单时可大幅提速</td></tr>
 </table>
+<pre><code>-- 让 count(*) 走 index-only scan
+CREATE INDEX idx_orders_status ON orders (status);
+VACUUM ANALYZE orders;              -- 更新可见性映射，避免回表
+EXPLAIN SELECT count(*) FROM orders WHERE status = 'paid';
+-- Aggregate -&gt; Index Only Scan using idx_orders_status</code></pre>
+
 </section>
-</main>
+<section id="s4"><h2>④ 其他实用技巧</h2>
+
+<div class="grid3">
+<div class="card3"><h4>覆盖索引</h4><p><code>CREATE INDEX ... INCLUDE (col)</code> 让查询只走索引，避免回表（PG 11+）</p></div>
+<div class="card3"><h4>部分索引</h4><p><code>WHERE status='pending'</code> 的索引更小、更快；适合「只查未处理」的场景</p></div>
+<div class="card3"><h4>表达式索引</h4><p><code>CREATE INDEX ON t (lower(email))</code> 让 <code>WHERE lower(email)=?</code> 走索引</p></div>
+<div class="card3"><h4>游标 CURSOR</h4><p>服务端游标适合<strong>大批量顺序导出</strong>，不适合交互式分页（占连接、有状态）</p></div>
+<div class="card3"><h4>keyset + 反向</h4><p>「上一页」用 <code>&gt;</code> 比较 + <code>ORDER BY ... ASC</code> 后再反转结果</p></div>
+<div class="card3"><h4>稳定排序</h4><p>ORDER BY 必须包含唯一键，否则同值行的顺序不确定，会导致重复/漏行</p></div>
+</div>
+<pre><code>-- 覆盖索引（INCLUDE）：避免回表
+CREATE INDEX idx_orders_list ON orders (created_at DESC, id DESC)
+  INCLUDE (status, amount);
+
+-- 部分索引：只索引热点子集
+CREATE INDEX idx_pending ON orders (created_at) WHERE status = 'pending';
+
+-- 表达式索引：大小写不敏感查询
+CREATE INDEX idx_users_email_lower ON users (lower(email));</code></pre>
+
+</section>
+<section id="s5"><h2>⑤ 常见问法</h2>
+<div class="qa"><b>Q：为什么深分页（OFFSET 很大）会变慢？</b><p>A：因为 <code>OFFSET m</code> 的语义是<strong>「先产生前 m 行结果，再丢弃它们」</strong>。数据库必须真正扫描（或索引扫描）这 m 行才能知道该从哪开始返回，因此<strong>代价是 O(offset + limit)</strong>，页码越深越慢。此外 OFFSET 分页<strong>会漂移</strong>：翻页期间有新数据插入/删除时，用户可能看到重复行或漏行。<strong>解法：改用 keyset（游标）分页。</strong></p></div>
+<div class="qa"><b>Q：keyset 分页怎么写？有什么限制？</b><p>A：把上一页最后一行的排序键作为锚点：<code>WHERE (created_at, id) &lt; (last_created, last_id) ORDER BY created_at DESC, id DESC LIMIT 20</code>，并建<strong>与 ORDER BY 顺序一致的复合索引</strong>。<strong>关键</strong>：① 排序键必须<strong>唯一</strong>，所以要补上 <code>id</code> 作为 tie-breaker；② 用 <strong>元组比较</strong> <code>(a,b) &lt; (x,y)</code> 才能正确走复合索引；③ 索引列顺序与排序方向要匹配。<strong>限制：不能跳页</strong>（无法直接到第 500 页），因此适合「加载更多」与时间线，不适合传统页码导航（后者可限制最大页数 + 缓存）。</p></div>
+<div class="qa"><b>Q：分页一定要显示总数吗？怎么优化 COUNT？</b><p>A：不一定。精确 COUNT 在大数据量下代价高，可选方案：① <strong>估算</strong>：<code>SELECT reltuples FROM pg_class</code> 或用 <code>EXPLAIN</code> 的 rows 估计；② <strong>维护计数表</strong>（触发器或异步任务更新）；③ <strong>产品上改为「加载更多」</strong>而不显示总数；④ 让 COUNT 走 <strong>index-only scan</strong>（建覆盖索引 + 及时 VACUUM 更新可见性映射）。<strong>实践建议：如果「约 12 万条」就够用，绝不要为了精确而付出全表扫描的代价。</strong></p></div>
+<div class="qa"><b>Q：ORDER BY 里为什么建议带上唯一键？</b><p>A：因为若排序键<strong>有重复值</strong>（如同一秒创建的多个订单），数据库不保证这些行的相对顺序稳定——两次查询之间顺序可能变化，导致<strong>同一行出现在两页，或某些行被跳过</strong>。加上 <code>id</code> 作为<strong>次级排序键</strong>后，排序键变成严格唯一的「全序」，分页结果才确定。<strong>这条对 OFFSET 与 keyset 分页都适用。</strong></p></div>
+<div class="qa"><b>Q：覆盖索引（INCLUDE）对分页有什么帮助？</b><p>A：分页查询通常需要<strong>先按索引顺序定位，再回表取完整行</strong>。若索引里已包含列表页所需的列（用 <code>INCLUDE (col1, col2)</code> 或建成复合索引），就可以走 <strong>index-only scan</strong>，<strong>完全不回表</strong>，随机 IO 大幅减少。<strong>前提</strong>：① 可见性映射（VM）已设置，否则仍需回表检查可见性——所以<strong>要及时 VACUUM</strong>；② 索引不能太大，否则得不偿失；③ INCLUDE 列不参与索引排序，只作为「附带数据」（PG 11+）。</p></div>
+<div class="qa"><b>Q：服务端游标（CURSOR）适合做分页吗？</b><p>A：<strong>不适合交互式分页，适合大批量导出。</strong>游标是<strong>有状态的</strong>：占用连接、持有事务快照、阻止 VACUUM 回收，在 Web 应用中（请求之间连接会被复用/释放）难以管理。<strong>正确用法</strong>：离线导出、ETL、批处理中声明游标并 <code>FETCH</code> 分批读取，读完后关闭。<strong>Web 分页请用 keyset（无状态）</strong>——它把「位置」编码在查询条件里，天然适合无状态的 HTTP 请求。</p></div>
+</section>
+  </main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

@@ -47,6 +47,24 @@ table.cmp th{background:rgba(255,255,255,.05);color:#fff}
 .footer{text-align:center;color:var(--muted);padding:30px 1rem 50px;font-size:.82rem;border-top:1px solid var(--line);margin-top:10px}
 @media(max-width:720px){.hero h1{font-size:1.5rem}.wrap{padding:1rem}}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -287,5 +305,59 @@ table.cmp th{background:rgba(255,255,255,.05);color:#fff}
 
 <div class="footer">程序内存分布 → 操作系统内存映射 · 交互式图解 · 地址与布局为示意，具体因架构/OS/ASLR 而异。</div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>进程地址空间的分段布局</h2><p>每个进程看到的是<b>独立的虚拟地址空间</b>（64 位下通常是 128TB，实际只用低 47 位）。布局从低到高固定分几段，理解它能解释绝大多数内存相关的现象。</p><div class="table-wrap"><table><thead><tr><th>段（从低地址到高）</th><th>内容</th><th>增长方向</th><th>权限</th></tr></thead><tbody><tr><td><b>代码段 .text</b></td><td>机器指令</td><td>固定</td><td>r-x</td></tr><tr><td><b>只读数据 .rodata</b></td><td>字符串常量、const 全局</td><td>固定</td><td>r--</td></tr><tr><td><b>已初始化数据 .data</b></td><td>已初始化的全局/静态变量</td><td>固定</td><td>rw-</td></tr><tr><td><b>未初始化 .bss</b></td><td>未初始化的全局/静态（<b>不占文件空间</b>）</td><td>固定</td><td>rw-</td></tr><tr><td><b>堆 Heap</b></td><td><code>malloc</code>/<code>new</code> 分配</td><td><b>向上增长</b></td><td>rw-</td></tr><tr><td><b>文件映射区</b></td><td>mmap、动态库、共享内存</td><td>向下增长（Linux 默认在堆和栈之间）</td><td>按映射</td></tr><tr><td><b>栈 Stack</b></td><td>函数调用栈帧、局部变量</td><td><b>向下增长</b></td><td>rw-</td></tr><tr><td><b>内核空间</b></td><td>内核代码/数据（用户态不可访问）</td><td>固定</td><td>—</td></tr></tbody></table></div><p><b>查看内存布局</b></p><pre><code># 看一个进程的实际内存布局
+cat /proc/&lt;pid&gt;/maps
+#   00400000-00401000 r-xp ... /usr/bin/app      &lt;- 代码段
+#   00600000-00601000 rw-p ... /usr/bin/app      &lt;- 数据段
+#   01b3a000-01b5b000 rw-p ... [heap]            &lt;- 堆
+#   7f2a4c000000-7f2a4c021000 r-xp ... libc.so   &lt;- 动态库（文件映射区）
+#   7ffd3c1e0000-7ffd3c201000 rw-p ... [stack]   &lt;- 栈
+
+# 看内存用量细分
+cat /proc/&lt;pid&gt;/status | grep -E 'VmSize|VmRSS|VmData|VmStk|VmLib'
+pmap -x &lt;pid&gt; | tail -5
+
+# 栈大小（默认 8MB）
+ulimit -s                      # 8192 (KB)
+#   主线程栈 8MB 是硬限制，递归太深会 stack overflow
+#   线程栈默认也是 8MB（pthread 可改），所以 1000 个线程 = 8GB 虚拟地址（但物理按需分配）
+
+# bss 不占文件空间的验证
+size /usr/bin/app              # text / data / bss 三段大小</code></pre><p class="muted">虚拟地址空间大 ≠ 占用物理内存。<code>VmSize</code>（虚拟）可以到几十 GB，但 <code>VmRSS</code>（实际驻留物理内存）才是真正的成本。<b>按需分页</b>：只有真正访问到的页才会触发缺页中断分配物理页。所以 <code>malloc(1GB)</code> 后不写，RSS 几乎不变。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>虚拟→物理：页表与 TLB</h2><p><b>翻译过程与 TLB</b></p><pre><code># 地址翻译过程
+#   虚拟地址 = 页号(VPN) + 页内偏移(offset)
+#   32位 4KB 页：高 20 位是页号，低 12 位是偏移
+#
+#   单级页表的问题：4GB/4KB = 2^20 个页表项 x 4B = 4MB &lt;b&gt;每个进程&lt;/b&gt;
+#   -&gt; 多级页表：只分配用到的那部分（x86-64 用 4 级，ARM64 也 4 级）
+#
+#   一次内存访问实际要访问几次内存？
+#     4 级页表 = 4 次页表访问 + 1 次真正访问 = &lt;b&gt;5 次&lt;/b&gt;！
+#   -&gt; 靠 TLB 缓存页表项解决
+#
+#   TLB 典型参数：
+#     L1 TLB: 64 项(4K页) -&gt; 覆盖 64 x 4KB = 256 KB
+#     L2 TLB: 512~1536 项 -&gt; 覆盖 2~6 MB
+#     大页(2MB): 同样的项数覆盖 512 倍面积
+#
+#   页错误（page fault）三种：
+#     minor fault: 页在内存但没建立映射（第一次访问）-&gt; 快
+#     major fault: 页在磁盘（swap / 文件）-&gt; 需要 IO，慢 1000 倍
+#     invalid   : 访问非法地址 -&gt; SIGSEGV</code></pre><div class="table-wrap"><table><thead><tr><th>机制</th><th>作用</th><th>关键数字</th></tr></thead><tbody><tr><td><b>多级页表</b></td><td>省页表内存</td><td>x86-64 四级，每级 512 项 × 8B = 4KB/级</td></tr><tr><td><b>TLB</b></td><td>缓存页表项，避免每次翻译都查页表</td><td>命中率通常 &gt;99%；miss 代价约几十~几百周期</td></tr><tr><td><b>大页 HugePage</b></td><td>2MB/1GB 页，减少 TLB miss</td><td>数据库/虚拟机常用，可降 TLB miss 90%+</td></tr><tr><td><b>写时复制 COW</b></td><td><code>fork()</code> 后父子共享只读页</td><td>写时才复制，fork 变得极快</td></tr><tr><td><b>按需分页</b></td><td>访问时才分配物理页</td><td><code>malloc</code> 不立刻占内存</td></tr><tr><td><b>内存映射 mmap</b></td><td>文件直接映射到地址空间</td><td>省一次内核↔用户拷贝，适合大文件</td></tr></tbody></table></div><p><b>实测命令</b></p><pre><code># 实测缺页与 TLB
+perf stat -e page-faults,minor-faults,major-faults ./app
+perf stat -e dTLB-loads,dTLB-load-misses ./app    # dTLB miss 率高 -&gt; 考虑大页
+
+# 查看与配置大页
+cat /proc/meminfo | grep -i huge
+#   HugePages_Total / HugePages_Free / Hugepagesize(通常 2048 kB)
+sysctl vm.nr_hugepages=1024                        # 预留 1024 x 2MB = 2GB
+#   透明大页 THP（自动，可能有延迟抖动，数据库常建议关闭）
+cat /sys/kernel/mm/transparent_hugepage/enabled
+echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+
+# swap 与 major fault 监控
+vmstat 1          # si/so 列非 0 = 在换入换出 = 严重性能问题
+sar -B 1          # pgscank/pgsteal 反映内存回收压力</code></pre><details><summary>为什么 <code>malloc(1GB)</code> 之后 RSS 没变化？</summary><p>因为 <b>glibc 的 malloc 只是申请了虚拟地址空间</b>（对大块用 <code>mmap</code> 建立映射，小块用 <code>brk</code> 扩堆），并没有分配物理页。真正的物理页要等你<b>写入</b>时才通过缺页中断分配。这也是 <code>calloc</code> 比 <code>malloc</code> 慢的原因之一（calloc 会清零，需要真正触碰页面）。</p></details><details><summary>栈和堆会撞上吗？</summary><p>现代系统上不会：中间隔着巨大的文件映射区（mmap 区），且 Linux 有地址空间随机化（ASLR）。64 位下虚拟地址空间足够大，堆从低往高长、mmap 区和栈在高位，中间有 TB 级的空隙。真正会撞的是<b>32 位程序</b>（4GB 空间，实际用户态只有 3GB），这也是当年 32 位时代内存紧张的原因之一。</p></details><details><summary>什么是写时复制（COW）？</summary><p><code>fork()</code> 时内核<b>不复制</b>父进程的内存，而是把双方的页表项都指向同一批物理页，并标记为只读。当任一方写入时才触发缺页中断，内核此时才真正复制那一页。这让 <code>fork</code> 变得极快（不管进程多大），也是 Redis 的 <code>BGSAVE</code> 能用 fork 做快照的基础——代价是<b>写入密集时 COW 会让内存翻倍</b>（这就是 Redis 做 RDB 时要留一半内存的原因）。</p></details></div></section>
 </body>
 </html>

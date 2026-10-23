@@ -11,6 +11,39 @@
 <section class="panel"><h2>分块拼接为何会听到断裂</h2><p>声学模型需要上下文才能决定语速、重音和句尾语调。把一句话逐字独立合成再相连，容易出现音量跳变、停顿不自然和韵律不连贯。常用方式是让相邻块共享少量文本或声学上下文，波形边界做平滑或交叉淡化，并选择合理的断句位置。上下文太长会增加等待和显存占用；太短则损害连贯性。</p><p>播放端还要有抖动缓冲。网络包偶尔晚到时，缓冲过小会卡顿，过大则增加首播等待。可把“首段到达”“首段进入播放队列”“声卡实际播放”作为不同事件记录，避免一个时间戳替代全部体验。</p></section>
 <section class="panel"><h2>用户打断时要取消整条旧链路</h2><p>语音助手播报到一半，用户说“停”，系统应停止播放器、取消旧请求的后续合成与传输，并确保新一轮答复不会和旧音频混播。仅在前端把音量调零，后台仍继续生成，会白白占用计算和带宽。每轮交互要有请求 ID、取消信号和播放队列代次；旧块晚到时应丢弃，而不是插入新回答之间。</p><p>打断还影响对话状态：模型已生成但用户未听到的内容，不能默认用户知道。产品可记录实际播完的片段或时间点，再决定下一轮如何续接。低延迟语音体验不是单个 TTS 模型指标，而是上游文本生成、合成、传输和播放共同作用的结果。</p></section>
 <section class="panel"><h2>质量和容量一起验收</h2><p>固定一批短句、长文、数字人名和多音字，比较首音频 P50/P95、整句完成时间、卡顿次数、错误读音、拼接听感与实时因子。并发上升时，GPU 排队可能成为首段延迟主因；单用户测试很快不代表高峰仍快。还要在移动弱网和浏览器后台运行中测试，记录播放限制与设备切换。</p><p>优化顺序应从观测到的关键路径出发：若最慢的是等待上游形成短句，优化声码器不会明显改善首听时间；若网络抖动导致频繁欠载，只缩小声学块可能反而更卡。报告要同时呈现延迟、质量和资源成本。</p></section>
+<section class="panel" data-dry-goods><h2>首段延迟拆解：每个环节各占多少毫秒</h2><p>用户感知的「等了多久才出声」= 一串串行环节的加总。不拆开看，优化就是撞运气。</p><div class="table-wrap"><table><thead><tr><th>环节</th><th>典型耗时</th><th>能否并行/预取</th><th>优化手段</th></tr></thead><tbody><tr><td>网络请求到达 + 鉴权</td><td>5~30 ms</td><td>否</td><td>边缘节点、连接复用、JWT 本地校验</td></tr><tr><td>文本归一化（数字/缩写/日期）</td><td>1~5 ms</td><td><b>可预取</b>（前端就能做）</td><td>规则缓存；LLM 归一化要 100ms+，慎用</td></tr><tr><td>分词 / 音素转换（G2P）</td><td>2~10 ms</td><td>可预取</td><td>词典缓存常见词</td></tr><tr><td>韵律/时长预测（前端模型）</td><td>5~30 ms</td><td>否</td><td>小模型、量化</td></tr><tr><td>声学模型首 chunk 推理</td><td><b>30~200 ms</b></td><td>否（最大头）</td><td>流式架构、KV Cache、chunk 减小</td></tr><tr><td>声码器（vocoder）首帧</td><td>5~50 ms</td><td>与声学模型流水并行</td><td>轻量 vocoder、帧级流式</td></tr><tr><td>封装 + 传输（首包）</td><td>5~50 ms</td><td>否</td><td>小 chunk、HTTP chunked / WebSocket</td></tr><tr><td>播放器缓冲</td><td><b>20~200 ms</b></td><td>否</td><td>调小 jitter buffer（抖动与卡顿的权衡）</td></tr></tbody></table></div><p><b>延迟预算与指标定义</b></p><pre><code># 总延迟预算拆解（一个可套的模板）
+#   目标：首包音频 &lt; 400ms（对话场景的体感阈值）
+#
+#   鉴权+路由        20 ms
+#   文本归一化        3 ms
+#   G2P              5 ms
+#   声学模型首chunk 120 ms   &lt;- 最大头，优化重点
+#   vocoder 首帧     20 ms
+#   封装传输         15 ms
+#   播放缓冲         80 ms
+#   ------------------------
+#   合计            263 ms   (留 137ms 余量给网络抖动)
+
+# 关键指标定义（面试/方案评审常问）
+#   TTFB  = 首字节（HTTP 响应第一个字节）
+#   TTFSP = 首个音频包（Time To First Speech Packet）
+#   RTF   = Real Time Factor = 合成耗时 / 音频时长
+#           RTF &lt; 1 才能实时；流式场景要求 RTF &lt;&lt; 1（如 0.1）
+#   RTFF  = Time To First Frame，等价于 TTFSP</code></pre><p class="muted">RTF 是判断能否实时的硬指标：<b>RTF &gt; 1 意味着生成比播放慢</b>，必然卡顿。流式合成的价值在于把 <b>RTF 从整体约束变成首帧约束</b>——只要每个 chunk 的生成速度快于播放速度，首帧之后就不会卡。所以优化要盯着<b>首 chunk 延迟</b>和<b>单 chunk 生成耗时</b>两个点，而不是总时长。</p></section><section class="panel"><h2>降低首帧延迟的 8 个手段与代价</h2><div class="table-wrap"><table><thead><tr><th>手段</th><th>能省多少</th><th>代价</th></tr></thead><tbody><tr><td><b>减小首 chunk</b>（如 0.5s→0.1s 音频）</td><td>50~150 ms</td><td>chunk 越小，模型调用次数越多，总吞吐下降</td></tr><tr><td><b>流式架构</b>（chunk 级自回归）</td><td><b>质变</b>：从「等全句」到「边说边生成」</td><td>模型改造成本大；长尾韵律略差</td></tr><tr><td><b>KV Cache / 增量解码</b></td><td>30~60%</td><td>显存占用增加</td></tr><tr><td><b>模型量化</b>（FP16 / INT8）</td><td>30~50%</td><td>音质轻微下降，需 MOS 评测确认</td></tr><tr><td><b>文本分句，首句优先</b></td><td>长句场景省 200ms+</td><td>断句错误会导致韵律奇怪</td></tr><tr><td><b>连接复用 / 长连接（WebSocket）</b></td><td>省 1~2 个 RTT（20~100ms）</td><td>服务端状态管理复杂</td></tr><tr><td><b>播放器 jitter buffer 调小</b></td><td>50~150 ms</td><td><b>卡顿率上升</b>，弱网下更明显</td></tr><tr><td><b>预热 + 常驻显存</b>（避免冷启动）</td><td>冷启动可达 1~3 s</td><td>常驻成本高</td></tr></tbody></table></div><p><b>延迟实测命令</b></p><pre><code># 实测：用 curl 测 TTFB / 首包时间
+curl -N -s -o /dev/null -w 'ttfb=%{time_starttransfer}s total=%{time_total}s\n' \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"你好，欢迎使用语音合成","stream":true}' \
+  http://ttsvc/v1/synthesize
+
+# 多次采样看稳定性（P50/P90/P99，别只看一次）
+for i in $(seq 1 20); do
+  curl -N -s -o /dev/null -w '%{time_starttransfer}\n' \
+    -d '{"text":"测试","stream":true}' http://ttsvc/v1/synthesize
+done | sort -n | awk '{a[NR]=$1} END{print "p50="a[int(NR*0.5)], "p90="a[int(NR*0.9)], "p99="a[int(NR*0.99)]}'
+
+# RTF 实测：合成 10 秒音频耗时 0.8 秒 -&gt; RTF = 0.08
+time curl -s -o out.wav -d '{"text":"..."}' http://ttsvc/v1/synthesize
+ffprobe -v error -show_entries format=duration -of csv=p=0 out.wav</code></pre><details><summary>首帧快了但听起来一顿一顿的，为什么？</summary><p>典型的 <b>jitter buffer 调太小 / 单 chunk 生成速度不够</b>。判据：看单 chunk 生成耗时是否 &lt; chunk 音频时长。若 0.1s 的 chunk 要 0.15s 才生成，播放一定卡。解法二选一：加大 chunk（牺牲首帧），或优化单 chunk 推理速度（量化、算子融合）。</p></details><details><summary>流式和非流式的音质有差吗？</summary><p>有，但差距在缩小。流式模型看不到完整句子，韵律预测（停顿、重音）信息更少，长句末尾尤其明显。工程上常用<b>「首句流式 + 后续非流式」混合</b>：先流式出首句保证快，后续句子用完整上下文合成保证质量。</p></details><details><summary>端到端 TTS（如 VITS、GPT-SoVITS）为什么首帧反而更慢？</summary><p>因为大模型单次前向计算量大，即使架构更简洁，<b>首 token 的计算量是固定的</b>。端到端 + 流式的组合需要专门的流式设计（如 chunk-wise 注意力、受限 receptive field）。选型时要区分「总时长快」和「首帧快」——对话场景只看后者。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>服务端首包提前 100 毫秒，用户一定会提前听到吗？</summary><p>不一定。客户端预缓冲、网络抖动和设备启动可能仍主导首听时间，应测端到端可听时刻。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/tts-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

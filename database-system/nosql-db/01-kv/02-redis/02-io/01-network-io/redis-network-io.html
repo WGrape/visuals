@@ -294,6 +294,24 @@
             padding: 1px 6px; border-radius: 4px; font-size: 0.85em;
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -1041,5 +1059,38 @@ function resetMT() {
     document.getElementById('mtLog').innerHTML = '';
 }
 </script>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>事件循环模型与关键参数</h2><p>Redis 单线程指的是<strong>命令执行</strong>在一个线程内串行完成；网络 IO 在 6.0+ 可以多线程并行（<code>io-threads</code>），但命令处理仍是单线程，这是原子性的来源。</p><div class="table-wrap"><table><thead><tr><th>版本</th><th>网络 IO</th><th>说明</th></tr></thead><tbody><tr><td><b>&lt; 6.0</b></td><td>纯单线程</td><td>accept/read/write 全在一个线程</td></tr><tr><td><b>6.0+</b></td><td><b>IO 多线程</b></td><td><code>io-threads</code> 默认 <b>1</b>（关闭）；读+写并行，执行仍单线程</td></tr><tr><td><b>7.0+</b></td><td>IO 多线程成熟</td><td>建议 <code>io-threads 4</code>，超过 8 收益递减</td></tr></tbody></table></div><p><b>网络参数配置</b></p><pre><code># redis.conf 关键网络参数
+io-threads 4                 # IO 线程数，建议 4；CPU 少于 4 核就别开
+io-threads-do-reads yes      # 6.0 需显式开启读并行；7.0 默认随 io-threads 生效
+
+tcp-backlog 511              # accept 队列长度，高并发需配合 somaxconn
+tcp-keepalive 300            # 秒，检测死连接，建议保持 300
+timeout 0                    # 客户端空闲超时，0 = 不主动断开
+maxclients 10000             # 最大连接数
+
+# 系统侧必须同步调整，否则 backlog 被内核截断
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>客户端缓冲区：OOM 的隐形杀手</h2><div class="table-wrap"><table><thead><tr><th>缓冲区</th><th>触发场景</th><th>硬限制</th><th>超限后果</th></tr></thead><tbody><tr><td><b>普通客户端</b></td><td>管道/批量读返回过大</td><td>默认无硬限，受 <code>client-output-buffer-limit normal 0 0 0</code></td><td>内存持续增长</td></tr><tr><td><b>主从复制</b></td><td><b>从库断连积压</b></td><td><code>256 MB</code> 持续 60 秒 / 硬限 64 MB</td><td><strong>主库主动断开从库</strong>，触发全量同步</td></tr><tr><td><b>订阅客户端</b></td><td>发布快于消费</td><td><code>32 MB</code> 持续 60 秒 / 硬限 8 MB</td><td>强制断开订阅者</td></tr></tbody></table></div><p><b>缓冲区排查</b></p><pre><code># 查看客户端缓冲区占用（找出元凶）
+redis-cli client list | awk -F' ' '{print $1, $12}' | sort -t= -k2 -rn | head -10
+# 关注 omem（输出缓冲字节数）与 qbuf（输入缓冲）
+
+# 只看 slave 连接的积压
+redis-cli info replication | grep slave_repl_offset
+redis-cli info memory | grep mem_clients_slaves</code></pre><p><b>经典故障链</b>：从库网络抖动 → 复制缓冲区积压超过 256 MB → 主库断开从库 → 重连触发 <strong>RDB 全量同步</strong> → 主库 fork 阻塞 + 带宽打满 → 雪上加霜。预防办法是把 <code>client-output-buffer-limit slave</code> 调大到 <b>512 MB ~ 1 GB</b>，并保证主从间带宽充足。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>延迟诊断：三步定位</h2><p><b>延迟定位命令</b></p><pre><code># 1) 测基线延迟（排除客户端自身开销）
+redis-cli --latency -h 127.0.0.1 -p 6379          # 持续采样
+redis-cli --latency-history                        # 每 15 秒输出一段，看毛刺分布
+redis-cli --intrinsic-latency 100                  # 测机器本身延迟（不连 Redis）
+
+# 2) 找慢命令
+redis-cli slowlog get 10                           # 默认记录 &gt; 10ms 的命令
+redis-cli config set slowlog-log-slower-than 5000  # 调到 5ms 更敏感
+
+# 3) 看服务端阻塞点
+redis-cli info stats | grep -E 'instantaneous_ops|total_commands'
+redis-cli latency doctor                           # 内置诊断，会直接给建议</code></pre><div class="table-wrap"><table><thead><tr><th>现象</th><th>可能原因</th><th>验证命令</th></tr></thead><tbody><tr><td>延迟均匀偏高</td><td><b>网络 RTT</b> 或跨机房</td><td><code>redis-cli --latency</code> vs <code>--intrinsic-latency</code> 对比</td></tr><tr><td>周期性毛刺</td><td><b>fork 阻塞</b>（RDB/AOF rewrite）</td><td><code>info stats</code> 看 <code>latest_fork_usec</code></td></tr><tr><td>单条命令慢</td><td><b>大 key</b>（如百万元素 list）</td><td><code>redis-cli --bigkeys</code> 扫描</td></tr><tr><td>偶发秒级卡顿</td><td><b>内存满触发淘汰</b> / 交换</td><td><code>info memory</code> 看 <code>used_memory</code> 与 swap</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：<code>io-threads</code> 开多大合适？</summary><p>A：<b>4 是甜点</b>，8 以上收益极小（因为命令执行仍是单线程，Amdahl 定律限制）。CPU 核数少于 4 时不要开，反而因线程同步开销变慢。注意它只加速<strong>读写 socket 与解析协议</strong>，不会提升命令执行速度。</p></details><details><summary>Q：为什么 Redis 单线程还能支撑 10 万 QPS？</summary><p>A：三个原因——① 纯内存操作，单次命令是<strong>微秒级</strong>；② 多路复用（epoll）事件驱动，无线程切换；③ 协议简单，解析开销极小。瓶颈通常是网络 syscall 与内存带宽，而非 CPU 计算，所以 IO 多线程才能带来提升。</p></details><details><summary>Q：<code>maxclients</code> 达到上限会怎样？</summary><p>A：新连接被拒绝并返回 <code>ERR max number of clients reached</code>。常见诱因是<strong>客户端泄漏</strong>（连接池未归还）而非真实并发。用 <code>info clients</code> 看 <code>connected_clients</code>，若持续增长不回落，去查应用侧的连接池配置。</p></details><details><summary>Q：大 key 为什么危险？</summary><p>A：三个后果——① 单命令执行时间长，<strong>阻塞整个事件循环</strong>（其他请求全部排队）；② 网络传输单次返回几 MB，占满带宽与输出缓冲；③ 删除时释放内存耗时（4.0+ 用 <code>UNLINK</code> 异步删除缓解）。判据：单 key 超过 <b>10 KB</b> 就该拆，集合类超过 <b>5000 个元素</b>就该分片。</p></details></div></section>
 </body>
 </html>

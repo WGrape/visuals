@@ -56,6 +56,24 @@
     code { font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace; background: var(--bg-highlight); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-teal); }
     svg text { font-family: -apple-system, 'PingFang SC', sans-serif; }
   </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="topbar"><a href="../../index.html" class="logo">☁️ 分布式系统</a><a href="../../index.html" class="back">← 返回分布式系统</a></div>
@@ -192,6 +210,19 @@
     </div>
     <div class="info-box amber"><span class="info-icon">⚠️</span><div class="info-body"><strong>常被追问：</strong>"Gossip 和 Paxos 怎么选？"——要<strong>强一致/共识选 Paxos/Raft</strong>；要<strong>成员发现/状态扩散/最终一致选 Gossip</strong>。它们不是替代关系，而是不同层。</div></div>
   </section>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Gossip 传播模型与收敛速度</h2><p>每个节点周期性地随机选若干邻居交换信息，像流言扩散一样最终让全体一致。</p><div class="table-wrap"><table><thead><tr><th>模式</th><th>行为</th><th>收敛（N 节点）</th><th>特点</th></tr></thead><tbody><tr><td><b>Push</b></td><td>主动把自己的更新推给随机邻居</td><td><b>O(log N)</b> 轮</td><td>新消息扩散快</td></tr><tr><td><b>Pull</b></td><td>主动向邻居拉取差异</td><td><b>O(log N)</b> 轮</td><td>对已收敛状态开销小</td></tr><tr><td><b>Push-Pull</b></td><td>双向交换</td><td><b>O(log N)</b> 轮，最快</td><td><b>实践首选</b>，代价是双倍消息</td></tr></tbody></table></div><p><b>收敛轮数的量化</b>：每轮每个节点联系 <code>k</code> 个邻居，经过 <code>r</code> 轮后未收到消息的节点比例约为 <code>e^(-k·r)</code>。让该值 &lt; 1/N 即可认为全员收到。</p><p><b>收敛计算</b></p><pre><code># 实例：N=1000 节点，每轮联系 k=3 个邻居，需要多少轮？
+#   未收到比例 = e^(-3r)，要求 &lt; 1/1000 = 0.001
+#   e^(-3r) &lt; 0.001  →  3r &gt; 6.9  →  r &gt; 2.3  →  约 3 轮
+# 若 k=1（只联系一个），需要 r &gt; 6.9 → 约 7 轮
+
+# 实际系统常用参数
+#   扇出 fanout = 3（Cassandra）
+#   周期 = 1 秒（Cassandra）/ 200ms（Consul LAN）
+#   故故障检测时间量级 = 轮数 × 周期 ≈ 秒级</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>故障检测：怀疑机制</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>原理</th><th>参数</th><th>典型值</th></tr></thead><tbody><tr><td><b>直接心跳</b></td><td>周期 ping，超时标记</td><td><code>timeout</code></td><td>Consul LAN 约 <b>1~2 s</b></td></tr><tr><td><b>间接探测</b></td><td>找第三方代为探测，排除自身网络问题</td><td><code>k</code> 个中间人</td><td><b>3</b></td></tr><tr><td><b>怀疑（Suspect）</b></td><td>不立即判定死亡，先标记怀疑并广播</td><td>怀疑超时</td><td>约 <b>5 s</b> 后转死亡</td></tr><tr><td><b>反熵修复</b></td><td>定期全量对账，兜底</td><td>周期</td><td>分钟~小时级</td></tr></tbody></table></div><p><b>为什么需要“怀疑”中间态</b>：直接判死亡会产生大量<strong>误判</strong>（尤其网络抖动时）。先标怀疑并由其他节点独立确认，能把误报率降低一个数量级。Consul 的 gossip + 怀疑机制把故障检测误报率控制在很低的水平，代价是检测延迟从 1 秒升到数秒。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>主流实现的参数对比</h2><div class="table-wrap"><table><thead><tr><th>系统</th><th>用途</th><th>扇出</th><th>周期</th><th>规模上限</th></tr></thead><tbody><tr><td><b>Cassandra</b></td><td>成员 + 故障检测</td><td><b>3</b></td><td><b>1 s</b></td><td>数千节点</td></tr><tr><td><b>Consul（LAN）</b></td><td>成员 + 故障检测</td><td><b>3</b></td><td><b>200 ms</b></td><td>单数据中心数百~千</td></tr><tr><td><b>Consul（WAN）</b></td><td>跨数据中心</td><td><b>3</b></td><td><b>1 s</b></td><td>数十数据中心</td></tr><tr><td><b>Redis Cluster</b></td><td>节点状态</td><td>随机选节点</td><td><b>100 ms</b>（ping 间隔）</td><td>官方建议 <b>≤ 1000</b></td></tr><tr><td><b>Dynamo/Riak</b></td><td>成员 + 数据同步</td><td>3</td><td>1 s</td><td>数百</td></tr></tbody></table></div><p class="muted"><b>规模上限的根源</b>：gossip 的消息数是 <code>O(N × fanout)</code> 每轮，N 增大时总消息量线性增长，但因为每个节点只发固定数量，<strong>单节点负载恒定</strong>——这是它比全广播优越的地方。真正的瓶颈是<strong>收敛时间随 log N 增长</strong>以及元数据总量。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：Gossip 和 Raft/Paxos 有什么区别？</summary><p>A：<strong>目标完全不同</strong>。Gossip 解决<strong>最终一致的信息传播</strong>（谁活着、有哪些节点），不提供强一致保证，任意时刻各节点视图可能不同。Raft/Paxos 解决<strong>强一致的决策</strong>（选主、日志复制），需要多数派 quorum。所以实际系统常<strong>两者并存</strong>：用 gossip 做成员管理与故障检测，用 Raft 做元数据的一致性存储（Consul 就是这么做的）。</p></details><details><summary>Q：为什么不用 gossip 传播业务数据？</summary><p>A：三个硬伤——① <strong>消息放大</strong>：一条数据要传 O(N log N) 次才能全网收敛，带宽浪费严重；② <strong>无顺序保证</strong>：不同节点收到顺序不同，冲突难解决；③ <strong>带宽不可控</strong>：gossip 的流量与数据量成正比，业务数据量大时会压垮网络。所以 gossip 只适合传播<strong>小且容忍延迟</strong>的元数据（成员表、状态摘要），业务数据交给专门的一致性协议。</p></details><details><summary>Q：网络分区时 gossip 会怎样？</summary><p>A：两个分区各自内部收敛，但<strong>互相看不到对方</strong>。此时两边都会认为对方节点已死亡——这就是<strong>脑裂</strong>的来源。所以仅靠 gossip 做故障检测是不够的，必须配合<strong>quorum 或租约</strong>：只有获得多数派确认才能执行关键操作（如剔除节点、选主）。这也是为什么 Cassandra 要配 <code>consistency level</code>、Consul 要配 <code>bootstrap_expect</code>。</p></details><details><summary>Q：怎么调优 gossip 的故障检测速度？</summary><p>A：三个旋钮——① <strong>减小周期</strong>（检测更快但消息量上升）；② <strong>增大扇出</strong>（收敛轮数减少，但每轮消息量上升）；③ <strong>降低怀疑超时</strong>（更快判死但误报率上升）。这三者都是<strong>延迟与开销/准确率的权衡</strong>，没有免费午餐。经验是先固定扇出为 3，再按业务可接受的检测延迟调周期与怀疑超时。</p></details></div></section>
 </main>
 <footer>分布式系统 · Gossip 协议 — 流言传播与最终一致 | 面试核心图解</footer>
 <script>

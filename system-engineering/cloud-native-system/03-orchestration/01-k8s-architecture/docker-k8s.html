@@ -31,6 +31,24 @@ svg{width:100%;height:auto;min-width:900px}
 /* Tooltip */
 .tip{position:absolute;background:#1a1f3a;border:2px solid #00d4ff;border-radius:8px;padding:12px;max-width:280px;display:none;z-index:100;box-shadow:0 4px 20px rgba(0,212,255,0.3);font-size:13px;line-height:1.6;color:#ddd}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="c">
@@ -392,5 +410,55 @@ spec:
 <!-- Tooltip div -->
 <div class="tip" id="tooltip"></div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>Docker 与 K8s 的分工</h2><p>一句话：<b>Docker 解决「一个应用怎么打包和跑起来」，K8s 解决「一千个容器怎么调度、怎么自愈、怎么伸缩」</b>。K8s 并不依赖 Docker（1.20 后已弃用 dockershim，改用 containerd + CRI）。</p><div class="table-wrap"><table><thead><tr><th>问题</th><th>Docker 解决</th><th>K8s 解决</th></tr></thead><tbody><tr><td>环境一致性</td><td>镜像（一次构建处处运行）</td><td>—（用镜像作为交付物）</td></tr><tr><td>单机多容器</td><td>docker-compose</td><td>Pod（一组紧密协作的容器）</td></tr><tr><td>调度到哪台机器</td><td>不解决（手动指定）</td><td><b>Scheduler 自动选节点</b></td></tr><tr><td>容器挂了怎么办</td><td><code>--restart=always</code></td><td><b>Controller 自动重建</b>（Deployment/ReplicaSet）</td></tr><tr><td>扩容</td><td>手动 <code>docker run</code> 更多</td><td><b>HPA 自动扩缩</b>（按 CPU/内存/QPS）</td></tr><tr><td>服务发现</td><td><code>--link</code> / 手动配</td><td><b>Service + DNS</b></td></tr><tr><td>滚动更新</td><td>不解决</td><td><b>Deployment 滚动/灰度</b></td></tr><tr><td>配置与密钥</td><td>环境变量 / 挂载</td><td><b>ConfigMap / Secret</b></td></tr><tr><td>存储</td><td>volume</td><td>PV / PVC / StorageClass</td></tr></tbody></table></div><p><b>Docker 实践</b></p><pre><code># Dockerfile 最佳实践（多阶段 + 瘦身 + 非 root）
+FROM golang:1.22 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download                       # 依赖单独一层，充分利用缓存
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app ./cmd/server
+
+FROM gcr.io/distroless/static-debian12    # 运行镜像只有几 MB
+COPY --from=build /app /app
+USER 10001                                # 非 root
+ENTRYPOINT ["/app"]
+
+# 构建与运行
+docker build -t app:v1 .
+docker run -d --name app -p 8080:8080 --memory=512m --cpus=1 app:v1
+docker logs -f app
+docker exec -it app sh                    # distroless 没有 shell！调试要用 busybox 版
+docker stats                              # 看实时资源
+
+# 镜像瘦身对比
+#   golang:1.22 基础        ~800 MB
+#   alpine                  ~5 MB（但 musl，CGO 有问题）
+#   distroless/static       ~2 MB
+#   加 -ldflags "-s -w"     再减 30%</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>K8s 核心对象与常用命令</h2><div class="table-wrap"><table><thead><tr><th>对象</th><th>作用</th><th>关键点</th></tr></thead><tbody><tr><td><b>Pod</b></td><td>最小调度单位（1~N 个容器）</td><td><b>短暂的</b>，随时可能被重建；不要在里面存状态</td></tr><tr><td><b>Deployment</b></td><td>管理无状态 Pod 的副本与更新</td><td><b>最常用</b>；滚动更新、回滚都靠它</td></tr><tr><td><b>StatefulSet</b></td><td>有状态服务（DB、MQ）</td><td>稳定网络标识 + 独立存储</td></tr><tr><td><b>Service</b></td><td>给一组 Pod 一个稳定访问入口</td><td>ClusterIP / NodePort / LoadBalancer</td></tr><tr><td><b>Ingress</b></td><td>HTTP 层的路由（域名/路径）</td><td>需要 Ingress Controller（nginx/traefik）</td></tr><tr><td><b>ConfigMap / Secret</b></td><td>配置与密钥</td><td>Secret 只是 base64，<b>不是加密</b></td></tr><tr><td><b>PVC</b></td><td>存储申请</td><td>与 PV 绑定，可动态供给</td></tr><tr><td><b>HPA</b></td><td>自动扩缩容</td><td>按 CPU/内存/自定义指标</td></tr></tbody></table></div><p><b>K8s 命令</b></p><pre><code># 部署一个服务（最小可用）
+kubectl create deployment app --image=app:v1 --replicas=3
+kubectl expose deployment app --port=80 --target-port=8080
+kubectl scale deployment app --replicas=10
+kubectl set image deployment/app app=app:v2          # 滚动更新
+kubectl rollout status deployment/app
+kubectl rollout undo deployment/app                  # 回滚（秒级）
+
+# 排障三板斧
+kubectl get pods -A                       # 看状态
+kubectl describe pod &lt;pod&gt;                # &lt;b&gt;看 Events，90% 的原因在这里&lt;/b&gt;
+kubectl logs &lt;pod&gt; [-c container] [--previous]   # 看日志（--previous 看崩溃前的）
+
+# 常见状态与原因
+#   Pending       -&gt; 资源不够 / 没有可调度节点（describe 看 Events）
+#   ImagePullBackOff -&gt; 镜像拉取失败（名字/标签/私有仓库鉴权）
+#   CrashLoopBackOff -&gt; 容器启动即退出（看 logs --previous）
+#   OOMKilled     -&gt; 内存超限（调 resources.limits.memory）
+#   Running 但不可用 -&gt; readinessProbe 失败
+
+# 资源限制（必须配）
+resources:
+  requests: { cpu: "100m", memory: "128Mi" }   # 调度依据
+  limits:   { cpu: "500m", memory: "512Mi" }   # 硬上限（内存超了会被 OOMKill）</code></pre><details><summary>Docker 被 K8s 弃用了吗？</summary><p>准确说法是 <b>K8s 弃用了 dockershim</b>（1.20 弃用、1.24 移除），不再直接支持 Docker 作为运行时。但<b>Docker 构建的镜像仍然完全可用</b>——因为大家用的都是 <b>OCI 标准镜像</b>，K8s 通过 CRI 接口调 containerd/CRI-O 来运行，而 containerd 本来就是 Docker 的底层组件。所以对开发者来说：本地继续用 Docker 构建，集群里用 containerd 运行，<b>没有任何影响</b>。</p></details><details><summary>Pod 和容器是什么关系？</summary><p>Pod 是 K8s 的<b>最小调度单位</b>，可以包含 1 个或多个容器。同一个 Pod 里的容器<b>共享网络命名空间</b>（同一个 IP、可以用 localhost 互访）和<b>共享 volume</b>。多容器 Pod 的典型用法是 sidecar 模式：主容器跑业务，sidecar 跑日志采集/服务网格代理/配置同步。注意：Pod 是<b>短暂的</b>，重建后 IP 会变——所以访问服务要走 Service 而不是直接连 Pod IP。</p></details><details><summary>requests 和 limits 该设多少？</summary><p><b>requests</b> 是调度依据（K8s 保证节点上所有 requests 之和不超过节点容量），<b>limits</b> 是硬上限。实践：① 都用压测得出，CPU 按 P99 用量的 1.2 倍，内存按峰值 ×1.3；② <b>CPU limit 可以不设</b>（CPU 是可压缩资源，超了只是变慢不会挂），但要设 requests 保证调度；③ <b>内存 limit 必须设</b>（不设会在节点内存紧张时把整个节点搞挂），且要给 JVM 类应用留足（容器内存 limit 要大于 <code>-Xmx</code> 的 1.3 倍，否则会被 OOMKill）。</p></details></div></section>
 </body>
 </html>

@@ -173,6 +173,24 @@
         .fade-in.visible { opacity: 1; transform: translateY(0); }
         svg text { font-family: -apple-system, sans-serif; }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <nav>
@@ -560,7 +578,33 @@
                 <strong>落地路线图：</strong>① 服务无状态化 → ② 数据可水平分片 + 幂等 → ③ 按 user_id 单元化路由 → ④ 跨城异步同步 + 冲突/补偿机制 → ⑤ GSLB 就近接入 → ⑥ 故障检测 + 一键切流 + 常态化混沌演练。一步步来，别想一步到位。
             </div>
         </section>
-    </main>
+    
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>异地多活的架构选项与代价</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>RPO / RTO</th><th>说明</th></tr></thead><tbody><tr><td><b>同城双活</b></td><td>RPO <b>0</b>，RTO <b>秒级</b></td><td>延迟 &lt; 5ms，可做强一致；机房间光纤直连</td></tr><tr><td><b>两地三中心</b></td><td>RPO <b>0</b>（同城）/ 秒~分钟（异地）</td><td>最经典；同城同步复制 + 异地异步</td></tr><tr><td><b>异地多活</b>（单元化）</td><td>RPO <b>秒级</b>，RTO <b>分钟级</b></td><td>流量按用户分片路由到固定单元，避免跨单元写</td></tr><tr><td><b>异地冷备</b></td><td>RPO <b>分钟~小时</b>，RTO <b>小时级</b></td><td>成本最低，仅做灾备</td></tr><tr><td>异步复制</td><td>RPO = 复制延迟（常 <b>0.5~5s</b>）</td><td>主库宕机可能丢最后几秒数据</td></tr><tr><td>半同步复制</td><td>RPO <b>0</b>（至少一个从库确认）</td><td>主库写性能下降，且从库全挂时会退化为异步</td></tr><tr><td>Quorum 写入</td><td>RPO <b>0</b></td><td>跨地域时延迟 = 最近多数派的 RTT</td></tr></tbody></table></div><p><b>单元化是异地多活的核心</b>：把用户按 <code>user_id % N</code> 划分到固定单元，<b>同一用户的所有读写都在同一个单元内完成</b>，从根本上避免跨地域写冲突。跨单元只做异步数据同步用于容灾。这是支付宝/微信级别的方案。</p><p class="muted">异地多活最大的敌人是<b>跨地域延迟</b>。北京↔上海 RTT 约 <b>30ms</b>，一个需要 5 次跨地域调用的业务流程就是 <b>150ms</b> 纯网络开销。所以<b>必须让调用链收敛在单元内</b>，这是所有单元化设计的出发点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>关键配置与命令</h2><pre><code># MySQL 半同步复制（保证 RPO=0）
+INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';
+SET GLOBAL rpl_semi_sync_master_enabled = 1;
+SET GLOBAL rpl_semi_sync_master_timeout = 10000;   # 10s 超时后退化为异步
+SET GLOBAL rpl_semi_sync_master_wait_for_slave_count = 1;
+SHOW STATUS LIKE 'Rpl_semi_sync_master_status';    # ON = 生效
+
+# 查看主从延迟（关键监控项）
+SHOW SLAVE STATUS\G
+# Seconds_Behind_Master: 0   &lt;- 不是精确值，忙时可能不准
+# 更准的方法：在主库写心跳表，比对时间差
+# 或看 Retrieved_Gtid_Set 与 Executed_Gtid_Set 的差</code></pre><pre><code># Redis 跨地域同步（异地多活常用）
+# 方式 1：原生主从（异步，RPO = 复制延迟）
+# 方式 2：RedisShake / 自研同步工具做双向同步
+#   注意：双向同步会遇到「回环」（A 同步到 B，B 又同步回 A）
+#   解决：给写操作打上 origin 标记，同步时跳过来自本机房的写入
+
+# Nginx/网关层的单元化路由（按 user_id 哈希）
+# 请求进来 -&gt; 提取 user_id -&gt; hash 到单元 -&gt; 转发到对应机房
+# 若目标单元故障 -&gt; 切流到其他单元（此时该用户数据可能有秒级延迟）
+upstream unit_a { server beijing-a:8080; }
+upstream unit_b { server shanghai-b:8080; }
+# 用 split_clients 或 OpenResty 的 Lua 做一致性哈希路由</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>异地多活排障</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>双写冲突（两地同时改同一条）</td><td>没有做单元化，两地都可写</td><td><b>按用户分片收敛写</b>；或加全局版本号/时间戳仲裁（最后写入胜出会丢数据）</td></tr><tr><td>切流后数据不一致</td><td>异步复制有延迟，切流时丢了几秒数据</td><td>切流前<b>先禁写</b>等追平；或接受秒级丢失并在事后对账补偿</td></tr><tr><td>自增 ID 冲突</td><td>两地各自生成 ID</td><td>用<b>雪花算法</b>并把机房 ID 编进 worker_id；或分段分配 ID 区间</td></tr><tr><td>同步回环</td><td>双向同步把对方的写入又同步回去</td><td>写入时打机房标记，同步时过滤；或用单向同步 + 只读副本</td></tr><tr><td>延迟太大业务不可用</td><td>跨地域调用链太长</td><td>单元化收敛调用；只读数据本地缓存；异步化非关键路径</td></tr><tr><td>脑裂（两地都认为自己是主）</td><td>网络分区 + 没有仲裁</td><td>引入<b>第三地仲裁节点</b>（ZK/etcd 奇数部署）；或人工介入</td></tr><tr><td>演练时发现切不了</td><td>没做过真实切流演练</td><td><b>定期做容灾演练</b>；把切流做成一键可回滚的操作</td></tr></tbody></table></div><p class="muted"><b>容灾能力是演练出来的，不是设计出来的</b>。建议每季度做一次真实切流演练，并记录 RTO 实测值。没有演练过的灾备方案，故障时有很大概率不工作。</p></div></section>
+</main>
 
     <script>
         // 滚动进度条

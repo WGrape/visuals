@@ -11,6 +11,82 @@
 <section class="panel"><h2>顺序创建与滚动更新</h2><p>StatefulSet 默认通常按序创建和删除 Pod，配合 Ready 状态推进，有利于有序启动；也有并行 Pod 管理策略可选。滚动更新时如何逐个替换，仍要确认数据库自己的主从关系、仲裁和升级兼容性。控制器保证 Kubernetes 资源趋近目标状态，不了解数据库当前领导者是否可安全下线。</p><p>三副本数据库如果升级时同时失去两份有效副本，可能失去多数派。即便控制器逐个更新，也要检查每一步成员是否追平、剩余仲裁是否足够、客户端是否正确切换。数据库 Operator 能编码部分领域规则，但也须审查它的故障与升级流程。</p></section>
 <section class="panel"><h2>服务发现和读写路由</h2><p>Headless Service 可让客户端发现每个有身份的 Pod，但“知道 db-0 地址”不代表 db-0 永远是主节点。领导者可能切换到 db-1，应用需要通过数据库协议、代理或 Operator 提供的服务路由找到正确写入口。把 StatefulSet 序号硬编码成主从角色，会在故障切换后写错位置。</p><p>Pod IP 会变化，DNS 记录也有缓存和生效时间；长连接在重建后需要重连。若使用固定域名做成员互联，要验证启动与就绪探针、DNS 解析、网络策略和证书里的名字一致。稳定身份减少发现成本，不能消除网络故障。</p></section>
 <section class="panel"><h2>一套最小演练</h2><p>部署三副本测试库，记录 db-0 的 Pod 名称、IP、PVC、PV 与数据库日志位置。删除 db-0 Pod，观察新 Pod 名字保留、IP 可能变化、PVC 是否仍绑定同一卷；再模拟节点不可用，观察卷分离与重新挂载耗时。最后验证数据库集群成员关系、已提交数据和主节点路由。演练完成后测试备份恢复，而不是只测试 Pod 自动重建。</p><p>练习：db-0 重建后名字和 PVC 都相同，但数据库仍报日志损坏。StatefulSet 的哪项保证已兑现，哪项数据可靠性问题仍需数据库与存储层处理？</p></section>
+<section class="panel" data-dry-goods><h2>StatefulSet 的四项稳定保证</h2><div class="table-wrap"><table><thead><tr><th>保证</th><th>具体表现</th><th>依赖</th></tr></thead><tbody><tr><td>稳定名称</td><td>Pod 名为 <code>&lt;sts&gt;-0</code>、<code>-1</code>…，重建后不变</td><td>StatefulSet 控制器</td></tr><tr><td>稳定网络标识</td><td>每个 Pod 有独立 DNS：<code>pod-0.svc.ns.svc.cluster.local</code></td><td><b>Headless Service</b>（<code>clusterIP: None</code>）</td></tr><tr><td>稳定存储</td><td>按 <code>volumeClaimTemplates</code> 为每个实例建 PVC，重建后仍挂载同一卷</td><td>PVC + PV</td></tr><tr><td>有序操作</td><td>默认按序号顺序创建/扩缩/更新，前一个 Ready 才继续</td><td><code>OrderedReady</code> 策略</td></tr></tbody></table></div><p class="muted">前提：<b>必须配套 Headless Service</b>，否则 Pod 没有稳定的 DNS 记录，稳定网络标识无从谈起。</p></section><section class="panel"><h2>关键参数对照</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>取值</th><th>含义</th></tr></thead><tbody><tr><td><code>podManagementPolicy</code></td><td><code>OrderedReady</code>（默认）/ <code>Parallel</code></td><td>是否严格按序；Parallel 可并行创建，加快扩容但失去顺序保证</td></tr><tr><td><code>updateStrategy.type</code></td><td><code>RollingUpdate</code> / <code>OnDelete</code></td><td>有状态服务常用 OnDelete 人工控制升级节奏</td></tr><tr><td><code>rollingUpdate.partition</code></td><td>如 2</td><td>序号 ≥ partition 的 Pod 才更新，用于灰度（金丝雀）</td></tr><tr><td><code>persistentVolumeClaimRetentionPolicy</code></td><td><code>whenDeleted</code> / <code>whenScaled</code>（1.27+ 稳定）</td><td>控制删除/缩容时是否保留 PVC</td></tr><tr><td><code>serviceName</code></td><td>Headless Service 名</td><td>决定 DNS 域名后缀</td></tr><tr><td><code>replicas</code></td><td>缩容时按序号从大到小删</td><td>缩容前需先迁移数据</td></tr></tbody></table></div></section>
+<section class="panel"><h2>运维命令</h2><p><b>命令</b></p><pre><code># 扩缩容（缩容按序号从大到小，务必先迁移/备份数据）
+kubectl scale sts mysql --replicas=5
+kubectl patch sts mysql -p '{"spec":{"replicas":3}}'
+
+# 灰度更新：只更新序号 &gt;= 3 的 Pod（先让 3、4 跑新版本）
+kubectl patch sts mysql -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":3}}}}'
+kubectl set image sts/mysql mysql=mysql:8.0.36
+
+# 验证稳定 DNS（在集群内解析）
+kubectl run -it --rm dnsutils --image=busybox:1.36 --restart=Never -- \
+  nslookup mysql-0.mysql.default.svc.cluster.local
+
+# 查看 PVC 与绑定（重建后仍绑定同一个 PV）
+kubectl get pvc -l app=mysql -o wide
+
+# 删除 StatefulSet 但保留 PVC（默认就是保留，删除 PVC 才会真丢数据）
+kubectl delete sts mysql --cascade=orphan
+kubectl delete pvc mysql-data-mysql-0      # 谨慎：这一步才真正丢数据</code></pre><p><b>定义</b></p><pre><code># 最小可用定义（Headless Service + volumeClaimTemplates）
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  clusterIP: None                 # Headless：不做负载均衡，暴露每个 Pod 的 DNS
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  serviceName: mysql
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: OnDelete                # 有状态服务：人工确认后再升级
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels: {app: mysql}
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+  volumeClaimTemplates:            # 每个实例一份 PVC
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>Pod 卡在 Pending / 扩容不动</td><td>前一个 Pod 未 Ready（OrderedReady）</td><td>先修复前一个；或改用 Parallel（仅限可并行场景）</td></tr><tr><td>DNS 解析不到 mysql-0</td><td>缺少 Headless Service 或 serviceName 写错</td><td>补 <code>clusterIP: None</code> 的 Service</td></tr><tr><td>重建后数据没了</td><td>PVC 被删除或重建时用了新卷</td><td>确认 <code>kubectl get pvc</code> 仍在；配置 PVC 保留策略</td></tr><tr><td>缩容后数据丢失</td><td>缩容删除了 PVC 且未迁移</td><td>缩容前迁移；配置 <code>whenScaled: Retain</code></td></tr><tr><td>滚动更新一次全升</td><td>未设置 partition</td><td>用 partition 灰度：先让高序号实例试新版</td></tr><tr><td>PV 无法绑定</td><td>StorageClass 或容量不匹配</td><td>检查 SC、可用区（拓扑）与容量</td></tr><tr><td>删除后重建报卷已占用</td><td>旧 PV 的 <code>Retain</code> 策略 + 节点残留</td><td>清理 PV 的 claimRef 或调整回收策略</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>StatefulSet 稳定的到底是什么？</summary><p>三件事：名称（<code>name-序号</code>重建后不变）、网络标识（配合 Headless Service 得到固定 DNS）、存储（每个实例一份 PVC，重建后挂载同一个卷）。Deployment 的 Pod 名随机、重建换 IP、共享存储语义，都不具备这些保证。</p></details><details><summary>为什么必须配 Headless Service？</summary><p>因为 StatefulSet 的稳定网络标识依赖 Headless Service 给每个 Pod 生成独立的 DNS A 记录（<code>pod-0.svc.ns.svc...</code>）。普通 Service 只提供一个 ClusterIP 做负载均衡，没有 per-Pod 记录，所以稳定身份无从建立。</p></details><details><summary>partition 有什么用？</summary><p>它指定「序号小于 partition 的 Pod 不更新」，因此可以实现灰度：先让高序号实例（如 replica 3、4）跑新版本验证，确认无误后再把 partition 调小逐步推进，最后置 0 全量。这是有状态服务控制升级风险的关键手段。</p></details><details><summary>缩容会丢数据吗？</summary><p>取决于 PVC 保留策略。默认删除 StatefulSet 不会删 PVC，但缩容（scale down）在旧版本会删除对应 PVC（1.27+ 可用 <code>persistentVolumeClaimRetentionPolicy.whenScaled: Retain</code> 保留）。无论如何，缩容前都应先把该实例的数据迁移或确认已备份。</p></details><details><summary>OrderedReady 和 Parallel 怎么选？</summary><p>需要严格启动顺序（如选主、初始化依赖前序节点）用默认 OrderedReady，代价是扩容串行、任一卡住全队阻塞；实例之间无启动依赖、追求扩容速度时用 Parallel，代价是失去顺序保证，应用必须自己处理并发初始化与选主。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>新 Pod 仍叫 db-0 并挂上原 PVC，能否据此断言数据一定完整且它仍是主节点？</summary><p>不能。存储完整性与数据库主从选举由各自机制保证，StatefulSet 只管理身份和资源关联。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第三层 · 排障与边界：StatefulSet 运维高频问题</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>怎么查 / 怎么办</th></tr></thead><tbody><tr><td>Pod 卡在 Pending</td><td>PVC 没有可用 PV（StorageClass 没配 / 配额满）</td><td><code>kubectl describe pvc</code> 看 Events；<code>kubectl get sc</code> 确认 provisioner</td></tr><tr><td>Pod 删不掉 / 一直 Terminating</td><td>前一个 Pod 未完全终止（有序性约束）</td><td><code>kubectl delete pod xxx --grace-period=0 --force</code>（谨慎）</td></tr><tr><td>滚动更新卡在某个序号</td><td>该 Pod 的 readiness probe 一直失败</td><td><code>kubectl describe pod</code> 看就绪探针；<code>kubectl logs</code></td></tr><tr><td>节点故障后 Pod 不重建</td><td>默认需人工确认（节点 NotReady 超过阈值才驱逐）</td><td>等 kube-controller-manager 判定；或手动 <code>delete node</code></td></tr><tr><td>缩容后 PVC 还在</td><td><b>PVC 不会随 Pod 删除</b>（这是设计，保数据）</td><td>确认无疑后手动 <code>kubectl delete pvc</code></td></tr><tr><td>扩不了容，报 volume node affinity</td><td>PV 绑在特定节点的本地盘</td><td>本地存储场景需调度回原节点；换用网络存储</td></tr></tbody></table></div><ul><li><b>排查顺序：</b><code>get pod</code> → <code>describe pod</code> 看 Events → <code>describe pvc</code> 看绑定 → <code>get pv</code> 看供给。</li><li><b>边界一：</b>StatefulSet 的 Pod 是<b>逐个</b>创建/删除的（序号 0 → n-1），前一个 Ready 才会动下一个——所以 n 个副本的滚动更新耗时是单体的 n 倍。</li><li><b>边界二：</b>删除 StatefulSet <b>不会</b>删除 PVC，也不会删除 PV；删 PVC 是否删 PV 取决于 StorageClass 的 <code>reclaimPolicy</code>（Retain / Delete）。</li><li><b>边界三：</b><code>spec.replicas</code> 缩容时，PVC 保留但 Pod 消失；再次扩容会重新挂上原来的卷——这是「稳定身份」的价值所在。</li></ul><p><b>排障命令</b></p><pre><code># 一眼看清 Pod / PVC / PV 的绑定关系
+kubectl get pod,pvc,pv -o wide | grep -i &lt;name&gt;
+
+# 看 PVC 为什么没绑上
+kubectl describe pvc &lt;pvc-name&gt;      # 重点看 Events 段
+
+# 看 StatefulSet 的更新进度
+kubectl rollout status statefulset/&lt;name&gt;
+
+# 手动确认无数据风险后再删 PVC（危险操作）
+kubectl delete pvc &lt;pvc-name&gt;</code></pre><p class="muted">量化参考：StatefulSet 滚动更新默认 <code>partition=0</code> 全量更新；设 <code>partition=N</code> 可实现「只更新序号 ≥ N 的 Pod」，常用于金丝雀发布。</p></section>
 <footer>继续阅读：<a href="pod.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

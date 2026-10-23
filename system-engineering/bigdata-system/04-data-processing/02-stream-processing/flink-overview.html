@@ -39,6 +39,24 @@ ul.tight li{ margin:6px 0; }
 footer{ text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .logline{ font-size:13px; color:#cdd6f4; font-family:"Fira Code",ui-monospace,monospace; margin:4px 0; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -255,6 +273,41 @@ footer{ text-align:center; color:var(--muted); padding:30px; font-size:13px; }
   <div class="qa"><div class="qa-q">Q4：反压（Backpressure）是什么？Flink 怎么处理？</div><div class="qa-a">反压指下游处理慢（如外部 Sink 阻塞）导致上游数据堆积、被迫降速的现象。Flink 基于<strong>信用（credit）的网路流控</strong>：接收端按自身 buffer 余量给发送端"信用额度"，收满即停发，反压沿 DAG 反向传播到 Source，无需全局协调即可自然限流，避免 OOM 且对正常算子影响最小。</div></div>
 
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>核心概念与语义</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>要点</th></tr></thead><tbody><tr><td><b>Event Time vs Processing Time</b></td><td>事件产生时间 vs 系统处理时间</td><td>乱序场景<b>必须用 Event Time</b>，否则结果随处理时刻漂移</td></tr><tr><td><b>Watermark</b></td><td>声明「不会再有早于 T 的数据到来」</td><td>太激进丢数据，太保守延迟高；常见允许乱序 1~5 分钟</td></tr><tr><td><b>窗口</b></td><td>滚动 / 滑动 / 会话 / 全局</td><td>窗口<u>触发</u>靠 watermark；迟到数据可走 allowedLateness + 侧输出</td></tr><tr><td><b>Checkpoint</b></td><td>分布式一致快照（Chandy-Lamport 算法）</td><td>决定<b>故障恢复</b>的一致性；间隔常见 10s~1min</td></tr><tr><td><b>State Backend</b></td><td>状态存放位置</td><td>HashMapStateBackend（内存，快）/ EmbeddedRocksDBStateBackend（磁盘，大状态）</td></tr><tr><td><b>Exactly-once</b></td><td>端到端需 <b>可重放源 + 事务/幂等 sink</b></td><td>Kafka + Flink + 幂等/事务写入才能做到</td></tr></tbody></table></div><p><b>Flink 骨架</b></p><pre><code>// 事件时间 + watermark + 滚动窗口的典型骨架
+env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)   // 老版本 API
+// 新版本：
+WatermarkStrategy&lt;Event&gt; wm = WatermarkStrategy
+    .&lt;Event&gt;forBoundedOutOfOrderness(Duration.ofMinutes(2))     // 允许 2 分钟乱序
+    .withTimestampAssigner((e, ts) -&gt; e.getEventTimeMillis());
+
+stream.assignTimestampsAndWatermarks(wm)
+      .keyBy(Event::getUserId)
+      .window(TumblingEventTimeWindows.of(Time.minutes(5)))
+      .allowedLateness(Time.minutes(1))          // 窗口触发后再等 1 分钟
+      .sideOutputLateData(lateTag)               // 迟到数据走侧输出，别直接丢
+      .aggregate(new MyAgg())
+      .addSink(kafkaSink);
+
+// Checkpoint 关键配置
+env.enableCheckpointing(30_000);                       // 30s 一次
+env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+env.getCheckpointConfig().setMinPauseBetweenCheckpoints(10_000);
+env.getCheckpointConfig().setCheckpointTimeout(120_000);
+env.getCheckpointConfig().setTolerableCheckpointFailureNumber(3);
+// 外部化 checkpoint：作业取消后仍保留，便于手动恢复
+env.getCheckpointConfig().setExternalizedCheckpointCleanup(
+    ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);</code></pre><p><b>Exactly-once 的真实含义</b>：Flink 内部靠 checkpoint 保证状态只被「逻辑上处理一次」；但<b>端到端</b>还要满足两个条件——源可重放（Kafka 有 offset）、sink 幂等或支持事务（Kafka 事务、数据库主键 upsert）。缺任何一个都只能到 at-least-once。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>并行度、背压与排障</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>说明</th></tr></thead><tbody><tr><td><b>并行度</b></td><td>算子并行实例数；受 <b>key 分布</b>与 <b>slot 数</b>共同限制</td></tr><tr><td><b>Task Slot</b></td><td>TaskManager 的资源单位；建议 slot 数 ≈ CPU 核数</td></tr><tr><td><b>算子链（operator chaining）</b></td><td>相邻算子合并到同一线程，减少序列化与网络开销</td></tr><tr><td><b>数据倾斜</b></td><td>某个 key 的量远超其他 → 一个 subtask 成为瓶颈</td><td>解法：加盐打散后再聚合、或本地预聚合</td></tr><tr><td><b>背压</b></td><td>下游处理慢导致上游阻塞</td><td>在 Web UI 的 BackPressure 页面定位源头算子</td></tr></tbody></table></div><ul><li><b>先定位背压源头</b>：从 sink 往 source 方向看，第一个「背压高」的算子就是瓶颈，而不是看最慢的那个。</li><li><b>状态过大</b>的表现：checkpoint 时间越来越长、最终超时失败。对策：设 State TTL、减小窗口、换 RocksDB + 增量 checkpoint。</li><li><b>增量 checkpoint</b>：RocksDB 状态下只上传变化的文件，能把 checkpoint 从分钟级降到秒级。</li><li><b>GC 压力大</b>：用 HashMapStateBackend + 大状态时常见，改成 RocksDB 把状态移出堆。</li><li><b>并行度不是越大越好</b>：超过 key 基数或 slot 数的部分不会带来收益，还会增加 checkpoint 开销。</li></ul><p><b>运维命令</b></p><pre><code># 常用运维命令
+flink run -d -p 8 -c com.x.Job app.jar          # 提交，并行度 8
+flink list                                       # 查看作业
+flink savepoint &lt;jobId&gt; hdfs:///sp/              # 触发 savepoint
+flink cancel -s hdfs:///sp/ &lt;jobId&gt;              # 取消前先存 savepoint（优雅停）
+flink run -s hdfs:///sp/savepoint-xxx app.jar    # 从 savepoint 恢复
+
+# 关键区别：
+#   Checkpoint = 自动、用于故障自动恢复、由 Flink 管理生命周期
+#   Savepoint  = 手动、用于版本升级/迁移、需显式指定路径</code></pre><details><summary>Flink 和 Spark Streaming 怎么选？</summary><p>要<b>低延迟 + 事件时间 + 精确一次状态</b> → Flink（毫秒~秒级、真流）；要<b>高吞吐 + 已有批处理能力复用</b>、延迟能接受秒~分钟级 → Spark Structured Streaming（微批）。</p></details><details><summary>watermark 该怎么设？</summary><p>先统计真实数据的乱序程度（如 max(event_time 落后 processing_time 的分位数），再取略大于 P99 的值。设太小会丢数据，设太大会让窗口迟迟不触发。</p></details><details><summary>窗口一直不输出是为什么？</summary><p>最常见是 watermark 没有推进：某个并行度上没有数据流入，watermark 就停在那里。解法是设 <code>withIdleness()</code> 让空闲分区也能推进 watermark。</p></details></div></section>
 <footer>© 2026 Visuals · 大数据系统</footer>
 <script>
 (function(){

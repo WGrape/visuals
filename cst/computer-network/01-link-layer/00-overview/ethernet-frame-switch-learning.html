@@ -11,6 +11,25 @@
 <section class="panel"><h2>帧大小与 MTU</h2><p>常见以太网负载 MTU 为 1500 字节；一个 IPv4 包若含 20 字节 IP 头和 20 字节 TCP 头，未计 TCP 选项时可装 1460 字节 TCP 数据。以太网帧本身还要添加目的、源、类型与 FCS 等开销，所以“1500 字节 MTU”不是整个线上帧的总长度。VLAN 标签又可增加 4 字节链路层开销；能否传输取决于链路设备支持的帧尺寸。</p><p>若路径中某个设备支持的 MTU 较小，问题出在 IP 包或更上层数据能否通过，不是简单把交换机的 MAC 表调大。计算协议开销时要注明是否含前导码、帧间隙、VLAN 标签和隧道封装，避免不同层的数字直接比较。</p></section>
 <section class="panel"><h2>一次真实排查</h2><p>A 能 ping 网关但不能访问 B，先检查两台主机是否在同一 VLAN、目标 IP 是否同一子网、ARP 是否成功。若 ARP 已解析出 B 的 MAC，而交换机 MAC 表却在错误端口出现 B，检查虚拟机迁移或环路。若 MAC 表正确但接口错误包增长，检查线缆、速率、双工和物理层统计。每一步都对应不同故障域。</p><p>抓包时在 A 上可看到发出的帧，却不一定能看到交换机泛洪给 C 的副本；要在正确的镜像端口或 C 上观察。抓包位置本身决定证据能证明什么。把“本机发出”推断成“对端收到”，中间还缺交换机、链路和对端网卡的验证。</p></section>
 <section class="panel"><h2>记住逐跳与端到端</h2><p>当 A 与远端服务器通信，A 的第一帧目的 MAC 是默认网关，不是远端服务器。网关收到后剥离本跳以太网头，按路由决定下一跳，再创建新的链路层帧。这个过程解释了为什么 MAC 学习解决局域网问题，却不能替代路由表。ARP 则把同一链路下一跳 IP 映射为需要封装的 MAC。</p><p>自测时画出 A、交换机、网关、远端服务器四点，给每一跳写目的 IP 与目的 MAC。若跨网段后仍写远端服务器 MAC，说明混淆了逐跳交付与端到端寻址。</p></section>
+<section class="panel" data-dry-goods><h2>以太网帧的确切字节数</h2><div class="table-wrap"><table><thead><tr><th>字段</th><th>字节数</th><th>说明</th></tr></thead><tbody><tr><td>前导码 Preamble + SFD</td><td><b>8</b></td><td>7 字节 0x55 同步 + 1 字节 0xD5 起始定界（物理层，不计入帧长）</td></tr><tr><td>目的 MAC</td><td><b>6</b></td><td>48 位</td></tr><tr><td>源 MAC</td><td><b>6</b></td><td>48 位</td></tr><tr><td>802.1Q Tag（可选）</td><td><b>4</b></td><td>TPID 0x8100 + TCI（PCP 3b + DEI 1b + VID 12b）</td></tr><tr><td>以太类型 EtherType</td><td><b>2</b></td><td>0x0800=IPv4、0x86DD=IPv6、0x0806=ARP、0x8100=VLAN</td></tr><tr><td>载荷 Payload</td><td><b>46 – 1500</b></td><td>MTU 1500；不足 46 字节要填充</td></tr><tr><td>帧校验 FCS</td><td><b>4</b></td><td>CRC32，网卡硬件校验，抓包通常看不到</td></tr></tbody></table></div><p><b>关键数字</b>：标准以太网帧<b>最小 64 字节</b>、<b>最大 1518 字节</b>（不含前导码）；带 VLAN tag 时最大 <b>1522</b>；Jumbo Frame 最大 <b>9000/9018</b>。最小帧长 64 字节是 CSMA/CD 的历史遗产——必须保证“发完之前能检测到最远处的冲突”（512 bit = 64 字节）。</p><div class="table-wrap"><table><thead><tr><th>MAC 地址部分</th><th>位数</th><th>含义</th></tr></thead><tbody><tr><td>OUI</td><td>前 <b>24 位</b></td><td>厂商编号，由 IEEE 分配</td></tr><tr><td>序列号</td><td>后 24 位</td><td>厂商自分配</td></tr><tr><td>I/G 位（第 1 字节最低位）</td><td>1 bit</td><td>1 = 组播/广播</td></tr><tr><td>U/L 位（第 1 字节次低位）</td><td>1 bit</td><td>1 = 本地管理地址（手动指定）</td></tr></tbody></table></div><p>广播地址 = <code>ff:ff:ff:ff:ff:ff</code>；IPv4 组播对应的 MAC 以 <code>01:00:5e</code> 开头；IPv6 组播 MAC 以 <code>33:33</code> 开头。</p><p><b>以太网排查命令</b></p><pre><code># 查看本机 MAC 与接口统计
+ip link show
+cat /sys/class/net/eth0/address
+ethtool eth0                    # 速率、双工、是否协商
+ethtool -S eth0 | grep -E 'rx_|tx_|error|drop'    # 错包/丢包计数
+
+# 交换机（Linux bridge）的 MAC 转发表
+bridge fdb show
+bridge fdb show br br0
+# 老化时间（默认 300 秒）
+cat /sys/class/net/br0/bridge/forward_delay
+brctl showmacs br0              # 老工具
+
+# 抓包看帧（注意最小帧会被填充到 60 字节，因为抓不到 4 字节 FCS）
+tcpdump -i eth0 -nn -e -XX 'icmp' | head -20
+# -e 显示 MAC 地址；-XX 十六进制
+
+# 看接口 MTU
+ip link show eth0 | grep mtu</code></pre></section><section class="panel"><h2>交换机学习、泛洪与排障</h2><ul><li><b>学习（Learning）</b>：交换机收到帧后，把「源 MAC + 入端口」记入 MAC 表（CAM 表）。<b>只看源地址</b>，所以一台从不发包的主机不会被学到。</li><li><b>泛洪（Flooding）</b>：目的 MAC 不在表中 → 向<b>除入端口外的所有端口</b>转发（未知单播泛洪）。广播和组播同样泛洪。</li><li><b>老化时间默认 300 s</b>：5 分钟没流量的表项被删除。主机长时间静默后再被访问会触发一次泛洪。</li><li><b>CAM 表溢出攻击</b>：攻击者发送大量伪造源 MAC 的帧填满 MAC 表，交换机退化成集线器（全部泛洪）→ 攻击者可嗅探全网流量。防御：<b>端口安全（Port Security）</b>限制每端口 MAC 数量。</li><li><b>广播风暴</b>：二层环路（没开 STP）+ 广播帧 → 帧被无限复制放大，全网瘫痪。症状：交换机灯狂闪、CPU 100%、丢包率接近 100%。<b>必须开 STP</b>。</li><li><b>排障顺序</b>：① <code>ethtool</code> 看速率/双工是否匹配（半双工/全双工不匹配会导致大量冲突与错包）；② <code>ethtool -S</code> 看 CRC 错误、丢包计数；③ <code>bridge fdb</code> 看 MAC 是否学到正确端口；④ 看是否有 MAC 漂移（同一 MAC 在多个端口间跳变 → 环路或 IP 冲突）。</li></ul><details><summary>为什么我的千兆链路只有百兆速度？</summary><p>双工/速率协商失败，降级到百兆或半双工。检查网线（超五类以上、8 芯全通）、两端协商设置。<code>ethtool eth0</code> 看 <code>Speed</code> 和 <code>Duplex</code>，以及 <code>Link detected: yes</code>。</p></details><details><summary>交换机和集线器（Hub）的区别是什么？</summary><p>集线器是物理层设备，把收到的信号简单放大到所有端口（所有主机共享带宽、半双工、冲突域不隔离）；交换机是二层设备，按 MAC 表定点转发（每端口独立带宽、全双工、隔离冲突域）。现在 Hub 已基本绝迹。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>交换机是通过帧的源 MAC 还是目的 MAC 学习主机位置？</summary><p>通过源 MAC 学习入口端口；目的 MAC 用于查询出口，未知时在同一 VLAN 内泛洪。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="../01-arp-and-ndp/arp-protocol-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

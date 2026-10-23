@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -154,6 +172,41 @@
 
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>三大标准基准：分别测什么</h2><div class="table-wrap"><table><thead><tr><th>基准</th><th>查询数</th><th>模型</th><th>测什么</th><th>适用</th></tr></thead><tbody><tr><td><b>TPC-H</b></td><td><b>22</b> 个</td><td>雪花模型（8 张表）</td><td><b>即席分析查询</b></td><td><b>最常用</b>，入门必测</td></tr><tr><td><b>TPC-DS</b></td><td><b>99</b> 个</td><td>星型+雪花（24 张表）</td><td>含<b>复杂子查询、窗口函数</b></td><td>更贴近真实数仓</td></tr><tr><td><b>SSB</b>（星型基准）</td><td>13 个</td><td>纯星型（1 事实 + 4 维）</td><td><b>多表 JOIN + 聚合</b></td><td>测试列存的 JOIN 性能</td></tr><tr><td><b>ClickBench</b></td><td>43 个</td><td>单大宽表（1 亿行）</td><td><b>单表扫描/聚合/过滤</b></td><td><b>ClickHouse 主导</b>，测扫描性能</td></tr></tbody></table></div><p><b>怎么选</b>：<b>TPC-H</b> 是最通用的基线（所有产品都会公布）；<b>TPC-DS</b> 更贴近真实数仓（有复杂的多层子查询）；<b>ClickBench</b> 专测单表扫描能力（这是列存最擅长的）。<b>但最重要的始终是你自己的真实 query</b>——标准基准只能做初筛。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>数据规模：SF 是什么意思</h2><div class="table-wrap"><table><thead><tr><th>Scale Factor</th><th><b>数据量</b></th><th>最大表行数（lineitem）</th><th>说明</th></tr></thead><tbody><tr><td>SF=1</td><td><b>约 1 GB</b></td><td>约 600 万行</td><td>快速验证</td></tr><tr><td>SF=10</td><td>约 10 GB</td><td>约 6000 万行</td><td>常用测试规模</td></tr><tr><td><b>SF=100</b></td><td><b>约 100 GB</b></td><td>约 6 亿行</td><td><b>标准的基准规模</b></td></tr><tr><td>SF=1000</td><td>约 1 TB</td><td>约 60 亿行</td><td>大厂评测规模</td></tr></tbody></table></div><p><b>TPC-H 数据生成与测试</b></p><pre><code># 生成 TPC-H 数据（官方工具 dbgen）
+git clone https://github.com/electrum/tpch-dbgen
+cd tpch-dbgen &amp;&amp; make
+./dbgen -s 100          # -s 就是 scale factor，生成约 100GB
+# 产出：lineitem.tbl, orders.tbl, customer.tbl ... 共 8 个文件
+
+# 导入 ClickHouse
+CREATE TABLE lineitem (
+  l_orderkey    Int64, l_partkey Int32, l_suppkey Int32,
+  l_linenumber  Int32, l_quantity Decimal(15,2),
+  l_extendedprice Decimal(15,2), l_discount Decimal(15,2),
+  l_tax Decimal(15,2), l_returnflag String, l_linestatus String,
+  l_shipdate Date, l_commitdate Date, l_receiptdate Date,
+  l_shipinstruct String, l_shipmode String, l_comment String
+) ENGINE = MergeTree ORDER BY (l_shipdate, l_orderkey);
+
+cat lineitem.tbl | clickhouse-client --query \
+  "INSERT INTO lineitem FORMAT CSV" --format_csv_delimiter='|'
+
+# 跑 Q1（典型的聚合查询）
+SELECT l_returnflag, l_linestatus,
+       sum(l_quantity), sum(l_extendedprice)
+FROM lineitem
+WHERE l_shipdate &lt;= '1998-09-02'
+GROUP BY l_returnflag, l_linestatus;
+
+# 计时（注意要跑 3 次取后 2 次，第一次含冷缓存）
+for i in 1 2 3; do
+  /usr/bin/time -f "%e s" clickhouse-client --query "$(cat q1.sql)"
+done</code></pre><p class="muted"><b>测量的三个纪律</b>：① <b>跑 3 次取后 2 次</b>（第一次含冷缓存和 JIT 预热）；② <b>关掉客户端的输出</b>（<code>&gt; /dev/null</code>），否则测的是打印速度；③ <b>记录并发数</b>——单并发和 32 并发的结果可以差 10 倍。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>实测指标怎么读（横向对比的方法）</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>含义</th><th>好产品的量级</th><th>注意</th></tr></thead><tbody><tr><td><b>单表扫描速度</b></td><td>每秒扫多少行</td><td><b>10 亿 – 100 亿行/s</b>（列存）</td><td>看是否用了压缩/向量化</td></tr><tr><td><b>聚合吞吐</b></td><td>GROUP BY 的速率</td><td>亿级行/s</td><td>基数影响极大</td></tr><tr><td><b>JOIN 性能</b></td><td>大表 JOIN 耗时</td><td>SF=100 下秒级</td><td><b>内存消耗是关键</b></td></tr><tr><td><b>压缩率</b></td><td>原始/压缩后</td><td><b>3 – 10 倍</b></td><td>列存 + 字典编码</td></tr><tr><td><b>导入速度</b></td><td>每秒导入行数</td><td><b>百万 – 千万行/s</b></td><td>影响数据新鲜度</td></tr><tr><td><b>内存占用</b></td><td>峰值内存</td><td>取决于并发</td><td><b>OLAP 最常见的失败原因</b></td></tr></tbody></table></div><p><b>对比时的三个陷阱</b>：① <b>硬件不一致</b>——不同机器/磁盘（NVMe vs HDD）结果差数倍；② <b>索引/分区不同</b>——有的产品建了物化视图或投影（如 ClickHouse 的 <code>ORDER BY</code> 就是稀疏索引），没建的自然慢；③ <b>并发度不同</b>——单并发 vs 高并发结论可能反转。<b>最可靠的做法：用你自己的数据和查询，在相同硬件上测。</b></p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>Workload 分类：先搞清楚你是哪一类</h2><div class="table-wrap"><table><thead><tr><th>类型</th><th>特征</th><th>查询模式</th><th>适合的产品</th></tr></thead><tbody><tr><td><b>Ad-hoc 即席分析</b></td><td>分析师随便查，无固定模式</td><td>大范围扫描 + 聚合</td><td><b>ClickHouse / Doris</b>（扫描快）</td></tr><tr><td><b>固定报表</b></td><td>几十个固定 SQL 每天跑</td><td>可预计算</td><td><b>加物化视图/预聚合</b></td></tr><tr><td><b>高并发点查</b></td><td>QPS 高、每次查少量</td><td>按主键/索引查</td><td><b>Doris/StarRocks</b>（有索引）或 ES</td></tr><tr><td><b>实时写入 + 实时查</b></td><td>秒级可见</td><td>写入吞吐高</td><td><b>Doris/StarRocks</b>（支持实时导入）</td></tr><tr><td><b>湖仓分析</b></td><td>数据在数据湖（Parquet/Iceberg）</td><td>外表查询</td><td><b>Trino / StarRocks 外表</b></td></tr></tbody></table></div><ul><li><b>先分类再选型</b>——把 workload 归到上面某一类，选型范围立刻缩小一半</li><li><b>混合负载要拆开</b>：高并发点查和大范围扫描<b>不要放同一集群</b>（资源互相抢）</li><li><b>看写入模式</b>：批量导入（推荐）vs 实时流式写入（对产品要求高很多）</li><li><b>估算数据生命周期</b>：只查最近 7 天 → 可以只保留热数据在 OLAP，冷数据留数据湖</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>为什么我的 TPC-H 测试结果和官方差很多？</summary><p>五个常见原因：① <b>硬件不同</b>（尤其磁盘：SATA SSD vs NVMe 差 3 – 5 倍）；② <b>没建合适的 ORDER BY / 分区</b>——ClickHouse 的 MergeTree 依赖 <code>ORDER BY</code> 做稀疏索引，建错了等于全表扫；③ <b>配置没调</b>（如 <code>max_threads</code>、内存限制）；④ <b>数据是冷缓存</b>——第一次查询要读盘；⑤ <b>官方用的是优化过的 schema 和参数</b>（有时还包括物化视图）。建议：先在<b>相同硬件</b>上跑两个产品对比，绝对值不重要，<b>相对差距</b>才可信。</p></details><details><summary>列存为什么快？核心原理是什么？</summary><p>三个叠加效应：① <b>只读需要的列</b>——查 3 列就不用读 50 列，IO 减少 <b>10 倍以上</b>；② <b>压缩率高</b>——同列数据类型相同、重复度高，字典编码 + RLE + 位压缩能压到 <b>1/3 – 1/10</b>，进一步减少 IO；③ <b>向量化执行</b>——一次处理一批（如 1024 个值）而非一行，充分利用 CPU 的 SIMD 指令和缓存。代价：<b>单行写入慢</b>（要拆列、压缩），所以 OLAP 库<b>不适合高频单行写入</b>。</p></details><details><summary>什么时候 OLAP 库不该用？</summary><p>四种情况：① <b>需要事务和行级更新</b>（OLAP 库的 UPDATE 通常很弱或是异步合并）；② <b>高并发点查</b>（每次按主键查一行——这是 OLTP 或 KV 存储的活，用 Redis/MySQL 更合适）；③ <b>数据量小</b>（&lt; 100 GB 且查询简单——PostgreSQL 甚至 DuckDB 就够了，引入 OLAP 库是过度设计）；④ <b>需要复杂的多表事务一致性</b>。判断口诀：<b>大批量扫描聚合 → OLAP；单条精确查询 → OLTP/KV</b>。</p></details><details><summary>怎么评估迁移到新 OLAP 库的成本？</summary><p>五项成本：① <b>SQL 方言改造</b>——窗口函数、JSON 函数、日期函数的语法差异（通常要改 <b>20 – 40%</b> 的 SQL）；② <b>数据迁移</b>——导出导入的时间和数据校验；③ <b>应用改造</b>——驱动、连接池、错误处理；④ <b>运维学习</b>——新产品的调优、监控、故障处理；⑤ <b>双跑期</b>——通常要<b>并行运行 1 – 3 个月</b>做结果比对。经验数字：中型系统（几十个报表）的迁移通常要 <b>2 – 6 人月</b>，SQL 改造是大头。<b>建议先迁一部分非核心报表验证</b>。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / OLAP / 选型指南 ·

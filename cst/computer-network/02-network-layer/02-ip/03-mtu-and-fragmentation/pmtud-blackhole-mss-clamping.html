@@ -11,6 +11,26 @@
 <section class="panel"><h2>探测与反馈的限制</h2><p>传统 PMTUD依赖网络返回差错，反馈被过滤就会卡住；Packetization Layer PMTUD 等方法可通过端到端不同包大小试探路径，但具体支持依协议实现。QUIC 等运行于 UDP 的协议也必须处理数据报大小与路径变化，不能因为没有 TCP MSS 就忽略 MTU。对路径中不同链路，探测包是否带 DF、载荷大小、IPv4/IPv6 和所走路由都要一致。</p><p>ping 工具的 `-s` 等参数常表示 ICMP 载荷长度，还要加 IP 和 ICMP 头才是实际 IP 包大小。算题前先看工具定义；把“ping 发送 1400 字节”直接等同于 MTU=1400 是常见误差。</p></section>
 <section class="panel"><h2>修复顺序</h2><p>先确认隧道与物理接口的实际 MTU、封装开销和故障路径；再核对 ICMPv4 Fragmentation Needed 或 ICMPv6 Packet Too Big 是否被正确发送、转发和接收。若业务紧急且主要是 TCP，可在隧道入口谨慎设置 MSS clamping，同时留证据验证大流量恢复。长期仍应修复差错报文过滤或路径 MTU 配置错误。</p><p>修复后分别测试短请求、大响应、文件上传、IPv4、IPv6 和 UDP/QUIC。只用浏览器刷一个小页面无法证明全部协议都恢复。监控可关注大包丢弃、ICMP PTB、重传和应用超时分布。</p></section>
 <section class="panel"><h2>一次复盘</h2><p>记录正常路径和故障路径的逐跳 MTU、隧道类型、DF/Packet Too Big 报文以及客户端协商 MSS。若防火墙变更导致反馈丢失，复盘应把“允许哪些必要 ICMP 类型”写成规则，而不是笼统放开所有 ICMP 或继续全禁。若只靠调小 MSS 止损，要标出 UDP 仍可能失败的剩余风险与后续修复安排。</p><p>教科书里分片似乎能解决一切，但分片会带来额外开销与丢失放大，IPv6 中途更不允许路由器代分。优先让源端了解可用包大小，通常比依赖中途分片更稳健。</p></section>
+<section class="panel" data-dry-goods><h2>MTU/MSS 的确切开销</h2><div class="table-wrap"><table><thead><tr><th>链路类型</th><th>MTU</th><th>TCP MSS</th><th>说明</th></tr></thead><tbody><tr><td>标准以太网</td><td><b>1500</b></td><td><b>1460</b></td><td>1500 − 20(IP) − 20(TCP)</td></tr><tr><td>PPPoE（家庭宽带）</td><td>1492</td><td><b>1452</b></td><td>多 8 字节 PPPoE 头</td></tr><tr><td>VLAN（802.1Q）</td><td>1500（帧长 1504）</td><td>1460</td><td>tag 在二层，IP MTU 仍是 1500</td></tr><tr><td>VXLAN / GRE 隧道</td><td>1450 或更小</td><td>1410</td><td>外层封装占 50 字节</td></tr><tr><td>WireGuard（IPv4）</td><td><b>1420</b></td><td>1380</td><td>WireGuard 开销 32 字节</td></tr><tr><td>WireGuard（IPv6）</td><td><b>1400</b></td><td>1360</td><td>开销 52 字节</td></tr><tr><td>IPsec ESP 隧道模式</td><td>约 1400</td><td>1360</td><td>ESP + 外层 IP 头 50–60 字节</td></tr><tr><td>Jumbo Frame</td><td>9000/9001</td><td>8960</td><td>同 VPC/IDC 内，需全路径一致</td></tr></tbody></table></div><p><b>PMTUD 原理</b>：发送方把 IP 头的 <b>DF（Don't Fragment）置 1</b>，路径上任何 MTU 更小的路由器应丢弃该包并回 <b>ICMP Type 3 Code 4（Destination Unreachable / Fragmentation Needed）</b>，附带它自己的 MTU。发送方据此降低 MSS。TCP 几乎总是置 DF，所以 PMTUD 是现代 TCP 的标准行为。</p><p><b>PMTU 探测与 MSS 钳制</b></p><pre><code># 探测路径 MTU（DF 置位，-s 是 ICMP 数据长度，+28 = IP 包大小）
+ping -M do -s 1472 8.8.8.8      # 1472+28=1500，通则 MTU≥1500
+ping -M do -s 1452 8.8.8.8      # PPPoE 场景
+ping -M do -s 1400 8.8.8.8
+
+# 自动探测路径 MTU 的工具
+tracepath 8.8.8.8               # 直接输出 PMTU
+
+# 抓 ICMP need frag（Type 3 Code 4）
+tcpdump -i any -nn 'icmp[0] == 3 and icmp[1] == 4'
+
+# MSS Clamping（最实用的兜底方案，在网关/防火墙上做）
+iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN \
+  -j TCPMSS --clamp-mss-to-pmtu          # 自动按出口 MTU 计算
+# 或显式指定（WireGuard/PPPoE 常用）
+iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN \
+  -j TCPMSS --set-mss 1360
+
+# nftables 等价写法
+nft add rule ip filter FORWARD tcp flags syn tcp option maxseg size set rt mtu</code></pre></section><section class="panel"><h2>PMTU 黑洞的症状与修复</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>排查/修复</th></tr></thead><tbody><tr><td>小页面正常，图片/大 POST 卡住</td><td>大包被丢弃且无 ICMP 反馈</td><td><code>ping -M do -s 1472</code> 不通</td></tr><tr><td>能 ping 通但网页打不开</td><td>ICMP 通（小包）但 TCP 大数据不通</td><td><code>curl</code> 卡住，抓包看 SYN 后无数据</td></tr><tr><td>HTTPS 握手成功但 Body 收不到</td><td>证书/大响应超过路径 MTU</td><td>抓包看有无重传或 ICMP</td></tr><tr><td>部分用户正常、部分卡</td><td>不同 ISP/隧道 MTU 不同</td><td>对比 PMTU 结果</td></tr></tbody></table></div><ul><li><b>黑洞的成因</b>：中间设备或管理员<b>过滤了所有 ICMP</b>（错误地认为“防攻击”），导致 need-frag 消息回不来，发送方一直用大包 → 永远超时。这是运维中最典型的“自己坑自己”。</li><li><b>实践建议</b>：① <b>不要全禁 ICMP</b>，至少放行 Type 3 Code 4；② 在网关上做 <b>MSS Clamping</b>（最省事，一条 iptables 规则解决 90% 的问题）；③ 隧道/VPN 场景主动把接口 MTU 调小。</li><li><b>IPv6 更严格</b>：IPv6 <b>不允许中间设备分片</b>，只能由源端分片，因此 PMTUD 是<b>唯一</b>手段，黑洞问题在 IPv6 下更致命。</li><li><b>分片的性能代价</b>：一个包拆成 N 片，丢一片整个包重传；且很多防火墙/NAT 对非首片处理不当（无法匹配端口）→ 建议<b>永不依赖分片</b>。</li><li><b>验证顺序</b>：① <code>tracepath</code> 测 PMTU；② <code>ping -M do</code> 二分法找临界值；③ 抓包确认 ICMP 是否回来；④ 加 MSS clamp 复测。</li></ul><details><summary>为什么 ping 通了但网站打不开？</summary><p>ICMP 包只有几十字节，能过；TCP 数据包按 1460 字节 MSS 发送，超过路径 MTU 后被丢。加上 ICMP 被过滤，发送方无法得知要降 MSS → 表现为“握手成功、数据卡死”。</p></details><details><summary>MSS Clamping 会影响性能吗？</summary><p>会有轻微影响（每个包少装几十字节，包数增加几个百分点），但相比“部分用户完全连不上”，这是非常划算的取舍。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>把 TCP MSS 调小后，UDP/QUIC 大包问题一定消失吗？</summary><p>不会。MSS 只约束 TCP 数据段，UDP/QUIC 仍需各自的包大小控制与路径 MTU 处理。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="fragmentation-and-pmtu.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

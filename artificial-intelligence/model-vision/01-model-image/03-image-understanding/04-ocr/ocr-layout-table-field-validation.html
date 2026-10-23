@@ -12,6 +12,38 @@
 <section class="panel"><h2>置信度不是正确概率的保证</h2><p>识别器给某字段 0.98 分，不代表同分段在生产中有 98% 正确率。置信分数需在代表性数据上校准，并按关键字段设阈值。低置信度应进入复核；高置信度但违反金额或校验位规则，也应触发复核。对账务类票据，错误接受的损失往往高于多做一次人工检查，应按业务成本选择阈值。</p><p>若检测框漏掉一行，识别器甚至不会产生该字段的置信度。质量控制要同时监控“字段缺失率”“检测覆盖率”和“识别正确率”，不能只筛已有字段的低分样本。</p></section>
 <section class="panel"><h2>数据集与上线漂移</h2><p>训练集若全是标准电子发票截图，上线遇到手机拍照、手写批注或新模板，性能会明显下降。评测按来源设备、清晰度、版式、纸质/电子、语言和金额范围切片。模板更新时，坐标规则可能失效；抽样保存脱敏截图和中间框可帮助发现漂移。涉及个人与财务信息的图像需控制存储、日志、访问权限和留存期限。</p><p>上线后应有人工纠错入口，纠错记录用于分析检测、识别或结构哪一环失败。不要把人工改过的最终字段直接当作模型原始预测来计算指标，否则会高估模型质量。</p></section>
 <section class="panel"><h2>一次验收流程</h2><p>准备一张斜拍发票，给每个关键字段标出真实框、文字和所属表格行。逐步比较矫正、检测、识别、表格重建和字段校验；故意遮住税额小数点、移除一条表格线、交换两行商品，查看系统是正确复原还是明确拒绝自动入账。最终报告字符错误率、关键字段完全匹配率、表格结构准确率和人工复核比例，并展示失败样本。</p><p>把“看上去能读字”推进到“可安全进入业务流程”，需要每个中间环节有证据和兜底。</p></section>
+<section class="panel" data-dry-goods><h2>OCR 精度指标体系</h2><div class="table-wrap"><table><thead><tr><th>层级</th><th>指标</th><th>计算方式</th><th>合格线</th></tr></thead><tbody><tr><td><b>字符级</b></td><td>CAR（字符准确率）</td><td>1 - 编辑距离/总字符数</td><td>&gt; <b>0.98</b>（印刷体）</td></tr><tr><td><b>行级</b></td><td>行准确率</td><td>完全匹配行数/总行数</td><td>&gt; 0.90</td></tr><tr><td><b>检测</b></td><td><b>IoU</b> 或 F1</td><td>预测框与真值框交并比</td><td>IoU &gt; <b>0.5</b> 视为命中</td></tr><tr><td><b>版面</b></td><td>版面 F1</td><td>区域类型+位置的联合匹配</td><td>&gt; 0.85</td></tr><tr><td><b>表格</b></td><td><b>TEDS</b></td><td>树编辑距离相似度</td><td>&gt; 0.90（简单表）</td></tr><tr><td><b>端到端</b></td><td>字段抽取准确率</td><td>关键字段完全正确率</td><td>业务决定，常 &gt; 0.95</td></tr></tbody></table></div><p><b>TEDS</b>（Tree-Edit-Distance-based Similarity）是表格结构的标准度量：把表格转成 HTML 树，算两棵树的编辑距离。它同时惩罚<strong>结构错误</strong>（行列错位）与<strong>内容错误</strong>，单纯文字对但格子错位的表格 TEDS 也会很低。</p></section><section class="panel"><h2>版面分析的区域类型与处理顺序</h2><div class="table-wrap"><table><thead><tr><th>区域类型</th><th>识别难点</th><th>推荐处理方式</th></tr></thead><tbody><tr><td><b>文本段</b></td><td>多栏混排、跨栏</td><td>先检测栏边界再切行</td></tr><tr><td><b>标题</b></td><td>字号相近时误判</td><td>结合字号+位置+加粗特征</td></tr><tr><td><b>表格</b></td><td><b>无线表、合并单元格</b></td><td>专用表格结构模型，不用通用检测</td></tr><tr><td><b>图片/公式</b></td><td>与文本混淆</td><td>单独分类，交给专用识别器或跳过</td></tr><tr><td><b>页眉页脚</b></td><td>每页重复污染正文</td><td><strong>先剔除再识别</strong></td></tr></tbody></table></div><p><b>阅读顺序还原</b></p><pre><code># 版面分析后按阅读顺序排序（关键：不能只按 y 坐标排）
+# 多栏文档的 y 排序会把左右栏混在一起
+def reading_order(blocks, column_gap_threshold=50):
+    # 1) 先按 x 聚类出栏
+    xs = sorted(set(b['x0'] for b in blocks))
+    cols, cur = [], [xs[0]]
+    for x in xs[1:]:
+        if x - cur[-1] &gt; column_gap_threshold:
+            cols.append(cur); cur = [x]
+        else:
+            cur.append(x)
+    cols.append(cur)
+    # 2) 栏内按 y 排，栏间按 x 排
+    out = []
+    for ci, col in enumerate(sorted(cols, key=lambda c: c[0])):
+        col_blocks = [b for b in blocks if b['x0'] in col]
+        out.extend(sorted(col_blocks, key=lambda b: (b['y0'], b['x0'])))
+    return out</code></pre></section>
+<section class="panel"><h2>字段校验与后处理规则</h2><p>OCR 输出不能直接进业务库，需要<strong>规则校验 + 格式规整</strong>，这是把准确率从 95% 提到 99.5% 的关键环节。</p><div class="table-wrap"><table><thead><tr><th>字段类型</th><th>校验规则</th><th>典型修正</th></tr></thead><tbody><tr><td><b>日期</b></td><td>正则 + 合法性（闰年、月份）</td><td>O/0、1/l 混淆；统一为 ISO 格式</td></tr><tr><td><b>金额</b></td><td>数值范围 + 两位小数</td><td>小数点与千分位混淆</td></tr><tr><td><b>身份证/编号</b></td><td><b>校验位</b>（如身份证第 18 位）</td><td>校验位不通过直接标为待人工</td></tr><tr><td><b>金额大写</b></td><td>与小写金额互相印证</td><td>不一致时以大写为准</td></tr><tr><td><b>合计</b></td><td>明细求和 == 合计</td><td>不等则触发复核</td></tr></tbody></table></div><p><b>校验位实现</b></p><pre><code># 身份证校验位（ISO 7064 MOD 11-2），OCR 后必做的自检
+def id_card_valid(s):
+    if len(s) != 18: return False
+    w = [7,9,10,5,8,4,2,1,6,3,7,9,10,5,8,4,2]
+    codes = "10X98765432"
+    try:
+        total = sum(int(s[i]) * w[i] for i in range(17))
+    except ValueError:
+        return False          # 前 17 位混入了字母 → OCR 误识
+    return s[17].upper() == codes[total % 11]
+
+# 使用：校验不通过的字段标为“低置信”，进人工复核队列
+# 经验：这一步能拦下约 60% 的静默写错（字符错但格式对）</code></pre><p class="muted"><b>置信度阈值不是越高越好</b>：把阈值设到 0.99 会让大量正确结果进人工队列，成本飙升。合理做法是按<strong>字段重要性分层</strong>——金额、证件号用高阈值（0.95），描述性文本用低阈值（0.7）。</p></section>
+<section class="panel"><h2>自检 Q&A</h2><details><summary>Q：为什么文字识别都对，但表格内容全错行了？</summary><p>A：这是<strong>结构识别</strong>与<strong>文字识别</strong>分离导致的。文字框位置对，但行列归属判断错（尤其无线表和合并单元格）。解决：用专门的表格结构模型输出单元格坐标，再把文字框按<strong>几何中心落入</strong>分配到格子，而不是依赖阅读顺序。</p></details><details><summary>Q：手写体准确率上不去怎么办？</summary><p>A：先分清是<strong>切分错</strong>还是<strong>识别错</strong>。手写连笔时，检测框把整行当一个字送进识别器，必然错。做法是切到字符/词级别，并用带语言模型的解码（CRNN+CTC 或 Transformer+beam search）利用上下文纠正单字误识。纯视觉模型不看上下文，天花板通常就在 90% 左右。</p></details><details><summary>Q：如何评估一个 OCR 服务该不该换？</summary><p>A：建<strong>分层测试集</strong>：清晰印刷、扫描件、拍照倾斜、手写、表格各 100 份，分别测 CAR 与字段准确率。只看整体准确率会被清晰样本拉高、掩盖拍照场景的崩塌。同时测<strong>延迟与并发</strong>——准确率相同下，P95 延迟差 3 倍对线上体验影响很大。</p></details><details><summary>Q：版面分析模型输出不稳定，同一份文档两次结果不同？</summary><p>A：检查是否用了带随机性的后处理（如 NMS 阈值抖动、随机数据增强在推理时未关闭）。推理阶段必须 <code>model.eval()</code> 并固定所有随机种子。另外<b>输入分辨率</b>变化会显著改变检测结果——固定长边缩放尺寸（如 1280）比自适应更能保证稳定。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>OCR 把“12.50”读成“1250”，CER 只多一个错误，能认为业务影响也很小吗？</summary><p>不能。金额可能相差百倍，应单独评估关键字段并用明细、总额和人工复核检查。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="ocr-pipeline.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

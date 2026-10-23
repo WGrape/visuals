@@ -12,6 +12,24 @@
 <section class="panel"><h2>DNSSEC 与合成回答</h2><p>DNS64 合成的 AAAA 并非原权威区直接签发的 AAAA。若验证解析器和客户端 DNSSEC 验证策略配合不当，可能出现“有 A 记录但合成 AAAA 被拒”的问题。部署应按相关协议处理验证与合成的边界，不能通过全局关闭 DNSSEC 来掩盖配置错误。对业务侧，仍需验证最终 HTTPS 证书和服务响应。</p><p>缓存也会影响迁移：网站新增原生 AAAA 后，某些客户端或递归解析器仍短暂持有旧合成结果。观测应按解析器、终端和地区切片，别把一处成功当作全球路径已切换。</p></section>
 <section class="panel"><h2>性能与故障边界</h2><p>NAT64 网关的 CPU、映射表、IPv4 出口端口和带宽都可能成为瓶颈；网关故障时多个 IPv4-only 站点会同时不可达。路径多一跳也可能增加时延，尤其跨地域部署。按实际应用测 DNS 时间、TCP/QUIC 建连、丢包和大包传输，确认 ICMP 错误与路径 MTU 反馈能够跨翻译边界正确工作。</p><p>运营时区分三类目标：原生 IPv6、经 NAT64 的 IPv4 域名、无法 DNS64 合成的字面量。它们失败时的根因和修复动作不同。</p></section>
 <section class="panel"><h2>排查顺序</h2><p>先查终端是否确为 IPv6 单栈，再查目标 A/AAAA、使用的 DNS64 解析器及合成前缀；随后查前缀路由是否到 NAT64、网关映射和 IPv4 侧回程。最后检查 SNI、Host 与应用行为。对直接写 IPv4 地址的旧应用，确认是否有 CLAT 或其他兼容机制。每一步记录两侧地址视图，避免把“IPv6 客户端打不开 IPv4 服务”简单归咎于网站 DNS。</p></section>
+<section class="panel" data-dry-goods><h2>NAT64/DNS64 的组件与参数</h2><div class="table-wrap"><table><thead><tr><th>组件</th><th>作用</th><th>关键值</th></tr></thead><tbody><tr><td>DNS64</td><td>对<b>只有 A 记录</b>的域名，合成一个 AAAA 返回</td><td>把 IPv4 地址嵌入 <code>64:ff9b::/96</code> 后 32 位</td></tr><tr><td>NAT64 网关</td><td>把 IPv6 流量翻译成 IPv4 发出</td><td>知名前缀 <code>64:ff9b::/96</code>（RFC 6052）</td></tr><tr><td>前缀长度选择</td><td>只能是 /32、/40、/48、/56、/64、/96 之一</td><td><b>/96 最常用</b>（后缀正好 32 位放 IPv4）</td></tr></tbody></table></div><p><b>合成规则</b>：DNS64 拿到 A 记录 <code>93.184.216.34</code>（十六进制 5D B8 D8 22），加上前缀 <code>64:ff9b::/96</code> → 合成的 AAAA 为 <code>64:ff9b::5db8:d822</code>。客户端访问这个地址，NAT64 网关取出后 32 位还原成 IPv4 并转发。</p><p><b>NAT64 验证</b></p><pre><code># 测试 DNS64 是否工作：查一个只有 A 记录的域名
+dig AAAA ipv4only.example.com @dns64-server
+# 若返回 64:ff9b::xxxx:xxxx 说明 DNS64 生效
+
+# 直接测试 NAT64 连通性
+ping6 64:ff9b::5db8:d822
+curl -6 -g 'http://[64:ff9b::5db8:d822]/'
+
+# 常见公共 NAT64 服务（用于测试，勿用于生产）
+# 前缀 64:ff9b::/96 需要你的网络有 NAT64 网关
+# 公开的 DNS64: 2001:67c:2b0::4 / 2001:67c:2b0::6
+
+# Linux 上搭建（Jool / tayga）
+jool instance add "default" --pool6 64:ff9b::/96
+jool -i "default" session display
+
+# 抓包看翻译前后
+tcpdump -i any -nn 'ip6 or host 93.184.216.34'</code></pre></section><section class="panel"><h2>部署要点与局限</h2><ul><li><b>只能由 IPv6 侧主动发起</b>：NAT64 是单向的（v6 → v4）。外部 IPv4 用户无法主动访问 IPv6-only 服务器，需要反向代理或 SIIT-DC 等更复杂方案。</li><li><b>应用层内嵌地址会失效</b>：FTP、SIP、WebRTC、某些 P2P 协议在<b>应用层数据里</b>携带 IP 地址，NAT64 无法翻译（需要 ALG）。这是 NAT 类技术的通病。</li><li><b>前缀冲突</b>：如果目标 IPv4 恰好落在 <code>64:ff9b::/96</code> 映射空间里（如访问真正的 <code>64:ff9b::</code> 地址），会冲突。生产环境可用 <b>网络特定前缀（NSP）</b>代替知名前缀。</li><li><b>日志与合规</b>：NAT64 是有状态网关，与 CGNAT 一样需要记录端口分配（日志量巨大），且要能抗住连接数压力。</li><li><b>与双栈的取舍</b>：IPv6-only + NAT64 减少了 IPv4 地址需求，但增加了架构复杂度和故障面。多数企业仍用<b>双栈</b>（同时跑 v4/v6），运营商移动网则偏向 IPv6-only + NAT64（如 464XLAT）。</li><li><b>464XLAT</b>：手机上应用只支持 IPv4 时的方案——客户端做 CLAT（v4→v6），运营商做 PLAT（v6→v4）。Android 已原生支持。</li></ul><details><summary>DNS64 会不会破坏 DNSSEC？</summary><p>会。DNS64 修改了响应内容（合成了不存在的 AAAA），签名校验会失败。所以启用 DNS64 的解析器必须在客户端侧“信任”，通常在解析器到本地客户端之间放弃 DNSSEC 校验（RFC 6147 明确说明这是设计上的取舍）。</p></details><details><summary>IPv6-only 服务器怎么被 IPv4 用户访问？</summary><p>NAT64 解决不了反向访问。常规做法是前置一个<b>双栈反向代理 / CDN</b>（如 Cloudflare、Nginx）：IPv4 用户访问代理，代理用 IPv6 回源。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>IPv6-only 应用直接连接 IPv4 字面量时，DNS64 一定有用吗？</summary><p>不一定。没有 DNS 查询就没有合成机会，可能需要 CLAT/464XLAT 或应用自身支持。</p></details><p>练习：把本文的算例改动一个条件，手推每一阶段的状态，再写出可以观察该状态的报文、日志或计数器。</p></section>
 <footer>继续阅读：<a href="ipv6-address-slaac-ndp.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

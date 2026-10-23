@@ -50,6 +50,24 @@
   .seq .n { color: #fab387; }
   .footer { margin-top: 60px; padding: 30px 20px; text-align: center; font-size: 12.5px; color: var(--text-secondary); border-top: 1px solid var(--gray-200); }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -289,5 +307,73 @@ srv.Start()</pre>
   go-zero RPC 通信详解 &nbsp;|&nbsp; 同系列：基础能力 / 规范 / 微服务 / 命令
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>go-zero RPC 的超时与重试配置</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>位置</th><th>默认值</th><th>建议</th></tr></thead><tbody><tr><td><code>Timeout</code></td><td>客户端 yaml</td><td><b>2000 ms</b></td><td>按 P99 设定，<strong>不要全用默认</strong></td></tr><tr><td><code>MaxConns</code></td><td>客户端 yaml</td><td><b>0</b>（不限）</td><td>高并发时设 <b>100~500</b>，防止连接爆炸</td></tr><tr><td><code>Etcd/Endpoints</code></td><td>服务发现</td><td>—</td><td>生产用 etcd，直连只用于本地调试</td></tr><tr><td><code>NonBlock</code></td><td>客户端</td><td><b>false</b></td><td>true 时服务不可达立即报错而非阻塞</td></tr><tr><td><code>Sync/Async</code></td><td>服务端</td><td>—</td><td><code>Sync: false</code> 时自动异步处理</td></tr></tbody></table></div><p><b>超时必须逐段变短</b>：调用链的超时应该是<strong>上游 &gt; 下游</strong>。若上游 2 秒、下游 3 秒，上游早已超时放弃，下游还在算——白白消耗资源。正确做法是<strong>从最下游开始定超时，逐层向上累加</strong>。</p><p><b>配置示例</b></p><pre><code># 客户端配置（etc/*.yaml）
+OrderRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: order.rpc
+  Timeout: 800          # 毫秒，按下游 P99 设定
+  MaxConns: 200         # 最大连接数，防连接爆炸
+  NonBlock: false
+
+# 服务端配置
+Name: order.rpc
+ListenOn: 0.0.0.0:8080
+Timeout: 3000           # 服务端自身的处理超时
+MaxConns: 10000
+Etcd:
+  Hosts:
+    - 127.0.0.1:2379
+  Key: order.rpc</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>拦截器与链路治理</h2><div class="table-wrap"><table><thead><tr><th>能力</th><th>开关</th><th>说明</th></tr></thead><tbody><tr><td><b>熔断</b></td><td><code>breaker</code>（默认开）</td><td>基于错误率与延迟，<strong>自动熔断</strong></td></tr><tr><td><b>限流</b></td><td><code>PeriodLimit</code> / <code>TokenLimit</code></td><td>需显式配置，令牌桶</td></tr><tr><td><b>超时</b></td><td><code>Timeout</code></td><td>客户端/服务端各自配置</td></tr><tr><td><b>链路追踪</b></td><td><code>Telemetry</code></td><td>需配置 Jaeger/OTLP 地址</td></tr><tr><td><b>监控</b></td><td><code>Prometheus</code></td><td>需配置 <code>Host/Port</code></td></tr></tbody></table></div><p><b>拦截器</b></p><pre><code>// 自定义拦截器（服务端）
+func LoggerInterceptor(ctx context.Context, req interface{},
+    info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+    start := time.Now()
+    resp, err := handler(ctx, req)          // 执行实际逻辑
+    logx.WithContext(ctx).Infow("rpc",
+        logx.Field("method", info.FullMethod),
+        logx.Field("cost", time.Since(start).Milliseconds()),
+        logx.Field("err", err))
+    return resp, err
+}
+
+// 注册
+s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
+    pb.RegisterOrderServer(grpcServer, svc)
+})
+s.AddUnaryInterceptors(LoggerInterceptor)   // 追加自定义拦截器</code></pre><p class="muted"><b>熔断参数</b>：go-zero 的 breaker 默认基于<strong>滑动窗口内的错误率</strong>（默认 5 秒内采样，错误率超 <b>50%</b> 触发）。可通过 <code>WithBreaker</code> 自定义。注意它是<strong>客户端侧</strong>熔断，保护的是调用方不被拖垮。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>proto 与代码生成约定</h2><p><b>proto 定义</b></p><pre><code>syntax = "proto3";
+
+package order;
+option go_package = "./order";
+
+message CreateOrderReq {
+  int64  user_id = 1;      // 字段号 1~15 只用 1 字节编码，&lt;strong&gt;高频字段优先用小号&lt;/strong&gt;
+  string sku_id  = 2;
+  int32  count   = 3;
+}
+
+message CreateOrderResp {
+  string order_id = 1;
+}
+
+service Order {
+  rpc Create(CreateOrderReq) returns (CreateOrderResp);
+}</code></pre><p><b>代码生成</b></p><pre><code># 生成代码
+goctl rpc protoc order.proto --go_out=./ --go-grpc_out=./ --zrpc_out=.
+
+# 目录约定（goctl 生成，勿手工改动生成文件）
+#   order/
+#     order.pb.go        由 protoc 生成
+#     order_grpc.pb.go   由 protoc-gen-go-grpc 生成
+#     order.go           goctl 生成的客户端封装
+#   internal/
+#     logic/             &lt;strong&gt;业务代码写这里&lt;/strong&gt;（不被覆盖）
+#     server/            服务注册
+#     svc/               依赖注入上下文
+#   etc/order.yaml       配置</code></pre><ul><li><code>internal/logic</code> 是唯一应该手写业务的地方——重新生成 proto 不会覆盖它。</li><li><strong>字段号一旦上线就不能改</strong>：改字段号等于改了 wire format，老客户端会解析错。要废弃字段用 <code>reserved</code> 占位。</li><li>字段号 <strong>1~15</strong> 的 tag 只占 1 字节，16 及以后占 2 字节——高频字段留给小号。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>自检 Q&A</h2><details><summary>Q：go-zero 的 RPC 和 gRPC 原生有什么区别？</summary><p>A：go-zero 是在 gRPC 之上的<strong>工程化封装</strong>：内置了服务发现（etcd）、负载均衡（P2C）、熔断、限流、超时、链路追踪，并把这些能力做成 yaml 配置而非手写代码。原生 gRPC 只提供通信骨架，治理能力都要自己接拦截器实现。所以差异不在协议（都是 gRPC/HTTP2），而在<strong>开箱即用的治理能力</strong>。</p></details><details><summary>Q：RPC 调用超时该怎么排查？</summary><p>A：分层定位——① 看是<strong>客户端超时</strong>还是<strong>服务端超时</strong>（日志里 <code>context deadline exceeded</code> 出现在哪一侧）；② 若服务端很快返回但客户端报超时，检查<strong>服务发现是否拿到了不可用的地址</strong>（etcd 里有已下线的实例）；③ 若服务端本身就慢，往下钻它依赖的 DB/缓存。关键工具是链路追踪——没有 tracing 时，超时问题在跨 3 个服务的调用链上几乎无法定位。</p></details><details><summary>Q：<code>NonBlock</code> 该设 true 吗？</summary><p>A：<strong>看场景</strong>。设为 true 时，服务不可达会<strong>立即返回错误</strong>而不是等待——适合启动阶段或强依赖检查（快速失败）。但生产环境通常设 false：服务短暂不可达时，阻塞等待能让<strong>服务恢复后自动连上</strong>，避免因启动顺序导致的首次调用失败。折中是设 false 但把 <code>Timeout</code> 调小。</p></details><details><summary>Q：proto 改了字段类型怎么办？</summary><p>A：<strong>兼容性分三种</strong>。安全：int32 → int64（wire 兼容）、加新字段（老端忽略）。危险：改字段号、改 string ↔ bytes 语义、改有符号/无符号。<strong>绝不能改字段号</strong>。要改类型，正确做法是<strong>新增一个字段</strong>（用新号），老字段标 <code>reserved</code>，双写一段时间后下线——这是 protobuf 演进的标准流程。</p></details></div></section>
 </body>
 </html>

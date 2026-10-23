@@ -11,6 +11,38 @@
 <section class="panel"><h2>与流式识别的关系</h2><p>流式 ASR 要在句子尚未结束时输出部分结果。声学模型若依赖未来若干帧，必须等这些帧到达；束搜索前缀也可能被后续声音改写。因此屏幕上的“临时转写”与“最终结果”应区别展示。用户说“妈……”时，系统不能因为当前只看到一个“妈”就断言不会出现第二个“妈”；后续 blank 和帧序列可能把结果扩成“妈妈”。</p><p>端点检测决定何时认为一句话说完，CTC 本身不等于端点检测。若静音阈值过短，会把一句话切断；过长则让最终文字迟到。产品需同时记录首字出现时间、最终结果时间、修订次数和整句准确率，而不只报告一个模型推理耗时。</p></section>
 <section class="panel"><h2>CTC、Transducer 与注意力路线</h2><p>CTC 的帧输出在给定声学表示后采用较强的条件独立假设，路径求和与解码相对清晰；Transducer 让输出依赖已有文字前缀，常用于低延迟流式识别，但训练和搜索更复杂；注意力编码器解码器直接建模输出序列，也可以做流式变体，但具体延迟取决于架构和未来上下文。三者不是“新模型全面替代旧模型”的单线进化，取舍还包括设备算力、目标语言和领域词。</p><p>同一音频若被错误重采样、截断或做了与训练不一致的前处理，换解码算法也救不了。评估应固定采样率、切分、标点后处理和词表版本，才能把提升归因到模型或搜索策略。</p></section>
 <section class="panel"><h2>排障与验收</h2><p>先抽取一个错误样本，写出原始音频、人工转写、逐帧最高符号、折叠结果与束搜索候选。若重复字被吞，检查 blank 概率、下采样后时间步与解码折叠顺序；若专有名词被改写，比较纯声学候选和语言模型重排；若最终字对但延迟高，查未来上下文、束宽与端点等待。修复后在相同音频集合上同时比较字错率、关键字段命中率、首字延迟和最终延迟。</p><p>保留可解释的错误分类比只看“准确率 95%”更有用。替换、删除、插入三种错误可能由不同环节造成；本课的“妈妈→妈”更像删除一个重复字，而人名误识别可能涉及声学混淆与语言模型偏好。</p></section>
+<section class="panel" data-dry-goods><h2>CTC 的三条规则</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>定义</th><th>例子</th></tr></thead><tbody><tr><td>blank（∅）</td><td>词表中的空标签，表示「这一帧不输出新字符」</td><td>词表索引通常为 0</td></tr><tr><td>多对一映射</td><td>多条对齐路径折叠后得到同一个标签序列</td><td><code>∅aa∅b</code> 与 <code>a∅ab∅</code> 都折叠成 <code>ab</code></td></tr><tr><td>折叠规则 B</td><td>先合并连续重复，再删除 blank</td><td><code>aa∅bb</code> → <code>ab</code>；<code>a∅a</code> → <code>aa</code>（blank 隔开的重复<b>不</b>合并）</td></tr><tr><td>对齐数量</td><td>长度 T 的帧序列对长度 L 的标签，路径数为组合量级</td><td>T=100、L=20 时路径数极大，靠动态规划求和</td></tr></tbody></table></div><p>CTC 损失：<code>L = −log Σ<sub>π∈B⁻¹(y)</sub> P(π|x)</code>，即对所有能折叠成目标 y 的路径概率求和再取负对数，用前向-后向算法在 <code>O(T·L)</code> 内计算。</p></section><section class="panel"><h2>帧长与词表的量化关系</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>典型取值</th><th>含义</th></tr></thead><tbody><tr><td>帧率</td><td>10 ms（每帧 hop 通常 10 ms）</td><td>1 秒音频约 100 帧</td></tr><tr><td>下采样后帧率</td><td>4 倍下采样后约 40 ms/帧</td><td>1 秒音频约 25 帧（Conformer 常见）</td></tr><tr><td>词表规模</td><td>中文字符级约 4000~6000；英文 BPE 约 几百~数千</td><td>决定 softmax 维度</td></tr><tr><td>输出张量形状</td><td><code>(T, batch, vocab_size)</code></td><td>CTC 要求 <b>时间维在前</b></td></tr><tr><td>对齐可行性前提</td><td><code>T ≥ 目标标签长度 L</code></td><td>否则无法对齐，loss 为 inf</td></tr></tbody></table></div><p class="muted">硬约束：<code>T ≥ L</code>（帧数要多于标签数），因为每个字符至少要占一帧，重复字符还要额外插 blank。若不满足，CTC 损失为无穷大。</p></section>
+<section class="panel"><h2>可运行的 CTC 代码</h2><p><b>CTCLoss</b></p><pre><code>import torch, torch.nn as nn
+
+# 词表：index 0 必须是 blank
+vocab_size, T, N = 5000, 100, 4          # 帧数 100，batch 4
+blank_id = 0
+
+log_probs = torch.log_softmax(torch.randn(T, N, vocab_size), dim=-1)  # (T, N, C)
+targets   = torch.randint(1, vocab_size, (N, 30))                     # (N, S)
+input_lengths  = torch.full((N,), T, dtype=torch.long)                # 每样本帧数
+target_lengths = torch.randint(10, 30, (N,), dtype=torch.long)        # 每样本标签长度
+
+loss = nn.CTCLoss(blank=blank_id, zero_infinity=True)(
+    log_probs, targets, input_lengths, target_lengths)
+
+# zero_infinity=True：把“不可能对齐”产生的 inf 梯度置 0，避免整批被 nan 污染
+# 校验：assert input_lengths.max() &lt;= log_probs.size(0)
+#       assert (target_lengths &lt;= input_lengths).all()</code></pre><p><b>解码</b></p><pre><code># 贪心解码：取每帧 argmax -&gt; 折叠（合并重复 -&gt; 去 blank）
+def ctc_greedy_decode(log_probs, blank_id=0):
+    ids = log_probs.argmax(dim=-1)            # (T,)
+    out, prev = [], None
+    for i in ids.tolist():
+        if i != blank_id and i != prev:       # 跳过 blank；合并连续重复
+            out.append(i)
+        prev = i
+    return out                                 # 注意：合并重复要在去 blank 之前判断
+
+# 束搜索 + 语言模型（torchaudio）
+from torchaudio.models.decoder import cuda_ctc_decoder
+# 或 cuda_ctc_decoder 的 CPU 版本 + kenlm 语言模型</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>loss 为 inf / nan</td><td>T &lt; 标签长度，无法对齐</td><td>检查帧数是否足够；设 <code>zero_infinity=True</code>；过滤过长标签</td></tr><tr><td>loss 不下降</td><td>blank 概率饱和（模型全输出 blank）</td><td>检查词表 blank 位置；降低初始 lr；看 blank 占比</td></tr><tr><td>解码全是重复字符</td><td>折叠规则实现错误</td><td>先合并连续重复再删 blank，顺序不能反</td></tr><tr><td>input_lengths 报错</td><td>长度超过实际帧数 T（下采样后）</td><td>用卷积/下采样后的真实帧数，不是原始采样点数</td></tr><tr><td>训练快但识别差</td><td>缺少语言模型或解码策略太弱</td><td>加 beam search + LM；或改用 transducer/attention 方案</td></tr><tr><td>显存爆</td><td>T×batch×vocab 三维很大</td><td>降 batch；按长度排序组批；用帧下采样</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>blank 的作用是什么？</summary><p>两个：① 让模型可以在「没有新字符输出」的帧上输出 blank（解决帧数远多于字符数的问题）；② 作为分隔符——被 blank 隔开的相同字符不会被合并，所以 <code>a∅a</code> 折叠后是 <code>aa</code> 而不是 <code>a</code>，从而能表达重复字符。</p></details><details><summary>CTC 的损失为什么要对所有路径求和？</summary><p>因为语音与文本之间没有逐帧标注（不知道每个字符发生在第几帧），CTC 的做法是把「所有能折叠成目标序列的对齐路径」都算作正确，最大化它们的概率之和。这样无需对齐标注就能训练。求和用前向-后向动态规划在 O(T·L) 内完成。</p></details><details><summary>T 必须大于 L 吗？</summary><p>是的。每个字符至少要占一帧，若出现连续相同字符还需要插入 blank 分隔，因此要求帧数 T ≥ 标签长度 L（更严格地，需满足插入 blank 后的最小长度）。不满足时该样本无法对齐，损失为无穷大，通常需要过滤掉或用 <code>zero_infinity=True</code> 避免污染梯度。</p></details><details><summary>折叠规则的实现顺序是什么？</summary><p>标准顺序：先合并连续重复的<b>非 blank</b> 标签，再删除所有 blank。关键是「合并重复」要在删除 blank <b>之前</b>判断——正因为 blank 会打断连续性，<code>a∅a</code> 中的两个 a 才不会被合并。实现时保持 prev 并逐帧扫描即可。</p></details><details><summary>CTC 适合什么场景？有什么短板？</summary><p>适合：无对齐标注的序列到序列训练、流式/低延迟、模型简单。短板：条件独立性假设（每帧独立预测，无显式语言建模），因此通常需要外接语言模型做束搜索；对长依赖与语言规律建模弱于 attention/transducer 方案；也无法直接给出精确的时间边界（需要强制对齐另算）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>路径“妈、妈”与“妈、blank、妈”会输出同样文字吗？</summary><p>不会。先合并连续相同符号再删除 blank，前者得到“妈”，后者得到“妈妈”。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="../00-overview/asr-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

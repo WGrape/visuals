@@ -11,6 +11,48 @@
 <section class="panel"><h2>局部导入何时合适</h2><p>把 `from b import helper` 放进真正调用 helper 的函数里，可推迟到两个模块初始化完成后再执行，常可解除启动期循环。这适合可选依赖、罕见路径或为了避免重型库启动成本的场景。但若依赖关系本质上仍是双向，局部导入只是隐藏结构问题；测试和重构可能再次踩到。不要把所有 import 都塞进函数里作为统一修复。</p><p>也要检查同名遮蔽：项目文件叫 `json.py`、`typing.py` 或与依赖包同名，可能意外导入自己，报错样子像循环导入。观察 traceback 中实际加载的文件路径，确认模块解析到了预期包。直接运行包内文件与用 `python -m package.module` 启动也可能影响包上下文与绝对/相对导入，应采用一致的启动入口。</p></section>
 <section class="panel"><h2>重现与定位流程</h2><p>最小化成两个文件，打印模块顶层语句的执行顺序和 `list(sys.modules)` 中相关名字；不要打印敏感配置或整个模块字典。沿 traceback 找到第一次从 a 进入 b，再找 b 回到 a 的语句，记录此时 a 已定义哪些属性。检查是否有顶层函数调用、装饰器执行、类体求值或单例初始化间接触发另一模块；这些都是导入期间运行的代码。</p><p>修复后从全新 Python 进程运行测试，避免交互式环境已缓存模块造成假成功。分别从项目正式入口、测试入口和命令行模块方式启动，核对解析路径与导入图。若通过改变导入顺序才能偶然通过，依赖环仍值得进一步拆除。</p></section>
 <section class="panel"><h2>常考结论</h2><p>模块导入是“创建模块对象、放入缓存、执行顶层语句”的过程；函数定义也是执行到定义语句时才绑定名字。`sys.modules` 有某模块，不表示该模块所有属性都已存在。循环导入错误大多由顶层立即取对方尚未绑定的名字触发。解决它通常是重新划清依赖方向，必要时才用局部导入或类型检查专用导入。</p><p>练习：a.py 第一行导入 b，最后一行才定义 run；b.py 第一行从 a 导入 run。画出四步执行顺序，指出哪一步抛错，再提出不依赖“碰巧先导入某模块”的重构。</p></section>
+<section class="panel" data-dry-goods><h2>四类循环导入错误与报错原文</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>典型报错</th><th>本质</th></tr></thead><tbody><tr><td><code>from b import X</code> 而 b 正在初始化</td><td><code>ImportError: cannot import name 'X' from partially initialized module 'b' (most likely due to a circular import)</code></td><td>b 的模块对象已在 sys.modules，但 X 还没定义</td></tr><tr><td><code>import b</code> 后立刻用 <code>b.X</code></td><td><code>AttributeError: partially initialized module 'b' has no attribute 'X'</code></td><td>拿到的是半成品模块对象</td></tr><tr><td>在类定义/装饰器里跨模块取值</td><td><code>NameError</code> 或 <code>AttributeError</code></td><td>导入时刻早于目标定义完成</td></tr><tr><td>类型注解里引用（未用 <code>from __future__ import annotations</code>）</td><td><code>NameError: name 'X' is not defined</code></td><td>注解在定义时求值</td></tr></tbody></table></div><p>根因：<code>import</code> 会先把模块对象放进 <code>sys.modules</code>，<b>再</b>执行模块体。所以循环引用拿到的是「已存在但还没执行完」的模块对象——这就是 <b>partially initialized module</b>。</p></section><section class="panel"><h2>导入耗时与定位命令</h2><p><b>导入耗时</b></p><pre><code># 看每个模块的导入耗时（累计微秒），找出拖慢启动的元凶
+python -X importtime -c "import yourpkg" 2&gt; importtime.log
+python - &lt;&lt;'PY'
+import re
+rows = []
+for line in open("importtime.log"):
+    m = re.match(r"import time:\s+(\d+) \|\s+(\d+) \|\s+(\S+)", line)
+    if m:
+        rows.append((int(m.group(1)) + int(m.group(2)), m.group(3)))
+rows.sort(reverse=True)
+for t, name in rows[:15]:
+    print("%8d us  %s" % (t, name))
+PY</code></pre><p><b>sys.modules</b></p><pre><code># 观察 sys.modules 的“半成品”现象
+python - &lt;&lt;'PY'
+import sys
+print("before:", "mymod" in sys.modules)
+import mymod                      # 模块体执行前，sys.modules 里已有条目
+print("after:", type(sys.modules.get("mymod")))
+
+# 强制重新加载（注意：旧对象仍被旧引用持有）
+import importlib
+importlib.reload(mymod)
+PY</code></pre><div class="table-wrap"><table><thead><tr><th>诊断点</th><th>命令</th><th>读什么</th></tr></thead><tbody><tr><td>导入耗时</td><td><code>python -X importtime</code></td><td>累计时间列，找 Top 项</td></tr><tr><td>循环依赖位置</td><td><code>python -m pydeps yourpkg --show-cycles</code></td><td>环上的模块名</td></tr><tr><td>模块是否已加载</td><td><code>'mod' in sys.modules</code></td><td>True 不代表执行完成</td></tr><tr><td>实际文件路径</td><td><code>mod.__file__</code></td><td>排除同名冲突/路径错误</td></tr></tbody></table></div></section>
+<section class="panel"><h2>四种修复手法与取舍</h2><div class="table-wrap"><table><thead><tr><th>手法</th><th>写法</th><th>适用</th><th>代价</th></tr></thead><tbody><tr><td>延迟导入（函数内 import）</td><td>在函数体里写 <code>import b</code></td><td>只在少数函数里用到</td><td>每次调用有一次字典查找（命中缓存，开销很小）</td></tr><tr><td>改为模块级引用</td><td><code>import b</code> 然后用 <code>b.X</code></td><td>不需要在导入期取值</td><td>访问时多一层属性查找</td></tr><tr><td>仅注解用 <code>TYPE_CHECKING</code></td><td><code>if TYPE_CHECKING: from b import X</code></td><td>类型提示、mypy</td><td>运行时拿不到，不能真用</td></tr><tr><td>提取公共模块</td><td>把共享定义挪到 <code>c.py</code>，两边都依赖 c</td><td>结构性循环依赖</td><td>需要重构目录，但最彻底</td></tr></tbody></table></div><p><b>修复写法</b></p><pre><code># 写法 1：延迟导入
+def render():
+    from .formatter import fmt      # 调用时才导入，避开导入期循环
+    return fmt(data)
+
+# 写法 2：模块级引用（不要在导入期取属性）
+import formatter                     # 只导入模块
+def render():
+    return formatter.fmt(data)       # 用到时再取属性
+
+# 写法 3：只在类型检查时导入
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .models import User         # 运行时不执行
+def greet(u: "User") -&gt; str: ...     # 注解加引号（或用 from __future__ import annotations）</code></pre></section>
+<section class="panel"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>本地能跑，打包后报错</td><td>入口不同导致导入顺序变化</td><td>不要依赖导入顺序；按上面的手法消除环</td></tr><tr><td>加了 import 变成循环</td><td>在模块顶层 from 导入了正处于初始化中的名字</td><td>改 <code>import mod</code> 或延迟到函数内</td></tr><tr><td>类型注解触发 NameError</td><td>注解在定义时求值</td><td>加 <code>from __future__ import annotations</code> 或用字符串注解</td></tr><tr><td>reload 后行为怪异</td><td>旧对象仍被持有</td><td>reload 只重建模块，重跑整个解释器更干净</td></tr><tr><td>同一模块被导入两次</td><td>以不同名字/路径导入（包内外）</td><td>统一用绝对导入；检查 <code>sys.path</code> 是否重复</td></tr><tr><td>启动慢</td><td>顶层导入了重型库（如 pandas）</td><td>把重型导入延迟到函数内；或用 -X importtime 定位</td></tr></tbody></table></div></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么循环导入有时报错、有时不报？</summary><p>取决于<b>导入顺序</b>与<b>取值的时点</b>。如果先被导入的模块在被引用时已经执行完（例如只用了 <code>import b</code> 而在函数里才访问 <code>b.X</code>），就不会报错；一旦在模块顶层执行 <code>from b import X</code> 而 b 尚未执行到 X 的定义，就会失败。</p></details><details><summary>ImportError 里那句 partially initialized module 是什么意思？</summary><p>模块对象已经创建并放入 sys.modules，但模块体还没执行完（或执行到一半）。此时模块里还没有你想要的那个名字。这是循环导入最典型的报错文本。</p></details><details><summary>延迟导入（函数内 import）有性能问题吗？</summary><p>几乎没有。import 语句会先查 sys.modules 字典，命中就直接返回，成本是一次字典查找。只有第一次真正加载时才执行模块体。因此它是最轻量的破环手段。</p></details><details><summary>为什么推荐 TYPE_CHECKING 而不是直接导入？</summary><p>类型注解在运行期并不需要真实对象。放在 <code>if TYPE_CHECKING:</code> 里，类型检查器（mypy/pyright）能看到，运行期不会执行，既不产生循环也不拖慢启动。配合 <code>from __future__ import annotations</code> 连引号都不用加。</p></details><details><summary>如何从根本上避免循环导入？</summary><p>分层：让依赖单向（高层依赖低层）。共享的类型/常量下沉到独立的公共模块，两边都依赖它而不是互相依赖。坏味道是 A 的模块体需要 B 的数据、B 的模块体又需要 A 的数据——这说明抽象边界划错了。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>sys.modules 中已经有 a，为什么 b 执行 `from a import run` 仍可能失败？</summary><p>因为 a 的顶层代码尚未执行到 `def run`，缓存中的模块对象还没有这个属性。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
+
+<section class="panel"><h2>第四层 · 原理与取舍：为什么 Python 允许「部分初始化的模块」</h2><p>Python 的 import 是<b>执行式</b>的：模块对象先被创建并塞进 <code>sys.modules</code>，然后才逐行执行模块体。这个「先注册后执行」的设计让循环导入不会直接死锁，代价就是你会拿到一个<b>只执行了一半的模块</b>。</p><div class="table-wrap"><table><thead><tr><th>设计</th><th>带来的好处</th><th>代价</th></tr></thead><tbody><tr><td>先注册进 sys.modules 再执行模块体</td><td><b>循环导入不会无限递归</b></td><td>可能拿到部分初始化模块，属性还没定义</td></tr><tr><td>import 即执行（有副作用）</td><td>模块可以自注册（如插件、装饰器）</td><td>导入顺序影响行为，难以推理</td></tr><tr><td>模块是单例（缓存在 sys.modules）</td><td>重复 import 不重复执行</td><td>运行时改模块属性会影响全局</td></tr></tbody></table></div><details><summary>为什么报错是 AttributeError 而不是 ImportError？</summary><p>因为 import 那一步<b>成功了</b>——a 已经在 sys.modules 里（只是模块体只跑到一半）。失败的是随后访问 <code>a.run</code> 这个还没被定义的属性，所以是 AttributeError。这也是它难排查的原因：报错点离真正的问题（导入顺序）很远。</p></details><details><summary>四种修复手法怎么选？</summary><p>① <b>抽公共模块</b>（最干净，优先）；② <b>延迟导入</b>（把 import 放进函数体，最快见效但掩盖了设计问题）；③ <b>改为导入模块而非 from ... import</b>（把绑定推迟到运行时）；④ <b>依赖倒置</b>（用参数传入依赖）。日常排序：① > ④ > ③ > ②。</p></details><details><summary>延迟导入（函数内 import）有什么代价？</summary><p>它把问题推到运行时：只有调用到那个函数才会 import，测试没覆盖到就发现不了；而且每次调用都会查一次 sys.modules（有缓存所以开销很小，但语义上更隐晦）。<b>适合救火，不适合当架构</b>。</p></details><details><summary>为什么有些项目完全不会遇到循环导入？</summary><p>因为分层清晰：依赖是单向的（上层 import 下层）。循环导入几乎总是「分层没划清」的信号——两个模块互相需要对方，说明它们应该属于同一层，或者有第三个模块该被抽出来。</p></details></section>
 <footer>继续阅读：<a href="import-system.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

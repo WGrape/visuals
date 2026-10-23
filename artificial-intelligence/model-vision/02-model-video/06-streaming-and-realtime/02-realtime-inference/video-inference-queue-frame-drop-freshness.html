@@ -12,6 +12,37 @@
 <section class="panel"><h2>批处理不是免费加速</h2><p>GPU 一次处理 8 帧可能比单帧调用 8 次总耗时短，但第一帧要等其他帧凑齐。可设置最大批量和最大等待时间，例如最多 8 帧或等待不超过 40 毫秒，并按实时性目标调节。批处理还可能把不同分辨率画面补齐到共同尺寸，增加计算或影响小目标效果。固定在实验室测吞吐，再直接推线上 P99 延迟，结论常会失真。</p><p>背压应向摄像头接入或抽帧层反馈，不能只在模型前无限加内存队列。队列长度、丢帧原因、GPU 利用率、预处理耗时与结果年龄共同决定瓶颈位置。</p></section>
 <section class="panel"><h2>事件级结果怎样稳定</h2><p>单帧模型在强光、遮挡时可能偶尔误报。可要求同一目标连续若干帧出现再告警，或用轨迹跟踪减少抖动；但连续确认会增加事件发现延迟，抽帧还会改变“连续三帧”对应的真实时间。规则宜写成真实毫秒和可观察帧数的组合，并在处理缺帧时明确定义行为。事件结束也要有滞后或冷却窗口，避免“出现—消失”反复通知。</p><p>验收要用带时间标注的视频记录“事件发生到报警”的分布，而不只统计逐帧准确率。对短事件、遮挡、网络卡顿和摄像头重启分别测漏报与延迟。</p></section>
 <section class="panel"><h2>一次端到端压测</h2><p>同时接入目标数量和分辨率的摄像头，逐步从 5 路加到 20 路。记录采集 FPS、输入 FPS、实际推理 FPS、每路丢帧、队列深度、P50/P95/P99 结果年龄和事件级召回。分别试 FIFO、每 3 帧抽 1、只保留最新帧和有限等待的动态批处理，画出新鲜度与漏检率的关系。最终配置要写清在超载时优先保留什么、舍弃什么，而不是只给一个“实时 30 FPS”的口号。</p></section>
+<section class="panel" data-dry-goods><h2>实时推理的时延预算与帧率</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>典型目标</th><th>说明</th></tr></thead><tbody><tr><td>端到端时延（玻璃到玻璃）</td><td><b>&lt; 200ms</b></td><td>超过 200ms 人能明显感到「不同步」</td></tr><tr><td>视频会议可接受延迟</td><td><b>&lt; 150ms</b></td><td>超过 400ms 对话开始互相打断</td></tr><tr><td>云端游戏 / 云渲染</td><td><b>&lt; 60ms</b></td><td>含编码 + 网络 + 解码，预算极紧</td></tr><tr><td>30 FPS 的帧间隔</td><td>33.3ms</td><td>推理必须快于帧间隔，否则必然丢帧</td></tr><tr><td>60 FPS 的帧间隔</td><td>16.7ms</td><td>很多模型单帧推理就超过 16.7ms，必须靠批处理/降分辨率</td></tr><tr><td>批大小 B 的吞吐增益</td><td>B=8 相比 B=1 常 <b>3~5×</b></td><td>但时延也上升到约 <b>2~3×</b>，是吞吐与时延的取舍</td></tr><tr><td>队列利用率 ρ = λ/μ</td><td>建议 <b>≤ 0.7</b></td><td>ρ→1 时排队时延趋于无穷（M/M/1 的 Wq ∝ 1/(1-ρ)）</td></tr></tbody></table></div><p><b>排队论判据</b>：设到达率 λ（帧/秒）、服务率 μ（帧/秒）。平均排队时延 <code>Wq = ρ / (μ - λ)</code>。当 ρ 从 0.5 升到 0.9，Wq 从 <code>2ms</code> 涨到 <code>18ms</code>（μ=500 时）——<b>容量利用率超过 0.8 后延迟会指数恶化</b>，这是实时系统最核心的直觉。</p></section><section class="panel"><h2>丢帧策略与实现</h2><pre><code># 最实用的实时推理队列：只保留最新帧，过期帧直接丢弃
+import threading, queue, time
+
+# maxsize=1 的队列 = 天然背压：新帧挤掉旧帧，保证处理的永远是「最新鲜」的帧
+frame_q = queue.Queue(maxsize=1)
+
+def producer(cap):
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+        if frame_q.full():
+            try: frame_q.get_nowait()      # 丢弃旧帧
+            except queue.Empty: pass
+        frame_q.put((time.time(), frame))  # 带上采集时间戳
+
+def consumer(model):
+    while True:
+        t0, frame = frame_q.get()
+        freshness = time.time() - t0       # 帧龄，用于判断是否已过期
+        if freshness &gt; 0.2:                # 超过 200ms 预算，跳过推理直接显示上一帧结果
+            continue
+        out = model.infer(frame)</code></pre><pre><code># 动态批处理（dynamic batching）：在时延预算内尽量凑批
+# Triton Inference Server 的 preferred_batch_size + max_queue_delay_microseconds
+# 配置示例（config.pbtxt）
+dynamic_batching {
+  preferred_batch_size: [4, 8]        # 凑到 4 或 8 就发，不到就等延时上限
+  max_queue_delay_microseconds: 5000  # 最多等 5ms，超时就按现有批次发
+}
+# 效果：单卡吞吐提升 3~4x，p99 时延增加约 5ms（= queue delay 上限 + 批处理时间）</code></pre></section>
+<section class="panel"><h2>实时链路排障</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>时延随并发线性上升</td><td>GPU 排队，ρ 接近 1</td><td>限流（拒绝超额请求）比排队好；或降分辨率/帧率把 μ 提上去</td></tr><tr><td>间歇性卡顿（jitter）</td><td>批处理凑不满时等待 max_queue_delay；或 GPU 被其他任务抢占</td><td>固定批大小 + 超时发送；用 MPS / 独占 GPU 避免抢占</td></tr><tr><td>画面越来越滞后</td><td>队列无限增长（生产者快于消费者）</td><td><b>必须用有界队列</b>（maxsize=1 或 2），让旧帧被丢弃而不是堆积</td></tr><tr><td>丢帧率突然升高</td><td>输入源帧率波动 / 解码慢</td><td>统计 <code>frames_dropped / frames_total</code>；先看是解码还是推理成为瓶颈</td></tr><tr><td>GPU 利用率低但延迟高</td><td>batch=1 导致 kernel 启动开销占比大；或数据搬运（H2D/D2H）耗时</td><td>开启动态批处理；用 pinned memory + 异步拷贝；尝试 CUDA Graph 减少启动开销</td></tr><tr><td>首帧特别慢</td><td>模型加载 / CUDA 初始化 / 显存分配</td><td>服务启动时预热一次；CUDA context 初始化常需 <b>200ms~1s</b></td></tr></tbody></table></div><ul><li><b>确定性优先</b>：实时系统里「稳定的 100ms」比「平均 50ms 但偶尔 500ms」体验好得多，优化目标是 p99 而不是平均值。</li><li><b>降级顺序</b>：降帧率 → 降分辨率 → 跳帧推理（每 N 帧推一次，中间用光流/插值）→ 返回上一帧结果。</li></ul></section>
+<section class="panel"><h2>深入自检</h2><details><summary>为什么队列要设为 maxsize=1 而不是更大的缓冲？</summary><p>实时场景里旧帧<b>没有价值</b>——用户要的是「现在」的画面。大缓冲只是把延迟藏起来，画面越播越滞后。maxsize=1 是主动丢帧，用「丢掉的帧」换「新鲜的帧」。</p></details><details><summary>批处理会破坏实时性吗？</summary><p>会，但可以控制在预算内。关键参数 <code>max_queue_delay_microseconds</code> 就是「为凑批愿意等多久」，设为 5ms 意味着最坏情况多等 5ms。时延预算 200ms 时完全可以接受，换来 3~4 倍吞吐。</p></details><details><summary>ρ 到 0.9 到底有多糟？</summary><p>M/M/1 下 <code>Wq = ρ/(μ-λ)</code>。μ=500 帧/秒：ρ=0.5→2ms，ρ=0.8→8ms，ρ=0.9→18ms，ρ=0.95→38ms。<b>利用率从 0.8 到 0.95，延迟涨了近 5 倍</b>，而吞吐只涨了 19%。这就是留余量的理由。</p></details><details><summary>怎么判断该优化模型还是该加卡？</summary><p>先算单卡的 μ（实测吞吐）。若 <code>λ/μ &gt; 0.7</code> 且模型已量化/已 TensorRT 化，就该加卡；若模型还是 FP32 未优化，先把 μ 提上去，通常能拿 2~5 倍，比加卡便宜得多。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>模型始终 100% 忙、每秒处理 10 帧，就能说明实时报警没有延迟积累吗？</summary><p>不能。30 FPS 输入到 10 FPS 处理的 FIFO 队列每秒积压约 20 帧，结果会越来越旧。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="realtime-video-inference.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>混合检索：稠密 + 稀疏</title>
+<title>混合检索：向量 + 关键词</title>
 <style>
 :root{
   --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#2a3140;
@@ -47,103 +47,194 @@ tr:nth-child(even) td{background:rgba(255,255,255,.02);}
 @media(max-width:1100px){.toc{display:none;}}
 footer{text-align:center;color:var(--muted);font-size:13px;padding:30px;border-top:1px solid var(--border);margin-top:30px;}
 footer a{color:var(--accent);text-decoration:none;}
+
+  .grid3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:16px 0; }
+  .grid3 .k { background:var(--surface2); border:1px solid var(--border); border-left:3px solid var(--accent);
+              border-radius:10px; padding:13px 15px; }
+  .grid3 .k b { display:block; color:var(--accent); font-size:13px; margin-bottom:4px; }
+  .grid3 .k span { font-size:13.5px; color:var(--text); }
+  .qa { background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:13px 16px; margin:11px 0; }
+  .qa b { color:var(--purple); display:block; margin-bottom:4px; font-size:15px; }
+  .qa p { margin:0; color:var(--muted); font-size:14px; }
+  .tag { display:inline-block; background:var(--surface2); border:1px solid var(--border);
+         color:var(--muted); border-radius:999px; padding:2px 10px; font-size:12px; margin:3px 5px 3px 0; }
+  .tag.g { color:var(--green); border-color:#24504a; }
+  .tag.r { color:var(--red); border-color:#5a2b2b; }
+  .steps { counter-reset:s; list-style:none; padding:0; margin:14px 0; }
+  .steps li { counter-increment:s; position:relative; padding:8px 0 8px 40px;
+              border-bottom:1px dashed var(--border); font-size:14px; }
+  .steps li:last-child { border-bottom:none; }
+  .steps li::before { content:counter(s); position:absolute; left:0; top:9px; width:24px; height:24px;
+    border-radius:50%; background:var(--accent); color:#0d1117; font-size:12.5px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; }
+  table.cmp td:first-child { color:var(--accent); font-weight:600; white-space:nowrap; }
+  .mini-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px; margin:14px 0; }
+  .mini { background:var(--surface2); border:1px solid var(--border); border-radius:9px; padding:9px 12px; font-size:13px; }
+  .mini b { display:block; color:var(--text); font-size:13px; }
+  .mini span { color:var(--muted); font-size:12.5px; }
+  .rel { display:flex; flex-wrap:wrap; gap:10px; margin:14px 0; }
+  .rel a { background:var(--surface2); border:1px solid var(--border); border-radius:9px; padding:8px 13px;
+           font-size:13.5px; color:var(--accent); text-decoration:none; }
+  .rel a:hover { border-color:var(--accent); }
+
 </style>
 </head>
 <body>
 <div class="wrap">
-<header class="hero"><h1>混合检索：稠密 + 稀疏</h1><p>稠密检索的短板与 BM25 的互补；两路召回后如何用 RRF / 加权 / 学习排序融合，以及何时该上混合检索。</p></header>
+<header class="hero"><h1>混合检索：向量 + 关键词</h1><p>为什么单靠向量不够、RRF 融合、加权融合、稀疏+稠密与 Rerank 的组合拳</p></header>
 <aside class="toc">
-<a href="#gap">稠密检索的短板</a>
-<a href="#sparse">稀疏检索的优势</a>
-<a href="#fuse">两路融合</a>
-<a href="#rrf">RRF 详解</a>
-<a href="#sparse-rep">稀疏表示</a>
-<a href="#when">何时用</a>
+<a href="#why">为什么单靠向量检索不够</a>
+<a href="#arch">标准三段式架构</a>
+<a href="#rrf">RRF 倒数排名融合（最推荐）</a>
+<a href="#weighted">加权融合（分数归一化后）</a>
+<a href="#sparse">稀疏向量：把 BM25 也变成向量</a>
+<a href="#rerank">为什么还要 Rerank</a>
+<a href="#check">落地检查清单</a>
+<a href="#qa">常见问法</a>
+<a href="#rel">相关页面</a>
 </aside>
+<section class="card" id="why">
+  <h2>为什么单靠向量检索不够</h2>
 
-<section class="card" id="gap">
-  <h2>稠密检索的短板</h2>
-  <p>纯向量（稠密）检索靠语义，但有几个天然弱项：</p>
-  <ul>
-    <li><b>稀有词 / 专有名词</b>：如产品型号、错误码、人名，训练时少见，语义空间里表达弱。</li>
-    <li><b>精确匹配</b>：用户要"包含 exactly 这个字符串"，稠密检索给的是"意思近"，答非所问。</li>
-    <li><b>词面对齐</b>：query 与文档字面高度重叠但语义不同（或反之）时容易误判。</li>
-  </ul>
+<p>稠密向量（Embedding）擅长<b>语义相似</b>： synonym、改写、跨语言都能召回。但它有几个硬伤：</p>
+<div class="grid3">
+  <div class="k"><b>① 精确匹配差</b><span>用户搜 "Redis 7.2 release notes"，向量可能召回一堆 Redis 教程，却漏掉标题里精准含该串的文档</span></div>
+  <div class="k"><b>② 稀有词/专有名词弱</b><span>型号、人名、错误码、SKU（如 "iPhone 15 Pro Max"）在训练语料里少见，向量表示不准</span></div>
+  <div class="k"><b>③ 数字与符号不敏感</b><span>"error 1045" 和 "error 1046" 向量可能几乎一样</span></div>
+</div>
+<p>而 <b>BM25 关键词检索</b>恰恰相反：精确匹配强、专有名词准，但不懂同义词与语义。两者<b>互补</b>——这就是混合检索（Hybrid Search）的出发点。</p>
+<div class="callout tip">一句话：<b>向量负责「意思对」，关键词负责「字面准」，Rerank 负责「排得对」。</b></div>
+
 </section>
 
-<section class="card" id="sparse">
-  <h2>稀疏检索（BM25）的优势</h2>
-  <p>传统 BM25 基于词频/逆文档频率，<b>对关键词、专名、精确串极其敏感且确定</b>。它正好补上稠密的短板：</p>
-  <ul>
-    <li>字面命中即高分，不会"语义对但词不对"。</li>
-    <li>对 ID、代号、术语零误判。</li>
-    <li>可解释、无需训练、开销低。</li>
-  </ul>
-  <div class="callout">互补关系：<b>稠密管"意思像"，稀疏管"词面对"</b>。两者合起来才稳。</div>
-</section>
+<section class="card" id="arch">
+  <h2>标准三段式架构</h2>
 
-<section class="card" id="fuse">
-  <h2>两路召回 + 融合</h2>
-  <p>混合检索（Hybrid Search）标准做法：</p>
-  <ol>
-    <li>同一 query 同时跑<b>稠密路</b>（向量召回 top-k_a）和<b>稀疏路</b>（BM25 召回 top-k_b）。</li>
-    <li>把两路结果<b>归并、去重</b>，用融合算法重新排序，得最终 top-k。</li>
-  </ol>
-  <div class="diagram">
-  <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg">
-    <defs><marker id="h1" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6ea8fe"/></marker></defs>
-    <rect x="40" y="80" width="110" height="40" rx="8" fill="#1c2230" stroke="#6ea8fe"/><text x="95" y="104" fill="#e6e8ec" font-size="12" text-anchor="middle">Query</text>
-    <rect x="200" y="30" width="150" height="40" rx="8" fill="#1c2230" stroke="#b692ff"/><text x="275" y="54" fill="#e6e8ec" font-size="12" text-anchor="middle">稠密路(向量)</text>
-    <rect x="200" y="120" width="150" height="40" rx="8" fill="#1c2230" stroke="#4ec9b0"/><text x="275" y="144" fill="#e6e8ec" font-size="12" text-anchor="middle">稀疏路(BM25)</text>
-    <rect x="430" y="75" width="150" height="50" rx="8" fill="#1c2230" stroke="#ff9e64"/><text x="505" y="98" fill="#e6e8ec" font-size="12" text-anchor="middle">融合排序</text>
-    <text x="505" y="118" fill="#9aa3b2" font-size="11" text-anchor="middle">RRF / 加权</text>
-    <rect x="610" y="80" width="50" height="40" rx="8" fill="#1c2230" stroke="#ffd66b"/><text x="635" y="104" fill="#e6e8ec" font-size="12" text-anchor="middle">TopK</text>
-    <line x1="150" y1="95" x2="198" y2="60" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
-    <line x1="150" y1="100" x2="198" y2="140" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
-    <line x1="350" y1="55" x2="428" y2="95" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
-    <line x1="350" y1="140" x2="428" y2="110" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
-    <line x1="580" y1="100" x2="608" y2="100" stroke="#6ea8fe" stroke-width="2" marker-end="url(#h1)"/>
-  </svg>
-  <div class="caption">图 1：两路并行召回，融合后输出最终 TopK。</div>
-  </div>
+<svg viewBox="0 0 760 210" role="img" aria-label="混合检索架构">
+  <rect x="20" y="20" width="150" height="44" rx="9" fill="#1c2230" stroke="#6ea8fe"/>
+  <text x="95" y="47" text-anchor="middle" fill="#6ea8fe" font-size="13" font-weight="700">用户 Query</text>
+  <line x1="170" y1="42" x2="196" y2="42" stroke="#4a5568" stroke-width="2"/>
+  <rect x="200" y="14" width="180" height="40" rx="9" fill="#1c2230" stroke="#4ec9b0"/>
+  <text x="290" y="39" text-anchor="middle" fill="#4ec9b0" font-size="12.5" font-weight="700">① 稠密检索（向量）</text>
+  <rect x="200" y="66" width="180" height="40" rx="9" fill="#1c2230" stroke="#ff9e64"/>
+  <text x="290" y="91" text-anchor="middle" fill="#ff9e64" font-size="12.5" font-weight="700">① 稀疏检索（BM25）</text>
+  <line x1="95" y1="64" x2="95" y2="86" stroke="#4a5568" stroke-width="2"/>
+  <line x1="95" y1="86" x2="198" y2="86" stroke="#4a5568" stroke-width="2"/>
+  <rect x="410" y="30" width="150" height="60" rx="9" fill="#1c2230" stroke="#b692ff"/>
+  <text x="485" y="56" text-anchor="middle" fill="#b692ff" font-size="13" font-weight="700">② 融合 Fusion</text>
+  <text x="485" y="76" text-anchor="middle" fill="#9aa3b2" font-size="11">RRF / 加权 / 归一化</text>
+  <line x1="380" y1="34" x2="408" y2="50" stroke="#4a5568" stroke-width="2"/>
+  <line x1="380" y1="86" x2="408" y2="70" stroke="#4a5568" stroke-width="2"/>
+  <line x1="560" y1="60" x2="588" y2="60" stroke="#4a5568" stroke-width="2"/>
+  <rect x="592" y="30" width="150" height="60" rx="9" fill="#1c2230" stroke="#ffd66b"/>
+  <text x="667" y="56" text-anchor="middle" fill="#ffd66b" font-size="13" font-weight="700">③ 精排 Rerank</text>
+  <text x="667" y="76" text-anchor="middle" fill="#9aa3b2" font-size="11">Cross-Encoder</text>
+  <text x="95" y="130" text-anchor="middle" fill="#9aa3b2" font-size="11.5">各召回 Top-50~200</text>
+  <text x="485" y="130" text-anchor="middle" fill="#9aa3b2" font-size="11.5">合并去重 → Top-100</text>
+  <text x="667" y="130" text-anchor="middle" fill="#9aa3b2" font-size="11.5">→ 最终 Top-10</text>
+  <text x="380" y="170" text-anchor="middle" fill="#4ec9b0" font-size="12.5">💡 粗排要「多而快」（召回优先），精排要「少而准」（精度优先）</text>
+  <text x="380" y="194" text-anchor="middle" fill="#9aa3b2" font-size="11.5">Rerank 虽慢（几十毫秒级），但只对几十~几百条候选跑，总延迟可控</text>
+</svg>
+
 </section>
 
 <section class="card" id="rrf">
-  <h2>RRF：最省心的融合算法</h2>
-  <p><b>RRF（Reciprocal Rank Fusion，倒数排名融合）</b>不需要把两路分数归一化到同一量纲，只看"排名"：</p>
-  <div class="formula">score(x) = Σ_{r in 各路}  1 / (k + rank_r(x))   ，k 常取 60</div>
-  <p>某个文档在两路里排名越靠前（rank 越小），融合分越高。优点：</p>
-  <ul>
-    <li><b>免归一化</b>：稠密分(0~1)和 BM25 分(0~20)量纲不同也能直接融。</li>
-    <li><b>鲁棒</b>：个别路分数异常不影响整体。</li>
-    <li>简单、无超参（除 k）。</li>
-  </ul>
-  <p>另有<b>加权求和</b>：先把各路分数 min-max / z-score 归一化，再 w_d·s_d + w_s·s_s。需调权重，但对"某路更重要"的场景更可控。还有<b>学习排序</b>（Cross-Encoder / LambdaMART）做最终精排，精度最高但成本高。</p>
+  <h2>RRF 倒数排名融合（最推荐）</h2>
+
+<p>RRF（Reciprocal Rank Fusion）是目前最主流、也最省事的融合方式。它<b>完全不看分数，只看排名</b>：</p>
+<div class="formula">RRF_score(d) = Σ 1 / (k + rank_i(d))　　k 通常取 60</div>
+<p>其中 <code>rank_i(d)</code> 是文档 d 在第 i 路检索结果里的排名（从 1 开始）。文档在某路排第 1 → 得 1/61；排第 10 → 得 1/70；没被这路召回 → 得 0。</p>
+<table class="cmp">
+  <tr><th>优点</th><th>说明</th></tr>
+  <tr><td>无需归一化</td><td>BM25 分数是 0~几十的无界值，余弦是 -1~1，量纲完全不同——RRF 只用排名，天然免疫</td></tr>
+  <tr><td>无需调参</td><td>k=60 是论文给出的默认值，绝大多数场景直接用就行</td></tr>
+  <tr><td>鲁棒</td><td>某一路结果质量差也不会毁掉整体</td></tr>
+</table>
+<pre style="background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:12px 14px;overflow:auto;font-size:12.5px;color:var(--text)"><code>def rrf(rank_lists, k=60, top_k=10):
+    # rank_lists: [[doc1, doc2, ...], [doc3, doc1, ...]]
+    scores = {}
+    for lst in rank_lists:
+        for rank, doc in enumerate(lst, start=1):
+            scores[doc] = scores.get(doc, 0) + 1.0 / (k + rank)
+    return sorted(scores, key=scores.get, reverse=True)[:top_k]</code></pre>
+<div class="callout warn">注意：RRF 只用排名意味着<b>丢失了分数差异信息</b>——「第 1 名比第 2 名强很多」和「两者几乎并列」在 RRF 眼里差别很小。如果你的两路分数都<b>可比且可靠</b>，加权融合可能更优（见下节）。</div>
+
 </section>
 
-<section class="card" id="sparse-rep">
-  <h2>稀疏表示不止 BM25</h2>
-  <ul>
-    <li><b>BM25</b>：统计式，确定、快、对关键词强。</li>
-    <li><b>SPLADE</b>：用模型把文档/查询变成"带权重的词表向量"（仍是稀疏），兼顾语义与可解释。</li>
-    <li><b>BM25+（上下文稀疏）</b>：模型生成的稀疏向量，比纯 BM25 更懂语义。</li>
-  </ul>
-  <p>混合检索的"稀疏路"可以是 BM25，也可以是这些模型稀疏向量，后两者效果更好。</p>
+<section class="card" id="weighted">
+  <h2>加权融合（分数归一化后）</h2>
+
+<p>如果想利用分数的绝对差异，用加权融合：</p>
+<div class="formula">score = α · norm(s_dense) + (1-α) · norm(s_sparse)</div>
+<p>关键是<b>必须先归一化</b>，否则量纲不同会一边倒。两种常用归一化：</p>
+<table class="cmp">
+  <tr><th>方法</th><th>公式</th><th>特点</th></tr>
+  <tr><td>Min-Max</td><td>(s - min) / (max - min)</td><td>压到 [0,1]；<b>对离群值敏感</b>，一批里有个超高分会把其他都压扁</td></tr>
+  <tr><td>分数归一（推荐）</td><td>s / max(该批分数)</td><td>简单稳定，但批次间不可比</td></tr>
+</table>
+<div class="callout tip">α 怎么定？经验起点 <b>α = 0.5</b> 左右。若业务偏语义（客服问答、知识库）→ α 调高（0.6~0.7）；若偏精确匹配（代码搜索、商品 SKU、法条）→ α 调低（0.3~0.4）。最好用标注数据扫一遍 α，画 NDCG 曲线选最优。</div>
+
 </section>
 
-<section class="card" id="when">
-  <h2>何时该上混合检索</h2>
-  <ul>
-    <li>知识库含<b>专名、型号、错误码、法律条款编号</b>等——必用。</li>
-    <li>用户常做<b>精确短语</b>搜索——必用。</li>
-    <li>纯开放域闲聊/通用问答——稠密单路通常够。</li>
-  </ul>
-  <div class="callout tip">经验法则：企业知识库 / RAG 生产环境，默认上"稠密 + BM25(RRF 融合)"。它几乎总是比纯向量稳一截，成本却只多一路关键词检索。</div>
-</section>
+<section class="card" id="sparse">
+  <h2>稀疏向量：把 BM25 也变成向量</h2>
 
-<footer>向量检索系列 · <a href="../../../index.html">← 返回 向量数据库</a></footer>
+<p>现代向量库（Qdrant、Milvus 2.4+、Weaviate、Elasticsearch）支持<b>稀疏向量（Sparse Vector）</b>：把 BM25 / SPLADE 的词权重表示成「词项 id → 权重」的高维稀疏向量，和稠密向量存在同一个库里、用同一套接口检索。</p>
+<div class="grid3">
+  <div class="k"><b>BM25 稀疏向量</b><span>词频/逆文档频率算权重，词表大小即维度（几万~几十万维，绝大多数为 0）</span></div>
+  <div class="k"><b>SPLADE / 学习型稀疏</b><span>用神经网络预测词权重，还能<b>扩展出原文本没有的相关词</b>（term expansion）</span></div>
+  <div class="k"><b>优势</b><span>统一存储与检索路径、支持同一套过滤、融合更简单</span></div>
 </div>
 
+</section>
+
+<section class="card" id="rerank">
+  <h2>为什么还要 Rerank</h2>
+
+<p>Rerank（重排序）用 <b>Cross-Encoder</b> 对「查询 + 候选文档」<b>拼在一起</b>做一次完整注意力计算，输出精确相关分。它比双塔 Embedding 准得多，但慢得多——所以只用在候选集的精排上。</p>
+<table class="cmp">
+  <tr><th></th><th>双塔 Bi-Encoder（粗排）</th><th>交叉编码 Cross-Encoder（精排）</th></tr>
+  <tr><td>怎么算</td><td>query 和 doc <b>各自</b>编码成向量，再算相似度</td><td>query 和 doc <b>拼在一起</b>过一遍模型</td></tr>
+  <tr><td>能否离线预计算 doc</td><td><b>能</b>（这是它快的关键）</td><td>不能，每次都要现算</td></tr>
+  <tr><td>速度</td><td>毫秒级 / 百万条</td><td>几十毫秒 / 每条</td></tr>
+  <tr><td>精度</td><td>中</td><td><b>高</b>（能捕捉细粒度交互）</td></tr>
+</table>
+<div class="callout tip">经典组合：<b>混合检索召回 Top-100 → Rerank 精排取 Top-10</b>。Rerank 通常能把 NDCG@10 提升 10~30 个百分点，是 RAG 效果提升性价比最高的一步。</div>
+
+</section>
+
+<section class="card" id="check">
+  <h2>落地检查清单</h2>
+
+<div class="steps">
+  <li>两路检索（稠密 + BM25）各召回 <b>50~200</b> 条候选，别太少</li>
+  <li>融合优先用 <b>RRF（k=60）</b>，零调参、鲁棒</li>
+  <li>若分数可比且想利用分数差异，再用加权融合 + 扫 α</li>
+  <li>融合后接 <b>Rerank</b>，最终取 Top-K</li>
+  <li>用标注集评估 <b>Recall@K 与 NDCG@10</b>，别只看延迟</li>
+  <li>监控「两路结果重合度」——重合极低说明某一路有问题</li>
+  <li>Rerank 有额外延迟预算（几十~一百毫秒），提前和 SLA 对齐</li>
+</div>
+
+</section>
+
+<section class="card" id="qa">
+  <h2>🎯 常见问法与答题要点</h2>
+<div class="qa"><b>Q：为什么有了向量检索还要关键词检索？</b><p>A：因为两者短板互补。向量（稠密）擅长<b>语义相似</b>——同义词、改写、跨语言都能召回，但<b>精确匹配弱</b>：搜「Redis 7.2 release notes」可能召回一堆 Redis 教程却漏掉标题精准匹配的文档；对型号、人名、错误码这类稀有专有名词也表示不准（「error 1045」和「error 1046」向量可能几乎一样）。BM25 关键词检索恰恰相反——字面匹配极准但不懂语义。混合起来召回质量明显优于任何单一路。</p></div>
+<div class="qa"><b>Q：RRF 是什么？为什么推荐它？</b><p>A：RRF（Reciprocal Rank Fusion，倒数排名融合）：<b>score(d) = Σ 1/(k + rank_i(d))</b>，k 通常取 60。推荐它的核心原因是<b>只用排名、不用分数</b>——BM25 分数是 0~几十的无界值、余弦是 -1~1，量纲完全不可比，直接加权会一边倒；而 RRF 天生免疫这个问题，且 k=60 是论文默认值，<b>零调参就能用</b>，鲁棒性也好。代价是丢失了分数差异信息。</p></div>
+<div class="qa"><b>Q：加权融合和 RRF 怎么选？</b><p>A：默认选 <b>RRF</b>（零调参、鲁棒）。只有当你确认两路分数都<b>可靠且可比</b>、并且想利用「第 1 名比第 2 名强很多」这种强度差异时，才用加权融合：<b>先把两路分数归一化</b>（推荐 s/max 或 min-max），再 score = α·norm(dense) + (1-α)·norm(sparse)，α 用标注数据扫一遍选最优（语义型业务 0.6~0.7，精确匹配型 0.3~0.4）。</p></div>
+<div class="qa"><b>Q：Rerank 为什么能显著提升效果？</b><p>A：因为粗排用的是<b>双塔 Bi-Encoder</b>：query 和 doc 各自独立编码成向量再算相似度——doc 向量可以离线预计算（这是快的原因），但 query 和 doc 之间没有细粒度交互，精度有限。Rerank 用 <b>Cross-Encoder</b> 把 query 和 doc 拼在一起过一遍完整模型，能捕捉词级交互，精度高得多。代价是不能预计算、每条要几十毫秒，所以只对几十~几百条候选跑。实践上 Rerank 常能把 NDCG@10 提升 10~30 个百分点。</p></div>
+<div class="qa"><b>Q：混合检索的延迟会翻倍吗？</b><p>A：不会翻倍，但要留预算。两路检索是<b>并行</b>的，所以粗排延迟 ≈ max(向量检索, BM25) 而不是两者之和（通常几十毫秒）。真正额外增加的是 <b>Rerank</b>：对 100 条候选跑 Cross-Encoder 通常要几十到一百多毫秒。总延迟通常仍在 100~200ms 量级，对 RAG 应用完全可接受。可以用「候选数」和「Rerank 模型大小」来调延迟/精度权衡。</p></div>
+<div class="qa"><b>Q：稀疏向量（SPLADE）比 BM25 好在哪？</b><p>A：BM25 只能匹配<b>原文出现过的词</b>。SPLADE 这类学习型稀疏表示用神经网络预测词权重，还能<b>扩展出原文没有但语义相关的词</b>（term expansion）——比如原文写「笔记本」，SPLADE 可能同时给「laptop」「电脑」分配权重。所以它既有关键词检索的精确性和可解释性，又带一点语义泛化能力，效果通常优于 BM25，代价是需要跑模型（比 BM25 慢、需要 GPU 编码）。</p></div>
+<div class="qa"><b>Q：怎么评估混合检索的效果？</b><p>A：两步：①<b>准备标注集</b>——人工标注若干 query 的相关文档（哪怕 100 条也好）；②<b>算指标</b>——粗排阶段看 <b>Recall@K</b>（Top-100 里有没有包含正确文档，决定天花板），最终看 <b>NDCG@10 / MRR</b>（排序质量）。然后做消融：单向量 / 单 BM25 / 混合 / 混合+Rerank 四组对比，能清楚看到每一步的贡献。别只看延迟和 QPS。</p></div>
+</section>
+
+<section class="card" id="rel">
+  <h2>相关页面</h2>
+<div class="rel"><a href="../01-retrieval-foundations/similarity-metrics.html">相似度度量</a><a href="../02-ann-and-indexes/ann-overview.html">ANN 概览</a><a href="../02-ann-and-indexes/vector-index-selection.html">索引选型</a><a href="../03-hybrid-retrieval/rerank-after-retrieval.html">重排序 Rerank</a><a href="../03-hybrid-retrieval/filtered-vector-search.html">带过滤的向量检索</a></div>
+</section>
+<footer>向量检索系列 · <a href="../../../index.html">← 返回 向量数据库</a> · <a href="../../../../../index.html#subjects">知识地图</a></footer>
+</div>
 <script>
 const tocLinks=[...document.querySelectorAll('.toc a')];
 const map=tocLinks.map(a=>document.getElementById(a.getAttribute('href').slice(1)));
@@ -151,12 +242,11 @@ const obs=new IntersectionObserver((entries)=>{
   entries.forEach(e=>{
     if(e.isIntersecting){
       const id=e.target.id;
-      tocLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')===('#'+id)));
+      tocLinks.forEach(a=>a.classList.toggle('active', a.getAttribute('href')==='#'+id));
     }
   });
-},{rootMargin:'-30% 0px -60% 0px'});
-map.forEach(s=>s&&obs.observe(s));
+},{rootMargin:'-80px 0px -70% 0px'});
+map.forEach(sec=>{ if(sec) obs.observe(sec); });
 </script>
-
 </body>
 </html>
