@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qdrant 存储与量化 · 内存估算、payload 落盘与快照备份</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Qdrant 存储与量化</h1>
+  <p>内存账单怎么算出来的？三层存储各自的开关、int8/BQ 的真实压缩比、payload 落盘的代价，以及那个「容器一重建备份就没了」的陷阱。</p>
+  <span class="tag">Qdrant 量化</span><span class="tag">内存估算</span><span class="tag">payload 落盘</span><span class="tag">快照备份</span>
+</header>
+
+<nav><a href="#quant">三种量化与黄金配置组合</a><a href="#memory">内存估算公式与四个规模实例</a><a href="#payload">payload 落盘与索引该建在哪些字段</a><a href="#snapshot">快照备份：唯一的备份机制及其陷阱</a><a href="#content">正文为什么不该进向量库</a><a href="#card">速记卡</a><a href="../02-architecture/qdrant-architecture.html">← 架构</a><a href="../04-distributed-and-sharding/qdrant-cluster.html">集群 →</a></nav>
+
+<main>
+<section id="quant"><h2><span class="n">①</span>三种量化与黄金配置组合</h2><p>Qdrant 的量化支持三种粒度，选择依据不是「哪个压得狠」，而是<b>你的维度、内存缺口和延迟预算</b>。</p><table><tr><th>类型</th><th>配置键</th><th>压缩比（payload）</th><th>默认关重排时的召回</th><th>适用</th></tr><tr><td>标量 int8</td><td><code>scalar: {type: int8}</code></td><td>4×</td><td>很高（几乎无感）</td><td><b>默认首选</b></td></tr><tr><td>二值</td><td><code>binary: {}</code></td><td>32×</td><td>低，必须重排</td><td>维度 ≥ 1024 的高维 embedding</td></tr><tr><td>乘积</td><td><code>product: {compression: x16}</code></td><td>16× 起</td><td>中，需重排</td><td>内存极度紧张</td></tr></table><pre><code>PUT /collections/docs
+{
+  "vectors": {
+    "size": 1024,
+    "distance": "Cosine",
+    "on_disk": true              # 原向量放盘
+  },
+  "quantization_config": {
+    "scalar": {
+      "type": "int8",
+      "quantile": 0.99,          # 裁掉 1% 极端值
+      "always_ram": true         # 量化码常驻内存
+    }
+  },
+  "optimizers_config": { "indexing_threshold_kb": 20000 }
+}</code></pre><div class="note"><code>on_disk: true</code> + <code>always_ram: true</code> 是这套配置的核心组合：<b>原向量在磁盘上占空间，量化码在内存里做粗筛</b>。粗筛拿到的候选再回磁盘取原向量精排。</div></section><section id="memory"><h2><span class="n">②</span>内存估算公式与四个规模实例</h2><p>内存到底要多少？可以用这条式子做一版估算（单位：字节/条）：</p><pre><code>总量 ≈ N × [ 向量本体 + 图邻接表 + payload 均值 + 索引开销 ]
+
+向量本体：
+  FP32        = dim × 4
+  int8 量化码 = dim × 1
+  BQ 量化码   = dim / 8
+图邻接表（HNSW，M 默认 16）：
+  ≈ M × 2 × 4 = 128 B
+payload：
+  按字段类型累加（int 8B、float 8B、小字符串 ~ 几十 B）</code></pre><table><tr><th>规模</th><th>配置</th><th>向量本体</th><th>图</th><th>payload 估</th><th>合计</th></tr><tr><td>100 万 × 768d</td><td>FP32 全内存</td><td>3.07 GB</td><td>0.13 GB</td><td>0.2 GB</td><td>≈ 3.4 GB</td></tr><tr><td>100 万 × 768d</td><td>int8 常驻 + 原向量落盘</td><td>0.77 GB</td><td>0.13 GB</td><td>0.2 GB</td><td>≈ 1.1 GB</td></tr><tr><td>1000 万 × 768d</td><td>int8 常驻 + 原向量落盘</td><td>7.7 GB</td><td>1.3 GB</td><td>2 GB</td><td>≈ 11 GB</td></tr><tr><td>1000 万 × 1536d</td><td>BQ 常驻 + 原向量落盘</td><td>1.9 GB</td><td>1.3 GB</td><td>2 GB</td><td>≈ 5.2 GB</td></tr></table><div class="danger">第二条到第三条的对比值得注意：<b>从 100 万涨到 1000 万，内存涨了 10 倍</b>，但图开销成了不可忽视的大头（1.3 GB）。如果还想压，只能降 M 或者换 IVF 体系 —— 这时候「量化已经没得压了」是正常的。</div></section><section id="payload"><h2><span class="n">③</span>payload 落盘与索引该建在哪些字段</h2><p>Qdrant 的 payload 默认落盘（<code>on_disk_payload</code> 在较新版本默认 true），这意味着<b>每个返回结果的 payload 都要读盘</b>。这个开关的取舍很实际：</p><table><tr><th>场景</th><th>建议</th><th>理由</th></tr><tr><td>结果只需 id + score</td><td><code>with_payload: false</code></td><td>免掉全部读盘开销，最快</td></tr><tr><td>结果要返回小 payload</td><td>默认落盘即可</td><td>OS page cache 会缓存热点，代价可接受</td></tr><tr><td>payload 大（长文本、base64）</td><td><b>务必落盘</b></td><td>进内存会直接吃光 RAM</td></tr><tr><td>过滤字段频繁</td><td><b>必须建 payload 索引</b></td><td>否则过滤退化为全段扫描</td></tr></table><pre><code># 建 payload 索引（过滤前必做）
+PUT /collections/docs/index?wait=true
+{
+  "field_name": "tenant_id",
+  "field_schema": "keyword"      # keyword 适合精确匹配
+}
+# 数值范围过滤用 integer / float
+# 全文检索用 text（会建倒排 + 分词）</code></pre><div class="warn">只在 <b>要过滤的字段</b>上建索引。payload 索引本身要占内存和写入时间，给 20 个字段全建索引会让写入吞吐掉一个量级。</div></section><section id="snapshot"><h2><span class="n">④</span>快照备份：唯一的备份机制及其陷阱</h2><p>快照（snapshot）是 Qdrant 唯一的备份机制，也是最容易在生产上翻车的一环 —— 它<b>落盘在本地</b>，不会自动上传云存储。</p><pre><code># 创建快照
+POST /collections/docs/snapshots
+# → result.name: docs-2026-10-23-12-00-00.snapshot
+
+# 下载（务必拉到外部存储！）
+GET /collections/docs/snapshots/docs-2026-10-23-12-00-00.snapshot
+
+# 恢复
+PUT /collections/docs/snapshots/recover
+{ "location": "file:///qdrant/snapshots/docs-2026-10-23-12-00-00.snapshot" }
+
+# 全量（整个存储）快照
+POST /snapshots</code></pre><div class="danger">默认快照保存在容器内 <code>/qdrant/snapshots</code>。<b>容器重建 = 备份一起没</b>。必须配一个定时任务把快照拉到 S3/OSS，并定期做恢复演练 —— 没演练过的备份等于没有备份。</div></section><section id="content"><h2><span class="n">⑤</span>正文为什么不该进向量库</h2><p>长文本字段（原文 chunk）是向量库最隐蔽的内存杀手：</p><table><tr><th>内容</th><th>单条大小</th><th>100 万条占用</th><th>建议</th></tr><tr><td>id + 短标签</td><td>~50 B</td><td>50 MB</td><td>可进内存</td></tr><tr><td>标题 + 100 字摘要</td><td>~400 B</td><td>400 MB</td><td>落盘</td></tr><tr><td>完整 chunk 正文（1000 字）</td><td>~3 KB</td><td>3 GB</td><td><b>不要存向量库</b></td></tr><tr><td>整篇文档 / base64 附件</td><td>数十 KB 起</td><td>数十 GB</td><td>存对象存储，库里只留 key</td></tr></table><div class="lead">向量库里只该存<b>「需要在过滤或排序里用到的标量」+「指回原始数据的主键」</b>。正文放对象存储或业务库，检索拿到 id 后再回表 —— 这条纪律能省掉后面 80% 的内存麻烦。</div></section><section id="card"><h2><span class="n">⑥</span>速记卡</h2><div class="grid2"><div class="card"><h4>三种量化</h4><p>scalar 4× / binary 32× / product 16×+。默认选 scalar。</p></div><div class="card"><h4>黄金组合</h4><p><code>on_disk: true</code> + <code>always_ram: true</code>：原向量落盘、量化码常驻。</p></div><div class="card"><h4>图开销</h4><p>M=16 约 128 B/条，千万级时是 GB 级大头。</p></div><div class="card"><h4>payload 默认落盘</h4><p>返回 payload 要读盘，用 <code>with_payload: false</code> 可免。</p></div><div class="card"><h4>过滤必建索引</h4><p>只给真要过滤的字段建，全建会拖垮写入。</p></div><div class="card"><h4>快照要外传</h4><p>默认只落本地盘，容器重建即丢失。</p></div><div class="card"><h4>正文别进库</h4><p>1000 字 chunk × 100 万 = 3 GB，存对象存储。</p></div><div class="card"><h4>量化后必须重排</h4><p><code>rescore: true</code> + <code>oversampling 2–3</code>。</p></div></div></section>
+</main>
+
+<footer>
+  内存估算的纪律：<b>先算向量本体，再加图，再加 payload，最后乘副本数</b>。四步都算完，才不会出现「按向量大小买了机器结果 OOM」。<br>延伸：<a href="../02-architecture/qdrant-architecture.html">Qdrant 架构</a> · <a href="../../01-foundations/01-index-and-retrieval/04-quantization/vector-quantization.html">量化原理</a>
+</footer>
+
+</body>
+</html>

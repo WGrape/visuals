@@ -73,6 +73,10 @@
   <a href="#filter">④ 过滤检索</a>
   <a href="#use">⑤ 上手示例</a>
   <a href="#vs">⑥ 与 Milvus 对比</a>
+  <a href="#l1">⑦ 概念与判定</a>
+  <a href="#l2">⑧ 参数与命令</a>
+  <a href="#l3">⑨ 排障与边界</a>
+  <a href="#l4">⑩ 原理与取舍</a>
 </nav>
 <main>
 
@@ -310,6 +314,38 @@ client.create_payload_index("docs", field_name="year", field_schema="integer")</
     两者都开源，Qdrant 的本地模式（无需服务端）也非常适合原型开发。
   </div>
 </section>
+
+<section id="l1"><h2><span class="n">⑦</span>第一层 · 概念与判定：什么场景该选 Qdrant</h2><p>Qdrant 的定位非常清晰：<b>用「一个进程」把向量检索做到位，不引入分布式复杂度</b>。选它的判据因此也很清晰 —— 你是否愿意用「单机上限」换「极低运维成本」。</p><table><tr><th>场景</th><th>选 Qdrant 的理由</th><th>不选的理由</th></tr><tr><td>向量 100 万 – 3000 万</td><td>单机 + 量化可覆盖，延迟个位数毫秒</td><td>—</td></tr><tr><td>团队没有专职 SRE</td><td>单二进制，无 etcd/对象存储/MQ 依赖</td><td>—</td></tr><tr><td>需要复杂的 payload 过滤</td><td>filterable HNSW，过滤与向量检索深度整合</td><td>—</td></tr><tr><td>需要 Rust/嵌入式生态</td><td>可作库使用，也可独立部署</td><td>—</td></tr><tr><td>向量 &gt; 1 亿</td><td>—</td><td>分片能力弱于 Milvus 存算分离</td></tr><tr><td>需要 DISKANN 类磁盘索引</td><td>—</td><td>Qdrant 以内存 HNSW 为主</td></tr><tr><td>已有 Postgres 且规模不大</td><td>—</td><td>pgvector 省一整套系统</td></tr></table><div class="lead ok">一句话判定：<b>「向量规模在千万级、想少运维、要强过滤」—— 选 Qdrant。「已经亿级、需要按角色弹性」—— 选存算分离的 Milvus。</b></div></section>
+<section id="l2"><h2><span class="n">⑧</span>第二层 · 参数 · 命令 · 量化：最小可用配置</h2><p>Qdrant 的配置全部走 HTTP API，没有 schema 迁移概念。下面是最小可用的一套（含量化与 payload 索引，这是生产必须的两项）。</p><pre><code># 1) 起服务：单条命令，无外部依赖
+docker run -p 6333:6333 -p 6334:6334 \
+  -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+
+# 2) 建集合：量化码常驻内存 + 原向量落盘
+PUT /collections/docs
+{
+  "vectors": { "size": 768, "distance": "Cosine", "on_disk": true },
+  "quantization_config": {
+    "scalar": { "type": "int8", "quantile": 0.99, "always_ram": true }
+  }
+}
+
+# 3) 过滤字段建 payload 索引（不建就是全段扫描）
+PUT /collections/docs/index?wait=true
+{ "field_name": "tenant_id", "field_schema": "keyword" }
+
+# 4) 写入
+PUT /collections/docs/points?wait=true
+{ "points": [{ "id": 1, "vector": [...], "payload": {"tenant_id": "t1"} }] }
+
+# 5) 查询：量化必须开 rescore
+POST /collections/docs/points/search
+{
+  "vector": [...], "limit": 10,
+  "filter": { "must": [{ "key": "tenant_id", "match": { "value": "t1" } }] },
+  "params": { "quantization": { "rescore": true, "oversampling": 2.0 } }
+}</code></pre><table><tr><th>配置项</th><th>默认值</th><th>说明</th><th>影响</th></tr><tr><td><code>hnsw_config.m</code></td><td>16</td><td>图邻居数，建集合时可设</td><td>内存与召回</td></tr><tr><td><code>hnsw_config.ef_construct</code></td><td>100</td><td>构建时的搜索宽度</td><td>建索引时间</td></tr><tr><td><code>indexing_threshold_kb</code></td><td><b>20000</b></td><td>超过 20 MB 未索引数据才建 HNSW</td><td><b>导入后多久变快</b></td></tr><tr><td><code>on_disk_payload</code></td><td>true（较新版本）</td><td>payload 是否落盘</td><td>返回字段延迟</td></tr><tr><td><code>quantization.scalar.quantile</code></td><td>0.99</td><td>裁掉 1% 极端值</td><td>抗离群维度</td></tr><tr><td><code>oversampling</code></td><td>2.0</td><td>粗筛后放大倍数</td><td>召回与延迟</td></tr></table><div class="lead warn"><b>压测前必须等索引建完</b>：<code>GET /collections/docs</code> 里的 <code>indexed_vectors_count</code> 追上 <code>points_count</code>，否则你测到的是暴力扫描的性能，会得出完全错误的结论。</div></section>
+<section id="l3"><h2><span class="n">⑨</span>第三层 · 排障与边界：高频坑与失效模式</h2><p>Qdrant 的故障几乎都能归到三类：<b>异步优化的时序</b>、<b>少建了某个索引</b>、<b>容器化没做持久化</b>。</p><table><tr><th>现象</th><th>根因</th><th>正确做法</th></tr><tr><td>导入后查询要几秒</td><td>优化器还没建 HNSW，数据在未索引缓冲被暴力扫</td><td>等 <code>indexed_vectors_count</code> 追平后再测</td></tr><tr><td>过滤查询极慢</td><td>过滤字段没建 payload 索引</td><td>对<b>要过滤的字段</b>建索引，别给全字段建</td></tr><tr><td>开了量化内存没降</td><td>原向量仍全量在内存（<code>on_disk</code> 没开）</td><td><code>vectors.on_disk: true</code> + 量化码 <code>always_ram: true</code></td></tr><tr><td>量化后召回掉了</td><td>没开 <code>rescore</code>，或 <code>oversampling</code> 太小</td><td>开 rescore，oversampling 从 2 起调</td></tr><tr><td>删除后内存/磁盘不降</td><td>标记删除，vacuum 异步触发</td><td>调低 <code>deleted_threshold</code>，耐心等</td></tr><tr><td><b>容器重启数据全没</b></td><td><b>存储目录没挂载到持久卷</b></td><td>必须 <code>-v host:/qdrant/storage</code>，这是第一坑</td></tr><tr><td><b>备份跟着一起丢了</b></td><td>快照默认只落容器内 <code>/qdrant/snapshots</code></td><td>定时把快照拉到 S3/OSS 并做恢复演练</td></tr><tr><td>刚写入的点搜不到</td><td>读写分离/副本异步，最终一致</td><td>写后读别依赖向量库；用返回的主键回表</td></tr></table><div class="lead warn"><b>边界</b>：Qdrant 不是关系库 —— 没有 JOIN、没有跨集合事务、payload 不支持复杂聚合分析。它的职责边界就是「按向量 + 条件取候选点」，拿到 id 之后的一切仍归业务库。</div></section>
+<section id="l4"><h2><span class="n">⑩</span>第四层 · 原理与取舍：为什么敢做成单进程</h2><p>Milvus 用五个角色 + 三个外部依赖换扩展性，Qdrant 走的是完全相反的路：<b>把段（segment）模型、WAL、优化器全部收进一个进程，用 Rust 把单机性能榨到极致</b>。这个选择能成立，前提是它对「单机能扛多大」有明确判断 —— 靠量化与磁盘化把千万级压进一台机器。</p><p>它的核心机制是<b>「段 + 异步优化器」</b>：新数据先进入带 WAL 保护的未索引缓冲，读写都不阻塞；当某个段的未索引数据超过阈值（默认 20 MB），后台优化器才为它构建 HNSW。这个设计带来两个直接后果 —— 写入极快，但<b>数据「什么时候变快」不由你控制</b>。理解这一点，就能理解它所有的时序类「异常」。</p><table><tr><th>设计选择</th><th>收益</th><th>代价</th></tr><tr><td>单进程、零外部依赖</td><td>部署与运维成本极低；故障面小</td><td>扩展能力上限低于存算分离架构</td></tr><tr><td>段 + 异步优化器</td><td>写入不被建索引阻塞；吞吐高</td><td>导入后一段时间内查询慢（未索引段被暴力扫）</td></tr><tr><td>filterable HNSW</td><td>过滤与向量检索在同一张图上协同，选择率不极端时表现稳定</td><td>实现复杂；极端选择率下仍需特殊处理</td></tr><tr><td>三层存储各自可落盘</td><td>能按预算精细控制内存与延迟的交换</td><td>配置项多，配错会「省了内存但慢了十倍」</td></tr><tr><td>最终一致读</td><td>多副本读吞吐高、实现简单</td><td>写后读不可靠，需要在业务层兜住</td></tr></table><div class="note">一句话收束：<b>Qdrant 的取舍是「用单机极限换零运维复杂度」</b>。它在千万级区间几乎无可替代；超过这个区间，才轮到存算分离架构发挥价值。</div></section>
 
 </main>
 <footer>

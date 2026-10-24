@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weaviate 架构与索引 · Schema-first、双轨索引与两个反直觉默认值</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Weaviate 架构与索引</h1>
+  <p>Schema-first 加内置向量化，让 Weaviate 上手极快也耦合较深。两个反直觉默认值（flatSearchCutoff 与动态 ef）会让你误判它的真实性能。</p>
+  <span class="tag">Weaviate 架构</span><span class="tag">Schema-first</span><span class="tag">flatSearchCutoff</span><span class="tag">动态 ef</span>
+</header>
+
+<nav><a href="#arch">Schema-first 与六个层次</a><a href="#defaults">两个反直觉默认值</a><a href="#deploy">部署形态怎么选</a><a href="#scale">分片与副本：desiredCount 的语义</a><a href="#compare">三产品选型速查</a><a href="#card">速记卡</a><a href="../00-overview/weaviate-explained.html">← 概览</a><a href="../01-hybrid-retrieval/weaviate-hybrid-search-fusion.html">混合检索</a></nav>
+
+<main>
+<section id="arch"><h2><span class="n">①</span>Schema-first 与六个层次</h2><p>Weaviate 与 Milvus、Qdrant 最大的理念差异是<b>Schema-first + 内置向量化</b>：它假定「你告诉我要存什么对象、用哪个模型向量化」，剩下的向量生成、存入、检索它全包。</p><p>这个理念带来两个直接后果：<b>上手极快</b>（不用自己调 embedding API），以及<b>耦合较深</b>（换模型意味着全量重算，向量化在写入路径上）。</p><table><tr><th>层</th><th>组成</th><th>说明</th></tr><tr><td>接入层</td><td>REST / GraphQL / gRPC</td><td><b>GraphQL 是主接口</b>，与另两家风格不同</td></tr><tr><td>Schema 层</td><td>Class（≈ 表）+ Property（≈ 字段）+ 交叉引用</td><td>写入前必须定义 Schema（除非开 auto-schema）</td></tr><tr><td>索引层（双轨）</td><td>HNSW 向量索引 + 倒排索引（BM25、过滤）</td><td>同一个查询可同时用两条索引</td></tr><tr><td>存储层</td><td><b>LSM-based</b> 存储（对象 + 倒排）+ HNSW 文件</td><td>写多读多都走 LSM</td></tr><tr><td>模块层</td><td><code>text2vec-*</code> / <code>reranker-*</code> / <code>generative-*</code></td><td>可插拔，编译进镜像或运行时配置</td></tr><tr><td>分布式</td><td>sharding（默认 1）+ replication factor</td><td>多租户走 tenant = shard 模型</td></tr></table></section><section id="defaults"><h2><span class="n">②</span>两个反直觉默认值</h2><p>Weaviate 有两个<b>反直觉的默认值</b>，不知道就会误判性能表现：</p><table><tr><th>参数</th><th>默认值</th><th>含义</th><th>为什么重要</th></tr><tr><td><code>flatSearchCutoff</code></td><td><b>40000</b></td><td>对象数低于此阈值时<b>不走 HNSW，直接暴力扫描</b></td><td>小数据集上「改 ef 没反应」是正常的 —— 它在暴力扫</td></tr><tr><td><code>ef</code>（查询）</td><td><b>-1</b>（动态）</td><td>按结果数自动算 ef，受 <code>dynamicEfMin</code>(100) / <code>dynamicEfMax</code>(500) / <code>dynamicEfFactor</code>(8) 约束</td><td>不显式设置时 ef 是自动的，手工调参前先关掉动态</td></tr></table><pre><code>{
+  "class": "Doc",
+  "vectorIndexConfig": {
+    "distance": "cosine",
+    "maxConnections": 32,          // 即 HNSW 的 M
+    "efConstruction": 128,
+    "ef": -1,                       // -1 = 动态 ef
+    "dynamicEfMin": 100,
+    "dynamicEfMax": 500,
+    "dynamicEfFactor": 8,
+    "flatSearchCutoff": 40000,      // 小于此对象数走暴力扫
+    "vectorCacheMaxObjects": 1000000000000,
+    "skip": false
+  }
+}</code></pre><div class="warn">做性能对比时，把 <code>flatSearchCutoff</code> 设成 0 才能强制走 HNSW，否则在 3 万条数据上你会得出「Weaviate 的 HNSW 参数没用」的错误结论。</div></section><section id="deploy"><h2><span class="n">③</span>部署形态怎么选</h2><p>Weaviate 的运维复杂度高于单机版 Qdrant，但低于分布式 Milvus。需要关心的组件就三个：Weaviate 自身、模块依赖的外部服务（如 embedding API）、以及对象存储（备份用）。</p><table><tr><th>部署形态</th><th>适用</th><th>说明</th></tr><tr><td>单容器 / 二进制</td><td>开发、中小规模</td><td>默认配置开箱即用</td></tr><tr><td>Docker Compose</td><td>中小生产</td><td>官方提供带模块的组合（如 Weaviate + transformers）</td></tr><tr><td>Kubernetes（Helm）</td><td>中大生产</td><td>官方 Helm chart，支持多副本</td></tr><tr><td>Weaviate Cloud</td><td>不想运维</td><td>托管，按用量计费</td></tr></table></section><section id="scale"><h2><span class="n">④</span>分片与副本：desiredCount 的语义</h2><p>Weaviate 的扩展单位是 shard 和 replica，与 Qdrant 类似但接口不同：</p><pre><code>{
+  "class": "Doc",
+  "shardingConfig": {
+    "desiredCount": 2
+  },
+  "replicationConfig": {
+    "factor": 2
+  },
+  "vectorIndexConfig": { "distance": "cosine" }
+}</code></pre><div class="note"><code>desiredCount</code> 是「期望分片数」，实际分片数会按集群节点数向上取整 —— 所以 3 节点集群里设 2，实际可能得到更多分片。这一点和 Qdrant 的「精确分片数」语义不同。</div></section><section id="compare"><h2><span class="n">⑤</span>三产品选型速查</h2><p>三个产品都摸过之后，可以用这张表快速判断：</p><table><tr><th>你的需求</th><th>更合适</th><th>原因</th></tr><tr><td>不想自己调 embedding，想「传文本就能搜」</td><td><b>Weaviate</b></td><td>内置 text2vec 模块，Schema 里声明即可</td></tr><tr><td>需要 GraphQL + 强 Schema 约束</td><td><b>Weaviate</b></td><td>Schema-first 是它的核心设计</td></tr><tr><td>要极致性能与低运维，团队熟 Rust</td><td>Qdrant</td><td>单二进制、段模型简单直接</td></tr><tr><td>数据往亿级走、要按角色扩</td><td>Milvus</td><td>存算分离，各角色独立扩展</td></tr><tr><td>已在 K8s 体系、要统一可观测</td><td>Milvus / Weaviate</td><td>两者都有成熟的 Helm 生态</td></tr><tr><td>要自带向量、完全掌控 embedding</td><td>Qdrant / Milvus</td><td>都支持直接写向量，无强制向量化</td></tr></table></section><section id="card"><h2><span class="n">⑥</span>速记卡</h2><div class="grid2"><div class="card"><h4>核心理念</h4><p>Schema-first + 内置向量化：传文本即可搜。</p></div><div class="card"><h4>代价</h4><p>向量化在写入路径上，换模型 = 全量重算。</p></div><div class="card"><h4>双轨索引</h4><p>HNSW + 倒排（BM25/过滤），一次查询可并用。</p></div><div class="card"><h4>反直觉默认①</h4><p><code>flatSearchCutoff=40000</code>：小数据直接暴力扫。</p></div><div class="card"><h4>反直觉默认②</h4><p><code>ef=-1</code>：动态 ef，受 min/max/factor 约束。</p></div><div class="card"><h4>主接口</h4><p>GraphQL（不是 REST 优先，这点与另两家不同）。</p></div><div class="card"><h4>分片语义</h4><p><code>desiredCount</code> 是期望值，实际按节点数取整。</p></div><div class="card"><h4>选型一句话</h4><p>想省 embedding 功夫选它；想极致性能选 Qdrant；想亿级选 Milvus。</p></div></div></section>
+</main>
+
+<footer>
+  Weaviate 的调参前提是<b>先搞清它在走哪条索引</b>：对象数低于 40000 时它根本不走 HNSW，此时调 ef 是白费力气。<br>延伸：<a href="../00-overview/weaviate-explained.html">Weaviate 原理</a> · <a href="../03-vectorizer-and-modules/weaviate-vectorizer-modules.html">向量化模块</a>
+</footer>
+
+</body>
+</html>

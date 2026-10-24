@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weaviate 多租户 · tenant 状态机、冷热分层与选型边界</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Weaviate 多租户</h1>
+  <p>tenant 就是独立 shard，漏写条件会报错而不是越权 —— 这是它比 payload 过滤更安全的地方。但冷租户激活要数十秒，十万级 tenant 也有硬上限。</p>
+  <span class="tag">Weaviate 多租户</span><span class="tag">tenant 状态机</span><span class="tag">冷热分层</span><span class="tag">隔离粒度</span>
+</header>
+
+<nav><a href="#options">三种隔离方案对比</a><a href="#states">tenant 状态机与内存释放</a><a href="#coldstart">激活代价与冷热分层的正确姿势</a><a href="#choose">按租户数与数据量选型</a><a href="#card">速记卡</a><a href="../02-architecture/weaviate-architecture.html">← 架构</a><a href="../../02-milvus/08-multi-tenancy/milvus-multi-tenancy.html">Milvus 多租户</a></nav>
+
+<main>
+<section id="options"><h2><span class="n">①</span>三种隔离方案对比</h2><p>Weaviate 的多租户实现是三个产品里最「彻底」的：<b>一个 tenant 就是一个独立 shard</b>，物理上住在各自的段里，不存在「过滤条件写漏就串数据」的风险。</p><table><tr><th>方案</th><th>隔离级别</th><th>开销</th><th>适用</th></tr><tr><td><b>tenant（原生多租户）</b></td><td>物理隔离（独立 shard）</td><td>每 tenant 有固定开销，适合中大规模租户</td><td><b>B2B SaaS 首选</b></td></tr><tr><td>单租户 + payload 过滤</td><td>逻辑隔离</td><td>最低</td><td>租户数极大（10 万+）、单租户数据极少</td></tr><tr><td>每租户一个 Class</td><td>物理隔离（独立 collection 级）</td><td>最高</td><td>极少的大客户、需独立配置</td></tr></table></section><section id="states"><h2><span class="n">②</span>tenant 状态机与内存释放</h2><p>Tenant 有明确的状态机，理解状态才知道内存什么时候被释放：</p><table><tr><th>状态</th><th>含义</th><th>内存</th><th>怎么进入</th></tr><tr><td><code>ACTIVE</code></td><td>正常服务</td><td>已加载</td><td>创建或激活</td></tr><tr><td><code>INACTIVE</code></td><td>保留数据但不接受查询</td><td>释放</td><td>API 置为 inactive</td></tr><tr><td><code>OFFLOADED</code></td><td>数据在冷存储，需先加载</td><td>未加载</td><td>长时间不活跃自动降级（可配）</td></tr></table><pre><code># 创建租户
+POST /v1/schema/Doc/tenants
+[{ "name": "tenant_a" }, { "name": "tenant_b" }]
+
+# 查询时指定租户（必须）
+GET /v1/objects?class=Doc&amp;tenant=tenant_a
+
+# GraphQL 里也要带
+{ Get { Doc(tenant: "tenant_a", limit: 5) { content } } }
+
+# 停用（释放内存）
+PUT /v1/schema/Doc/tenants
+[{ "name": "tenant_a", "activityStatus": "INACTIVE" }]</code></pre><div class="warn">忘记带 <code>tenant</code> 参数会直接报错（这其实是好事 —— <b>报错好过静默跨租户</b>）。对比 Qdrant 的 payload 过滤方案，忘记写条件不会报错，只会越权。这是 Weaviate 多租户的核心优势。</div></section><section id="coldstart"><h2><span class="n">③</span>激活代价与冷热分层的正确姿势</h2><p>OFFLOADED / INACTIVE 是省内存的利器，但激活是<b>有延迟的重操作</b> —— 这正是「冷租户」方案在体验上的代价。</p><table><tr><th>操作</th><th>耗时量级</th><th>对用户的影响</th></tr><tr><td>ACTIVE → INACTIVE</td><td>秒级</td><td>查询立刻失败（应提前从路由摘除）</td></tr><tr><td>OFFLOADED → ACTIVE</td><td><b>取决于数据量，可能数十秒到分钟级</b></td><td>首个请求超时；需预热</td></tr><tr><td>新建 tenant</td><td>毫秒级</td><td>无</td></tr></table><div class="lead">冷热分层的前提是<b>能预判谁要热起来</b>。登录即触发异步激活 + 前端 loading 兜底，或者按租户活跃度定时预热 —— 直接把冷租户丢给用户第一请求，必然超时。</div></section><section id="choose"><h2><span class="n">④</span>按租户数与数据量选型</h2><p>按租户数与单租户数据量两个维度选型，比按「哪个高级」选更靠谱：</p><table><tr><th>租户数</th><th>单租户数据</th><th>推荐</th><th>理由</th></tr><tr><td>&lt; 100</td><td>大（十万级以上）</td><td>每租户一个 Class 或 tenant，配独立资源</td><td>隔离彻底，成本可控</td></tr><tr><td>100 – 1 万</td><td>中</td><td><b>tenant</b></td><td>Weaviate 的设计甜点区</td></tr><tr><td>1 万 – 10 万</td><td>小</td><td>tenant + 冷热分层</td><td>大量租户需卸载冷数据</td></tr><tr><td>&gt; 10 万</td><td>极小（数百条）</td><td>单 Class + payload 过滤</td><td>shard 数量过多会让元数据管理爆炸</td></tr></table><div class="danger">每个 tenant 一个 shard 不是没有代价：<b>shard 数量过多会显著拖慢集群元数据操作和启动时间</b>。十万级 tenant 的场景不要硬套原生多租户。</div></section><section id="card"><h2><span class="n">⑤</span>速记卡</h2><div class="grid2"><div class="card"><h4>实现方式</h4><p>tenant = 独立 shard，物理隔离。</p></div><div class="card"><h4>核心优势</h4><p>查询必带 tenant，<b>漏写会报错而不是越权</b>。</p></div><div class="card"><h4>三种状态</h4><p>ACTIVE / INACTIVE / OFFLOADED，后两者释放内存。</p></div><div class="card"><h4>激活代价</h4><p>OFFLOADED → ACTIVE 可能数十秒，需预热或异步。</p></div><div class="card"><h4>甜点区</h4><p>100 – 1 万租户、单租户中等数据量。</p></div><div class="card"><h4>上限警告</h4><p>10 万+ tenant 会让元数据与启动变慢，改用过滤。</p></div><div class="card"><h4>vs Qdrant</h4><p>Qdrant 靠 payload 过滤，需 SDK 层强制注入条件。</p></div><div class="card"><h4>冷热分层</h4><p>必须能预判热租户，不能靠第一请求硬扛。</p></div></div></section>
+</main>
+
+<footer>
+  多租户选型的本质是<b>在「隔离强度」和「shard 数量」之间找平衡</b>。租户越多越不能靠物理隔离，越要注意越权。<br>延伸：<a href="../03-vectorizer-and-modules/weaviate-vectorizer-modules.html">向量化模块</a> · <a href="../../02-milvus/08-multi-tenancy/milvus-multi-tenancy.html">Milvus 多租户对比</a>
+</footer>
+
+</body>
+</html>

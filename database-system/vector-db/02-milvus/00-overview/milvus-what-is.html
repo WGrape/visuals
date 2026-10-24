@@ -78,6 +78,10 @@
   <a href="#prob">⑤ 解决什么问题</a>
   <a href="#scene">⑥ 应用场景</a>
   <a href="#cmp">⑦ 对比其他数据库</a>
+  <a href="#l1">⑧ 概念与判定</a>
+  <a href="#l2">⑨ 参数与命令</a>
+  <a href="#l3">⑩ 排障与边界</a>
+  <a href="#l4">⑪ 原理与取舍</a>
 </nav>
 
 <main>
@@ -244,6 +248,34 @@ res = client.search(<span class="str">"docs"</span>, data=[query_vec], anns_fiel
   </table>
   <div class="note">一句话选型：<b>业务数据用 MySQL，全文搜索用 ES，海量向量相似检索用 Milvus</b>。三者常常搭配——MySQL 存权威业务数据，Milvus 存其向量副本专做语义召回，ES 做关键词检索，最后在应用层做融合。</div>
 </section>
+
+<section id="l1"><h2><span class="n">⑧</span>第一层 · 概念与判定：什么时候该用 Milvus</h2><p>判断标准不是「它功能多」，而是<b>你的约束条件是否真的需要存算分离</b>。下面这张表左边一列是「信号」，出现任意两条以上，Milvus 才是合理选择。</p><table><tr><th>信号</th><th>为什么需要 Milvus</th><th>不需要时的替代</th></tr><tr><td>向量条数 &gt; 1000 万</td><td>单机内存装不下索引，必须水平扩展</td><td>pgvector / Qdrant 单机</td></tr><tr><td>需要<b>独立扩展查询层</b></td><td>读写负载差异大，存算分离才划算</td><td>单机加副本</td></tr><tr><td>需要多种索引并存并随时切换</td><td>FLAT/IVF/HNSW/DISKANN/GPU 索引齐全</td><td>Qdrant 以 HNSW 为主</td></tr><tr><td>需要 DISKANN 这类磁盘索引</td><td>亿级放不进内存</td><td>pgvector 无此能力</td></tr><tr><td>需要成熟的多租户隔离方案</td><td>五种隔离粒度 + 资源组</td><td>Weaviate tenant / Qdrant 过滤</td></tr><tr><td>已有 K8s 与专职 SRE</td><td>多组件可以被运维体系吸收</td><td>托管服务</td></tr></table><div class="lead">反向信号同样重要：<b>向量 &lt; 100 万、已在用 Postgres、没有专职运维</b> —— 任意一条成立，引入 Milvus 的净收益都可能是负的。它带来 4 个以上的服务组件和一套新的运维体系，这个成本必须被收益覆盖。</div></section>
+<section id="l2"><h2><span class="n">⑨</span>第二层 · 参数 · 命令 · 量化：最小可用配置</h2><p>从零到一个能查的 Collection，最短路径是这六步。关键在于<b>索引参数与度量方式在创建时就定了</b>，之后只能重建。</p><pre><code>from pymilvus import connections, Collection, CollectionSchema, FieldSchema, DataType, utility
+
+connections.connect(host="localhost", port="19530")
+
+fields = [
+    FieldSchema("id", DataType.INT64, is_primary=True),
+    FieldSchema("vec", DataType.FLOAT_VECTOR, dim=768),
+    FieldSchema("tenant", DataType.VARCHAR, max_length=64),
+    FieldSchema("text", DataType.VARCHAR, max_length=4096),
+]
+col = Collection("docs", CollectionSchema(fields))
+
+# 索引参数：M 与 efConstruction 建索引后不可改
+col.create_index("vec", {
+    "index_type": "HNSW",
+    "metric_type": "COSINE",
+    "params": {"M": 16, "efConstruction": 200},
+})
+# 标量字段也要建索引，否则过滤会走全扫
+col.create_index("tenant", {"index_type": "INVERTED"})
+col.load()
+
+# 查询：ef 是查询期的旋钮，可以随时改
+col.search([q], "vec", {"metric_type": "COSINE", "params": {"ef": 64}}, limit=10)</code></pre><table><tr><th>配置项</th><th>默认值</th><th>说明</th><th>能否事后改</th></tr><tr><td><code>metric_type</code></td><td>必须显式指定</td><td>COSINE / L2 / IP；<b>建索引时定死</b></td><td>❌ 只能重建</td></tr><tr><td><code>index_type</code> 与 <code>M</code> / <code>efConstruction</code></td><td>AUTOINDEX（云上）</td><td>决定索引结构与内存</td><td>❌ 只能重建</td></tr><tr><td>查询期 <code>ef</code> / <code>nprobe</code></td><td>8 / 依索引</td><td>召回与延迟的直接旋钮</td><td>✅ 每次查询可改</td></tr><tr><td><code>consistency_level</code></td><td><b>Bounded</b></td><td>其余为 Strong / Session / Eventually</td><td>✅ 可改</td></tr><tr><td><code>shards_num</code></td><td><b>2</b></td><td>决定写入并行度</td><td>❌ 建集合时定</td></tr><tr><td>索引内存估算</td><td>—</td><td>N × dim × 4 B × （1 + 图开销约 1.1~1.5）</td><td>—</td></tr></table><div class="warn">两个最容易漏的动作：<b>建完索引必须 <code>load()</code></b>，否则查询报 collection not loaded；<b>过滤字段必须单独建标量索引</b>，否则带过滤的查询会退化成全段扫描。</div></section>
+<section id="l3"><h2><span class="n">⑩</span>第三层 · 排障与边界：高频坑与失效模式</h2><p>下面六个坑覆盖了新手期八成的「Milvus 不好用」体验。注意它们几乎都不是引擎缺陷，而是<b>异步设计带来的时序假设错误</b>。</p><table><tr><th>现象 / 报错</th><th>根因</th><th>正确做法</th></tr><tr><td><code>collection not loaded</code></td><td>建索引后没 load，或重启后未自动加载</td><td>显式 <code>col.load()</code>；启动流程里加加载步骤</td></tr><tr><td><b>刚写入的数据搜不到</b></td><td>一致性级别为 Bounded/Session，存在可见性窗口</td><td>写后读改用 Strong，或业务层直接用写入返回的主键回表</td></tr><tr><td>过滤查询特别慢</td><td>过滤字段没建标量索引，走全段扫描</td><td><code>create_index(field, {"index_type":"INVERTED"})</code></td></tr><tr><td>召回率明显偏低</td><td>metric 设成 IP 但向量未归一化，或 CUDA 场景 CUDA_COSINE 误用</td><td>统一归一化 + COSINE；核对 metric 与业务预期</td></tr><tr><td>查询延迟随时间上升</td><td>growing（未索引）段占比升高，被暴力扫描</td><td>看 growing 段占比，等 compaction 或调 flush 策略</td></tr><tr><td><b>单 Collection 塞全部租户</b></td><td>一个热点租户把 QueryNode 内存吃满，拖垮全部业务</td><td>按租户分 Partition / Partition Key，或按大客户分资源组</td></tr></table><div class="note"><b>边界（它明确不擅长的事）</b>：不支持事务、不支持 JOIN、不适合高频点查（那是 OLTP 数据库的活）、不擅长复杂的聚合分析。正确用法是<b>把它当成「按相似度取候选」的一层</b>，拿到主键后回业务库取详情。</div></section>
+<section id="l4"><h2><span class="n">⑪</span>第四层 · 原理与取舍：为什么是存算分离</h2><p>Milvus 把系统拆成 Proxy、Coordinator、QueryNode、DataNode、IndexNode 五个角色，依赖 etcd（元数据）、对象存储（段文件）、消息队列（WAL）。这不是为了「微服务好看」，而是因为向量检索有一个特殊的不对称性。</p><p><b>写入很便宜，建索引很贵。</b>一批数据写进来只需追加，但为它建 HNSW 可能要几十秒到几分钟。如果写入与建索引绑定在同一个进程里，写入就会被建索引拖死。Milvus 的解法是：<b>写入只追加到消息队列就返回，建索引用独立的 IndexNode 异步完成</b>。这就是存算分离最本质的收益 —— 把两种量级完全不同的工作解耦到不同角色、不同机器上。</p><table><tr><th>设计选择</th><th>收益</th><th>代价</th></tr><tr><td>存算分离（段文件放对象存储）</td><td>存储近乎无限；QueryNode 无状态可随意扩缩</td><td>每次查询/加载都要跨网络取段文件；冷启动慢</td></tr><tr><td>用消息队列做 WAL</td><td>写入吞吐高；建索引可异步、可重放</td><td>多一个必须运维的组件（Pulsar/Kafka）；端到端延迟增加</td></tr><tr><td>etcd 存元数据</td><td>元数据强一致，协调逻辑简单</td><td>etcd 成为单点风险，需要独立保障</td></tr><tr><td>多角色拆分</td><td>按负载类型独立扩缩容，成本更精细</td><td>部署与排障复杂度上升；一次故障要跨 5 个组件定位</td></tr></table><div class="warn">这四条收益全部建立在<b>「规模足够大」</b>这个前提上。数据量在百万级时，存算分离带来的跨组件延迟与运维复杂度，远大于它节省的资源 —— 这正是「小规模别上分布式」的技术原因，而不只是「没必要」。</div><div class="note">一句话收束：<b>Milvus 是用运维复杂度换扩展能力的系统</b>。买单之前先确认自己真的需要那份扩展能力。</div></section>
 
 </main>
 

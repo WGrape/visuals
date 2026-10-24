@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>向量检索压测方法 · 八个前提、扫并发与拐点判读</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>压测方法与口径</h1>
+  <p>公开 benchmark 为什么不能用、一份可信报告必须写明的八个前提、扫并发找饱和点的顺序，以及「没有 recall 的 QPS 没有意义」这条铁律。</p>
+  <span class="tag">向量库压测</span><span class="tag">recall-QPS 曲线</span><span class="tag">并发拐点</span><span class="tag">压测口径</span>
+</header>
+
+<nav><a href="#why">公开 benchmark 为什么不可用</a><a href="#prereq">八个必须写明的前提</a><a href="#method">六步压测顺序与并发扫描表</a><a href="#throughput">吞吐与延迟关系：Little's Law</a><a href="#tools">工具选择与各自的坑</a><a href="#card">速记卡</a><a href="../00-overview/capacity-and-cost.html">← 容量成本</a><a href="../02-migration-and-rebuild/migration-and-rebuild.html">迁移重建 →</a></nav>
+
+<main>
+<section id="why"><h2><span class="n">①</span>公开 benchmark 为什么不可用</h2><p>公开 benchmark 几乎不能用于选型决策。原因不是厂商造假，而是<b>压测的前提条件被隐藏了</b>：用的是什么数据集、带不带过滤、召回率多少、索引参数多少、冷缓存还是热缓存 —— 任何一项不同，结果就差几倍。</p><table><tr><th>隐藏前提</th><th>不同取值带来的差异</th><th>为什么容易被忽略</th></tr><tr><td>是否带过滤</td><td>过滤严格时性能可降 <b>5–10 倍</b></td><td>多数 benchmark 用无过滤场景</td></tr><tr><td>recall@K 水平</td><td>recall 0.90 与 0.99 的延迟差 2–3 倍</td><td>只报 QPS 不报 recall</td></tr><tr><td>冷 / 热缓存</td><td>冷启动首查可能慢 10 倍以上</td><td>压测通常跑在热缓存上</td></tr><tr><td>索引参数</td><td>M 从 16 调到 32，内存翻倍、延迟变化</td><td>参数往往不公开</td></tr><tr><td>单租户 vs 多租户</td><td>共享资源下互相干扰</td><td>benchmark 通常单租户独占</td></tr><tr><td>并发模型</td><td>单线程 QPS × 并发 ≠ 饱和 QPS</td><td>压测工具配置不透明</td></tr></table><div class="lead">所以正确做法只有一条：<b>用你自己的数据、你自己的过滤条件、你自己的召回目标，压你自己的候选引擎</b>。公开数据只能用来排除明显不合适的选项。</div></section><section id="prereq"><h2><span class="n">②</span>八个必须写明的前提</h2><p>一份可信的压测报告必须写明以下八项，缺一项结论就不可复现：</p><table><tr><th>前提</th><th>示例写法</th><th>为什么必须写</th></tr><tr><td>数据规模与维度</td><td>1000 万 × 1536 维，float32</td><td>决定内存与图规模</td></tr><tr><td>距离度量</td><td>cosine（向量已归一化）</td><td>影响算法实现路径</td></tr><tr><td>索引类型与参数</td><td>HNSW，M=16，efConstruction=200</td><td>参数不同结果不可比</td></tr><tr><td>查询参数</td><td>ef_search=64，top_k=10</td><td>这是延迟的直接旋钮</td></tr><tr><td><b>recall@10</b></td><td>0.955（对 FLAT ground truth）</td><td><b>没有召回数字的 QPS 没有意义</b></td></tr><tr><td>过滤条件与选择率</td><td>tenant_id 等值过滤，选择率约 8%</td><td>过滤是最主要的性能变量</td></tr><tr><td>并发数与缓存状态</td><td>32 并发，热缓存（预热 1000 次）</td><td>并发与缓存决定吞吐上限</td></tr><tr><td>硬件规格</td><td>8 vCPU / 32 GB / NVMe</td><td>跨硬件比 QPS 等于没比</td></tr></table><div class="danger">最常见的不诚实（往往是无意的）：<b>只报 QPS 不报 recall</b>。把 ef 调到 8 能得到极高的 QPS，但召回可能只有 0.7。任何「QPS 比对手高 5 倍」的结论，先问它的 recall 是多少。</div></section><section id="method"><h2><span class="n">③</span>六步压测顺序与并发扫描表</h2><p>压测不是「跑个工具看数字」，顺序错了结论就废了：</p><ol><li><b>建 ground truth</b>：同一批数据用暴力检索生成 top-100，作为召回基准（方法见召回评测页）。</li><li><b>灌数据并等索引建完</b>：这一步最容易被跳过。Qdrant 看 <code>indexed_vectors_count</code>，Milvus 看索引构建完成，pgvector 看 <code>CREATE INDEX</code> 结束。</li><li><b>预热</b>：先跑 1000 次查询把缓存填满，再开始正式测量。</li><li><b>扫并发</b>：并发从 1、4、8、16、32、64 依次增加，每档记录 QPS、p50/p95/p99。</li><li><b>定拐点</b>：QPS 不再随并发增长、而 p99 快速上升的那个点，就是这台机器的饱和点。</li><li><b>同档位复测 recall</b>：确认在不同并发下召回没有变化（正常情况下不应变化）。</li></ol><table><tr><th>并发</th><th>QPS</th><th>p50</th><th>p99</th><th>判断</th></tr><tr><td>1</td><td>85</td><td>11 ms</td><td>14 ms</td><td>单请求延迟基线</td></tr><tr><td>4</td><td>310</td><td>12 ms</td><td>18 ms</td><td>近似线性增长</td></tr><tr><td>8</td><td>540</td><td>14 ms</td><td>25 ms</td><td>效率开始下降</td></tr><tr><td>16</td><td>720</td><td>21 ms</td><td>48 ms</td><td><b>p99 拐点出现</b></td></tr><tr><td>32</td><td>760</td><td>40 ms</td><td>130 ms</td><td>QPS 不再增，延迟翻倍</td></tr><tr><td>64</td><td>745</td><td>82 ms</td><td>310 ms</td><td><b>已过饱和，反降</b></td></tr></table><div class="note">上表的正确读法：<b>可用的最大并发是 8–16，不是 64</b>。选 64 并发报告里那个「760 QPS」是自欺 —— 那时 p99 已经 130 ms，用户能感知到卡顿。</div></section><section id="throughput"><h2><span class="n">④</span>吞吐与延迟关系：Little's Law</h2><p>两个常被算错的吞吐概念：</p><table><tr><th>误解</th><th>正确关系</th></tr><tr><td>「单线程 QPS × 并发数 = 饱和 QPS」</td><td>只在完全线性区成立。实际受 CPU 核数、IO、锁竞争限制，必然饱和</td></tr><tr><td>「QPS 越高越好」</td><td>应在<b>目标 p99 约束下</b>比 QPS。脱离延迟讲吞吐没有意义</td></tr><tr><td>「平均延迟 20 ms 就够快」</td><td>向量检索的延迟分布长尾明显，p99 可能是 p50 的 5–10 倍，要看 p99</td></tr><tr><td>「资源占用低就是好」</td><td>占用低可能意味着索引没建完、或走了暴力扫描</td></tr></table><p>并发与吞吐的关系可以用 Little's Law 做个粗算：</p><pre><code>并发数 L = 吞吐 QPS × 平均延迟 R
+  → QPS = L / R
+
+例：目标 500 QPS、平均延迟 20 ms
+  → 需要并发 L = 500 × 0.02 = 10
+
+反过来验证：32 并发、p99 130 ms 时
+  → 理论 QPS ≈ 32 / 0.13 ≈ 246（远低于报告的 760，
+     说明 p50 决定了吞吐，而 p99 决定了用户感受 —— 两者都要看）</code></pre></section><section id="tools"><h2><span class="n">⑤</span>工具选择与各自的坑</h2><p>工具选择：</p><table><tr><th>工具</th><th>适合</th><th>注意</th></tr><tr><td><b>VectorDBBench</b></td><td>多引擎横向对比</td><td>内置数据集；仍要替换成自己的数据复核</td></tr><tr><td><b>ann-benchmarks</b></td><td>索引算法层面的 recall-QPS 曲线</td><td>纯算法视角，不含数据库开销</td></tr><tr><td>各产品的 benchmark 脚本</td><td>单产品深度压测</td><td>Qdrant / Milvus / Weaviate 都有官方脚本</td></tr><tr><td><b>k6 / locust + 真实 query 集</b></td><td><b>最贴近生产</b></td><td>需要自己搭，但结论最可信</td></tr><tr><td>pgbench / sysbench</td><td>pgvector 的 SQL 层压测</td><td>要自己写向量查询 SQL</td></tr></table><div class="warn">无论用哪个工具，<b>query 集必须来自真实日志</b>。用随机向量压测会高估性能，因为随机向量的分布比真实 embedding 更均匀、更难区分，某些索引结构反而更快。</div></section><section id="card"><h2><span class="n">⑥</span>速记卡</h2><div class="grid2"><div class="card"><h4>公开 benchmark</h4><p>只能排除明显不合适的选项，不能用于决策。</p></div><div class="card"><h4>八个前提</h4><p>规模/维度/度量/索引参数/查询参数/recall/过滤/并发缓存硬件。</p></div><div class="card"><h4>最重要一条</h4><p><b>没有 recall 数字的 QPS 没有意义</b>。</p></div><div class="card"><h4>顺序</h4><p>ground truth → 灌数据等索引建完 → 预热 → 扫并发。</p></div><div class="card"><h4>拐点判读</h4><p>QPS 不增而 p99 快速上升处 = 饱和点，别报后面的数字。</p></div><div class="card"><h4>Little's Law</h4><p>QPS = 并发 / 平均延迟，用于粗算所需并发。</p></div><div class="card"><h4>看 p99</h4><p>向量检索长尾明显，p99 常是 p50 的 5–10 倍。</p></div><div class="card"><h4>query 集</h4><p>必须来自真实日志，随机向量的结论不可信。</p></div></div></section>
+</main>
+
+<footer>
+  压测最容易犯的错不是选错工具，而是<b>在索引没建完、缓存没预热的情况下测出漂亮数字</b>，然后在生产上被打脸。<br>延伸：<a href="../../01-foundations/03-recall-and-evaluation/recall-and-evaluation.html">召回评测</a> · <a href="../00-overview/capacity-and-cost.html">容量与成本</a>
+</footer>
+
+</body>
+</html>

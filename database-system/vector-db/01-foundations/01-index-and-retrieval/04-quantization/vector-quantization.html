@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>向量量化全景 · SQ / PQ / BQ / RQ 的压缩比与召回代价</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>向量量化压缩</h1>
+  <p>把一条向量从 3072 字节压到 96 字节，代价是什么？SQ、PQ、BQ、RQ 四条路线的机理、压缩比、召回损失与那个最容易被漏算的图开销。</p>
+  <span class="tag">量化 Quantization</span><span class="tag">SQ / PQ / BQ / RQ</span><span class="tag">压缩比与召回</span><span class="tag">内存核算</span>
+</header>
+
+<nav><a href="#why">先算一笔内存账：为什么必须量化</a><a href="#routes">四条技术路线与各自压缩的对象</a><a href="#sq">标量量化 SQ：为什么 int8 几乎无损</a><a href="#pq">乘积量化 PQ：子空间切分与查表距离</a><a href="#bq">二值量化 BQ：1 bit 一维的适用前提</a><a href="#graph">最易漏算的一项：图索引开销不压缩</a><a href="#tradeoff">压缩比—召回曲线与 rescoring 的赎金</a><a href="#choose">选型决策表</a><a href="#card">速记卡</a><a href="quantization-practice.html">量化落地 →</a></nav>
+
+<main>
+<section id="why"><h2><span class="n">①</span>先算一笔内存账：为什么必须量化</h2><p>向量数据库的成本几乎全部压在内存上。假设用 <code>float32</code> 存 768 维向量，一条就是 <b>768 × 4 = 3072 字节</b>；一千万条是 <b>30.7 GB</b>，一亿条是 <b>307 GB</b>。再加上 HNSW 图的邻接表，真实占用还要再多一成到一倍。</p><p>这个量级下，想让单机扛住、想让云账单可接受，唯一有效的手段就是<b>量化（Quantization）</b>：用更少的 bit 表示同一个向量，用可控的召回损失换内存和延迟。</p><table><tr><th>精度</th><th>每条字节（768 维）</th><th>1 亿条总量</th><th>压缩比</th><th>典型召回损失</th></tr><tr><td>float32（FP32）</td><td>3072 B</td><td>307.2 GB</td><td>1×（基准）</td><td>0</td></tr><tr><td>float16 / halfvec</td><td>1536 B</td><td>153.6 GB</td><td>2×</td><td>≈0</td></tr><tr><td>SQ8（int8）</td><td>768 B</td><td>76.8 GB</td><td>4×</td><td>0.5–2%</td></tr><tr><td>SQ4（int4）</td><td>384 B</td><td>38.4 GB</td><td>8×</td><td>2–5%</td></tr><tr><td>PQ，m=96 / nbits=8</td><td>96 B</td><td>9.6 GB</td><td>32×</td><td>3–8%</td></tr><tr><td>BQ（1 bit/维）</td><td>96 B</td><td>9.6 GB</td><td>32×</td><td>5–15%</td></tr></table><div class="warn">上表的「压缩比」只算了<b>向量本体</b>。图索引的邻接表不跟着压缩，它的开销在低 bit 场景会反超本体 —— 见第 ⑥ 节，这是量化算账时最常见的漏项。</div></section><section id="routes"><h2><span class="n">②</span>四条技术路线与各自压缩的对象</h2><p>不同路线压缩的对象不一样，理解这一点比记参数重要。</p><div class="grid2"><div class="card"><h4><b>标量量化 SQ</b></h4><p>逐维度把 float32 映射成 int8/int4，保留每个维度自己的 min/max 或分位数。不改变维数，只降低每维位宽，因此<b>对任意距离度量都成立</b>，实现最简单、精度损失最小。</p></div><div class="card"><h4><b>乘积量化 PQ</b></h4><p>把 D 维切成 m 段，每段单独做 k-means 得到 256 个聚类中心（nbits=8）。向量最终存成 m 个聚类 ID（m 字节），距离用<b>查表相加</b>（ADC）算出来。</p></div><div class="card"><h4><b>二值量化 BQ</b></h4><p>只看每一维的符号，正数为 1、负数为 0，一条 768 维向量压成 96 字节。距离退化成 Hamming 距离或 XOR+popcount，是<b>吞吐最高</b>的路线。</p></div><div class="card"><h4><b>残差量化 RQ</b></h4><p>先粗量化，再对「残差」继续量化，多级叠加逼近原始向量。常与 PQ 组合成 IVF-RQ / RABITQ 这类复合索引，在超大规模下才划算。</p></div></div><div class="note">一句话分工：<b>SQ 保精度、PQ 压到底、BQ 拼吞吐、RQ 压极限</b>。工程上 90% 的场景用 SQ8 或 SQ4 就够了，PQ/BQ 属于「内存真的不够」时才上的重武器。</div></section><section id="sq"><h2><span class="n">③</span>标量量化 SQ：为什么 int8 几乎无损</h2><p>SQ 的做法是给每一维定一个区间 [min, max]，把区间线性切成 256 份（int8）或 16 份（int4），存下落在第几份。解码时按区间中点还原。</p><pre><code># SQ8 的本质：per-dimension 线性映射
+# 训练阶段：统计每一维的 min/max（或 0.99 分位数）
+# 编码阶段：q = round((x - min) / (max - min) * 255)
+# 解码阶段：x' = min + q / 255 * (max - min)
+#
+# 误差上界 = 每维区间宽度 / 255 / 2
+# 768 维、取值大致落在 [-0.3, 0.3] 时，
+# 单维误差 ~0.0012，累积后对余弦相似度的影响在 1e-3 量级
+# —— 这就是 SQ8 往往能做到「几乎不掉召回」的原因</code></pre><p><b>那 SQ4 为什么也常常够用？</b>因为最近邻排序靠的是<b>相对距离</b>而不是绝对数值。只要量化误差在所有向量上同分布，它主要在互相抵消，排序很少翻转。真正会翻的是「第 9 名和第 10 名本来就几乎同分」的边界情形 —— 而这部分本来也该由重排（rerank）来救。</p><div class="danger">SQ 的经典翻车点：<b>离群维度</b>。LLM 的 embedding 里常有个别维度出现极大值（几十甚至上百），一旦用全局 min/max 定区间，正常值全被压进一两个桶，量化等于失效。解法是改用<b>分位数裁剪</b>（如 0.99 quantile）把极端值截断，Qdrant 的 <code>quantile</code> 参数就是干这个的。</div></section><section id="pq"><h2><span class="n">④</span>乘积量化 PQ：子空间切分与查表距离</h2><p>PQ 不按维度切，而是按<b>子空间</b>切。以 768 维、m=96 为例：每 8 维组成一个子空间，每个子空间用 k-means 训练 256 个中心，任意子向量用 1 个字节（中心编号）表示。整条向量于是只剩 <b>96 字节</b>。</p><svg viewBox="0 0 880 320" width="880" height="320" role="img" ><rect x="20" y="40" width="700" height="46" rx="8" fill="#1f2433" stroke="#2b3142"/><text x="30" y="70" fill="#94a3b8" font-size="13">原始 float32：768 维 × 4 B = 3072 B</text><text x="740" y="70" fill="#94a3b8" font-size="12">3072 B</text><rect x="20" y="115" width="700" height="46" rx="8" fill="#1f2433" stroke="#56d4dd"/><rect x="24" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="67" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="111" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="154" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="198" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="241" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="285" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="328" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="372" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="415" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="459" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="502" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="546" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="589" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="633" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><rect x="676" y="118" width="41" height="40" fill="rgba(86,212,221,.15)" stroke="#56d4dd"/><text x="30" y="145" fill="#56d4dd" font-size="12">切成 m=96 个子空间，每段 8 维</text><rect x="20" y="190" width="700" height="46" rx="8" fill="#1f2433" stroke="#7ee787"/><rect x="24" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="67" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="111" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="154" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="198" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="241" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="285" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="328" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="372" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="415" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="459" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="502" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="546" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="589" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="633" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><rect x="676" y="193" width="41" height="40" fill="rgba(126,231,135,.18)" stroke="#7ee787"/><text x="30" y="220" fill="#7ee787" font-size="12">每段替换为 1 字节聚类 ID → 共 96 B</text><text x="740" y="220" fill="#7ee787" font-size="12">96 B</text><text x="20" y="275" fill="#94a3b8" font-size="12.5">压缩比 = 4 × D / m = 4 × 768 / 96 = 32×；m 越小压得越狠，但每段要表达的维度越多，精度越差</text><text x="20" y="300" fill="#f0a868" font-size="12.5">代价：距离不再逐维计算，改为查 m 张 256 项的距离表后相加（ADC），精度有损且无法再算精确距离</text></svg><table><tr><th>参数</th><th>含义</th><th>怎么调</th><th>代价</th></tr><tr><td>m</td><td>子空间个数 = 最终字节数</td><td>dim/8 起手；768 维常用 m=48~96</td><td>m↑ 精度↑ 内存↑</td></tr><tr><td>nbits</td><td>每段中心数 = 2^nbits</td><td>几乎固定为 8；12 位需 1.5 字节</td><td>nbits↑ 精度↑ 码本↑</td></tr><tr><td>训练样本</td><td>k-means 输入</td><td>至少 256 × m 条，推荐 10 万条以上</td><td>样本不足时码本退化</td></tr></table><div class="warn">PQ 必须有<b>训练阶段</b>，且码本绑定了数据分布。换了 embedding 模型、换了数据域，码本必须重训并重建索引 —— 这是 PQ 比 SQ 麻烦的根本原因。</div></section><section id="bq"><h2><span class="n">⑤</span>二值量化 BQ：1 bit 一维的适用前提</h2><p>BQ 只保留符号位：<code>b = 1 if x &gt; 0 else 0</code>。距离用 Hamming 距离，CPU 上可以靠 XOR + popcount 一条指令算 64 维，GPU 上吞吐更是量级提升。</p><table><tr><th>适用条件</th><th>说明</th></tr><tr><td>维度足够高（建议 ≥ 1024）</td><td>维度越高，符号位保留的方向信息越充分；768 维以下损失明显</td></tr><tr><td>向量已归一化或分布对称</td><td>若整体偏移到正半轴，符号位全为 1，信息量为零</td></tr><tr><td>必须有重排（rescoring）</td><td>BQ 只用于<b>粗筛</b>，靠 oversampling 拿 3–4 倍候选再用原向量精排</td></tr><tr><td>量化后一定要算实际内存</td><td>见第 ⑥ 节，图索引开销可能比省下的还多</td></tr></table><pre><code># Qdrant：二值量化 + 过采样重排
+PUT /collections/docs
+{
+  "vectors": { "size": 1024, "distance": "Cosine" },
+  "quantization_config": {
+    "binary": { "always_ram": true }
+  },
+  "hnsw_config": {
+    "payload_m": 16
+  }
+}
+
+POST /collections/docs/points/search
+{
+  "vector": [...],
+  "limit": 10,
+  "params": {
+    "quantization": { "rescore": true, "oversampling": 3.0 }
+  }
+}</code></pre><div class="note"><code>oversampling: 3.0</code> 的意思是：先用 BQ 召回 <b>30 条</b>（10 × 3），再用原始向量精排取前 10。这个倍数就是「召回率」和「延迟」的旋钮 —— 官方经验值 2–4，低于 2 通常召回掉得厉害。</div></section><section id="graph"><h2><span class="n">⑥</span>最易漏算的一项：图索引开销不压缩</h2><p>这是量化算账时最容易被忽略、也最容易造成「明明量化了内存却没降」的一条。HNSW 每个节点要存邻居 ID 列表，level 0 最多 <b>2M</b> 个邻居，每个 ID 4 字节，所以平均每条约 <b>2M × 4 = 128 B</b>（M=16）的图开销。</p><table><tr><th>方案</th><th>向量本体</th><th>图开销（M=16）</th><th>合计/条</th><th>图占比</th></tr><tr><td>FP32</td><td>3072 B</td><td>128 B</td><td>3200 B</td><td>4%</td></tr><tr><td>SQ8</td><td>768 B</td><td>128 B</td><td>896 B</td><td>14%</td></tr><tr><td>SQ4</td><td>384 B</td><td>128 B</td><td>512 B</td><td>25%</td></tr><tr><td>PQ m=96</td><td>96 B</td><td>128 B</td><td>224 B</td><td><b>57%</b></td></tr><tr><td>BQ</td><td>96 B</td><td>128 B</td><td>224 B</td><td><b>57%</b></td></tr></table><div class="danger">算清这笔账：从 FP32 压到 BQ，向量本体省了 <b>32 倍</b>，但总占用只省了 <b>3200 / 224 ≈ 14 倍</b>。如果还想更省，要么降低 M（牺牲召回），要么换 IVF/PQ 体系（少用图），要么上磁盘索引（DiskANN）——<b>单靠压向量位宽会很快撞到图开销这堵墙</b>。</div></section><section id="tradeoff"><h2><span class="n">⑦</span>压缩比—召回曲线与 rescoring 的赎金</h2><p>量化不是免费的。压缩比越高，越依赖「多召回一些再精排」来把召回率赎回来，而精排需要原始向量还在（内存或磁盘上），于是内存省了一部分、延迟涨了一部分。</p><table><tr><th>方案</th><th>建议 oversampling</th><th>相对 FP32 召回</th><th>相对 FP32 延迟</th><th>省内存</th></tr><tr><td>SQ8 + rescore</td><td>1.5–2×</td><td>98–99.5%</td><td>1.1–1.3×</td><td>约 4×</td></tr><tr><td>SQ4 + rescore</td><td>2–3×</td><td>95–98%</td><td>1.3–1.6×</td><td>约 6×</td></tr><tr><td>BQ + rescore</td><td>3–4×</td><td>90–97%</td><td>1.4–2.0×</td><td>约 10–14×（含图开销）</td></tr><tr><td>PQ + rescore</td><td>2–4×</td><td>88–96%</td><td>1.5–2.2×</td><td>约 10–14×（含图开销）</td></tr></table><div class="warn">上表是<b>量级参考</b>，不是承诺值。真实损失强依赖数据分布与维度，必须用你自己的数据 + FLAT ground truth 实测（方法见 <a href="../../03-recall-and-evaluation/recall-and-evaluation.html">召回评测</a>）。</div></section><section id="choose"><h2><span class="n">⑧</span>选型决策表</h2><p>按「内存压力 + 召回要求 + 运维预算」三个输入做判断：</p><table><tr><th>你的处境</th><th>选它</th><th>理由</th></tr><tr><td>千万级以内，内存够</td><td>不上量化，或只开 SQ8</td><td>召回优先；SQ8 几乎无损，性价比最高</td></tr><tr><td>内存差 2–4 倍</td><td>SQ8，必要时 SQ4</td><td>改一个配置项即可，无需重训码本，可随时回退</td></tr><tr><td>内存差 10 倍以上，维度 ≥ 1024</td><td>BQ + 3–4× oversampling</td><td>吞吐最高；但先算图开销，别指望 32×</td></tr><tr><td>内存差 10 倍以上，维度 512–768</td><td>PQ 或 SQ4</td><td>低维 BQ 损失太大；PQ 更稳但需要码本训练</td></tr><tr><td>数据会频繁换模型/换域</td><td>SQ 系（SQ8/SQ4）</td><td>SQ 无训练、可增量；PQ 换域要重训重建</td></tr><tr><td>要极致规模（亿级以上）</td><td>磁盘索引 + 量化（DiskANN 等）</td><td>内存放量化码 + 图，原始向量留盘上做重排</td></tr></table><div class="lead">先算账、再选型：<b>算出 FP32 的每向量总字节 → 乘数据量 → 对比可用内存</b>，缺口倍数决定了你能用哪一档，而不是反过来先选了个酷炫的量化方案再想办法塞进去。</div></section><section id="card"><h2><span class="n">⑨</span>速记卡</h2><div class="grid2"><div class="card"><h4>量化解决什么</h4><p>内存与延迟，代价是召回。它是<b>精度换钱</b>的旋钮，不是免费优化。</p></div><div class="card"><h4>SQ8 的定位</h4><p>默认首选。4× 压缩、几乎不掉召回、无需训练、可随时开关。</p></div><div class="card"><h4>PQ 的本质</h4><p>子空间切分 + 码本查表。<b>必须训练</b>，换域即失效。</p></div><div class="card"><h4>BQ 的前提</h4><p>维度够高 + 必须重排 + 先算图开销。低维直接崩。</p></div><div class="card"><h4>最大的坑</h4><p><b>图开销不压缩</b>。BQ/PQ 时图可能占 57%，实际只省 14 倍。</p></div><div class="card"><h4>最常漏的开关</h4><p><b>oversampling + rescore</b>。不开重排，量化召回必掉。</p></div><div class="card"><h4>离群维度</h4><p>用分位数裁剪（quantile 0.99），否则正常值被压成一桶。</p></div><div class="card"><h4>怎么验证</h4><p>FLAT 建 ground truth → 量 recall@K → 找 oversampling 拐点。</p></div></div></section>
+</main>
+
+<footer>
+  量化的账要算两本：<b>省下多少内存</b>，和<b>付出多少召回</b>。只算前一本，上线后就会被 badcase 追着改。<br>延伸：<a href="quantization-practice.html">量化落地实操与排障</a> · <a href="../../03-recall-and-evaluation/recall-and-evaluation.html">召回率怎么量</a> · <a href="../../../02-milvus/03-indexes/milvus-index-params-tuning.html">Milvus 索引参数调优</a>
+</footer>
+
+</body>
+</html>

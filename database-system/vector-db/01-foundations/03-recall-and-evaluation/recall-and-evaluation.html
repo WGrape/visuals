@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>召回率评测与调参 · ground truth、recall@K 与拐点选择</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>召回率评测与调参</h1>
+  <p>ef 调到 128 到底换来多少召回？不建 ground truth 就只能靠感觉。从 FLAT 造标准答案，到扫参找拐点，再到过滤场景的塌方与线上验证。</p>
+  <span class="tag">recall@K</span><span class="tag">ground truth</span><span class="tag">ef / nprobe 拐点</span><span class="tag">过滤召回塌方</span>
+</header>
+
+<nav><a href="#why">为什么必须有可复现的召回数字</a><a href="#truth">ground truth 怎么建（必须用暴力检索）</a><a href="#metrics">recall@10 / @100 / MRR / nDCG 各看什么</a><a href="#tune">建索引参数 vs 查询参数与拐点选择</a><a href="#filter">过滤场景：为什么越严格召回越差</a><a href="#online">离线之外：人工标注、A/B 与 badcase 归因</a><a href="#mistakes">七个让数字失真的错误</a><a href="#card">速记卡</a><a href="../01-index-and-retrieval/04-quantization/vector-quantization.html">量化原理 →</a></nav>
+
+<main>
+<section id="why"><h2><span class="n">①</span>为什么必须有可复现的召回数字</h2><p>向量检索的结果「看起来都挺相关」，这种主观判断无法用于调参。把 ef 从 64 调到 128 到底换来多少召回、付出多少延迟，必须有一个<b>可复现的数字</b>。这个数字就是 recall@K，而它的前提是一份可信的<b>标准答案（ground truth）</b>。</p><div class="lead">recall@K = 近似检索返回的 K 条结果中，有多少条出现在真实前 K 名里 ÷ K。<b>没有 ground truth 就没有 recall，没有 recall 就没有调参依据</b> —— 很多人调 ef 全靠「感觉快了/感觉准了」，本质是在盲调。</div></section><section id="truth"><h2><span class="n">②</span>ground truth 怎么建（必须用暴力检索）</h2><p>ground truth 必须用<b>暴力检索</b>生成，不能用 ANN 生成 —— 用 ANN 生成的标准答案去评测 ANN，相当于自己给自己判卷。</p><ol><li><b>冻结数据快照</b>：把要评测的这批向量导出，或者建一个 FLAT 索引的副本（数据必须与线上完全一致）。</li><li><b>准备 query 集</b>：从真实日志里抽 500–1000 条 query 向量；不要只用手写的几条「典型 query」，那会严重高估召回。</li><li><b>暴力检索</b>：FLAT / brute-force，取 top-100（比目标 K 大一个量级，方便复用同一份 ground truth 评测 recall@1/10/100）。</li><li><b>落盘</b>：存成 <code>{query_id: [doc_id, ...]}</code> 的映射，连同数据版本号一起存档。</li></ol><pre><code># 用 Milvus 的 FLAT 索引造 ground truth
+collection.create_index("embedding", {
+    "index_type": "FLAT", "metric_type": "COSINE", "params": {}
+})
+collection.load()
+
+truth = {}
+for qid, qv in queries.items():
+    hits = collection.search([qv], "embedding", {"metric_type": "COSINE"},
+                             limit=100)[0]
+    truth[qid] = [h.id for h in hits]
+
+json.dump(truth, open("ground_truth_v1.json", "w"))</code></pre><div class="warn">ground truth 必须<b>带版本</b>。数据增量写入、embedding 模型升级、向量归一化策略变化，任何一项变了旧 ground truth 就作废，否则你会在「召回突然从 0.96 掉到 0.72」时查错方向。</div></section><section id="metrics"><h2><span class="n">③</span>recall@10 / @100 / MRR / nDCG 各看什么</h2><p>不同 K 反映不同环节的健康度，别只盯一个：</p><table><tr><th>指标</th><th>反映什么</th><th>典型目标</th><th>掉下来先查</th></tr><tr><td>recall@10</td><td>最终给用户的结果质量</td><td>≥ 0.95（通用 RAG）</td><td>索引参数 ef/nprobe、过滤选择率</td></tr><tr><td>recall@100</td><td>粗筛层有没有把对的捞进来</td><td>≥ 0.98</td><td>量化精度、oversampling 是否够</td></tr><tr><td>MRR@10</td><td>第一条正确结果排多前</td><td>≥ 0.85</td><td>重排（rerank）是否生效</td></tr><tr><td>nDCG@10</td><td>多级相关性的排序质量</td><td>视业务</td><td>打分方向（cosine vs IP）搞反了没</td></tr></table><div class="note"><b>recall@100 高但 recall@10 低</b> = 粗筛没问题，是排序/重排环节没做好；<b>两个都低</b> = 索引或量化本身有问题，或者过滤把正确答案排除了。这两个信号的区分能直接省掉一半排查时间。</div></section><section id="tune"><h2><span class="n">④</span>建索引参数 vs 查询参数与拐点选择</h2><p>这是最核心的一节：检索参数分「建索引时」和「查询时」两类，只有查询时的参数能在线调。</p><table><tr><th>体系</th><th>建索引参数（需重建）</th><th>查询参数（可在线调）</th><th>调大的效果</th></tr><tr><td>HNSW</td><td>M、efConstruction</td><td><b>ef / ef_search</b></td><td>召回↑ 延迟↑</td></tr><tr><td>IVF</td><td>nlist</td><td><b>nprobe</b></td><td>召回↑ 延迟↑</td></tr><tr><td>PQ / 量化</td><td>m、nbits、码本</td><td><b>oversampling</b></td><td>召回↑ 延迟↑</td></tr><tr><td>过滤检索</td><td>过滤字段索引</td><td>过滤选择率 / 迭代扫描</td><td>视实现，可能反而更慢</td></tr></table><p>正确的调参姿势是<b>先定召回目标，再找最小代价点</b>，而不是「ef 调到最大肯定最准」。做法是把 ef 从小到大扫一遍，画 recall-延迟曲线，取拐点：</p><table><tr><th>ef（HNSW）</th><th>recall@10</th><th>p99 延迟</th><th>判断</th></tr><tr><td>16</td><td>0.82</td><td>3 ms</td><td>召回不够</td></tr><tr><td>32</td><td>0.91</td><td>4 ms</td><td>偏紧</td></tr><tr><td>64</td><td>0.955</td><td>6 ms</td><td><b>拐点附近，推荐</b></td></tr><tr><td>128</td><td>0.972</td><td>11 ms</td><td>多花 83% 延迟换 1.7 个点，不值</td></tr><tr><td>256</td><td>0.978</td><td>21 ms</td><td>边际收益趋零</td></tr></table><div class="note">上表是典型的 HNSW 拐点形状：<b>召回在 ef 走过某个值后迅速饱和，延迟却是线性上涨</b>。真正该选的不是召回最高的那行，而是「再多加延迟换不来召回」的前一行。</div></section><section id="filter"><h2><span class="n">⑤</span>过滤场景：为什么越严格召回越差</h2><p>带过滤条件的检索是召回塌方的高发区，而且现象很反直觉：<b>过滤越严格，召回往往越差</b>。</p><p>原因是 pre-filter 模式下，候选集被过滤得只剩很少的点，HNSW 的邻居图在这些点上不连通，遍历早早断头；post-filter 模式下则是「先取 top-K 再筛」，一旦筛选比例低，返回结果直接不够 K 条。</p><table><tr><th>过滤选择率</th><th>典型现象</th><th>对策</th></tr><tr><td>&gt; 50%</td><td>基本无影响</td><td>无需处理</td></tr><tr><td>10% – 50%</td><td>召回轻微下降</td><td>适度提高 ef 或 oversampling</td></tr><tr><td>1% – 10%</td><td>召回明显下降，结果数可能不足 K</td><td>改用支持迭代扫描的实现；用 partition/tenant 物理隔离</td></tr><tr><td>&lt; 1%</td><td>HNSW 几乎失效</td><td>换过滤专用索引（payload index + 倒排优先），或干脆不用向量索引</td></tr></table><div class="warn">评测带过滤场景时，<b>ground truth 也必须带同样的过滤条件</b>。拿无过滤的 ground truth 去评带过滤的结果，召回数字会毫无意义（必然很低）。</div></section><section id="online"><h2><span class="n">⑥</span>离线之外：人工标注、A/B 与 badcase 归因</h2><p>离线 recall 是必要条件，不是充分条件。用户感知的「检索好不好用」还包括排序质量和多样性。</p><div class="grid2"><div class="card"><h4>人工标注集</h4><p>抽 200 条 query，人工标「哪些结果算相关」，算 precision@10。这是唯一能发现「recall 很高但结果同质化」的手段。</p></div><div class="card"><h4>线上 A/B</h4><p>同一流量分桶，A 用旧参数、B 用新参数，比较点击率、追问率、「没用/重答」率。注意向量检索的效果常被 LLM 掩盖，要看二级指标。</p></div><div class="card"><h4>badcase 归因</h4><p>对「答案明显错」的会话回溯：是没召回（recall 问题）、召回了没排上来（rank 问题）、还是排上来了但 LLM 没用（prompt 问题）。三者修法完全不同。</p></div><div class="card"><h4>回归测试集</h4><p>把历史 badcase 固化成固定 query 集，每次改索引/换模型/调参都跑一遍，防止「修好一个坏掉三个」。</p></div></div></section><section id="mistakes"><h2><span class="n">⑦</span>七个让数字失真的错误</h2><p>这些错误会让 recall 数字看起来很好或很差，但都不是真实的：</p><table><tr><th>错误</th><th>为什么错</th><th>正确做法</th></tr><tr><td>用 ANN 结果当 ground truth</td><td>自己给自己判卷，recall 恒为 1</td><td>必须 FLAT / 暴力检索</td></tr><tr><td>K 不一致</td><td>ground truth 存 top-10 却算 recall@100</td><td>ground truth 的 K ≥ 评测的 K</td></tr><tr><td>query 集太小或太典型</td><td>手写 20 条 query 无法代表线上分布</td><td>从真实日志抽 500+ 条</td></tr><tr><td>数据已变但 ground truth 没重建</td><td>新增/删除向量后标准答案失效</td><td>ground truth 绑定数据版本</td></tr><tr><td>只测无过滤场景</td><td>线上几乎都带过滤</td><td>ground truth 带同样的过滤条件</td></tr><tr><td>忽略更新延迟</td><td>刚写入的向量还没 flush，自然召不回</td><td>评测前等待可见（或显式 flush）</td></tr><tr><td>在 CPU 空闲时测延迟</td><td>延迟数字漂亮但线上不可复现</td><td>按目标并发压测，看 p99 而非均值</td></tr></table></section><section id="card"><h2><span class="n">⑧</span>速记卡</h2><div class="grid2"><div class="card"><h4>recall 是什么</h4><p>近似的 top-K 命中真实 top-K 的比例。没有它调参就是盲调。</p></div><div class="card"><h4>ground truth</h4><p>必须 FLAT 暴力检索生成，且<b>绑定数据版本</b>。</p></div><div class="card"><h4>recall@100 vs @10</h4><p>前者看粗筛、后者看排序。两个都低才是索引问题。</p></div><div class="card"><h4>建索引 vs 查询参数</h4><p>M / nlist / m 要重建；ef / nprobe / oversampling 可在线调。</p></div><div class="card"><h4>调参目标</h4><p>找<b>拐点</b>而不是最大值：再加延迟换不来召回的前一行。</p></div><div class="card"><h4>过滤会塌召回</h4><p>选择率 &lt; 10% 时 HNSW 明显退化，考虑物理隔离。</p></div><div class="card"><h4>离线≠线上</h4><p>还要人工标注集、A/B、badcase 归因、回归集。</p></div><div class="card"><h4>七个常见错</h4><p>最致命的是「用 ANN 造 ground truth」和「K 不一致」。</p></div></div></section>
+</main>
+
+<footer>
+  评测的价值在于<b>把「感觉更准了」换成「recall@10 从 0.91 到 0.955，p99 从 4ms 到 6ms」</b>。没有这行数字，所有调参都是在赌。<br>延伸：<a href="../01-index-and-retrieval/04-quantization/quantization-practice.html">量化落地</a> · <a href="../02-retrieval-performance/vector-search-latency.html">检索延迟拆解</a>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pgvector 调优与限制 · 更新代价、TOAST 与去留判断</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:30px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  h4{font-size:14.5px;margin:16px 0 4px;color:#e2e8f0}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .center{text-align:center}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-family:'SF Mono',Menlo,Consolas,monospace}
+  .kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#7ee787}.cmt{color:#94a3b8}.num{color:#f0a868}.typ{color:#56d4dd}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:16px 0}
+  .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card h4{margin:0 0 5px;font-size:14.5px;color:#e2e8f0}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  ul,ol{margin:10px 0 10px 22px;color:var(--muted)}
+  li{margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#dbe4ef;font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .note{border-left:4px solid var(--accent);background:rgba(110,168,254,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .warn{border-left:4px solid var(--warn);background:rgba(240,168,104,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  .danger{border-left:4px solid var(--danger);background:rgba(255,123,114,.08);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+  svg{display:block;margin:18px auto;max-width:100%}
+  a{color:var(--accent)}
+  footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>pgvector 调优与限制</h1>
+  <p>为什么要避免更新向量列、3072 维为什么必然 TOAST、索引装不进内存会怎样，以及五条「留在 pgvector 还是迁走」的判断线。</p>
+  <span class="tag">pgvector 调优</span><span class="tag">TOAST</span><span class="tag">VACUUM / REINDEX</span><span class="tag">去留判断</span>
+</header>
+
+<nav><a href="#update">更新与删除为什么特别贵</a><a href="#toast">TOAST：大向量的隐性成本</a><a href="#memory">内存命中率决定 p99</a><a href="#perf">性能量级参考（含打折前提）</a><a href="#debug">七类故障对照表</a><a href="#decide">去留判断的五条线</a><a href="#card">速记卡</a><a href="../01-index-and-query/hnsw-and-ivfflat.html">← 索引</a><a href="../../07-engineering-practices/00-overview/capacity-and-cost.html">容量与成本</a></nav>
+
+<main>
+<section id="update"><h2><span class="n">①</span>更新与删除为什么特别贵</h2><p>向量列的更新和删除在 pgvector 里比普通列贵得多，因为 HNSW 是<b>图结构</b>：删一个点只是标记，图不会立刻修复；插入一个点要更新多处邻接表。</p><table><tr><th>操作</th><th>代价</th><th>后果</th><th>对策</th></tr><tr><td>INSERT</td><td>要维护图的邻接关系</td><td>写入吞吐低于普通表</td><td>批量写入，避免逐条</td></tr><tr><td>UPDATE 向量列</td><td>等价于删 + 插</td><td><b>最贵</b>，且留下死元组</td><td>尽量避免更新向量本身</td></tr><tr><td>DELETE</td><td>标记删除，图不修复</td><td>搜索仍会经过死节点，召回与延迟双降</td><td>定期 <code>VACUUM</code>；大量删除后 <code>REINDEX</code></td></tr><tr><td>大量删除后</td><td>索引膨胀</td><td>索引大小与查询延迟都上升</td><td><code>REINDEX INDEX CONCURRENTLY</code></td></tr></table><div class="danger">「每天全量重建向量表」这种设计在 pgvector 上会非常痛：<b>HNSW 重建可能要数小时</b>。正确做法是分区表 + 只重建变化的分区，或者改用「增量插入 + 定期 REINDEX」的策略。</div></section><section id="toast"><h2><span class="n">②</span>TOAST：大向量的隐性成本</h2><p>Postgres 的行有宽度限制，大向量会触发 <b>TOAST</b>（超尺寸数据外置存储）。这不影响索引可用性，但会影响顺序扫描、备份大小和复制流量。</p><table><tr><th>维度 × 类型</th><th>单行大小</th><th>是否 TOAST</th><th>备注</th></tr><tr><td>768 × float32</td><td>约 3 KB</td><td>否（通常）</td><td>还算正常</td></tr><tr><td>1536 × float32</td><td>约 6 KB</td><td><b>是</b></td><td>外置存储，seq scan 变慢</td></tr><tr><td>3072 × float32</td><td>约 12 KB</td><td><b>是</b></td><td>必然 TOAST，且无法建 vector 索引</td></tr><tr><td>3072 × halfvec</td><td>约 6 KB</td><td>是</td><td>可建索引，仍是 TOAST</td></tr></table><div class="note">备份和逻辑复制会把 TOAST 数据一起带走。千万级向量表的 <code>pg_dump</code> 可能几十 GB、耗时数小时 —— 规划备份窗口时要把这部分算进去，别只算业务数据。</div></section><section id="memory"><h2><span class="n">③</span>内存命中率决定 p99</h2><p>pgvector 的性能高度依赖「索引能不能留在内存里」。共享缓冲区命中率是关键指标：</p><pre><code>-- 看索引大小
+SELECT pg_size_pretty(pg_relation_size('docs_emb_hnsw'));
+
+-- 看缓冲区命中率（理想 &gt; 0.99）
+SELECT sum(blks_hit)::float / (sum(blks_hit) + sum(blks_read)) AS hit_ratio
+FROM pg_stat_database;
+
+-- 看 HNSW 实际扫描量（0.8+）
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id FROM docs ORDER BY emb &lt;=&gt; $1 LIMIT 10;</code></pre><table><tr><th>配置</th><th>作用</th><th>建议</th></tr><tr><td><code>shared_buffers</code></td><td>缓存数据与索引页</td><td>设为实例内存的 25%，且要能装下 HNSW 索引</td></tr><tr><td><code>effective_cache_size</code></td><td>告诉优化器 OS 缓存有多少</td><td>设为内存的 50–75%</td></tr><tr><td><code>work_mem</code></td><td>排序/哈希内存</td><td>影响大 LIMIT 的排序，适度提高</td></tr><tr><td>实例内存</td><td>决定性因素</td><td>索引 + 热数据必须装得下，否则 p99 会抖</td></tr></table></section><section id="perf"><h2><span class="n">④</span>性能量级参考（含打折前提）</h2><p>下表是经验量级（单机、HNSW、无过滤、warm cache），用于判断自己的测试结果是否合理：</p><table><tr><th>规模</th><th>维度</th><th>索引大小</th><th>p50</th><th>p99</th><th>QPS（可接受）</th></tr><tr><td>10 万</td><td>768</td><td>约 100 MB</td><td>&lt; 2 ms</td><td>&lt; 5 ms</td><td>数千</td></tr><tr><td>100 万</td><td>768</td><td>约 1 GB</td><td>2–5 ms</td><td>5–15 ms</td><td>数百到一千</td></tr><tr><td>1000 万</td><td>768</td><td>约 10 GB</td><td>10–20 ms</td><td>20–50 ms</td><td>几十到数百</td></tr><tr><td>1000 万</td><td>1536</td><td>约 20 GB</td><td>20–40 ms</td><td>50–100 ms</td><td>数十</td></tr></table><div class="warn">上表在<b>无过滤、单租户、索引全内存、warm cache</b> 的前提下成立。一旦加过滤条件、或索引装不进内存，p99 可能翻数倍。用这些数字做容量规划时必须打折。</div></section><section id="debug"><h2><span class="n">⑤</span>七类故障对照表</h2><p>按「现象 → 原因 → 验证」组织：</p><table><tr><th>现象</th><th>最可能原因</th><th>怎么验证</th></tr><tr><td>查询返回少于 LIMIT 条</td><td><code>ef_search</code> &lt; LIMIT；或过滤太严</td><td>提高 ef_search；看 EXPLAIN 行数</td></tr><tr><td>召回明显偏低</td><td>IVFFlat <code>probes=1</code></td><td>设 <code>ivfflat.probes = 20</code> 再测</td></tr><tr><td>建索引 OOM / 极慢</td><td><code>maintenance_work_mem</code> 太小</td><td>提高后重试；或先建 ivfflat</td></tr><tr><td>建索引报维度错</td><td>vector 索引上限 2000 维</td><td>改 <code>halfvec</code> 或降维</td></tr><tr><td>查询走 Seq Scan 而非索引</td><td>排序表达式不匹配、或条件里对列做了运算</td><td>看 EXPLAIN；改写 <code>ORDER BY emb &lt;=&gt; $1</code></td></tr><tr><td>索引越用越大</td><td>大量删除后未 VACUUM/REINDEX</td><td>查 <code>pg_stat_user_tables.n_dead_tup</code></td></tr><tr><td>写向量卡住主库</td><td>HNSW 插入 + WAL 写入放大</td><td>批量写、错峰、或把向量表拆到独立实例</td></tr></table></section><section id="decide"><h2><span class="n">⑥</span>去留判断的五条线</h2><p>最后给一条判断线，避免在 pgvector 上硬扛：</p><table><tr><th>你的处境</th><th>结论</th></tr><tr><td>向量 &lt; 1000 万，p99 要求 &gt; 20 ms，团队已有 Postgres</td><td><b>留在 pgvector</b>，性价比最高</td></tr><tr><td>向量 &lt; 1000 万，但 p99 要求 &lt; 10 ms</td><td>先试调优；仍不行则迁移</td></tr><tr><td>向量 &gt; 1000 万</td><td>评估专用库；pgvector 的索引构建与 VACUUM 会成为长期负担</td></tr><tr><td>需要频繁更新向量（如实时个性化）</td><td>pgvector 的 UPDATE 代价很高，倾向于专用库</td></tr><tr><td>已有数据在 Postgres，且向量只是辅助召回</td><td><b>留在 pgvector</b>，用 SQL 过滤融合</td></tr></table><div class="lead">迁移到专用向量库不是「升级」，是<b>把一个库的问题换成两个库的一致性问题</b>。只有在向量规模或延迟真的顶不住时，这笔交换才划算。</div></section><section id="card"><h2><span class="n">⑦</span>速记卡</h2><div class="grid2"><div class="card"><h4>更新最贵</h4><p><code>UPDATE</code> 向量列 = 删 + 插，还留死元组。</p></div><div class="card"><h4>删除要善后</h4><p>标记删除 + 图不修复；大量删后 <code>REINDEX</code>。</p></div><div class="card"><h4>TOAST</h4><p>1536 维起行数据外置，备份与复制流量变大。</p></div><div class="card"><h4>内存决定 p99</h4><p>索引装不进 <code>shared_buffers</code>，p99 必然抖。</p></div><div class="card"><h4>量级参考</h4><p>100 万×768：p50 2–5ms，p99 5–15ms。</p></div><div class="card"><h4>打折前提</h4><p>无过滤、单租户、warm cache —— 实际要打折。</p></div><div class="card"><h4>七类故障</h4><p>结果数不足、召回低、建索引 OOM 是前三名。</p></div><div class="card"><h4>去留判断</h4><p>千万级内没硬延迟要求，留在 pgvector 更划算。</p></div></div></section>
+</main>
+
+<footer>
+  pgvector 的取舍可以用一句话概括：<b>用「向量检索的中等性能」换「省掉一整套系统」</b>。这笔交换在千万级以内几乎总是划算的。<br>延伸：<a href="../01-index-and-query/hnsw-and-ivfflat.html">索引实战</a> · <a href="../../06-engine-landscape/00-overview/vector-db-selection.html">引擎横向选型</a>
+</footer>
+
+</body>
+</html>
