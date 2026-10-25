@@ -74,6 +74,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -222,5 +234,48 @@ ldd app             # not a dynamic executable（CGO 关闭时）
 # 代价：二进制较大（最小 hello world 约 1.5~2MB）
 # 裁剪：-ldflags="-s -w" 可减 25~30%</code></pre></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td><code>undefined reference to xxx</code></td><td>库没链接；或<b>库顺序</b>错（依赖者要在前）</td><td>把 <code>-lfoo</code> 放在依赖它的 .o <b>之后</b>；检查 <code>-L</code> 路径</td></tr><tr><td><code>multiple definition of xxx</code></td><td>头文件里放了变量<b>定义</b></td><td>头文件只放 <code>extern</code> 声明；或用 <code>static</code>/<code>inline</code></td></tr><tr><td>C/C++ 混编链接失败</td><td>C++ 的名字改编（name mangling）</td><td>C 的头文件加 <code>extern "C" { ... }</code></td></tr><tr><td><code>error while loading shared libraries</code></td><td>运行时找不到 .so</td><td><code>ldconfig</code>；<code>LD_LIBRARY_PATH</code>；或用 <code>-Wl,-rpath</code> 编进二进制</td></tr><tr><td>改了 .so 但没生效</td><td>有缓存 / 路径不对</td><td><code>ldconfig</code> 刷新缓存；确认 ldd 指向的路径</td></tr><tr><td>静态链接报 glibc 警告</td><td>glibc 的部分函数（getaddrinfo 等）动态依赖</td><td>用 musl（Alpine）；或接受警告并静态链接其余部分</td></tr><tr><td>二进制太大</td><td>符号表 + 静态链接</td><td><code>-s</code> 去符号；Go 用 <code>-ldflags="-s -w"</code>；<code>strip</code></td></tr></tbody></table></div><p class="muted"><b>为什么库的顺序很重要</b>：链接器按<b>从左到右</b>扫描，只会从后面的库里找当前「未定义符号」。所以 <code>gcc main.o -lmath</code> 能过，<code>gcc -lmath main.o</code> 会报 undefined reference。这是初学者的高频困惑点。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>四个阶段与对应工具</h2><p>从源码到进程是固定的四步：<b>预处理 → 编译 → 汇编 → 链接</b>，再加运行时的<b>加载 → 执行</b>。每一步都有对应的产物和查看工具。</p><div class="table-wrap"><table><thead><tr><th>阶段</th><th>做什么</th><th>产物</th><th>查看工具</th><th>常用命令</th></tr></thead><tbody><tr><td>预处理</td><td>展开宏、包含头文件、处理条件编译</td><td><code>.i</code></td><td><code>cpp</code> / gcc -E</td><td><code>gcc -E main.c -o main.i</code></td></tr><tr><td>编译</td><td>词法/语法/语义分析 + 优化，生成汇编</td><td><code>.s</code></td><td>gcc -S</td><td><code>gcc -O2 -S main.c</code></td></tr><tr><td>汇编</td><td>汇编指令转机器码，生成可重定位目标文件</td><td><code>.o</code></td><td><code>objdump</code> / <code>readelf</code></td><td><code>gcc -c main.s -o main.o</code></td></tr><tr><td>链接</td><td>符号解析 + 地址重定位，合并成可执行文件</td><td><code>a.out</code></td><td><code>nm</code> / <code>ldd</code></td><td><code>gcc main.o -o app</code></td></tr><tr><td>加载</td><td>建立虚拟地址映射、加载依赖库</td><td>进程镜像</td><td><code>/proc/PID/maps</code></td><td><code>cat /proc/$PID/maps</code></td></tr><tr><td>执行</td><td>从入口开始取指执行</td><td>运行中的进程</td><td><code>strace</code> / <code>ltrace</code></td><td><code>strace ./app</code></td></tr></tbody></table></div><p><b>全流程命令</b></p><pre><code># 一条命令看全过程（-v 会打印各阶段调用的子命令）
+gcc -v -O2 main.c -o app
+
+# 1) 预处理：看宏展开后的真实代码
+gcc -E main.c -o main.i &amp;&amp; head -40 main.i
+
+# 2) 编译到汇编：对比 -O0 与 -O2 的差别最直观
+gcc -O0 -S main.c -o main_O0.s
+gcc -O2 -S main.c -o main_O2.s
+diff &lt;(wc -l &lt; main_O0.s) &lt;(wc -l &lt; main_O2.s)   # O2 通常更短且无冗余
+
+# 3) 目标文件：看符号表与未定义符号（链接错误排查）
+nm -C main.o | head -20          # U 开头 = 未定义（需要链接时解析）
+readelf -h main.o                # 看 ELF 头（类型、机器、入口）
+readelf -S main.o                # 看段表（.text/.data/.bss/.rodata）
+
+# 4) 可执行文件：看依赖的共享库
+ldd ./app
+objdump -d ./app | head -40      # 反汇编
+
+# 5) 运行时：看进程的内存映射与系统调用
+cat /proc/$PID/maps              # 代码段 r-xp、数据段 rw-p、堆、mmap 区、栈
+strace -c ./app                  # 系统调用统计（哪个调用最多）
+strace -e trace=openat,mmap ./app</code></pre><div class="table-wrap"><table><thead><tr><th>段/区</th><th>存放什么</th><th>权限</th><th>说明</th></tr></thead><tbody><tr><td><code>.text</code></td><td>机器指令</td><td>r-x（可读可执行）</td><td>多个进程可共享同一份物理页</td></tr><tr><td><code>.rodata</code></td><td>只读数据（字符串常量）</td><td>r--</td><td>写它会触发段错误</td></tr><tr><td><code>.data</code></td><td>已初始化的全局/静态变量</td><td>rw-</td><td>每个进程一份</td></tr><tr><td><code>.bss</code></td><td>未初始化的全局/静态变量</td><td>rw-</td><td><b>不占文件空间</b>，加载时清零</td></tr><tr><td>堆（heap）</td><td>动态分配内存</td><td>rw-</td><td><code>brk</code> / <code>mmap</code> 扩展</td></tr><tr><td>栈（stack）</td><td>局部变量与调用帧</td><td>rw-</td><td>默认 8 MB（<code>ulimit -s</code>）</td></tr><tr><td>mmap 区</td><td>动态库、文件映射、大块分配</td><td>按需</td><td><code>malloc</code> 大块时走这里</td></tr></tbody></table></div><p><b>运行时观测</b></p><pre><code># 看进程实际内存布局（理解「虚拟地址 ≠ 物理地址」的最好方式）
+cat /proc/self/maps
+# 示例输出：
+# 55d4a8c00000-55d4a8c01000 r--p  ...  /usr/bin/cat     &lt;- 只读段
+# 55d4a8c01000-55d4a8c05000 r-xp  ...  /usr/bin/cat     &lt;- 代码段
+# 7f8e4a000000-7f8e4a1d0000 r-xp  ...  /lib/libc.so.6   &lt;- 共享库代码
+# 7ffd3c000000-7ffd3c021000 rw-p  ...  [stack]          &lt;- 栈
+
+# 看缺页与内存分配（理解「malloc 不一定立刻要物理页」）
+/usr/bin/time -v ./app 2&gt;&amp;1 | grep -E 'Maximum resident|Minor|Major'
+#   Minor(page) faults 高 = 首次访问触发的零页/文件页映射
+#   Major faults 高 = 真的要读磁盘（性能杀手）</code></pre><p class="muted">最容易混淆的一点：<code>malloc</code> 只是<b>在虚拟地址空间里划一块</b>，首次写入时才通过缺页异常拿到真正的物理页。所以「申请 1 GB 内存」可能瞬间返回且 RSS 几乎不涨——直到你真的写它。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>编译选项与检查清单</h2><div class="table-wrap"><table><thead><tr><th>选项</th><th>作用</th><th>说明</th></tr></thead><tbody><tr><td><code>-O0</code> / <code>-O1</code> / <code>-O2</code> / <code>-O3</code></td><td>优化等级</td><td><b>生产常用 -O2</b>（性能与编译时间的平衡点）</td></tr><tr><td><code>-Os</code></td><td>优化体积</td><td>嵌入式、移动端</td></tr><tr><td><code>-g</code></td><td>生成调试信息</td><td>调试构建必开；与 -O2 可共存</td></tr><tr><td><code>-Wall -Wextra</code></td><td>打开更多警告</td><td><b>建议默认开启</b></td></tr><tr><td><code>-fPIC</code></td><td>生成位置无关代码</td><td>做动态库必须；可执行文件默认 PIE</td></tr><tr><td><code>-static</code></td><td>静态链接</td><td>体积大但部署简单（无依赖问题）</td></tr><tr><td><code>-march=native</code></td><td>按本机 CPU 指令集优化</td><td>性能更好，但二进制不可跨机</td></tr><tr><td><code>-flto</code></td><td>链接时优化</td><td>跨编译单元优化，编译更慢</td></tr></tbody></table></div><p>排障与核对：</p><ul><li><b>链接报 undefined reference</b>：用 <code>nm -C xx.o</code> 找谁引用了未定义符号，再确认库是否加到命令行且<b>顺序正确</b>（被依赖的库要放后面）。</li><li><b>duplicate symbol</b>：头文件中定义了非 static 的变量/函数，应改成 <code>extern</code> 声明 + 单一定义。</li><li><b>运行时 <code>undefined symbol</code></b>：动态库版本不匹配，用 <code>ldd</code> 与实际库比对。</li><li><b>栈溢出</b>：默认栈 8 MB（<code>ulimit -s</code>），大局部数组或深递归要警惕。</li><li><b>段错误先区分是读还是写</b>：写 <code>.rodata</code>、空指针解引用、越界是三大常见原因。</li><li><b>发布构建要 <code>-O2</code> 且保留符号表</b>（或单独保存 .sym 文件），否则线上 core 无法分析。</li><li><b>strip 会去掉符号</b>：调试版本不要 strip，或保留一份带符号的副本。</li><li><b>动态库的搜索顺序</b>：<code>LD_LIBRARY_PATH</code> → <code>/etc/ld.so.cache</code> → 默认路径。</li><li><b>用 <code>strace -c</code> 找系统调用热点</b>，比盲目优化更快定位 IO 问题。</li><li><b>大内存分配走 mmap</b>（通常 &gt; 128 KB 阈值），<code>free</code> 后立刻归还，行为与小块不同。</li></ul></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="stack-frames-and-calls.html">函数调用栈：栈帧、返回地址与递…</a><a href="../02-closure/closure-implementation.html">闭包实现：捕获变量、环境对象与…</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 运行时机制</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

@@ -346,6 +346,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -898,5 +910,30 @@ defer resp.Body.Close()
 io.Copy(io.Discard, resp.Body)     // 读完才能复用；不读完连接会被丢弃
 _ = err</code></pre></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>连接问题排查</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>压测 QPS 上不去，大量 TIME_WAIT</td><td>短连接：客户端主动关闭，TIME_WAIT 堆在客户端</td><td>开启连接池复用；调 <code>net.ipv4.ip_local_port_range</code> 与 <code>tcp_tw_reuse</code></td></tr><tr><td>连接数暴涨到几万</td><td>连接池配置太大或没复用</td><td>每 host 连接数 ≈ <code>QPS × RT</code>；设上限并监控</td></tr><tr><td>偶发 <code>connection reset by peer</code></td><td>服务端先关了空闲连接，客户端正好复用它</td><td><b>客户端 IdleConnTimeout 要小于服务端 keepalive_timeout</b>；加<b>重试</b>兜底</td></tr><tr><td>HTTP/2 下反而更慢</td><td>单连接多路复用时丢包造成全连接阻塞</td><td>弱网下 HTTP/3(QUIC) 更好；或调大 <code>SETTINGS_MAX_CONCURRENT_STREAMS</code></td></tr><tr><td>Nginx 报 <code>upstream prematurely closed</code></td><td>上游提前关闭</td><td>检查上游 <code>keepalive_timeout</code>；保证 <code>proxy_http_version 1.1</code></td></tr><tr><td>TIME_WAIT 在服务端堆积</td><td>服务端主动关闭（如短连接模式）</td><td>让<b>客户端</b>主动关闭；或开 keepalive</td></tr><tr><td>握手耗时占比高</td><td>首次访问/连接被频繁重建</td><td>开 keepalive + 会话复用；TLS 1.3 的 0-RTT；用 <code>preconnect</code></td></tr></tbody></table></div><p class="muted"><b>连接池大小的算法</b>：<code>连接数 = QPS × 平均响应时间</code>。QPS 1000、RT 50ms → 需要 <code>1000 × 0.05 = 50</code> 个并发连接。池子小于这个值就会成为吞吐瓶颈（Little's Law）。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>协议版本的复用能力对比</h2><p>连接复用经历了三代：<b>HTTP/1.1 keep-alive（串行复用）→ HTTP/2 多路复用 → HTTP/3 无队头阻塞</b>。每一代解决的都是上一代的「等」的问题。</p><div class="table-wrap"><table><thead><tr><th>能力</th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3（QUIC）</th></tr></thead><tbody><tr><td>连接复用</td><td>keep-alive（<b>串行</b>，一个请求完了才发下一个）</td><td><b>多路复用</b>（同一连接并行多个 stream）</td><td>多路复用 + 每 stream 独立</td></tr><tr><td>队头阻塞</td><td><b>有</b>（前一个慢后面全等）</td><td>传输层没有，但 TCP 层仍有</td><td><b>基本没有</b>（UDP 之上各自独立）</td></tr><tr><td>并发连接数</td><td>浏览器每域名 6 个左右</td><td><b>1 个连接即可</b></td><td>1 个连接</td></tr><tr><td>头部压缩</td><td>无（每个请求重复发 Cookie/UA）</td><td><b>HPACK</b>（显著降低）</td><td>QPACK</td></tr><tr><td>握手</td><td>TCP + 可选 TLS</td><td>TCP + TLS（通常必需）</td><td><b>QUIC 把传输与加密握手合并</b>，1-RTT / 0-RTT</td></tr><tr><td>弱网表现</td><td>丢一个包全连接等</td><td>丢包会阻塞所有 stream（TCP 层）</td><td><b>只影响丢的那个 stream</b></td></tr><tr><td>部署现状</td><td>全支持</td><td>主流浏览器与服务端均支持</td><td>支持度快速上升（CDN 多已开启）</td></tr></tbody></table></div><p>量化一下头部压缩的收益：一个带 Cookie、UA、Referer 的请求头常在 <b>500 B ~ 2 KB</b>。HTTP/1.1 每次都要完整发送；HTTP/2 的 HPACK 用<b>静态表 + 动态表 + 哈夫曼编码</b>后，重复头部通常只剩 <b>几十字节</b>，在高频小请求场景能省掉一半以上的上行流量。</p><p><b>协议验证与压测</b></p><pre><code># 看服务端支持哪些协议版本
+curl -I --http2 https://example.com/ -v 2&gt;&amp;1 | grep -i 'ALPN\|HTTP/2'
+curl --http3 https://example.com/ -o /dev/null -w '%{http_version}\n'   # 需支持 HTTP/3 的 curl
+#   http_version=3 即为 HTTP/3
+
+# nghttp 是 HTTP/2 的专用调试工具
+nghttp -nv https://example.com/            # 看帧交换过程
+nghttp -nvas https://example.com/ | head   # 看 HEADERS 帧
+
+# 压测对比（同一台机器上换协议对比才有意义）
+h2load -n 10000 -c 100 https://example.com/      # HTTP/2
+wrk -t4 -c100 -d30s https://example.com/         # HTTP/1.1
+
+# 看连接是否真的被复用（关键：多次请求只握手一次）
+curl -w '%{http_version} %{num_connects} connects, total %{time_total}s\n' \
+     -o /dev/null -s https://example.com/ https://example.com/ https://example.com/
+#   num_connects=1 说明复用成功</code></pre><div class="table-wrap"><table><thead><tr><th>参数（Nginx）</th><th>默认值</th><th>作用</th><th>建议</th></tr></thead><tbody><tr><td><code>http2</code> 指令</td><td>关闭（需显式 <code>listen 443 ssl http2</code>）</td><td>开启 HTTP/2</td><td>HTTPS 站点建议开启</td></tr><tr><td><code>http2_max_concurrent_streams</code></td><td>128</td><td>单连接最大并发流</td><td>默认够用</td></tr><tr><td><code>http2_max_requests</code></td><td>1000</td><td>单连接最多服务多少请求后关闭</td><td>高并发可调大</td></tr><tr><td><code>keepalive_timeout</code></td><td>75s</td><td>空闲连接保持时间</td><td>内网 60~120s</td></tr><tr><td><code>keepalive_requests</code></td><td>1000</td><td>单连接请求上限</td><td>默认即可</td></tr><tr><td><code>ssl_session_cache</code></td><td>none</td><td>TLS 会话复用缓存</td><td><b>务必开启</b>，省 1 个 RTT</td></tr><tr><td><code>ssl_session_timeout</code></td><td>5m</td><td>会话缓存有效期</td><td>可提到 10m~1h</td></tr></tbody></table></div><p class="muted">开启 HTTP/2 后<b>连接数会显著下降</b>（浏览器从 6 个降到 1 个），这对服务端是好事（连接开销小），但要注意：<b>负载均衡的「最少连接」算法会失效</b>，因为所有流量都挤在一条连接上，需要改用请求数或轮询。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>排障与检查清单</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>验证</th><th>处理</th></tr></thead><tbody><tr><td>请求排队等待</td><td>HTTP/1.1 队头阻塞或连接池太小</td><td><code>num_connects</code> 与耗时分布</td><td>上 HTTP/2 或加大连接池</td></tr><tr><td>每次都重新握手</td><td>keep-alive 未开启或中间设备关闭</td><td><code>curl -w '%{num_connects}'</code></td><td>检查中间代理的空闲超时</td></tr><tr><td>偶发 502/EOF</td><td>服务端已关闭连接、客户端还在用</td><td>对比两端超时配置</td><td><b>客户端超时 ≤ 服务端超时</b></td></tr><tr><td>HTTP/2 没生效</td><td>未开 TLS 或 ALPN 未协商</td><td><code>curl -v</code> 看 ALPN</td><td>确认 listen 指令与证书</td></tr><tr><td>切换 HTTP/2 后变慢</td><td>单连接被队头阻塞或流控配置不当</td><td>对比并发下的 P99</td><td>调整并发流数与窗口大小</td></tr></tbody></table></div><p>逐条核对：</p><ul><li><b>客户端超时必须小于服务端 keepalive 超时</b>，否则会用到已被关闭的连接。</li><li><b>中间设备（LB/NAT）的空闲超时要长于 keepalive 间隔</b>，否则静默断连。</li><li><b>连接池大小要 ≥ 并发数</b>，Go 默认每主机 2 个空闲连接几乎必然要调。</li><li><b>开启 TLS 会话复用</b>（ssl_session_cache），能省掉一个 RTT。</li><li><b>HTTP/2 下不要再用域名分片</b>（sharding），那是 HTTP/1.1 时代的优化，现在反而有害。</li><li><b>HTTP/2 要配好并发流数与窗口</b>，默认 128 对高并发 API 可能偏小。</li><li><b>压测要对比协议版本</b>，且保持其他变量一致。</li><li><b>弱网/移动端优先考虑 HTTP/3</b>：QUIC 在丢包与切换网络场景下优势明显。</li><li><b>监控连接数与握手次数</b>：握手次数不随请求量增长才是复用正常的表现。</li></ul></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="long-vs-short-connection.html">长连接 vs 短连接</a><a href="../02-http-versions/http-versions-deep-dive.html">HTTP 1.0 / 2.0 …</a><a href="../02-http-versions/http-versions.html">HTTP 各版本核心原理图</a><a href="../03-message-format/http-packet-format-dynamic.html">HTTP 报文格式</a></div>
+  <div class="xrel-up"><a href="../../../../index.html">← 返回 计算机网络</a>　·　<a href="../../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

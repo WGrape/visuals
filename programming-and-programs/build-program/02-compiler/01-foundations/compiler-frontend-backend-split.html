@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>编译器为什么分前后端：IR 与三段结构</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>编译器为什么分前后端：IR 与三段结构</h1>
+  <p>从 N×M 到 N+M 的拆分动机、三段职责划分、IR 的三种形态与 SSA，以及 Pass 流水线</p>
+  <span class="tag">编译器</span><span class="tag">IR</span><span class="tag">前端</span><span class="tag">后端</span><span class="tag">LLVM</span><span class="tag">SSA</span>
+</header>
+<nav>
+  <a href="#why">① 为什么分段</a>
+  <a href="#duty">② 三段职责</a>
+  <a href="#ir">③ IR 形态</a>
+  <a href="#pass">④ Pass</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>编译器分成前端、中端、后端三段，根本原因是<b>把「N 种语言 × M 种目标」变成「N + M」</b>。实现这个拆分的关键是 <b>IR（中间表示）</b>——前端只管把语言翻译成 IR，后端只管把 IR 翻译成机器码，优化器在 IR 上做一次即可复用到所有组合。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>为什么要分段：从 N×M 到 N+M</h2>
+<div class="fig">
+    <svg width="720" height="290" viewBox="0 0 720 290">
+  <defs>
+    <marker id="ah5" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+    </marker>
+  </defs>
+  <rect x="30" y="30" width="150" height="56" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="105" y="56" text-anchor="middle" font-size="12" fill="#56d4dd">前端 Frontend</text>
+  <text x="105" y="76" text-anchor="middle" font-size="11" fill="#94a3b8">词法/语法/语义 → AST</text>
+
+  <line x1="184" y1="58" x2="216" y2="58" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ah5)"/>
+
+  <rect x="220" y="30" width="130" height="56" rx="8" fill="#241b33" stroke="#d2a8ff"/>
+  <text x="285" y="56" text-anchor="middle" font-size="12" fill="#d2a8ff">IR 中间表示</text>
+  <text x="285" y="76" text-anchor="middle" font-size="11" fill="#94a3b8">与目标无关</text>
+
+  <line x1="354" y1="58" x2="386" y2="58" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ah5)"/>
+
+  <rect x="390" y="30" width="130" height="56" rx="8" fill="#172b1f" stroke="#7ee787"/>
+  <text x="455" y="56" text-anchor="middle" font-size="12" fill="#7ee787">中端优化</text>
+  <text x="455" y="76" text-anchor="middle" font-size="11" fill="#94a3b8">IR → IR</text>
+
+  <line x1="524" y1="58" x2="556" y2="58" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ah5)"/>
+
+  <rect x="560" y="30" width="130" height="56" rx="8" fill="#1f2433" stroke="#f0a868"/>
+  <text x="625" y="56" text-anchor="middle" font-size="12" fill="#f0a868">后端 Backend</text>
+  <text x="625" y="76" text-anchor="middle" font-size="11" fill="#94a3b8">指令选择/寄存器分配</text>
+
+  <rect x="30" y="120" width="310" height="66" rx="10" fill="#171b26" stroke="#ff7b72"/>
+  <text x="185" y="144" text-anchor="middle" font-size="12" fill="#ff7b72">不分段：N 种语言 × M 个目标 = N×M 套编译器</text>
+  <text x="185" y="168" text-anchor="middle" font-size="11" fill="#94a3b8">5 种语言 × 4 种 CPU = 20 套</text>
+
+  <rect x="380" y="120" width="310" height="66" rx="10" fill="#171b26" stroke="#7ee787"/>
+  <text x="535" y="144" text-anchor="middle" font-size="12" fill="#7ee787">分段：N 个前端 + M 个后端 = N+M</text>
+  <text x="535" y="168" text-anchor="middle" font-size="11" fill="#94a3b8">5 + 4 = 9 套，且优化器只写一次</text>
+
+  <rect x="30" y="212" width="660" height="58" rx="10" fill="#171b26" stroke="#2b3142"/>
+  <text x="360" y="236" text-anchor="middle" font-size="12" fill="#e2e8f0">IR 就是这个「中间层」，它是分段能成立的关键</text>
+  <text x="360" y="258" text-anchor="middle" font-size="11" fill="#94a3b8">前端只管把语言翻译成 IR，后端只管把 IR 翻译成机器码；优化器在 IR 上做，与语言和 CPU 都无关</text>
+</svg>
+    <div class="cap">分段让编译器数量从乘法变成加法，IR 是关键中间层</div>
+  </div><p>如果没有 IR，每种语言要为每种 CPU 写一套完整编译器。有了 IR：</p><ul>
+  <li><b>新语言</b>：只写前端（把语言翻译成 IR），自动获得所有后端和优化。</li>
+  <li><b>新 CPU</b>：只写后端（把 IR 翻译成机器码），自动支持所有语言。</li>
+  <li><b>新优化</b>：在 IR 上写一次，所有语言 × 所有目标都受益。</li>
+</ul><div class="lead ok"><b>要点：</b>LLVM 是这个思路最成功的实践：Clang（C/C++）、Rust、Swift 的前端各不相同，但都产出 LLVM IR，共享同一套中端优化和后端。</div>
+</section>
+
+<section id="duty">
+  <h2><span class="n">02</span>三段各自负责什么</h2>
+<div class="table-wrap"><table><thead><tr><th>段</th><th>输入 → 输出</th><th>核心工作</th><th>与目标机器有关吗</th></tr></thead><tbody><tr><td><b>前端</b></td><td>源码 → AST → IR</td><td>词法分析、语法分析、语义检查、类型检查、<b>报错定位</b></td><td><b>无关</b></td></tr><tr><td><b>中端</b></td><td>IR → IR（优化后）</td><td>常量传播、死代码消除、内联、循环优化</td><td><b>无关</b></td></tr><tr><td><b>后端</b></td><td>IR → 目标机器码</td><td>指令选择、寄存器分配、指令调度、目标相关优化</td><td><b>完全相关</b></td></tr></tbody></table></div><ul>
+  <li><b>前端负责「程序写对了没有」</b>：语法错误、类型错误、未定义符号都在这里报，并且要给出准确的行列位置。</li>
+  <li><b>中端负责「让程序跑得更快」</b>：与目标无关，所以可以做得很通用、很激进。</li>
+  <li><b>后端负责「落到具体 CPU」</b>：寄存器有多少、指令集长什么样、流水线怎么排。</li>
+</ul><div class="lead warn"><b>要点：</b>判断一个编译器问题属于哪一段：<b>报错信息不对 → 前端；性能不及预期 → 中端/后端；在某款 CPU 上崩 → 后端</b>。</div>
+</section>
+
+<section id="ir">
+  <h2><span class="n">03</span>IR 长什么样：三种形态</h2>
+<div class="table-wrap"><table><thead><tr><th>形态</th><th>例子</th><th>特点</th><th>用途</th></tr></thead><tbody><tr><td><b>树形 / AST</b></td><td>语法树</td><td>最接近源码，保留结构</td><td>前端内部，语义分析</td></tr><tr><td><b>三地址码 / 线性 IR</b></td><td><code>t1 = a + b; t2 = t1 * c</code></td><td>接近机器但仍是抽象的指令序列</td><td>便于做数据流分析</td></tr><tr><td><b>SSA 形式</b></td><td>LLVM IR</td><td><b>每个变量只赋值一次</b>，配 φ 节点处理分支合并</td><td><b>现代编译器的主流选择</b>，极大简化优化</td></tr></tbody></table></div><pre><code>; LLVM IR 示例：一眼能看出它的特点
+define i32 @add_mul(i32 %a, i32 %b, i32 %c) {
+entry:
+  %t1 = add nsw i32 %a, %b        ; 三地址码：一个操作，一个结果
+  %t2 = mul nsw i32 %t1, %c
+  ret i32 %t2
+}
+
+; SSA 的核心约束：每个虚拟寄存器只被赋值一次
+;   %t1 = ... 出现第二次就是非法的，必须改名（%t1.1 %t1.2）
+; 好处：定义与使用是一一对应的，做数据流分析不用考虑"这个变量现在是什么值"
+
+; 分支合并用 phi 节点表示
+define i32 @max(i32 %a, i32 %b) {
+entry:
+  %cmp = icmp sgt i32 %a, %b
+  br i1 %cmp, label %then, label %else
+then:
+  br label %merge
+else:
+  br label %merge
+merge:
+  %m = phi i32 [ %a, %then ], [ %b, %else ]    ; 从哪条边来就取哪个值
+  ret i32 %m
+}</code></pre><div class="lead warn"><b>要点：</b>SSA 看似麻烦（要插入 φ 节点），但它把「变量在某个点的值是什么」变成了<b>静态可查</b>的事实，这是绝大多数优化能高效实现的前提。</div>
+</section>
+
+<section id="pass">
+  <h2><span class="n">04</span>Pass：优化是怎么组织的</h2>
+<p>每个优化是一个独立的 <b>Pass</b>（一遍扫描 + 变换），编译器把很多 Pass 串成流水线。这种结构让优化可以<b>自由组合、按需开关</b>（对应 <code>-O0/-O1/-O2/-O3</code>）。</p><div class="table-wrap"><table><thead><tr><th>类别</th><th>代表 Pass</th><th>做什么</th></tr></thead><tbody><tr><td><b>简化类</b></td><td>常量传播、常量折叠、死代码消除</td><td>把能算的先算掉，删掉没用的</td></tr><tr><td><b>内联类</b></td><td>函数内联</td><td>把调用展开，为后续优化创造机会</td></tr><tr><td><b>循环类</b></td><td>循环不变量外提、循环展开、向量化</td><td>减少循环开销、利用 SIMD</td></tr><tr><td><b>内存类</b></td><td>公共子表达式消除、别名分析</td><td>避免重复计算、判断能否重排访存</td></tr><tr><td><b>后端类</b></td><td>指令选择、寄存器分配、指令调度</td><td>落地到具体 CPU</td></tr></tbody></table></div><pre><code># 看 LLVM 的优化过程（直观理解 Pass 流水线）
+clang -O2 -S -emit-llvm demo.c -o demo.ll       # 产出 IR
+opt -O2 -S demo.ll -o demo_opt.ll               # 只跑中端优化
+llc -O2 demo_opt.ll -o demo.s                   # 后端：IR → 汇编
+
+# 看某个 Pass 单独的效果
+opt -passes='inline' -S demo.ll -o after_inline.ll
+opt -passes='instcombine' -S demo.ll -o after_ic.ll
+
+# 看优化报告（为什么没内联/没向量化）
+clang -O2 -Rpass=inline -Rpass-missed=inline demo.c</code></pre><div class="lead warn"><b>要点：</b>调试「优化后行为变了」这类问题的标准手法：<b>逐级降低优化等级（-O2 → -O1 → -O0）定位是哪一级引入的</b>，再用 <code>-Rpass</code> 系列看编译器做了什么决定。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：为什么我的代码开了 -O2 行为就变了？</b><p>绝大多数情况是<b>源码里有未定义行为</b>（数组越界、有符号溢出、使用未初始化值），优化器基于「未定义行为不会发生」的假设做变换，于是行为就变了。<b>先修未定义行为，而不是关掉优化。</b></p></div><div class="qa"><b>问：IR 和字节码是一回事吗？</b><p>不是。IR 是<b>编译期</b>的中间表示（如 LLVM IR），编译完就没了；字节码是<b>运行期</b>的分发格式（如 Java bytecode、Python bytecode），要被虚拟机执行。两者的设计约束完全不同。</p></div><div class="qa"><b>问：写一个新语言要自己写后端吗？</b><p>通常不用。产出 LLVM IR 就能复用它的后端与优化，这样你只需要专注前端（语法、类型系统、语义）。这也是 Rust/Swift 等语言的做法。</p></div><div class="qa"><b>问：前端和后端哪个更难？</b><p>难点不同：前端难在<b>语言设计与语义正确性</b>（类型系统、报错体验）；后端难在<b>工程深度</b>（寄存器分配、指令调度、目标相关的细节非常多）。中端优化则是两者之间的算法密集区。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 编程与程序 / 程序的构建 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

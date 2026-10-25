@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>依赖图与增量构建：为什么「该重编的没重编」是最难查的 bug</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>依赖图与增量构建：为什么「该重编的没重编」是最难查的 bug</h1>
+  <p>依赖图的性质、时间戳与内容哈希两种判定、漏依赖的三种表现，以及增量提速的优化顺序</p>
+  <span class="tag">构建系统</span><span class="tag">依赖图</span><span class="tag">增量构建</span><span class="tag">ccache</span><span class="tag">头文件依赖</span>
+</header>
+<nav>
+  <a href="#graph">① 依赖图</a>
+  <a href="#judge">② 判定方式</a>
+  <a href="#leak">③ 漏依赖</a>
+  <a href="#fast">④ 提速</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>增量构建的正确性完全取决于<b>依赖图准不准</b>：漏一条边，该重编的没重编（程序行为与源码不一致，极难排查）；多一条边，白白多重建（只是慢，不会错）。所以构建系统的设计哲学是<b>宁可多重建，不可漏重建</b>。
+</div>
+
+<section id="graph">
+  <h2><span class="n">01</span>依赖图是什么</h2>
+<div class="fig">
+    <svg width="720" height="280" viewBox="0 0 720 280">
+  <defs>
+    <marker id="ah4" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+    </marker>
+  </defs>
+  <rect x="40" y="20" width="130" height="44" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="105" y="48" text-anchor="middle" font-size="12" fill="#56d4dd">common.h</text>
+  <rect x="200" y="20" width="130" height="44" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="265" y="48" text-anchor="middle" font-size="12" fill="#56d4dd">utils.h</text>
+
+  <line x1="105" y1="68" x2="105" y2="108" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <line x1="265" y1="68" x2="180" y2="108" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <line x1="265" y1="68" x2="350" y2="108" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+
+  <rect x="40" y="112" width="130" height="44" rx="8" fill="#172b1f" stroke="#7ee787"/>
+  <text x="105" y="140" text-anchor="middle" font-size="12" fill="#7ee787">main.o</text>
+  <rect x="200" y="112" width="130" height="44" rx="8" fill="#172b1f" stroke="#7ee787"/>
+  <text x="265" y="140" text-anchor="middle" font-size="12" fill="#7ee787">utils.o</text>
+  <rect x="360" y="112" width="130" height="44" rx="8" fill="#172b1f" stroke="#7ee787"/>
+  <text x="425" y="140" text-anchor="middle" font-size="12" fill="#7ee787">net.o</text>
+
+  <line x1="105" y1="160" x2="290" y2="196" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <line x1="265" y1="160" x2="290" y2="196" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <line x1="425" y1="160" x2="320" y2="196" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah4)"/>
+
+  <rect x="240" y="200" width="140" height="48" rx="8" fill="#241b33" stroke="#f0a868"/>
+  <text x="310" y="228" text-anchor="middle" font-size="12" fill="#f0a868">app（链接）</text>
+
+  <rect x="430" y="90" width="250" height="158" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+  <text x="555" y="116" text-anchor="middle" font-size="12" fill="#d2a8ff">改了 common.h 会重建什么</text>
+  <text x="555" y="140" text-anchor="middle" font-size="11" fill="#94a3b8">沿箭头向下传播：</text>
+  <text x="555" y="160" text-anchor="middle" font-size="11" fill="#94a3b8">common.h → main.o → app</text>
+  <text x="555" y="180" text-anchor="middle" font-size="11" fill="#94a3b8">net.o 不依赖它 → 不重建</text>
+  <text x="555" y="204" text-anchor="middle" font-size="11" fill="#94a3b8">漏画一条边 = 该重编的没重编</text>
+  <text x="555" y="226" text-anchor="middle" font-size="11" fill="#94a3b8">多画一条边 = 白白多重建</text>
+</svg>
+    <div class="cap">依赖图是有向无环图（DAG），改动沿边向下传播</div>
+  </div><div class="table-wrap"><table><thead><tr><th>性质</th><th>说明</th><th>为什么</th></tr></thead><tbody><tr><td><b>有向</b></td><td>边表示「谁依赖谁」</td><td>方向错了会导致反向重建</td></tr><tr><td><b>无环</b></td><td>不能有循环依赖</td><td>有环就无法确定构建顺序，构建系统会报错</td></tr><tr><td><b>拓扑序执行</b></td><td>依赖先于目标构建</td><td>这是调度的唯一依据</td></tr><tr><td><b>可并行</b></td><td>无依赖关系的分支可同时构建</td><td>并行加速的来源</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>循环依赖是构建系统<b>唯一会直接报错</b>的结构问题。出现时通常是模块划分有问题（A 依赖 B 的同时 B 又依赖 A），应该抽取公共层。</div>
+</section>
+
+<section id="judge">
+  <h2><span class="n">02</span>怎么判断「要不要重建」</h2>
+<div class="table-wrap"><table><thead><tr><th>方式</th><th>判据</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td><b>时间戳</b>（Make 默认）</td><td>依赖的 mtime &gt; 目标的 mtime</td><td>简单、快</td><td><b>不可靠</b>：时钟回拨、文件回写、复制丢失时间戳都会误判</td></tr><tr><td><b>内容哈希</b>（Bazel / ccache）</td><td>依赖内容的哈希与上次不同</td><td><b>可靠</b>，不受时间影响；支持远程缓存</td><td>计算哈希有开销（但现代算法很快）</td></tr><tr><td><b>混合</b></td><td>先用时间戳粗筛，命中再算哈希</td><td>兼顾速度与可靠</td><td>实现复杂</td></tr></tbody></table></div><pre><code># 时间戳判定的经典失效场景
+#   1) 从版本库 checkout 旧版本：文件 mtime 变成 checkout 时刻
+#      → 明明是旧代码，却比目标文件"新"，触发无谓的全量重建
+#   2) 两台机器时间不同步，或 NFS 挂载导致时间偏移
+#      → 该重建的没重建
+#   3) 构建产物被复制/打包时丢失 mtime
+#      → 下次构建全量重来
+
+# 内容哈希的做法（伪代码）
+for each target:
+    key = hash(
+        hash(所有依赖文件的内容),
+        命令行参数,
+        编译器版本
+    )
+    if key != 上次记录的 key:
+        重建
+    else:
+        直接复用缓存的产物
+
+# 这就是 ccache / Bazel / 远程缓存的核心思路</code></pre><div class="lead warn"><b>要点：</b>时间戳判定的问题不会让构建「出错」，只会让构建<b>多干或多漏</b>。但因为「漏」的表现是程序行为诡异，代价往往比想象中大得多。</div>
+</section>
+
+<section id="leak">
+  <h2><span class="n">03</span>漏依赖的三种典型表现</h2>
+<div class="table-wrap"><table><thead><tr><th>现象</th><th>根因</th><th>修法</th></tr></thead><tbody><tr><td><b>改了头文件没生效</b></td><td>.o 的依赖里没有头文件</td><td>加 <code>-MMD -MP</code> 生成 .d；或用 CMake（自动处理）</td></tr><tr><td><b>改了配置文件没生效</b></td><td>配置被嵌进产物，但未声明为依赖</td><td>把配置/生成脚本声明进依赖列表</td></tr><tr><td><b>换了编译器没重编</b></td><td>编译器不在依赖图里</td><td>把工具链版本纳入缓存 key（ccache/Bazel 会自动算）</td></tr><tr><td><b>并行构建偶发失败</b></td><td>两个目标会写同一文件，但没声明顺序</td><td>显式加顺序依赖；或让产物路径不冲突</td></tr></tbody></table></div><ul>
+  <li><b>最阴险的是「改了头文件没生效」</b>：编译链接都正常，程序跑起来行为不对，往往要花很久才想到是构建问题。</li>
+  <li><b>排查手法</b>：删掉 build 目录全量重编，如果行为就对了 —— 99% 是依赖图缺失。</li>
+  <li><b>验证手法</b>：改一个头文件，看预期该重建的目标是否真的重建了（用 <code>make -n</code> 干跑看命令）。</li>
+</ul>
+</section>
+
+<section id="fast">
+  <h2><span class="n">04</span>怎么让增量构建更快</h2>
+<ol>
+  <li><b>开并行</b>：<code>make -j$(nproc)</code> 或 <code>cmake --build . --parallel</code>。性价比最高。</li>
+  <li><b>换 Ninja</b>：启动开销小，依赖检查快，大项目差异明显。</li>
+  <li><b>减少头文件耦合</b>：用前置声明替代 include、把私有声明移进 .c —— <b>这是最根本的优化</b>。</li>
+  <li><b>用 ccache</b>：内容哈希缓存，切换分支来回编译时几乎秒出。</li>
+  <li><b>拆分大翻译单元</b>：单个 .c 过大时无法并行，拆开能提高并行度。</li>
+  <li><b>避免「全项目都依赖」的公共头</b>：改一次触发全量重建，是增量构建的头号杀手。</li>
+</ol><div class="table-wrap"><table><thead><tr><th>优化手段</th><th>收益</th><th>成本</th></tr></thead><tbody><tr><td>并行 <code>-j</code></td><td>数倍</td><td><b>零成本</b>，先做这个</td></tr><tr><td>Ninja 替代 Make</td><td>10%~30%（大项目更多）</td><td>低（改一行 -G）</td></tr><tr><td>ccache</td><td>切换分支场景极大</td><td>低（配一次）</td></tr><tr><td>减少头文件耦合</td><td><b>最根本</b></td><td>需要重构，成本高</td></tr><tr><td>预编译头 / 模块</td><td>大</td><td>引入复杂度，谨慎评估</td></tr></tbody></table></div><div class="lead ok"><b>要点：</b>优化顺序建议：<b>并行 → Ninja → ccache → 头文件重构</b>。前三项几乎零成本，先拿完再考虑重构。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：为什么我改了一行，却重建了大半个项目？</b><p>说明那个文件在依赖图的<b>上游</b>（被大量模块 include）。这既是构建问题也是<b>架构信号</b>——一个头文件被全项目依赖，通常意味着抽象层次需要调整。</p></div><div class="qa"><b>问：什么时候该 clean 全量重编？</b><p>出现这些情况就全量重来：① 换编译器/工具链；② 切换大版本分支；③ 构建出现无法解释的行为异常；④ 依赖配置（CMakeLists）有大改。<b>把这些当成常规动作，不要试图省</b>。</p></div><div class="qa"><b>问：内容哈希一定比时间戳好吗？</b><p>正确性上更好，但不是免费的：要读文件内容算哈希、要维护缓存仓库。<b>小项目用时间戳足够</b>；大型仓库、需要远程缓存共享产物时，内容哈希才明显更划算。</p></div><div class="qa"><b>问：构建产物要不要进版本库？</b><p><b>不要</b>。构建产物放进 .gitignore，源码里只保留构建配置。进版本库会带来冲突、体积膨胀和「本地产物与源码不一致」的问题。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 编程与程序 / 程序的构建 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

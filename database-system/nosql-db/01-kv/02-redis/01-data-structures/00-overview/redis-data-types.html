@@ -342,6 +342,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -982,6 +994,12 @@ redis-cli --bigkeys        # 找大 key
 redis-cli MEMORY DOCTOR    # 官方诊断建议</code></pre><p class="muted"><b>转换是不可逆的</b>：一旦因为超阈值转成 hashtable，即使后来删元素也不会变回 listpack。所以如果写入时曾短暂超过阈值（比如批量导入时），需要<b>重写一遍 key</b> 才能恢复紧凑编码。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>五种类型该怎么选（决策表）</h2><div class="table-wrap"><table><thead><tr><th>需求</th><th>该用</th><th>不该用</th><th>理由</th></tr></thead><tbody><tr><td>缓存单个对象</td><td><b>String</b>（JSON）或 <b>Hash</b></td><td>List/Set</td><td>Hash 可单独改字段，省反序列化</td></tr><tr><td>对象字段要单独读写</td><td><b>Hash</b></td><td>String(JSON)</td><td>避免“读整个→改一个→写回”的竞态</td></tr><tr><td>队列 / 最新 N 条</td><td><b>List</b>（LPUSH + LTRIM）</td><td>Set</td><td>List 有序且两端 O(1)</td></tr><tr><td>去重 / 存在性判断</td><td><b>Set</b></td><td>List</td><td>Set 的 SISMEMBER 是 O(1)</td></tr><tr><td>排行榜 / TopN / 范围查</td><td><b>ZSet</b></td><td>List</td><td>ZSet 按分数有序，O(log N) 插入</td></tr><tr><td>二值状态统计（签到）</td><td><b>Bitmap</b></td><td>Set</td><td>1 亿用户签到只需 <b>12.5 MB</b></td></tr><tr><td>UV 统计（允许误差）</td><td><b>HyperLogLog</b></td><td>Set</td><td><b>12 KB 内存</b>统计 2^64 个，误差 0.81%</td></tr><tr><td>消息流 / 事件</td><td><b>Stream</b>（5.0+）</td><td>List 模拟</td><td>Stream 支持消费组、ACK、回溯</td></tr><tr><td>地理位置</td><td><b>GEO</b>（底层 ZSet）</td><td>自己算</td><td>GEORADIUS 原生支持</td></tr></tbody></table></div><p><b>两个最容易被忽略的省内存神器</b>：<b>HyperLogLog</b> 用 <b>12 KB</b> 搞定亿级 UV（标准误差 <b>0.81%</b>）；<b>Bitmap</b> 每位一天，1 亿用户的月签到只要 <b>1 亿 × 31 bit ≈ 3.7 MB</b>。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>ZSet 为什么同时用跳表和字典？</summary><p>因为两种操作需求不同：<b>按分数范围查 / 排序</b>需要有序结构（<b>跳表</b>，O(log N) 范围扫描）；<b>按成员查分数</b>需要 O(1) 的 KV 查找（<b>字典</b>）。Redis 让两者<b>共享同一份成员和分数的指针</b>，所以内存只多了一份索引结构，却同时获得了两种能力。这是典型的“用空间换两种时间”。跳表参数：最大层数 <b>32</b>，晋升概率 <b>p = 0.25</b>。</p></details><details><summary>为什么 ZSet 的 listpack 阈值（128）比 Hash（512）小这么多？</summary><p>因为 ZSet 在 listpack 里要<b>同时存成员和分数</b>，且插入时要<b>按分数排序做插入</b>——这是 O(n) 的内存移动（memmove）。元素越多，插入越慢，所以要更保守。ZSet 的 listpack 是<b>按分数有序</b>的紧凑数组，查找用<b>线性扫描</b>，128 个元素是“扫描成本”与“内存节省”的平衡点。</p></details><details><summary>用 String 存 JSON 还是用 Hash？</summary><p>看访问模式：<b>整读整写</b>（如缓存渲染好的页面）→ <b>String + JSON</b>，简单且一次 IO；<b>频繁改单个字段</b> → <b>Hash</b>，因为 String 要“读全量→改→写回”，在多客户端并发下会产生<b>覆盖丢失</b>，而 <code>HSET field</code> 天然是原子的。另外 Hash 在小对象下（listpack）比 String 省内存。</p></details><details><summary>String 的 embstr 在什么情况下被破坏？</summary><p>只要对值做<b>追加或修改</b>就会转 raw：<code>APPEND</code> 一个字符后，<code>OBJECT ENCODING</code> 就从 <code>embstr</code> 变成 <code>raw</code>，因为 embstr 是<b>只读</b>的（一次分配、连续内存，无法原地扩展）。同理，整数 <code>int</code> 编码一旦 <code>APPEND</code> 也会转 raw。所以计数场景要一直用 <code>INCR</code>（保持 int 编码，零分配）。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="redis-data-structures.html">Redis 数据结构总览</a><a href="../01-type-encodings/redis-data-types-source.html">Redis 数据结构</a><a href="../01-type-encodings/redis-hash-evolution.html">Redis Hash 数据结构…</a><a href="../02-internal-mechanisms/redis-rehash.html">Redis 渐进式 Rehas…</a></div>
+  <div class="xrel-up"><a href="../../../../index.html">← 返回 NoSQL</a>　·　<a href="../../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>
   Redis 五大数据类型可视化 · 基于 Redis 7.x &nbsp;|&nbsp; <span>底层编码随版本迭代可能变化</span>
 </footer>

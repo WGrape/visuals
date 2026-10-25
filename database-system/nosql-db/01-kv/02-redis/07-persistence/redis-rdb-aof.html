@@ -558,6 +558,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -1172,5 +1184,11 @@ redis-check-aof --fix appendonlydir/appendonly.aof.1.incr.aof
 redis-cli --stat                 # 观察恢复期间的 keys 增长</code></pre><p class="muted">Redis 7.0 起 AOF 从单文件改为 <b>appendonlydir/</b> 多文件（base + incr + manifest），排查时别再只找 <code>appendonly.aof</code>。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b>写请求突然全部报错 MISCONF Redis is configured to save RDB snapshots...</b> → 快照失败后 <code>stop-writes-on-bgsave-error yes</code> 触发写保护。先 <code>config set stop-writes-on-bgsave-error no</code> 恢复服务，再去查真实原因（磁盘满 / 权限 / fork 失败）。</li><li><b>fork 耗时高、延迟尖刺</b> → <code>latest_fork_usec</code> 大于 100ms 就要处理。常见原因：开了 Transparent Huge Pages（THP，会把 fork 成本放大数倍，必须关）、实例内存过大（单实例建议 ≤10GB 以便快速 fork）、虚拟机内存超售。</li><li><b>BGSAVE 期间内存突然翻倍</b> → 这是 <b>copy-on-write</b> 的正常代价：写越密集，父子进程共享的页被复制得越多。峰值最坏可达 2 倍。所以 Redis 内存上限要按 <b>maxmemory ≤ 物理内存的一半</b> 来设，留出 fork 余量。</li><li><b>磁盘被 AOF 撑满</b> → 先看是不是 rewrite 没触发（<code>auto-aof-rewrite-min-size</code> 设太大，或 <code>appendfsync</code> 压力导致 rewrite 排队）。紧急处理：手动 <code>bgrewriteaof</code> + 清理，长期要加磁盘告警（≥80%）。</li><li><b>重启后数据比预期少</b> → 检查是否<b>开着 AOF 却用 RDB 文件恢复</b>：只要 <code>appendonly yes</code>，Redis 启动时<b>只认 AOF</b>，会忽略 dump.rdb。反过来同理。这是最常见的「数据变少」原因。</li><li><b>AOF 文件损坏无法启动</b> → 用 <code>redis-check-aof --fix</code> 截断修复，最多丢最后一条命令。修复前务必备份。</li><li><b>从库全量同步（RDB 传输）把主库拖垮</b> → 加大 <code>repl-backlog-size</code>（默认 1MB 太小，生产建议 128MB+），避免短暂断开就触发全量同步。</li></ul></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>两句话讲清底层：<b>RDB 是某一时刻的内存快照</b>（fork + COW，子进程写新文件）；<b>AOF 是写命令的追加日志</b>（先执行命令再记日志，重启时重放）。两者对性能的影响点完全不同。</p><div class="table-wrap"><table><thead><tr><th>维度</th><th>RDB</th><th>AOF</th></tr></thead><tbody><tr><td>代价发生在哪</td><td><b>周期性</b>：fork（阻塞主线程，与内存大小成正比）+ 子进程写盘</td><td><b>持续</b>：每次写的 <code>write(2)</code> + 每秒一次 <code>fsync</code></td></tr><tr><td>对延迟的影响</td><td>偶发尖刺（fork 期间）</td><td>持续小开销；<code>always</code> 时吞吐可掉 50%</td></tr><tr><td>代价随什么增长</td><td>随<b>内存大小</b>增长</td><td>随<b>写 QPS</b> 增长</td></tr><tr><td>文件增长</td><td>恒定（就是内存大小）</td><td>持续增长，靠 rewrite 压缩</td></tr><tr><td>最坏丢失</td><td>最后一次 save 之后全部</td><td><code>everysec</code> 时 ≤1 秒</td></tr></tbody></table></div><details><summary>为什么 <code>appendfsync everysec</code> 是最优解？</summary><p>因为它把「安全」和「性能」的冲突点放在了最合适的位置。<code>always</code> 每次写都 fsync，把 Redis 的吞吐压到接近磁盘 IOPS（通常掉 50% 以上）；<code>no</code> 完全交给 OS，页缓存回刷周期可能 30 秒，断电就丢 30 秒数据。<code>everysec</code> 是后台线程每秒一次 fsync：<b>最多丢 1 秒</b>，而 fsync 的开销被摊到后台线程，主线程几乎无感。所以它是几乎所有生产配置的默认值。注意「最多丢 1 秒」的前提是 <b>Redis 进程崩溃</b>而不是<b>fsync 本身失败</b>——后者 Redis 会主动报错。</p></details><details><summary>AOF 为什么需要 rewrite？不 rewrite 会怎样？</summary><p>因为 AOF 是<b>追加</b>的，对同一个 key 写 100 次就记 100 条命令，但恢复时只需要最后一条。文件会无限膨胀（一个计数器 key 可以让 AOF 涨到几十 GB 而实际数据只有几 KB），恢复时要重放所有命令，可能要几十分钟。rewrite 的做法是<b>读取当前内存中的值，用最少的命令重建一份等价的 AOF</b>（同一 key 只写一条），文件立刻缩小一个数量级。rewrite 由子进程完成，不阻塞主进程。触发条件是「当前体积比上次 rewrite 后增长了 <code>auto-aof-rewrite-percentage</code>%」且「体积超过 <code>auto-aof-rewrite-min-size</code>」。</p></details><details><summary>fork 到底阻塞多久？为什么 THP 是坑？</summary><p>fork 本身要<b>复制页表</b>，耗时与<b>内存大小</b>成正比（不是与数据量）：经验值约 <b>每 GB 内存 10~20ms</b>（物理机），所以 10GB 实例 fork 一次约 100~200ms——这段时间 Redis <b>完全不响应</b>。开启 Transparent Huge Pages（THP，Linux 默认 often 开启）后，页变大但<b>页表项和 COW 粒度变粗</b>，fork 耗时和 COW 复制量都会显著上升，实测可放大 2~5 倍。所以 Redis 官方明确要求 <code>echo never > /sys/kernel/mm/transparent_hugepage/enabled</code>。另外 Xen 等虚拟化平台 fork 更慢，这也是建议单实例内存控制在 10GB 以内的原因。</p></details><details><summary>既然有持久化，为什么还要从库和备份？</summary><p>因为持久化只解决「进程重启」，不解决另外三类问题：① <b>误操作</b>——<code>FLUSHALL</code> 会被 AOF 忠实记录并重放，恢复后依然是空的；② <b>逻辑错误</b>——代码 bug 写坏了数据，AOF 里也是坏数据；③ <b>主机/机房故障</b>——本地磁盘一起没。正确做法是「持久化（防重启）+ 从库（防单机故障，最好是跨机架）+ 定期 RDB 冷备到对象存储并保留 7~30 天（防误删和逻辑错误，可回滚到历史时点）」三层。只做一层都不能称为「数据安全」。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="redis-persistence-quick-guide.html">Redis 持久化速查</a><a href="redis-persistence.html">Redis 持久化机制</a><a href="../00-overview/command-classification.html">Redis 命令分类</a><a href="../00-overview/redis-overview.html">Redis 概述</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 NoSQL</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

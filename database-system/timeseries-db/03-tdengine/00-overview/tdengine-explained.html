@@ -59,6 +59,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -318,6 +336,51 @@ SELECT COUNT(*) FROM d001 SESSION(ts, 10s);</code></pre>
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>建库建表参数与命令</h2><p>TDengine 的核心设计是<b>一个采集点一张表 + 超级表（STable）聚合</b>。数据模型定对了，压缩率与查询性能才有保障。</p><p><b>核心 DDL / DML</b></p><pre><code>-- 创建数据库：这几个参数直接决定存储与保留
+CREATE DATABASE power
+    DAYS 10            -- 每个数据文件存 10 天数据（默认 10）
+    KEEP 3650          -- 数据保留 3650 天（默认 3650）
+    CACHE 16           -- 每个 vnode 的内存缓存大小（MB）
+    BLOCKS 6           -- 每个 vnode 的内存块数
+    PRECISION 'ms'     -- 时间精度：ms / us / ns
+    COMP 2;            -- 压缩：0 不压 / 1 一阶段 / 2 两阶段（默认 2）
+
+-- 超级表：定义 schema + 标签
+CREATE STABLE meters (
+    ts TIMESTAMP,
+    current FLOAT,
+    voltage INT,
+    phase FLOAT
+) TAGS (location BINARY(64), group_id INT);
+
+-- 子表：一个采集点一张，写入时自动创建
+CREATE TABLE d1001 USING meters TAGS ('Beijing.Chaoyang', 1);
+INSERT INTO d1001 USING meters TAGS ('Beijing.Chaoyang', 1)
+       VALUES (NOW, 10.2, 220, 0.31);
+
+-- 查询：对超级表查就是对所有子表查
+SELECT AVG(current) FROM meters
+WHERE ts &gt;= NOW - 7d AND location LIKE 'Beijing%'
+INTERVAL(1h) GROUP BY location;</code></pre><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th><th>建议</th></tr></thead><tbody><tr><td><code>DAYS</code></td><td>10</td><td>单个数据文件覆盖的天数</td><td>查询多按天就设 1~10；归档场景可大</td></tr><tr><td><code>KEEP</code></td><td>3650（10 年）</td><td>数据保留天数</td><td>按合规与磁盘定，到期自动删</td></tr><tr><td><code>COMP</code></td><td>2（两阶段压缩）</td><td>压缩等级</td><td>默认即可，关压缩只在调试时用</td></tr><tr><td><code>PRECISION</code></td><td>ms</td><td>时间戳精度</td><td>设备是秒级的别用 us，会浪费</td></tr><tr><td><code>CACHE</code></td><td>16 MB</td><td>vnode 写缓存</td><td>写密集可调大，读多写少不必</td></tr><tr><td><code>VGROUPS</code></td><td>自动（按 CPU 核数）</td><td>vnode 分片数</td><td>分片数 = 并行度，别设太少</td></tr><tr><td><code>REPLICA</code></td><td>1</td><td>副本数（企业版）</td><td>生产环境至少 3</td></tr></tbody></table></div><p><b>运维命令</b></p><pre><code># 运维命令（taos shell 内）
+SHOW DATABASES;                     -- 看库参数
+SHOW VGROUPS;                       -- 看分片分布
+SHOW TABLES LIKE 'd%';              -- 看子表
+DESCRIBE meters;                    -- 看超级表结构
+
+# 备份与恢复
+taosdump -D power -o /backup/power       # 导出
+taosdump -i /backup/power                # 导入（会建库）
+
+# 压测：先造数据再测，否则结论不可信
+taosBenchmark -t 1000 -n 100000 -y       # 1000 张表，每张 10 万行
+
+# 观察压缩效果
+SELECT table_name,
+       ROUND(compression_ratio, 2) AS ratio
+FROM information_schema.ins_tables
+LIMIT 20;</code></pre><div class="table-wrap"><table><thead><tr><th>设计决策</th><th>推荐做法</th><th>反例</th><th>原因</th></tr></thead><tbody><tr><td>表怎么建</td><td><b>一个采集点一张子表</b></td><td>一张大表存所有设备</td><td>单表按时间有序，压缩率高；标签过滤走 STable</td></tr><tr><td>标签放哪</td><td>放 TAGS（稳定、低基数）</td><td>把经常变的字段放 TAGS</td><td>TAG 变更代价高</td></tr><tr><td>时间精度</td><td>按设备实际精度</td><td>一律用 ns</td><td>精度越高存储与时间索引开销越大</td></tr><tr><td>查询方式</td><td>对 STable 查 + TAG 过滤</td><td>逐子表 UNION</td><td>前者由引擎优化，后者计划膨胀</td></tr><tr><td>降采样</td><td>用 INTERVAL + 预聚合</td><td>每次扫原始点</td><td>原始数据量大时差距是数量级的</td></tr></tbody></table></div><p class="muted">TDengine 的压缩来自三点：<b>列式存储 + 差分/游程编码 + 一设备一表的天然时间有序</b>。实践中常见 <b>5~10 倍</b>压缩率，慢变浮点（如温度）更高。如果压缩率明显低于这个量级，先检查是不是「一张大表混装所有设备」。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>排障与检查清单</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>最可能原因</th><th>怎么验证</th><th>处理</th></tr></thead><tbody><tr><td>写入变慢</td><td>vgroup 数太少或未批量写</td><td><code>SHOW VGROUPS</code> 看分布</td><td>增加 vgroups、改成批量 INSERT</td></tr><tr><td>磁盘涨得快</td><td>KEEP 设置过长或精度过高</td><td>查库参数与表压缩率</td><td>调 KEEP / PRECISION，开降采样</td></tr><tr><td>查询全表慢</td><td>没带时间范围或 TAG 过滤</td><td>看执行计划是否扫全表</td><td>强制带 ts 范围</td></tr><tr><td>TAG 过滤慢</td><td>TAG 基数过大</td><td>看标签取值数量</td><td>高基数字段应放数据列而非 TAG</td></tr><tr><td>压缩率低</td><td>一个表混装多设备</td><td>看表设计与列值抖动</td><td>改成一设备一表</td></tr><tr><td>内存占用高</td><td>CACHE 或并发写入过大</td><td>监控 taosd 进程内存</td><td>调小 CACHE、限制写入并发</td></tr></tbody></table></div><p>上线前逐条核对：</p><ul><li><b>先定数据模型再建库</b>：一设备一表 + 超级表，这是压缩率与查询性能的前提。</li><li><b>时间精度按实际需要选</b>，不要默认用最高精度。</li><li><b>KEEP 要按磁盘容量反推</b>：保留天数 × 日增数据量 × 压缩后大小。</li><li><b>vgroups 决定写入并行度</b>，太少会成为瓶颈。</li><li><b>写入必须批量</b>：单条 INSERT 的吞吐比批量低一个数量级。</li><li><b>查询必须带时间范围</b>，否则扫全表。</li><li><b>高基数字段不要放 TAGS</b>，TAG 适合放设备位置、型号这类稳定属性。</li><li><b>长期趋势查询用 INTERVAL 预聚合</b>，不要每次扫原始点。</li><li><b>备份要实测恢复</b>：<code>taosdump</code> 导出的必须能导回。</li><li><b>容量规划要算上副本</b>：3 副本时磁盘需求直接 ×3。</li></ul></div></section>
 <footer>
   <p>Visuals · 数据库系统 / 时序数据库 / TDengine ·
   <a href="../../index.html">返回目录</a> ·

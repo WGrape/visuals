@@ -277,6 +277,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
     <div class="container">
@@ -933,5 +945,29 @@ console.log(`总缺页次数：${faults}`);
   2  -&gt; [2,3,0]        hit
   LRU: miss = 9, hit = 4, 命中率 = 4/13 ≈ 31%</code></pre><p class="muted">本例 LRU 优于 FIFO，但差距不大。LRU 的优势在<b>局部性明显</b>的序列上会拉开——循环访问一个比内存大的数组时，FIFO 命中率接近 0，LRU 也接近 0，两者都失效，这正是 <b>LIRS</b> 要解决的问题。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>抖动与系统调优</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td><b>抖动（thrashing）</b>：CPU 利用率骤降、磁盘狂响</td><td>并发进程的工作集总和 &gt; 物理内存</td><td>降低并发度（挂起部分进程）、加内存、或减少单进程内存占用</td></tr><tr><td>sar 显示 pgscank/pgsteal 持续高</td><td>内核正在回收页</td><td><code>sar -B 1</code> 看 <code>pgscank/s</code>；持续 &gt; 0 说明内存紧张</td></tr><tr><td>swap 使用量涨但 CPU 空闲</td><td>大量换页</td><td>调低 <code>swappiness</code>（默认 <b>60</b>，数据库机器常设 <b>1~10</b>）</td></tr><tr><td>OOM Killer 杀进程</td><td>内存耗尽</td><td>看 <code>dmesg</code> 的 <code>Out of memory: Kill process</code>；给关键进程设 <code>oom_score_adj</code></td></tr><tr><td>数据库缓冲池命中率下降</td><td>缓冲池小于工作集，或被全表扫描污染</td><td>InnoDB 用 <b>改进的 LRU</b>（midpoint insertion，新页先放 5/8 处），就是防扫描污染的设计</td></tr><tr><td>madvise / mmap 后性能差</td><td>预读策略不匹配</td><td>顺序访问用 <code>MADV_SEQUENTIAL</code>，随机用 <code>MADV_RANDOM</code></td></tr></tbody></table></div><ul><li>Linux 用 <b>活跃/非活跃 LRU 双链表</b> + <code>swappiness</code> 控制回收倾向，不是教科书式的纯 LRU。</li><li>判断内存是否真的不够，看 <code>available</code> 而不是 <code>free</code>——Linux 会把空闲内存用作 page cache，<code>free</code> 很小是正常的。</li></ul></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>算法代价与真实实现</h2><p>淘汰算法的选择不是「哪个命中率高就用哪个」，而是<b>命中率 × 实现代价</b>的取舍。硬件每纳秒都在做这个决定，所以真实系统都选近似算法。</p><div class="table-wrap"><table><thead><tr><th>算法</th><th>实现代价</th><th>命中率</th><th>Belady 异常</th><th>真实谁在用</th></tr></thead><tbody><tr><td>OPT（最佳）</td><td>不可实现（需预知未来）</td><td><b>理论上限</b></td><td>无</td><td>只做离线对比基线</td></tr><tr><td>FIFO</td><td>极低（一个队列）</td><td>低（可能比随机还差）</td><td><b>有</b></td><td>几乎不用（只作教学）</td></tr><tr><td>LRU</td><td>高（每次访问要更新顺序）</td><td>接近 OPT</td><td>无</td><td>缓存系统（近似实现）</td></tr><tr><td>Clock / 二次机会</td><td>低（一个访问位 + 指针）</td><td>接近 LRU</td><td>无</td><td><b>操作系统页框回收</b></td></tr><tr><td>LFU</td><td>中（计数器 + 老化）</td><td>对稳定热点好</td><td>无</td><td>缓存（需处理历史热点问题）</td></tr><tr><td>随机</td><td>最低</td><td>中等</td><td>无</td><td>极端场景（无数据结构开销）</td></tr></tbody></table></div><p>关键结论：<b>操作系统不做真正的 LRU</b>。因为每次内存访问都要更新 LRU 顺序的代价太高，真实做法是<b>用访问位（Accessed bit）近似</b>：硬件在每次访问时置位，OS 在回收扫描时清零，这就是 Clock 算法——用一个 bit 换掉了整个链表维护。</p><p><b>观测缺页与抖动</b></p><pre><code># Linux 上观察缺页与换页，判断淘汰是否频繁
+vmstat 1
+#   si/so：每秒换入/换出 KB，持续 &gt; 0 说明在抖动（thrashing）
+#   free 很低但 si/so 为 0：多是 page cache，不算问题
+
+# 更详细的分页统计（每秒刷新）
+sar -B 1
+#   pgpgin/s pgpgout/s fault/s majflt/s   &lt;- majflt/s 是主要缺页，越高越糟
+#   majflt 持续增长 = 内存不足，需要回收页面
+
+# 进程级：看每个进程的主要/次要缺页
+ps -eo pid,comm,minflt,majflt,rss --sort=-majflt | head -20
+cat /proc/$PID/stat | awk '{print "minflt="$10, "majflt="$12}'
+
+# 工作集估算（需要 smaps 权限）
+grep -E 'Rss|Referenced' /proc/$PID/smaps_rollup</code></pre><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>作用</th><th>建议</th></tr></thead><tbody><tr><td><code>vm.swappiness</code></td><td>60</td><td>回收匿名页 vs 文件页的倾向（0~100）</td><td>数据库机设 1~10；桌面保持 60</td></tr><tr><td><code>vm.vfs_cache_pressure</code></td><td>100</td><td>回收 dentry/inode 缓存的倾向</td><td>低于 100 表示更愿意保留（如 50）</td></tr><tr><td><code>vm.min_free_kbytes</code></td><td>自动计算</td><td>保留的最小空闲内存</td><td>不要手调太大，会触发频繁直接回收</td></tr><tr><td><code>vm.dirty_ratio</code></td><td>20（占可用内存 %）</td><td>脏页占比到多少强制回写</td><td>大内存机器调小（如 10）避免卡顿</td></tr><tr><td><code>vm.dirty_background_ratio</code></td><td>10</td><td>后台回写阈值</td><td>配合上面一起调</td></tr><tr><td>THP（<code>/sys/kernel/mm/transparent_hugepage/enabled</code>）</td><td>madvise（多数发行版）</td><td>是否自动用 2MB 大页</td><td>数据库常设 never 避免延迟抖动</td></tr></tbody></table></div><p class="muted">抖动的判据很明确：<b>si/so 持续非零 + CPU 的 sys 时间升高 + 磁盘 IO 打满</b>，三者同时出现就是工作集超过物理内存。这时唯一的解法是<b>加内存或减少并发度</b>，调 swappiness 只能缓解，不能解决。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>手算示例与检查清单</h2><p>手算淘汰过程的标准格式：给定<b>引用串</b>和<b>页框数</b>，逐次记录命中/缺页。拿引用串 <code>1,2,3,4,1,2,5,1,2,3,4,5</code>、3 个页框做例子：</p><div class="table-wrap"><table><thead><tr><th>算法</th><th>缺页次数（3 页框）</th><th>缺页率</th><th>说明</th></tr></thead><tbody><tr><td>OPT</td><td>7</td><td>58%</td><td>理论最优（已知未来）</td></tr><tr><td>LRU</td><td>10</td><td>83%</td><td>本例表现一般（引用串对 LRU 不友好）</td></tr><tr><td>FIFO</td><td>9</td><td>75%</td><td>本例反而优于 LRU（说明算法无绝对优劣）</td></tr><tr><td>Clock</td><td>9~10</td><td>75%~83%</td><td>取决于访问位初态，接近 LRU</td></tr></tbody></table></div><p>注意这个例子里 <b>FIFO 比 LRU 好</b>——这正说明「LRU 一定优于 FIFO」是错的，算法优劣取决于<b>访问模式</b>。真正有保证的只有 OPT 的理论上限。</p><p>排查与调优逐条核对：</p><ul><li><b>LRU 不是万能</b>：顺序扫描型负载下 LRU 会把热点全冲掉（<b>缓存污染</b>），此时 LFU 或 LRU-K 更好。</li><li><b>操作系统用 Clock 近似 LRU</b>，不是真正的 LRU，这是用 1 个 bit 换掉了链表维护开销。</li><li><b>抖动看 si/so 与 majflt</b>，两者持续非零就是工作集超内存。</li><li><b>swappiness 不是「是否用 swap」</b>，而是回收时更偏向匿名页还是文件页。</li><li><b>数据库机把 swappiness 调到 1~10</b>，避免热数据被换出。</li><li><b>大内存机器要调小 dirty_ratio</b>，否则一次回写会造成秒级卡顿。</li><li><b>增加页框不一定降低缺页率</b>（Belady 异常，FIFO 会出现），不要迷信扩容。</li><li><b>缓存要防污染</b>：全表扫描类操作应走单独通道或用 <code>O_DIRECT</code>。</li><li><b>预读策略与淘汰策略要配套</b>：预读过猛会提前淘汰有用页。</li><li><b>观测优先用 sar -B</b>：pgpgin/pgpgout/majflt 三个数就能定位大部分内存问题。</li></ul></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="thrashing-and-working-set.html">抖动与工作集</a><a href="../00-overview/memory-management.html">操作系统内存管理全景图</a><a href="../00-overview/memory-model-visualizer.html">硬件、操作系统与 Go 的内存…</a><a href="../01-address-spaces/memory-layout-history.html">进程内存布局：历史起源与设计哲学</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 操作系统</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

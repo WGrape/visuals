@@ -688,6 +688,36 @@
             margin-top: 4rem;
         }
     </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
     <!-- 导航栏 -->
@@ -1338,6 +1368,32 @@ Seq = 1000, Len = 500
                 </svg>
             </div>
         </section>
+<section class="section"><div class="x-dry"><h2>断点续传与校验：可复制的实现</h2><p>OTA 的三件事：<b>下载要能续传</b>、<b>刷写要能回滚</b>、<b>结果要能上报</b>。任何一环缺失都会变砖或留下僵尸设备。</p><p><b>续传与校验命令</b></p><pre><code># 1) HTTP Range 续传（服务端必须支持 Accept-Ranges）
+curl -I https://ota.example.com/fw/v2.1.0.bin | grep -i 'accept-ranges\|content-length'
+#   看到 accept-ranges: bytes 才支持续传
+
+# 断点续传下载：-C - 表示自动从已下载部分继续
+curl -C - -o fw.bin https://ota.example.com/fw/v2.1.0.bin
+
+# 手动指定起点（设备端实现时就是这个逻辑）
+curl -H 'Range: bytes=1048576-' -o part.bin https://ota.example.com/fw/v2.1.0.bin
+#   服务端应返回 206 Partial Content，而不是 200
+
+# 2) 校验：下载完必须验证，且用强校验
+sha256sum fw.bin                       # 与发布时记录的摘要比对
+# 设备端还要验证签名（防止伪装固件）
+openssl dgst -sha256 -verify pubkey.pem -signature fw.bin.sig fw.bin</code></pre><div class="table-wrap"><table><thead><tr><th>机制</th><th>作用</th><th>典型取值</th><th>不做会怎样</th></tr></thead><tbody><tr><td><code>Range</code> 请求</td><td>断点续传</td><td>分块 1~16 MB</td><td>弱网环境每次失败都从头下，成功率骤降</td></tr><tr><td><code>ETag</code> / <code>Last-Modified</code></td><td>判断固件是否变化</td><td>内容哈希或 mtime</td><td>拉取到一半源变了，拼出错误固件</td></tr><tr><td>SHA-256 校验</td><td>完整性</td><td>32 字节摘要</td><td>位翻转导致的坏固件被刷入</td></tr><tr><td>签名验证</td><td>来源可信</td><td>RSA-2048 / ECDSA</td><td>恶意固件刷入，等于设备被接管</td></tr><tr><td>A/B 双分区</td><td>失败可回滚</td><td>两份固件分区</td><td>刷写中断即变砖</td></tr><tr><td>版本号单调检查</td><td>防降级攻击</td><td>单调递增版本号</td><td>被回滚到有漏洞的旧版本</td></tr></tbody></table></div><p><b>设备端流程</b></p><pre><code># 设备端典型流程（伪代码，体现关键顺序）
+1. 上报当前版本 -&gt; 服务端返回 {url, version, size, sha256, signature, min_version}
+2. 校验 version &gt; current &amp;&amp; version &gt;= min_version      # 防降级
+3. 分块下载（Range），每块写入临时分区，记录已下载偏移到非易失存储
+4. 下载中断 -&gt; 重启后从记录偏移继续（续传）
+5. 下载完成 -&gt; 校验 sha256 -&gt; 校验签名
+6. 校验通过 -&gt; 写入备用分区(B) -&gt; 标记待激活
+7. 重启 -&gt; bootloader 尝试启动 B 分区
+8. 启动成功 -&gt; 上报成功，标记 B 为有效
+   启动失败(连续 N 次) -&gt; bootloader 自动回退到 A 分区</code></pre><div class="table-wrap"><table><thead><tr><th>失败场景</th><th>处理策略</th><th>关键点</th></tr></thead><tbody><tr><td>下载中断（网络）</td><td>记录偏移，续传</td><td><b>偏移要持久化</b>，掉电不能丢</td></tr><tr><td>下载中断（掉电）</td><td>重启后检查临时文件与偏移</td><td>未完成的固件不能标记为可刷写</td></tr><tr><td>校验失败</td><td>删除重下，累计次数上限后上报错误</td><td>不能重试无限次</td></tr><tr><td>刷写中断（掉电）</td><td>bootloader 检测到 B 不完整 -> 回退 A</td><td><b>靠 A/B 分区保证</b></td></tr><tr><td>新固件启动失败</td><td>看门狗 / 启动计数回退 A</td><td>失败计数要持久化</td></tr><tr><td>磁盘空间不足</td><td>下载前先检查可用空间 ≥ size × 1.2</td><td>预留临时文件空间</td></tr><tr><td>版本回退攻击</td><td>校验版本号单调性 + 签名</td><td>版本号校验要在签名保护范围内</td></tr></tbody></table></div><p class="muted">最容易踩的坑：<b>把「下载完成」当成「升级完成」</b>。真正的成功标志是<b>新固件启动成功并上报</b>。因此临时状态（已下载、待激活、启动中）必须持久化，否则掉电后设备无法确定自己处于哪一步。</p></div></section>
+<section class="section"><div class="x-dry"><h2>灰度、监控与清单</h2><div class="table-wrap"><table><thead><tr><th>灰度策略</th><th>做法</th><th>适用</th><th>风险</th></tr></thead><tbody><tr><td>按设备 ID 哈希分批</td><td>先 1% → 10% → 50% → 100%</td><td>大规模设备</td><td>回滚要能按批次暂停</td></tr><tr><td>按区域/型号分批</td><td>先灰度一个城市/型号</td><td>硬件差异大</td><td>覆盖不全</td></tr><tr><td>按时间段</td><td>只在凌晨低峰推</td><td>影响用户体验的升级</td><td>进度慢</td></tr><tr><td>强制升级窗口</td><td>到期后强制</td><td>安全补丁</td><td>要留「用户可拒绝一次」的口子</td></tr></tbody></table></div><p>监控指标必须包含：<b>成功率、失败原因分布、平均耗时、当前各版本占比、卡在中途的设备数</b>。其中「卡在中途」是最危险的——它意味着设备处于不确定状态。</p><p>上线前逐条核对：</p><ul><li><b>服务端必须支持 Range 请求</b>（返回 206），否则续传无从谈起。</li><li><b>下载偏移要持久化</b>，掉电后能接着下。</li><li><b>必须先校验再刷写</b>：SHA-256 验完整，签名验来源，两者都要。</li><li><b>必须支持版本回滚保护</b>：禁止降级到有漏洞的旧版本。</li><li><b>优先用 A/B 分区</b>，这是唯一能在刷写失败时保证不变砖的方案。</li><li><b>下载前检查磁盘空间</b>（≥ 固件大小 × 1.2），并预留临时文件。</li><li><b>状态机要持久化</b>：下载中/待激活/启动中都要能恢复。</li><li><b>必须有灰度与暂停开关</b>：出问题时一键停推。</li><li><b>失败重试要有上限与退避</b>，避免全网设备同时重试打爆服务器。</li><li><b>升级窗口要避开业务高峰</b>，并考虑设备所在时区。</li><li><b>监控要能定位到单设备</b>：只知道成功率无法排查具体故障。</li><li><b>必须做断电测试</b>：在下载中、校验中、刷写中分别断电，验证都能恢复。</li></ul></div></section>
+
 
         <!-- 页脚 -->
         <div class="footer">
@@ -1567,5 +1623,11 @@ Seq = 1000, Len = 500
             setInterval(highlightFlowStep, 2000);
         }, 1000);
     </script>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="ota-design.html">OTA 升级系统技术方案</a><a href="../01-connectivity/iot-communication.html">物联网 IoT 服务端-设备通信</a><a href="../01-connectivity/mqtt-explained.html">MQTT 长连接通信</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 业务系统</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

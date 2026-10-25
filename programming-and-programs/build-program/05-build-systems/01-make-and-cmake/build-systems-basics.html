@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>构建系统基础：Make、CMake 与 Ninja 的分工</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>构建系统基础：Make、CMake 与 Ninja 的分工</h1>
+  <p>为什么需要构建系统、Make 的规则写法、CMake 的生成式工作流，以及并行构建的依赖完整性</p>
+  <span class="tag">构建系统</span><span class="tag">Make</span><span class="tag">CMake</span><span class="tag">Ninja</span><span class="tag">增量构建</span>
+</header>
+<nav>
+  <a href="#why">① 为什么需要</a>
+  <a href="#make">② Make</a>
+  <a href="#cmake">③ CMake</a>
+  <a href="#parallel">④ 并行</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>构建系统做的事只有两件：<b>描述依赖图</b>（谁依赖谁），和<b>决定哪些要重建</b>（增量）。Make 直接用规则描述，CMake 用更高级的描述<b>生成</b>构建文件，Ninja 只负责飞快地执行。理解三者的分工，就不会纠结「该用哪个」。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>为什么需要构建系统</h2>
+<div class="fig">
+    <svg width="720" height="270" viewBox="0 0 720 270">
+  <defs>
+    <marker id="ah3" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+    </marker>
+  </defs>
+  <rect x="40" y="20" width="150" height="46" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="115" y="48" text-anchor="middle" font-size="12" fill="#56d4dd">源文件 .c / .cpp</text>
+
+  <line x1="194" y1="43" x2="228" y2="43" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ah3)"/>
+
+  <rect x="232" y="20" width="150" height="46" rx="8" fill="#1f2433" stroke="#d2a8ff"/>
+  <text x="307" y="48" text-anchor="middle" font-size="12" fill="#d2a8ff">编译 → .o 目标文件</text>
+
+  <line x1="386" y1="43" x2="420" y2="43" stroke="#6ea8fe" stroke-width="1.6" marker-end="url(#ah3)"/>
+
+  <rect x="424" y="20" width="150" height="46" rx="8" fill="#1f2433" stroke="#7ee787"/>
+  <text x="499" y="48" text-anchor="middle" font-size="12" fill="#7ee787">链接 → 可执行文件</text>
+
+  <rect x="40" y="96" width="640" height="56" rx="10" fill="#171b26" stroke="#f0a868"/>
+  <text x="360" y="120" text-anchor="middle" font-size="12" fill="#f0a868">构建系统做的事：把上面这张依赖图写出来，并且只重建「必须重建」的那部分</text>
+  <text x="360" y="142" text-anchor="middle" font-size="11" fill="#94a3b8">手写编译命令在小项目还行；一旦文件上百、依赖跨目录、还要跨平台，就必须交给构建系统</text>
+
+  <rect x="40" y="176" width="200" height="74" rx="10" fill="#171b26" stroke="#56d4dd"/>
+  <text x="140" y="200" text-anchor="middle" font-size="12" fill="#56d4dd">Make</text>
+  <text x="140" y="222" text-anchor="middle" font-size="11" fill="#94a3b8">直接写规则，Unix 标配</text>
+  <text x="140" y="240" text-anchor="middle" font-size="11" fill="#94a3b8">跨平台能力弱</text>
+
+  <rect x="260" y="176" width="200" height="74" rx="10" fill="#171b26" stroke="#7ee787"/>
+  <text x="360" y="200" text-anchor="middle" font-size="12" fill="#7ee787">CMake</text>
+  <text x="360" y="222" text-anchor="middle" font-size="11" fill="#94a3b8">生成式：产出 Makefile / Ninja</text>
+  <text x="360" y="240" text-anchor="middle" font-size="11" fill="#94a3b8">跨平台，事实标准</text>
+
+  <rect x="480" y="176" width="200" height="74" rx="10" fill="#171b26" stroke="#d2a8ff"/>
+  <text x="580" y="200" text-anchor="middle" font-size="12" fill="#d2a8ff">Ninja</text>
+  <text x="580" y="222" text-anchor="middle" font-size="11" fill="#94a3b8">极快，不适合手写</text>
+  <text x="580" y="240" text-anchor="middle" font-size="11" fill="#94a3b8">由 CMake 生成后使用</text>
+</svg>
+    <div class="cap">从源码到可执行文件的依赖链，以及三种构建工具的分工</div>
+  </div><p>小项目手写 <code>gcc main.c -o app</code> 没问题。但项目一大就会出现三类靠手工解决不了的问题：</p><div class="grid">
+    <div class="card">
+      <h4>🔗 依赖复杂度</h4>
+      <p>几百个文件、跨目录、还依赖第三方库。谁先编译、谁要重编译，人脑维护不了。</p>
+    </div>
+    <div class="card">
+      <h4>⚡ 增量构建</h4>
+      <p>全量编译一次几十分钟。改一个文件只重建受影响的部分，是构建系统最核心的价值。</p>
+    </div>
+    <div class="card">
+      <h4>🌍 跨平台</h4>
+      <p>编译器路径、库后缀、链接参数在 Linux/macOS/Windows 上完全不同。</p>
+    </div>
+    <div class="card">
+      <h4>🔁 可重复性</h4>
+      <p>「在我机器上是好的」——构建配置没固化，换台机器就编不出来。</p>
+    </div>
+  </div><div class="lead warn"><b>要点：</b>判断标准很简单：<b>当你开始写 build.sh 拼一堆编译命令时，就该上构建系统了。</b></div>
+</section>
+
+<section id="make">
+  <h2><span class="n">02</span>Make：规则与时间��判定</h2>
+<p>Make 的核心是一行规则：<b>目标 → 依赖 + 命令</b>。判定时比较<b>文件修改时间</b>：如果任一依赖比目标新，就执行命令重建。</p><pre><code># 基本形态
+target: prerequisites
+<TAB>recipe
+
+# 实际例子
+CC      = gcc
+CFLAGS  = -O2 -Wall
+OBJS    = main.o utils.o net.o
+
+app: $(OBJS)
+<TAB>$(CC) $(OBJS) -o app
+
+# 模式规则：所有 .c 生成同名 .o
+%.o: %.c
+<TAB>$(CC) $(CFLAGS) -c $< -o $@
+
+# 自动变量（写规则必记）
+#   $@  目标名          $<  第一个依赖      $^  所有依赖
+#   $?  比目标新的依赖   $*  模式匹配的主干
+
+.PHONY: clean          # 声明伪目标：clean 不是文件
+clean:
+<TAB>rm -f $(OBJS) app</code></pre><div class="table-wrap"><table><thead><tr><th>概念</th><th>含义</th><th>注意</th></tr></thead><tbody><tr><td><b>target</b></td><td>要生成的东西（文件）</td><td>同名文件不存在时一定执行</td></tr><tr><td><b>prerequisites</b></td><td>依赖的文件或其他目标</td><td>任一比目标新 → 重建</td></tr><tr><td><b>recipe</b></td><td>重建命令</td><td><b>必须用 TAB 缩进</b>，空格会报错</td></tr><tr><td><b>.PHONY</b></td><td>声明不是文件的伪目标</td><td>clean/all 这类必须声明，否则同名文件会让规则失效</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>Make 最常见的两个新手错误：<b>① recipe 用了空格缩进；② 忘了声明 .PHONY</b>。</div>
+</section>
+
+<section id="cmake">
+  <h2><span class="n">03</span>CMake：生成式构建</h2>
+<p>CMake 自己不编译，它<b>生成</b> Make/Ninja/Visual Studio 的工程文件，再由后者执行。这一层间接换来的是跨平台能力。</p><pre><code>cmake_minimum_required(VERSION 3.16)
+project(myapp C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# 可执行文件 + 源文件
+add_executable(app
+    src/main.c
+    src/utils.c
+    src/net.c
+)
+
+# 头文件搜索路径
+target_include_directories(app PRIVATE include)
+
+# 链接库（现代 CMake 用 target_* 形式，作用域明确）
+target_link_libraries(app PRIVATE m pthread)
+
+# 编译选项
+target_compile_options(app PRIVATE -Wall -Wextra)
+
+# 查找第三方库
+find_package(OpenSSL REQUIRED)
+if(OpenSSL_FOUND)
+    target_link_libraries(app PRIVATE OpenSSL::SSL)
+endif()</code></pre><pre><code># 典型工作流：源码外构建（build 目录与源码分离）
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build                 # 编译（-G 用什么就调什么）
+cmake --build build --target clean
+cmake --build build --parallel 8    # 并行
+
+# 为什么用「源码外构建」：
+#   构建产物都在 build/ 下，不会污染源码目录，清理只需删一个目录</code></pre><div class="table-wrap"><table><thead><tr><th>工具</th><th>定位</th><th>适合</th><th>不适合</th></tr></thead><tbody><tr><td><b>Make</b></td><td>规则执行器 + 依赖图</td><td>小项目、Unix 脚本化构建</td><td>跨平台、大型项目</td></tr><tr><td><b>CMake</b></td><td><b>生成器</b>（产出 Makefile/Ninja/VS 工程）</td><td><b>C/C++ 事实标准</b>，跨平台项目</td><td>追求极致简洁的小项目</td></tr><tr><td><b>Ninja</b></td><td>极快的执行器</td><td>由 CMake/Meson 生成后使用</td><td><b>手写</b>（语法不友好）</td></tr><tr><td><b>Meson / Bazel 等</b></td><td>各有侧重（速度 / 大规模多语言）</td><td>大规模或多语言仓库</td><td>小项目引入成本高</td></tr></tbody></table></div><div class="lead ok"><b>要点：</b>记住这条链：<b>CMake 描述「要构建什么」，Ninja/Make 负责「怎么快速构建」</b>。新项目推荐 <code>CMake -G Ninja</code>。</div>
+</section>
+
+<section id="parallel">
+  <h2><span class="n">04</span>并行构建与依赖完整性</h2>
+<p><code>make -j8</code> / <code>cmake --build . --parallel 8</code> 能大幅提速，但它有一个前提：<b>依赖图必须完整</b>。缺依赖声明在串行时可能碰巧能过，并行时一定偶发失败。</p><ul>
+  <li><b>并行加速的极限</b>：受依赖图的关键路径限制，不是核越多越快。链接阶段通常是串行的瓶颈。</li>
+  <li><b>缺依赖声明的表现</b>：并行构建偶发失败，重新跑一次又好了——这是典型的依赖缺失症状。</li>
+  <li><b>头文件依赖最容易漏</b>：改了头文件但 .o 没重建，程序行为和源码不一致，极难排查。</li>
+  <li><b>伪目标的并行问题</b>：多个目标写同一个文件时并行会冲突，需要显式声明顺序依赖。</li>
+</ul><pre><code># 解决「改了头文件不重编」：自动生成 .d 依赖文件
+CFLAGS += -MMD -MP          # -MMD 生成 .d；-MP 为每个头文件生成空目标，避免删头文件后报错
+
+%.o: %.c
+<TAB>$(CC) $(CFLAGS) -c $< -o $@
+
+-include $(OBJS:.o=.d)      # 减号表示文件不存在也不报错（首次构建）
+
+# CMake 会自动处理头文件依赖，这也是它比手写 Makefile 省心的关键点之一</code></pre><div class="lead warn"><b>要点：</b>「改了头文件却没生效」是 C/C++ 构建里最经典的坑，<b>根因几乎总是缺少 .d 依赖文件</b>。用 CMake 或加 <code>-MMD -MP</code> 可根治。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：小项目也要用 CMake 吗？</b><p>如果是单文件练习，直接 gcc 就行。但只要超过五六个源文件、或者需要给别人用，上 CMake 的成本远低于收益——它顺手解决了头文件依赖、跨平台和 IDE 工程生成。</p></div><div class="qa"><b>问：为什么 make 说「target is up to date」但我的改动没生效？</b><p>三种常见原因：① 改动的文件不在依赖列表里（典型是头文件）；② 时间戳问题（文件被回写成了旧时间，或时钟回拨）；③ 你改的是被 include 的生成文件，但生成规则没声明。</p></div><div class="qa"><b>问：CMake 和 Makefile 能混用吗？</b><p>能。CMake 可以调用外部 Makefile（<code>add_custom_target</code>），也可以在 CMake 生成的 Makefile 里加自定义目标。但混用会让构建逻辑变复杂，<b>新代码尽量统一到 CMake 体系</b>。</p></div><div class="qa"><b>问：构建慢该怎么优化？</b><p>按性价比排序：① 开并行（<code>-j</code>）；② 用 Ninja 替代 Make；③ 减少不必要的头文件依赖（前置声明、减少头文件包含）；④ 用 ccache 缓存编译结果；⑤ 拆分过大的翻译单元。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 编程与程序 / 程序的构建 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

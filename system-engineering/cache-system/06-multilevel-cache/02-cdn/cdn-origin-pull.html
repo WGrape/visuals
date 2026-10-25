@@ -66,6 +66,18 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -176,6 +188,12 @@ curl -I -H "If-None-Match: $ETAG" https://cdn.example.com/a.jpg
 # 源站侧看回源来源（确认是 CDN 节点而不是真实用户）
 grep 'cdn-node' /var/log/nginx/access.log | awk '{print $1}' | sort | uniq -c | sort -rn | head</code></pre></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>回源优化与故障排查</h2><div class="table-wrap"><table><thead><tr><th>手段</th><th>效果</th><th>注意</th></tr></thead><tbody><tr><td><b>合理设置 TTL</b></td><td>回源率直接下降</td><td>静态资源带版本号可设 1 年（<code>max-age=31536000, immutable</code>）</td></tr><tr><td><b>预热</b></td><td>消除首次回源的慢请求</td><td>大促前必做；预热要<b>分批限速</b>，否则打爆源站</td></tr><tr><td><b>Range 分片回源</b></td><td>大文件回源流量降 50%+</td><td>源站必须支持 <code>Range</code>，返回 206</td></tr><tr><td><b>回源合并</b></td><td>热点内容的惊群降为 1 次回源</td><td>需 CDN 支持，或源站做单飞</td></tr><tr><td><b>回源超时与重试</b></td><td>避免源站慢拖垮边缘</td><td>超时建议 5~15s；<b>重试要限制次数</b>（1~2 次）</td></tr><tr><td><b>多级回源（边缘→区域→中心）</b></td><td>进一步降低源站压力</td><td>层级越多，一致性越难保证</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>故障现象</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>回源率突然飙升</td><td>① 大量新内容/新 URL；② 缓存规则被误改；③ <b>URL 带了随机参数</b></td><td>检查是否有时间戳/UUID 参数；配置<b>忽略参数缓存</b></td></tr><tr><td>源站被回源打爆</td><td>缓存 TTL 太短 / 没预热 / 热点集中</td><td>延长 TTL + 回源合并 + 预热</td></tr><tr><td>回源 502/504</td><td>源站超时或拒绝；回源 HOST 配错</td><td>查源站负载；确认回源 HOST 与源站虚拟主机匹配</td></tr><tr><td>回源 403</td><td>源站防盗链把 CDN 节点拦了</td><td>把 CDN 回源 IP 段加入白名单；或回源带合法 Referer</td></tr><tr><td>内容更新了但 CDN 还是旧的</td><td>TTL 未到期</td><td>用<b>刷新</b>（按 URL）或改 URL 版本号（更推荐）</td></tr><tr><td>HTTPS 回源失败</td><td>证书/协议不匹配</td><td>确认源站证书有效、SNI 正确、协议版本一致</td></tr></tbody></table></div><ul><li><b>最有效的两条实践</b>：① 静态资源<b>文件名带内容哈希</b>（<code>app.a1b2c3.js</code>），然后 TTL 设一年 + <code>immutable</code>——这样永远不用刷新，发布即生效；② <b>刷新优于改 TTL</b>：真要更新就主动调刷新 API，别把 TTL 设成几分钟去换取「准实时」，那会让源站压力暴涨。</li><li><b>刷新有配额</b>：各家 CDN 每天的刷新 URL 数都有上限（常见几百到几万条/天），大批量更新要走<b>目录刷新</b>或直接改版本号。</li><li><b>回源 HOST 是最容易配错的一项</b>：它决定源站用哪个虚拟主机响应。配错会返回源站默认站点的内容或 404，且现象诡异（部分 URL 正常、部分不正常）。</li></ul><details><summary>回源率多少算健康？</summary><p>静态资源 <b>&lt;5%</b>（命中率 &gt;95%）是及格线，做得好能到 1~2%。如果超过 10%，说明缓存策略有问题——八成是 <b>URL 带了变化参数</b>（时间戳、随机数、用户 ID）或 <b>TTL 设得太短</b>。动态内容（个性化 API）本来就不该走缓存，别用回源率衡量。</p></details><details><summary>304 回源和普通回源差多少？</summary><p>差一个数量级。普通回源要传完整响应体（比如 2MB 图片），304 只传几百字节的响应头。对源站来说带宽省 99%+，但对<b>请求数</b>没有帮助（还是要打一次源站），所以源站的 QPS 压力不变。想同时省请求数，得靠延长 TTL。</p></details><details><summary>CDN 刷新和预热有什么区别？</summary><p><b>刷新</b>是「把边缘的旧内容删掉」，下次请求会回源取新的（会产生回源流量）；<b>预热</b>是「主动把内容推到边缘节点」，让首次访问就命中（不产生用户触发的回源）。正确顺序是：<b>先刷新、再预热</b>，尤其大促前。只预热不刷新会预热到旧内容。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="cdn-purge-preheat.html">CDN 刷新与预热</a><a href="cdn.html">CDN 内容分发网络</a><a href="../01-multi-level/l1-invalidation.html">本地缓存失效（L1 一致性）</a><a href="../01-multi-level/multi-level-architecture.html">多级缓存架构</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>© 2026 Visuals · 多级缓存 / CDN 回源</footer>
 </body>
 </html>

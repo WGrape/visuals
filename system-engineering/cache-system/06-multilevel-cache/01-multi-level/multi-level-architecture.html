@@ -66,6 +66,18 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -204,6 +216,12 @@ location /api/ {
 #   按 80% 装载 -&gt; 实际设 maximumSize = 40 万 / 4 万</code></pre><p class="muted">最容易漏的两个开关：<code>proxy_cache_lock</code>（防击穿）和 <code>proxy_cache_use_stale</code>（后端故障时用陈旧数据兜底）。这两个不开，缓存层在故障时反而会放大问题。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障清单</h2><ul><li><b>加了缓存但延迟没降</b> → 先用 <code>X-Cache-Status</code> 或监控确认<b>到底命中了没有</b>。很多「加了缓存没效果」其实是命中率只有 20%。</li><li><b>本地缓存导致各实例数据不一致</b> → 这是本地缓存的固有代价。缓解：① 短 TTL（1~5 分钟）；② <b>失效广播</b>（用 Redis Pub/Sub 或 MQ 通知各实例清缓存）；③ 版本号机制（缓存 key 带版本号，更新时递增版本号）。</li><li><b>缓存击穿（热点 key 过期瞬间大量回源）</b> → 三级防护：① <code>proxy_cache_lock</code>（接入层只放行一个）；② <b>逻辑过期 + 互斥重建</b>（应用层只让一个线程回源）；③ <b>永不过期 + 后台刷新</b>（Caffeine 的 <code>refreshAfterWrite</code>）。</li><li><b>缓存穿透（查不存在的 key）</b> → 布隆过滤器前置，或<b>缓存空值</b>（短 TTL，如 60s）。注意空值也要设 TTL，否则存了永远不存在的 key 会占满缓存。</li><li><b>缓存雪崩（大量 key 同时过期）</b> → TTL 加<b>随机抖动</b>（如 <code>TTL + random(0, 300s)</code>），避免同一时刻集体失效。</li><li><b>CDN 缓存了不该缓存的内容（用户信息串号）</b> → <b>最危险的问题</b>。原因：CDN 按 URL 缓存，若响应内容随用户变化（如带个人信息），就会被串给用户。解法：① 个性化内容<b>绝对不要</b>走 CDN（<code>Cache-Control: private</code>）；② 若必须缓存，把用户维度<b>放进 URL 或 Vary 头</b>；③ 分清「静态资源走 CDN」和「API 走 CDN」的边界。</li><li><b>多级缓存的一致性问题</b> → 更新时从上到下逐级失效，且要<b>容忍部分失败</b>（某一层失效失败要有补偿：短 TTL 兜底 + 告警）。</li><li><b>内存占用超预期</b> → 本地缓存最容易失控。必须设<b>容量上限</b>（<code>maximumSize</code>）而不是只设 TTL——只设 TTL 时，短时间内大量写入仍会撑爆内存。</li></ul></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>多级缓存的核心矛盾是：<b>越靠近用户的层越快但越难保持一致，越靠近数据的层越一致但越慢</b>。所有设计都是在这条轴上找平衡点。</p><div class="table-wrap"><table><thead><tr><th>设计选择</th><th>延迟</th><th>一致性</th><th>复杂度</th><th>适用</th></tr></thead><tbody><tr><td><b>只用分布式缓存</b></td><td>0.5ms</td><td><b>好</b>（单一数据源）</td><td><b>低</b></td><td>大多数系统的正确起点</td></tr><tr><td><b>本地 + 分布式</b></td><td><b>0.1~0.5ms</b></td><td>中（有短暂不一致）</td><td>中（要处理失效传播）</td><td><b>高并发读热点</b></td></tr><tr><td><b>再加接入层</b></td><td>1~5ms</td><td>中</td><td>中高</td><td>读多写少、可容忍秒级陈旧</td></tr><tr><td><b>再加 CDN</b></td><td>5~30ms</td><td><b>差</b>（分钟级）</td><td>高</td><td>静态资源、全国/全球用户</td></tr><tr><td><b>全栈覆盖</b></td><td>—</td><td><b>最难</b></td><td><b>最高</b></td><td>大型 C 端读系统</td></tr></tbody></table></div><ul><li><b>每加一层的收益是递减的</b>：假设各层命中率 80%，三层叠加后回源率 = 0.2³ = 0.8%，看似极好。但要注意<b>命中率的分布</b>：如果热点集中，第一层就能拦掉 95%，后面几层的边际价值很低；如果访问均匀（长尾），每层都只能拦 50%，多层才有意义。</li><li><b>一致性成本随层数<b>指数级</b>增长</b>：n 层缓存，一次更新要失效 n 处，且要保证顺序（从上层到下层还是反过来都有坑）。<b>实践建议：层数 ≤ 3</b>（本地 + 分布式 + 数据库自身），除非有明确的地理分布需求才加 CDN。</li><li><b>「陈旧但可用」优于「新鲜但错误」</b>：这是 <code>stale-while-revalidate</code> 和 <code>proxy_cache_use_stale</code> 的设计哲学。后端故障时返回 60 秒前的缓存，用户体验远好于返回 500。这个取舍在多数业务里都是划算的。</li><li><b>缓存粒度决定一切</b>：<b>缓存整页</b>（快但难失效）、<b>缓存片段</b>（平衡）、<b>缓存数据对象</b>（灵活但要组装）。很多缓存方案失败的根源是粒度选错——比如缓存了整页却频繁需要局部更新。</li></ul><details><summary>本地缓存值不值得加？大多数场景是不是 Redis 就够了？</summary><p><b>大多数场景 Redis 就够了，不要一上来就加本地缓存</b>。判断标准很简单：<b>算一下 Redis 的延迟在你的接口总耗时里占多少</b>。如果接口总耗时 50ms，Redis 占 0.5ms（1%），加本地缓存最多省 0.5ms——收益微乎其微，却引入了「各实例数据不一致」这个新问题。真正需要本地缓存的是两种场景：① <b>极致延迟要求</b>（接口总耗时要求在 1~5ms 内，Redis 的 0.5ms 就是 10%+）；② <b>极热的小数据集</b>（如配置信息、字典表，几 KB 但每秒被访问几万次——这时 Redis 的 QPS 和网络开销反而是瓶颈）。另外别忘了本地缓存还有一个隐藏收益：<b>Redis 故障时的兜底</b>——本地有缓存时 Redis 挂了不至于立刻全站击穿。</p></details><details><summary>多级缓存的更新顺序应该从上到下还是从下到上？</summary><p><b>先更新数据库，再删除缓存（Cache-Aside 的标准做法），且删除顺序是「从下层到上层」（先删分布式，再广播失效本地）</b>。为什么是删除而不是更新？因为「更新缓存」在并发下会有<b>写覆盖</b>问题：两个请求 A、B 并发更新，可能 A 写库 → B 写库 → B 更新缓存 → A 更新缓存，最终缓存里是 A 的旧值。删除则没有这个问题（下次读自然会从库里加载最新值）。为什么从下到上？因为如果先失效本地、后删 Redis，中间窗口内本地缓存可能读到 Redis 的旧值并重新填充——<b>把旧数据又缓存了一遍</b>。所以顺序是：<b>写库 → 删 Redis → 广播失效本地缓存</b>。还要注意：删除失败要有补偿（重试 + 短 TTL 兜底），否则会长时间不一致。</p></details><details><summary>CDN 缓存 API 响应有什么坑？</summary><p>三个必须知道的坑：① <b>个性化内容被串号</b>——CDN 按 URL 缓存，如果两个用户请求同一个 URL，第一个用户的响应会被返回给第二个。这是<b>严重的安全事故</b>。防护：个性化响应必须带 <code>Cache-Control: private</code> 或明确 <code>Vary: Cookie/Authorization</code>；② <b>缓存时间不可控</b>——CDN 节点众多，刷新（purge）需要时间（几十秒到几分钟），且各节点可能不一致。所以<b>不要依赖 CDN 的即时失效</b>，重要变更要走 URL 版本号；③ <b>回源风暴</b>——一个热点 URL 在 CDN 过期瞬间，全国几十个边缘节点会同时回源。要开启<b>回源合并/分层回源</b>（CDN 厂商一般都有这个功能）。总结：<b>静态资源（带 hash 的 js/css/图片）放心用 CDN 并设长 TTL；动态 API 要极其谨慎，能不用就不用。</b></p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="l1-invalidation.html">本地缓存失效（L1 一致性）</a><a href="../02-cdn/cdn-origin-pull.html">CDN 回源</a><a href="../02-cdn/cdn-purge-preheat.html">CDN 刷新与预热</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>© 2026 Visuals · 多级缓存 / 架构总览</footer>
 </body>
 </html>

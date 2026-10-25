@@ -306,6 +306,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -1496,5 +1508,11 @@ WHERE TIMESTAMPDIFF(SECOND, trx_started, NOW()) &gt; 60;
 SHOW ENGINE INNODB STATUS\G   -- 看 LATEST DETECTED DEADLOCK 段</code></pre><p class="muted">量化参考：单条 <code>UPDATE</code> 走主键，QPS 量级在万级；同一个事务里语句越多、持锁时间越长，并发吞吐下降越明显——<b>事务耗时控制在 100ms 内</b>是常见工程红线。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑与定位手法</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>根因</th><th>怎么查 / 怎么办</th></tr></thead><tbody><tr><td><code>Lock wait timeout exceeded</code></td><td>别人持锁超过 50 秒</td><td>查 <code>information_schema.innodb_trx</code> 找源头，<code>KILL</code> 掉长事务</td></tr><tr><td>死锁 <code>Deadlock found</code></td><td>两个事务加锁顺序相反</td><td><code>SHOW ENGINE INNODB STATUS</code> 看 LATEST DETECTED DEADLOCK；统一加锁顺序</td></tr><tr><td>回滚了但数据没完全恢复</td><td>DDL 触发隐式提交</td><td>事务内禁止 DDL；DDL 前后不要指望回滚</td></tr><tr><td>并发扣款出现负数</td><td>先 SELECT 再 UPDATE 的读改写</td><td>改成条件更新 <code>WHERE balance &gt;= 100</code> 或 <code>SELECT ... FOR UPDATE</code></td></tr><tr><td>主从延迟突然变大</td><td>大事务在从库回放慢</td><td>拆小事务；单事务影响行数控制在万级以内</td></tr></tbody></table></div><ul><li><b>排查顺序：</b>先 <code>SHOW PROCESSLIST</code> 看有没有 Sleep 很久的连接（未提交事务）→ 再查 <code>innodb_trx</code> → 再看锁等待关系。</li><li><b>边界一：</b><code>autocommit=1</code> 下单条 UPDATE 也是事务，只是自动提交了——所以它同样会加锁、同样会写 redo。</li><li><b>边界二：</b>锁等待超时后事务<b>不会自动回滚</b>（默认 OFF），必须显式 ROLLBACK，否则连接会带着锁一直挂着。</li><li><b>边界三：</b>幻读在 InnoDB 的 RR 下靠 <b>next-key lock</b> 解决；但如果只用快照读（普通 SELECT），看到的是事务开始时的版本。</li></ul></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：为什么 InnoDB 默认 RR</h2><p>MySQL 默认 RR 而不是 RC，是<b>历史包袱 +  Replication 要求</b>共同决定的：早期 binlog 只有 statement 格式，RC 下语句重放顺序可能不同导致主从不一致，必须用 RR 的间隙锁保证可重复读与可重放。</p><div class="table-wrap"><table><thead><tr><th>隔离级别</th><th>可见性规则</th><th>锁范围</th><th>生产建议</th></tr></thead><tbody><tr><td>READ-UNCOMMITTED</td><td>能读到未提交</td><td>最少</td><td>不用</td></tr><tr><td>READ-COMMITTED</td><td>每次读生成新 ReadView</td><td>无间隙锁（除外键/唯一检查）</td><td><b>高并发 OLTP 推荐</b>，锁冲突少</td></tr><tr><td>REPEATABLE-READ</td><td>事务首读生成 ReadView，全程复用</td><td>有 next-key lock（行锁+间隙锁）</td><td>MySQL 默认；注意间隙锁导致的死锁</td></tr><tr><td>SERIALIZABLE</td><td>读也加共享锁</td><td>最宽</td><td>基本不用</td></tr></tbody></table></div><details><summary>为什么 RR 下还会有死锁？</summary><p>因为 RR 有间隙锁（gap lock）。两个事务在同一区间内插入/删除，即使操作的是不存在的行，也会因为间隙锁互相等待。RC 下没有间隙锁，这类死锁天然消失。</p></details><details><summary>改成 RC 有什么代价？</summary><p>语句级 binlog 下可能主从不一致——所以必须配合 <code>binlog_format=ROW</code>（MySQL 5.7 起默认就是 ROW），这也是现在大量公司把默认隔离级别改成 RC 的前提。</p></details><details><summary>长事务到底多长算长？</summary><p>经验值：<b>超过 5 秒就要警惕，超过 60 秒基本是事故</b>。因为 InnoDB 的 Undo 历史版本要一直保留到该事务结束，长事务会让 undo 表空间膨胀、purge 线程跟不上、历史版本链变长拖慢所有读。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="mysql-transaction-core.html">MySQL 事务核心</a><a href="transaction-understanding-method.html">我是怎么"想明白"事务、ACI…</a><a href="../02-isolation-and-mvcc/isolation-levels.html">数据库隔离级别</a><a href="../02-isolation-and-mvcc/mvcc-visualization.html">MySQL MVCC 多版本并…</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 关系型数据库</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

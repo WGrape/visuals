@@ -66,6 +66,18 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -185,6 +197,12 @@ Cache&lt;String, byte[]&gt; c = Caffeine.newBuilder()
     .build();</code></pre><p class="muted">选 <code>refreshAfterWrite</code> 还是 <code>expireAfterWrite</code>：前者<b>不阻塞</b>（过期后仍返回旧值，后台刷新），适合能容忍短暂陈旧的数据；后者过期就必须等待加载，适合一致性要求高的。<b>两者可以同时设</b>，refresh 更早触发。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与调参清单</h2><ul><li><b>命中率上不去（&lt;80%）</b> → 按顺序排查：① 容量是否太小（<code>evictionCount</code> 是否持续很高）；② key 设计是否合理（是否把<b>高基数维度</b>（如用户 ID、时间戳）放进了 key，导致根本无法复用）；③ 是否有<b>周期性全量扫描</b>污染（此时 LRU 会崩，ARC/W-TinyLFU 应该没事）。</li><li><b>ARC 效果不明显</b> → ARC 只在<b>存在扫描型负载</b>时才优于 LRU。如果访问模式本身就符合局部性（正常业务），ARC 和 LRU 命中率差距通常 &lt;2%。<b>不要期待 ARC 是银弹</b>。</li><li><b>Caffeine 命中率低于 Guava</b> → 常见原因是 <code>maximumSize</code> 设太小导致窗口区（1%）频繁淘汰，或<b>启用了 <code>expireAfterAccess</code> 与 W-TinyLFU 的频率统计冲突</b>。先去掉过期策略单独测命中率。</li><li><b>频率统计占内存超预期</b> → <code>maximumSize</code> 设得过大（如 1000 万）时，sketch 本身也要几十 MB。合理做法是<b>按实际热数据集大小</b>设（热数据通常远小于总数据量）。</li><li><b>缓存抖动（命中率周期性下跌）</b> → 周期性任务（报表、批处理）把缓存冲掉。解法：① 用 W-TinyLFU（对扫描免疫）；② 把批处理<b>走独立缓存实例</b>；③ 批处理时<b>旁路缓存</b>。</li><li><b>淘汰数持续增长但命中率没提升</b> → 说明<b>新增的容量没带来复用</b>，即数据集本身缺乏局部性。继续加内存是浪费，应该重新设计 key 或缓存粒度。</li><li><b>统计信息开销</b> → <code>recordStats()</code> 有约 5~10% 的额外开销。生产环境可以只在灰度/采样时开启。</li></ul></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>理解这三个算法，只需要搞清三件事：<b>ARC 的自适应双列表</b>、<b>Count-Min Sketch 怎么用 1 字节估频率</b>、<b>W-TinyLFU 为什么要加一个 LRU 窗口</b>。</p><ul><li><b>ARC 的自适应机制</b>：维护两个列表——T1（只访问过一次）和 T2（访问过≥2 次），以及两个影子列表 B1/B2（记录被淘汰的 key 的<b>元数据</b>，不存值）。当 B1 命中（说明刚淘汰的「一次访问型」key 又被访问了），就<b>调大 T1 的目标比例</b>；B2 命中则调大 T2。<b>影子列表是 ARC 的精髓</b>——它让算法能「感知到自己淘汰错了」，从而自适应地在「抗扫描」和「保局部性」之间找平衡。代价是要额外存影子元数据（约为缓存容量的 100%）。</li><li><b>Count-Min Sketch 为什么省内存</b>：它是一个 <code>d × w</code> 的计数矩阵（如 4 行 × 容量数），每个 key 用 d 个哈希映射到每行的一个位置，访问时对应位置 +1；查询频率时取 d 个位置的<b>最小值</b>（因为哈希冲突只会让计数偏大，取最小最接近真值）。<b>每个 key 不占独立空间</b>，整个 sketch 是固定大小（约 <code>O(容量)</code> 而非 <code>O(key 数)</code>），摊到每个 key 不到 1 字节。误差是有界的（只会高估，不会低估），这对淘汰决策完全够用。</li><li><b>为什么要「老化」</b>：定期把所有计数右移一位（减半）。这让<b>历史热点自然衰减</b>，避免纯 LFU 的「赖着不走」问题。Caffeine 的实现是在 sketch 增长到阈值时触发 <code>reset</code>（除以 2）。</li><li><b>W-TinyLFU 为什么要加 LRU 窗口</b>：因为 TinyLFU 对<b>新条目不友好</b>——新 key 频率为 1，进主区会立刻被淘汰，导致「突发的新热点」（如刚发布的热点新闻）根本进不了缓存。解法：前面加一个占 1% 的 <b>LRU 窗口区</b>，新条目先在这里「观察」，被访问到一定次数后<b>晋升</b>到主区；主区内部再用 SLRU（分段 LRU，80% 保护段 + 20% 试用段）进一步分层。这就是 <b>W</b>-TinyLFU 的 W（Window）。</li></ul><div class="table-wrap"><table><thead><tr><th>算法</th><th>抗扫描污染</th><th>利用频率</th><th>新条目友好</th><th>额外内存</th><th>实现复杂度</th></tr></thead><tbody><tr><td>LRU</td><td>✗</td><td>✗</td><td>✓</td><td>低</td><td><b>低</b></td></tr><tr><td>LFU</td><td>✓</td><td><b>✓</b></td><td>✗</td><td><b>高</b>（每 key 计数器）</td><td>中</td></tr><tr><td>ARC</td><td><b>✓</b></td><td>部分</td><td>✓</td><td><b>高</b>（影子列表 100%）</td><td>中</td></tr><tr><td>LIRS</td><td><b>✓✓</b></td><td>部分</td><td>✓</td><td>中</td><td><b>高</b></td></tr><tr><td>W-TinyLFU</td><td><b>✓✓</b></td><td><b>✓</b></td><td><b>✓</b>（窗口区）</td><td><b>低</b>（≈1B/key）</td><td><b>高</b></td></tr></tbody></table></div><details><summary>为什么 Caffeine 能全面超过 Guava Cache？</summary><p>三个层面的改进：① <b>淘汰算法</b>——Caffeine 用 W-TinyLFU，Guava 是分段 LRU。官方基准测试在多种真实 trace（数据库、搜索、分析）下，Caffeine 命中率显著更高，尤其在有扫描型负载的场景。② <b>并发实现</b>——Guava 用分段锁（类似 ConcurrentHashMap 的分段），Caffeine 借鉴了 <b>Java 8 ConcurrentHashMap 的无锁读 + 写时细粒度锁 + 环形缓冲区异步处理</b>，读写吞吐高得多，且<b>读完全无锁</b>。③ <b>淘汰的异步化</b>——淘汰任务在后台线程完成，不阻塞put 操作。所以换 Caffeine 通常能同时拿到「更高命中率」和「更高吞吐」。这也是为什么 Caffeine 现在是 Spring Boot 默认的缓存实现。</p></details><details><summary>命中率到底多少算健康？</summary><p>没有统一标准，但有几个经验阈值：<b>&gt;95%</b> 优秀（说明热数据集完全装下了）；<b>80~95%</b> 正常（多数业务系统在这个区间）；<b>60~80%</b> 偏低，值得优化（先查 key 设计和容量）；<b>&lt;60%</b> 说明缓存基本没起作用，要重新审视是否该缓存、缓存粒度是否太细。<b>更重要的是看趋势和构成</b>：如果命中率 90% 但 <code>averageLoadPenalty</code> 高达 100ms，说明每次 miss 代价极大，此时提升 1% 命中率的价值远大于命中率 70% 但 miss 只要 1ms 的场景。<b>缓存的价值 = 命中率 × miss 代价</b>，别只看命中率。</p></details><details><summary>本地缓存和分布式缓存怎么选？</summary><p>看四个因素：① <b>一致性要求</b>——要求强一致（如库存、余额）必须用分布式缓存（或干脆不缓存）；能容忍秒级不一致（如用户资料、配置、字典）可以用本地缓存。② <b>数据量</b>——热数据在单机内存能装下（几 GB 内）适合本地；TB 级必须分布式。③ <b>延迟要求</b>——本地缓存是<b>纳秒级</b>（无网络），分布式是<b>亚毫秒级</b>。极致延迟用本地。④ <b>命中率与网络放大</b>——本地缓存每加一台机器，回源量就翻倍；分布式缓存全局只有一份 miss。<b>最常见的架构是两层</b>：本地 Caffeine（纳秒级、抗热点）+ Redis（共享、一致），本地 miss 才走 Redis，配合 Pub/Sub 或短 TTL 做失效传播。这也是记忆里「多级缓存」章节讲的架构。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="arc-algorithm.html">ARC 自适应替换缓存</a><a href="tinylfu-countmin.html">TinyLFU 与 Count…</a><a href="../01-lru-lfu/lfu-impl-aging.html">LFU 实现与老化机制</a><a href="../01-lru-lfu/lru-impl.html">手写 LRU 缓存</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>© 2026 Visuals · 缓存淘汰 / ARC 与 TinyLFU</footer>
 </body>
 </html>

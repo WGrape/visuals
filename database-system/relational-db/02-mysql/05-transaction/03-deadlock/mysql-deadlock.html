@@ -90,6 +90,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
     <div class="container">
@@ -151,6 +163,12 @@ FROM sys.innodb_lock_waits;
 -- 8.0 之前用 information_schema
 SELECT * FROM information_schema.innodb_lock_waits;
 SELECT * FROM information_schema.innodb_locks;</code></pre><ul><li><b>统一加锁顺序是最有效的规避手段</b>：批量更新时先按主键排序再执行（<code>ORDER BY id</code> 或在应用侧排），能把「交叉加锁」的死锁基本消灭。</li><li><b>缩短事务</b>：事务里不要有 RPC 调用、文件 IO、用户交互。持锁时间越短，撞锁概率越低。</li><li><b>死锁不是错误，是正常现象</b>：高并发系统里偶发死锁是可接受的，只要<b>应用层有重试</b>。真正的目标是让死锁率低到不影响业务。</li><li><b>重试要带退避</b>：捕获 1213 错误后重试，但要<b>随机退避</b>（如 10~100ms 随机），否则大量请求同时重试会再次撞上。</li><li><b>死锁检测的代价</b>：每个锁等待都要遍历等待图，高并发下 CPU 开销可观。极端场景（如秒杀单行热点）可以关掉检测改用超时（<code>innodb_deadlock_detect=OFF</code>），但要设短超时。</li><li><b>RC vs RR</b>：RC 下没有间隙锁（除外键和唯一键检查），死锁概率显著低于 RR。很多互联网公司把默认隔离级别改成 RC，但要配 <code>binlog_format=ROW</code>。</li></ul><details><summary>怎么读懂 SHOW ENGINE INNODB STATUS 的死锁日志？</summary><p>抓三个部分：① <b>两个事务各自的 SQL</b>——<code>(1) TRANSACTION</code> 和 <code>(2) TRANSACTION</code> 下面会列出正在执行的语句，先看清是哪两条 SQL 撞了；② <b>锁信息</b>——<code>LOCK WAIT ... lock_mode X ... waiting</code> 表示它在等什么锁，<code>holds the lock(s)</code> 或 <code>lock struct(s)</code> 表示它持有什么锁。注意锁的模式（<code>X</code>=排他、<code>S</code>=共享）和类型（<code>RECORD</code>=记录锁、<code>GAP</code>=间隙锁、<code>next-key</code>）；③ <b>谁被回滚</b>——最后一行 <code>WE ROLL BACK TRANSACTION (1/2)</code>。判断成因的关键是把两个事务的「持有」和「等待」画成一张图，看是否成环。<b>如果只是看最近一次不够，务必打开 <code>innodb_print_all_deadlocks</code>，把所有死锁写进 error log 才能做统计和趋势分析</b>。</p></details><details><summary>死锁和锁等待超时有什么区别？怎么处理？</summary><p><b>死锁</b>是「互相等待成环」，InnoDB 能主动检测，<b>立刻</b>回滚其中一个（错误码 <b>1213</b>），响应快；<b>锁等待超时</b>是「单向等待太久」，没有环（比如 A 持锁不放在做别的事，B 一直等），只能等 <code>innodb_lock_wait_timeout</code>（默认 <b>50 秒</b>，太长！）到期后放弃（错误码 <b>1205</b>）。处理差异：死锁要靠<b>改加锁顺序/缩事务</b>根治；锁超时除了这两点，还要注意<b>把超时时间调短</b>（生产建议 <b>5~15 秒</b>，50 秒意味着一个请求卡了近一分钟才失败，线程池很容易被打满）。两者都需要在应用层做重试。</p></details><details><summary>为什么 RR 隔离级别更容易死锁？</summary><p>因为 <b>RR（可重复读）下有间隙锁（Gap Lock）和临键锁（Next-Key Lock）</b>，而 RC（读已提交）基本没有。间隙锁锁的是「记录之间的空隙」，比如 <code>UPDATE ... WHERE id BETWEEN 10 AND 20</code> 在 RR 下会锁住 (10,20] 这个区间，<b>包括那些还不存在的行</b>。这导致两个事务即使操作完全不同的行，只要它们的范围有重叠就会互相阻塞，死锁概率大幅上升。典型坑：<code>UPDATE t SET ... WHERE id = 123</code> 而 123 不存在时，RR 下会加一个间隙锁，两个事务都这么做就会死锁。规避方法：① <b>改用 RC</b>（需 <code>binlog_format=ROW</code>）；② <b>先 SELECT 确认行存在再更新</b>；③ <b>范围操作改成先查 id 列表、再按主键精确更新</b>（主键精确匹配只加记录锁，不加间隙锁）。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../01-transaction-foundations/mysql-transaction-core.html">MySQL 事务核心</a><a href="../01-transaction-foundations/mysql-transaction.html">MySQL 事务</a><a href="../02-isolation-and-mvcc/isolation-levels.html">数据库隔离级别</a><a href="../02-isolation-and-mvcc/mvcc-visualization.html">MySQL MVCC 多版本并…</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 关系型数据库</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>
             <p>📚 MySQL 死锁：成因、检测与排查</p>
             <p>生成时间：<span id="current-time"></span></p>

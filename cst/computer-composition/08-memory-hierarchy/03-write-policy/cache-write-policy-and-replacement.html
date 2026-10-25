@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>写策略与替换算法：dirty 位、写分配与 LRU 的近似实现 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"><style>
+.lesson{max-width:1060px;margin:0 auto;padding:26px 22px 60px}
+.fig{background:#122033;border:1px solid #40556c;border-radius:12px;padding:14px;margin:16px 0;overflow-x:auto}
+.fig svg{display:block;width:100%;height:auto}
+.cap{color:#9fb3c6;font-size:.82rem;text-align:center;margin-top:6px}
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin:14px 0}
+.kv div{background:#19283b;border:1px solid #40556c;border-left:3px solid #76d7db;border-radius:9px;padding:10px 12px}
+.kv b{display:block;color:#76d7db;font-size:.85rem;margin-bottom:3px}
+.kv span{color:#cfe0ea;font-size:.92rem;line-height:1.65}
+.formula{background:#0f1c2b;border:1px solid #40556c;border-radius:9px;padding:12px 16px;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#ffd17d;overflow-x:auto;margin:12px 0;font-size:.95rem}
+.tip,.warn,.ok{border-left:3px solid #76d7db;background:#152538;border-radius:0 8px 8px 0;padding:8px 14px;margin:12px 0;font-size:.93rem;color:#cfe0ea}
+.warn{border-left-color:#ffb86b}.ok{border-left-color:#6ee7a8}
+.qa{background:#19283b;border:1px solid #40556c;border-radius:9px;padding:10px 14px;margin:10px 0}
+.qa summary{color:#ffd17d;cursor:pointer;font-weight:600}
+.qa p{margin:8px 0 0;color:#b9cbd9;font-size:.94rem}
+.mini{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin:14px 0}
+.mini div{background:#1b2c40;border:1px solid #40556c;border-radius:8px;padding:9px 11px;font-size:.88rem}
+.mini b{display:block;color:#edf4fa}.mini span{color:#9fb3c6;font-size:.85rem}
+</style></head>
+<body><main class="lesson"><a class="back" href="../../index.html">← 返回组成原理</a>
+<header><span class="eyebrow">VISUALS · 组成原理 · 存储层次</span><h1>写策略与替换算法：dirty 位、写分配与 LRU 的近似实现</h1><p class="lead">读可以随便缓存，写不行——因为内存里还留着一份旧值。写直达还是写回、写未命中要不要先载入、dirty 位怎么维护、LRU 为什么在硬件里只能「近似」，这一篇讲清缓存写路径的全部选择。</p></header>
+<section class="panel"><h2>一句话定位：写操作要决定「什么时候让内存知道」</h2>
+<p>写命中时可以选择立刻写穿到内存（write-through），也可以只改缓存、标脏、等被替换时再写回（write-back）。写未命中时还要决定要不要先把这块读进来（write-allocate）。两个维度组合出四种策略。</p><div class="kv"><div><b>写直达</b><span>每次写都同步到下一级，简单但流量大</span></div><div><b>写回</b><span>只标 dirty，替换时回写，流量省但要一致性协议</span></div><div><b>写分配</b><span>写未命中先载入该行，再改</span></div><div><b>非写分配</b><span>直接写到内存，不进缓存</span></div></div><div class="fig"><svg viewBox="0 0 680 220" xmlns="http://www.w3.org/2000/svg"><text x="8" y="16" fill="#9fb3c6" font-size="12">写直达 vs 写回：一次写操作要产生几次内存流量</text>
+<g font-size="10">
+<rect x="20" y="36" width="300" height="150" rx="8" fill="#122033" stroke="#40556c"/>
+<text x="170" y="58" fill="#ffb86b" font-size="11" text-anchor="middle">写直达 Write-through</text>
+<text x="36" y="86" fill="#edf4fa">① 写缓存</text><text x="36" y="108" fill="#edf4fa">② 同时写内存（或下一级）</text>
+<text x="36" y="134" fill="#9fb3c6">每次写都有总线/内存流量</text>
+<text x="36" y="154" fill="#9fb3c6">实现简单，一致性容易保证</text>
+<text x="36" y="174" fill="#9fb3c6">适合：写少、要求强一致</text>
+<rect x="360" y="36" width="300" height="150" rx="8" fill="#122033" stroke="#40556c"/>
+<text x="510" y="58" fill="#6ee7a8" font-size="11" text-anchor="middle">写回 Write-back</text>
+<text x="376" y="86" fill="#edf4fa">① 只写缓存，置 dirty=1</text><text x="376" y="108" fill="#edf4fa">② 被替换时才写回内存</text>
+<text x="376" y="134" fill="#9fb3c6">同一行多次写只产生一次回写</text>
+<text x="376" y="154" fill="#9fb3c6">需要 dirty 位与一致性协议</text>
+<text x="376" y="174" fill="#9fb3c6">现代 CPU 的默认选择</text>
+</g>
+<text x="20" y="208" fill="#ffd17d" font-size="10">量化：连续写同一行 16 次 → 写直达产生 16 次内存写，写回只产生 1 次（被替换时）</text>
+</svg><div class="cap">同一行连续写 16 次：写回把 16 次内存写压成 1 次</div></div>
+</section>
+<section class="panel"><h2>四种组合，各用在哪</h2>
+<div class="table-wrap"><table><thead><tr><th>写命中</th><th>写未命中</th><th>典型组合</th><th>适用场景</th></tr></thead><tbody><tr><td>写回</td><td>写分配</td><td>现代 CPU 的 L1/L2/L3 默认</td><td>通用程序，写局部性好</td></tr><tr><td>写直达</td><td>非写分配</td><td>早期 CPU、某些嵌入式</td><td>写少、实现简单</td></tr><tr><td>写直达</td><td>写分配</td><td>少见于数据缓存</td><td>需要读回刚写的值</td></tr><tr><td>写回</td><td>非写分配</td><td>少见</td><td>流式写（写一次不再读）</td></tr></tbody></table></div><div class="tip">写分配为什么要先读？</div><p>因为缓存行是 64 字节，而一次写通常只有 4~8 字节。要保证整行数据正确，必须先把其余字节读进来。例外是「整行写」（如 memset 大块内存），硬件可以识别并跳过读——这叫 write-combining。</p>
+</section>
+<section class="panel"><h2>dirty 位与一致性：为什么写回更复杂</h2>
+<p>写回意味着「内存里的值可能是旧的」。多核场景下，其他核读这个地址时必须先让持有 dirty 行的核回写或直接转发数据——这正是 MESI 协议要解决的事。单核时 dirty 只影响替换时的回写，多核时它直接决定正确性。</p><div class="table-wrap"><table><thead><tr><th>操作</th><th>写直达的开销</th><th>写回的开销</th></tr></thead><tbody><tr><td>单次写命中</td><td>1 次内存/下级写</td><td>0 次（只标脏）</td></tr><tr><td>同一行写 16 次</td><td>16 次</td><td>0 次（直到替换）</td></tr><tr><td>该行被替换</td><td>0 次</td><td>1 次回写</td></tr><tr><td>其他核读该行</td><td>直接读内存（可能较慢）</td><td>需要转发或回写（协议开销）</td></tr></tbody></table></div>
+</section>
+<section class="panel"><h2>替换算法：LRU 为什么只能近似</h2>
+<p>真正的 LRU 要给每行维护时间戳并全局比较，硬件代价随路数平方增长。实际做法是「近似 LRU」：</p><div class="table-wrap"><table><thead><tr><th>算法</th><th>实现</th><th>精度</th><th>用在哪</th></tr></thead><tbody><tr><td>真 LRU</td><td>每行一个年龄计数器，命中时更新全部</td><td>最高</td><td>小容量全相联（TLB）</td></tr><tr><td>伪 LRU（树形）</td><td>每组一棵二叉树，用 1 位记录「上次用了哪半」</td><td>接近 LRU</td><td>L1/L2 主流</td></tr><tr><td>NRU</td><td>只分「最近用过/没用过」</td><td>粗</td><td>简单实现</td></tr><tr><td>随机</td><td>伪随机数选一路</td><td>意外地不差</td><td>大容量 LLC（省面积）</td></tr><tr><td>RRIP / 自适应</td><td>按重用距离分级</td><td>优于 LRU 在某些负载</td><td>现代 LLC</td></tr></tbody></table></div><p>反直觉的事实：在超大 LLC 上，随机替换常常接近 LRU。因为容量大时「谁被替换」影响变小，而 LRU 的维护成本与最坏情况（扫描型访问把缓存冲干净）反而更糟。</p>
+</section>
+<section class="panel"><h2>排障：写路径相关的现象</h2>
+<div class="table-wrap"><table><thead><tr><th>现象</th><th>根因</th><th>验证</th></tr></thead><tbody><tr><td>写密集程序带宽打满</td><td>写直达或非写分配导致每次都走内存</td><td>看内存写带宽与 cache 命中率</td></tr><tr><td>掉电后文件损坏</td><td>页缓存写回未落盘（非硬件问题）</td><td>fsync/barrier 语义</td></tr><tr><td>多核写同一数组极慢</td><td>dirty 行在核间来回迁移</td><td>perf c2c 看 HITM</td></tr><tr><td>大块 memset 反而慢</td><td>未触发 write-combining</td><td>用非临时存储指令（streaming store）</td></tr><tr><td>缓存替换导致抖动</td><td>工作集刚好大于缓存</td><td>减少工作集或改分块</td></tr></tbody></table></div>
+</section>
+<section class="panel"><h2>原理与取舍：写回是「延迟一致性换带宽」</h2>
+<p>写回把「内存何时更新」推迟到替换时刻，用 dirty 位记录欠账。它把 N 次写合并成 1 次，代价是任何想读这块数据的核都要先跟持有者打交道。换句话说：<b>写回优化了带宽，把复杂度转嫁给了缓存一致性协议</b>。这也是为什么多核时代一致性协议成为芯片里最复杂的部分之一。</p><details class="qa"><summary>写直达一定比写回慢吗？</summary><p>不一定。写少读多的负载里两者差别很小；写直达实现简单、无需 dirty 位与回写逻辑，某些嵌入式场景更划算。</p></details><details class="qa"><summary>为什么 L1 也用写回？</summary><p>L1 写回可以减少对 L2 的写流量（L2 带宽有限）。早期有些设计用写直达 L1 + 写回 L2，现代多为写回。</p></details><details class="qa"><summary>LRU 的最坏情况是什么？</summary><p>顺序扫描一个比缓存大的数组。LRU 会把整个缓存冲干净，之后热点数据全部 miss。这也是 RRIP 这类「抗扫描」算法出现的原因。</p></details>
+</section>
+<footer>© 2026 Visuals · 计算机组成原理</footer></main><script src="../../../../assets/knowledge-lesson.js"></script></body></html>

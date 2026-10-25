@@ -116,6 +116,18 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -273,6 +285,12 @@ go build -x                     # 看完整编译命令
 GODEBUG=cgocheck=2 go run .     # 更严格的指针传递检查
 go tool pprof -http=:8080 cpu.out   # 看 runtime.cgocall 占比</code></pre></div></section>
 <section class="x-sec" ><div class="x-dry"><h2>类型映射、内存规则与替代方案</h2><div class="table-wrap"><table><thead><tr><th>C 类型</th><th>cgo 类型</th><th>Go 类型</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>C.int</code></td><td><code>int</code>（平台相关，注意 32/64 位）</td></tr><tr><td><code>long</code></td><td><code>C.long</code></td><td><code>int64</code>（Linux 64 位）</td></tr><tr><td><code>char*</code></td><td><code>C.CString</code> / <code>C.GoString</code></td><td><code>string</code></td></tr><tr><td><code>void*</code></td><td><code>unsafe.Pointer</code></td><td><code>unsafe.Pointer</code></td></tr><tr><td><code>struct</code></td><td><code>C.struct_xxx</code></td><td><code>struct{...}</code>（字段布局需对齐）</td></tr><tr><td><code>数组</code></td><td><code>C.CBytes</code></td><td><code>[]byte</code></td></tr></tbody></table></div><ul><li><b>Go 指针不能传给 C 长期保存</b>——这是 cgo 的<b>硬性规则</b>。Go 的 GC 会移动/回收对象，C 侧持有的指针会失效。必须存的话，先在 C 侧 <code>malloc</code> 一份拷贝过去。</li><li><b>C 代码不能回调 Go 并长期持有 Go 内存</b>——同样原因。回调可以，但传入的 Go 指针只在回调期间有效。</li><li><b><code>C.CString</code> / <code>C.CBytes</code> 分配的内存必须手动 <code>C.free</code></b>，否则泄漏（Go GC 管不到）。这是 cgo 最常见的内存泄漏源。</li><li><b>不要在热路径调 cgo</b>：如果循环里调 100 万次，150ns × 100 万 = 0.15 秒纯开销。正确做法是<b>把循环移进 C 侧</b>，一次调用处理整批数据。</li></ul><div class="table-wrap"><table><thead><tr><th>替代方案</th><th>适用</th><th>对比 cgo</th></tr></thead><tbody><tr><td><b>纯 Go 重写</b></td><td>逻辑不复杂</td><td>最快、可交叉编译、<b>首选</b></td></tr><tr><td><b>syscall</b>（<code>syscall.Syscall</code>）</td><td>调系统调用或简单 libc</td><td>无编译器依赖，但仍是系统调用开销</td></tr><tr><td><b>纯 Go 的 FFI（purego）</b></td><td>调动态库，不想引入 C 编译器</td><td>避免 CGO，但功能有限</td></tr><tr><td><b>独立进程 + RPC</b></td><td>重量级 C/C++ 库（如 OpenCV、FFmpeg）</td><td><b>彻底隔离</b>：崩溃不影响主进程，可独立升级</td></tr><tr><td><b>SWIG</b></td><td>大量 C++ 接口要绑定</td><td>自动生成绑定，但产物庞大</td></tr></tbody></table></div><details><summary>为什么 cgo 这么慢？</summary><p>因为它跨越了两个完全不同的运行时边界：① <b>栈切换</b>——Go 用的是可增长的 goroutine 栈，C 需要系统栈，调用时要切换；② <b>调度器让渡</b>——进入 C 前要通知调度器「这个 M 要离开 Go 世界」，保证 GC 不会在不知情的情况下扫描/移动栈；③ <b>阻塞语义</b>——Go 假设 C 调用可能长时间阻塞，会把它当作阻塞系统调用处理。这些都是必要的正确性开销。</p></details><details><summary>怎么判断 cgo 是不是性能瓶颈？</summary><p>① pprof 里看 <code>runtime.cgocall</code> 的占比（超过 10% 就要警惕）；② 看进程<b>线程数</b>——cgo 调用多时线程数会远超 <code>GOMAXPROCS</code>（用 <code>ps -o nlwp</code> 看）；③ 做个 A/B：把 cgo 调用换成空函数，看 QPS 变化。最快的优化通常是<b>批量化</b>：把 N 次调用合成 1 次。</p></details><details><summary>交叉编译和 cgo 冲突怎么解决？</summary><p>核心矛盾：cgo 需要<b>目标平台的 C 编译器</b>和<b>目标平台的 C 库</b>。三条路：① <code>CGO_ENABLED=0</code>——最简单，前提是依赖的库有纯 Go 实现（如用纯 Go 的 SQLite 驱动代替 cgo 版）；② 用交叉编译工具链（如 <code>x86_64-linux-musl-gcc</code> + <code>CC</code> 环境变量）；③ 在目标平台的容器/机器上构建。Docker 多阶段构建 + musl 是生产上最常见的方案。</p></details></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../01-assembly-and-debugging/assembly-and-debugging.html">汇编与调试（准备工作）</a><a href="../03-compiler-pipeline/compiler-pipeline.html">编译过程：词法、语法与类型检查</a><a href="../04-intermediate-and-machine-code/intermediate-and-machine-code.html">中间代码与机器码生成</a><a href="../05-unsafe-and-memory-layout/unsafe-and-memory-layout.html">unsafe：内存布局与指针魔法</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 Go</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
 
 </body>
 </html>

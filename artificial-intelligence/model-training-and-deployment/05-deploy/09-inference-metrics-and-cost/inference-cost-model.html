@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>推理成本怎么算：从 GPU 时租到单 token 成本</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>推理成本怎么算：从 GPU 时租到单 token 成本</h1>
+  <p>三输入成本模型、四个降本杠杆的性价比排序、五个监控指标</p>
+  <span class="tag">推理成本</span><span class="tag">GPU</span><span class="tag">批处理</span><span class="tag">量化</span><span class="tag">缓存</span>
+</header>
+<nav>
+  <a href="#model">① 成本模型</a>
+  <a href="#levers">② 降本杠杆</a>
+  <a href="#metrics">③ 监控指标</a>
+  <a href="#qa">④ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>推理成本 = 单卡每秒成本 ÷ 单卡每秒输出 token 数 ÷ 利用率。</b>把这三个数算清楚，才能判断「换小模型 / 上量化 / 加批处理」哪个更划算。
+</div>
+
+<section id="model">
+  <h2><span class="n">01</span>成本模型的三个输入</h2>
+<div class="table-wrap"><table><thead><tr><th>输入</th><th>怎么得到</th><th>典型量级</th><th>注意</th></tr></thead><tbody><tr><td>单卡每秒成本</td><td>时租 ÷ 3600</td><td>A100 约 1~2 美元/时 → 约 0.0003~0.0006 美元/秒</td><td>含机器其他成本则再 ×1.3</td></tr><tr><td>单卡输出吞吐</td><td><b>压测实测</b>（benchmark_serving）</td><td>7B 模型、批 32 时通常几十~几百 tokens/s</td><td><b>不能按理论算力算</b>，实测才准</td></tr><tr><td>利用率</td><td>GPU 忙时占比（DCGM / nvidia-smi 采样）</td><td>线上常见 30%~60%，做好的能到 80%+</td><td>这是<b>最大</b>的降本空间</td></tr><tr><td>输入 token 成本</td><td>与输出分开算</td><td>Prefill 通常比 Decode 便宜（可批处理）</td><td>长 prompt 场景不能忽略</td></tr></tbody></table></div><pre><code># 手算示例（数字仅示意，替换成自己的实测值）
+gpu_hourly = 2.0                    # 美元/小时
+per_sec    = gpu_hourly / 3600      # 0.00056 美元/秒
+out_tps    = 200                    # 实测：单卡输出 200 tokens/s
+util       = 0.5                    # 实测：GPU 利用率 50%
+
+cost_per_token = per_sec / out_tps / util
+print(cost_per_token)               # 5.6e-6 美元/token
+print(cost_per_token * 1000 * 7.2)  # 每百万 token 约 40 美元（按 1 美元=7.2 元折算约 288 元）
+
+# 同样配置下把利用率提到 80%：
+print(per_sec / out_tps / 0.8 * 1e6)  # 直接降到 3.5 美元/百万 token，降幅 30%</code></pre><div class="lead warn"><b>要点：</b>算成本时最容易漏掉的是<b>利用率</b>。很多团队只算「跑满时能到多少 tokens/s」，而线上实际只用了 30%~50%，真实成本是理论值的 2~3 倍。</div>
+</section>
+
+<section id="levers">
+  <h2><span class="n">02</span>四个降本杠杆，按性价比排序</h2>
+<div class="table-wrap"><table><thead><tr><th>杠杆</th><th>典型收益</th><th>代价</th><th>优先级</th></tr></thead><tbody><tr><td><b>提高利用率</b>（连续批处理、错峰、合并小请求）</td><td><b>成本降 30%~50%</b></td><td>调度改造，几乎无质量损失</td><td><b>① 最高</b></td></tr><tr><td><b>缓存与去重</b>（prefix caching、结果缓存）</td><td>命中率高时可降 50%+</td><td>需要缓存策略与失效管理</td><td>② 高</td></tr><tr><td><b>模型路由</b>（简单问题走小模型）</td><td>按分流比例线性下降</td><td>需要一个分类器或规则</td><td>③ 中高</td></tr><tr><td><b>量化</b>（FP8 / INT8 / INT4）</td><td>显存与带宽省 2~4 倍</td><td>精度损失，需评估集验证</td><td>④ 中</td></tr><tr><td><b>蒸馏 / 换小模型</b></td><td>成本降一个数量级</td><td>能力下降明显，需重新验证</td><td>⑤ 视业务而定</td></tr><tr><td><b>投机解码</b></td><td>延迟降 1.5~3 倍（吞吐提升有限）</td><td>需 draft 模型与接受率调优</td><td>⑥ 延迟敏感时才做</td></tr></tbody></table></div><pre><code># 缓存：最便宜的降本手段（OpenAI 风格 API 已内置 prefix caching）
+#   命中缓存的输入 token 通常按更低价格计费（各厂商折扣不同）
+resp = client.chat.completions.create(
+    model='gpt-4o',
+    messages=[
+        {'role': 'system', 'content': long_system_prompt},   # 这部分会被缓存
+        {'role': 'user',   'content': question},             # 这部分不会
+    ],
+)
+# 要点：把<b>稳定的长内容放前面</b>，变化的内容放后面，命中率才高
+
+# 模型路由：先用小模型判断难度
+def route(q):
+    if is_simple(q):        # 规则或小模型判断
+        return 'small-model'
+    return 'large-model'
+# 典型效果：60%~80% 的请求可以走小模型，总成本降一半以上</code></pre><div class="lead warn"><b>要点：</b>降本的正确顺序是<b>先提利用率、再上缓存、最后才动模型</b>。很多人一上来就换小模型，结果能力掉得厉害，而利用率还停在 30%。</div>
+</section>
+
+<section id="metrics">
+  <h2><span class="n">03</span>要监控的五个指标</h2>
+<ul>
+  <li><b>GPU 利用率</b>：低于 50% 说明调度或批处理有巨大空间，是最该看的一个数。</li>
+  <li><b>每请求 token 数</b>（输入 + 输出）：直接决定成本，异常增长通常意味着提示词失控或死循环。</li>
+  <li><b>TTFT 与 TPOT</b>：分开看。TPOT 升高往往意味着批处理过大或显存压力。</li>
+  <li><b>缓存命中率</b>：命中率下降说明系统提示词被频繁改动，或请求顺序不利于复用。</li>
+  <li><b>单请求成本</b>：按业务维度（用户/功能）拆分，才能知道哪个功能最烧钱。</li>
+</ul><pre><code># 用 Prometheus 风格的指标算单请求成本
+#   llm_input_tokens_total{route="chat"}
+#   llm_output_tokens_total{route="chat"}
+#   llm_requests_total{route="chat"}
+# 每请求平均成本：
+#   (rate(llm_input_tokens_total[5m]) * price_in
+#    + rate(llm_output_tokens_total[5m]) * price_out)
+#   / rate(llm_requests_total[5m])</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">04</span>常见疑问</h2>
+<div class="qa"><b>问：自建一定比调 API 便宜吗？</b><p><b>不一定。</b>自建有固定成本（机器、运维、闲置），只有在<b>利用率能做高、且规模足够大</b>时才划算。粗略判断：如果 GPU 利用率长期低于 40%，或者每天请求量不足以让一张卡持续忙碌，调 API 通常更便宜。</p></div><div class="qa"><b>问：量化到底损失多少精度？</b><p><b>FP8 几乎无损</b>（多数任务上差异 &lt; 1%），INT8 在复杂推理任务上可能掉几个点，INT4 需要看具体任务。<b>必须先有评估集再决定</b>，不能只看困惑度。</p></div><div class="qa"><b>问：为什么我加了批处理，延迟却变差了？</b><p>因为<b>批越大，单个请求排队越久、Prefill 越慢</b>。批处理提升的是吞吐，不是延迟。要为延迟和吞吐分别设上限：批大小按 SLO 反推，而不是越大越好。</p></div><div class="qa"><b>问：怎么判断该不该用小模型？</b><p>做一个<b>抽样评估</b>：拿 200~500 条真实请求，分别跑大模型和小模型，人工或模型打分对比。如果小模型在简单子集上达标，就按难度路由；<b>不要用「感觉差不多」来决定</b>。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 人工智能 / 模型训练与部署 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

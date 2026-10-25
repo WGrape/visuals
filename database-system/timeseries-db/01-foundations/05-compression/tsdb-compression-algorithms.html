@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>时序压缩算法：Delta-of-Delta 与 Gorilla XOR</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>时序压缩算法：Delta-of-Delta 与 Gorilla XOR</h1>
+  <p>两个针对时序特性的压缩技巧、完整链路、实测预期量级，以及压缩率不达预期的排查路径</p>
+  <span class="tag">时序数据库</span><span class="tag">压缩</span><span class="tag">Gorilla</span><span class="tag">Delta-of-Delta</span><span class="tag">Prometheus</span>
+</header>
+<nav>
+  <a href="#why">① 可利用特性</a>
+  <a href="#ts">② 时间戳</a>
+  <a href="#val">③ 数值</a>
+  <a href="#chain">④ 完整链路</a>
+  <a href="#trap">⑤ 排障</a>
+  <a href="#qa">⑥ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>时序数据压缩能压到十几分之一，不是靠通用压缩算法，而是靠两个针对时序特性的技巧：<b>时间戳用 Delta-of-Delta</b>（等间隔时全变 0），<b>数值用 Gorilla XOR</b>（相邻浮点异或后绝大多数是 0）。这两招是 Facebook Gorilla 论文提出的，后来被 Prometheus、InfluxDB 等大量借鉴。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>监控数据的两个可利用特性</h2>
+<div class="grid">
+    <div class="card">
+      <h4>⏱ 采集间隔固定</h4>
+      <p>每 10 秒 / 15 秒 / 30 秒采一次，时间点之间的间隔几乎恒定。一阶差分是常数，二阶差分几乎全是 0。</p>
+    </div>
+    <div class="card">
+      <h4>📉 数值缓慢变化</h4>
+      <p>CPU、内存、QPS 这类指标在相邻采样点之间变化很小，浮点的高位（指数 + 高位尾数）几乎不变。</p>
+    </div>
+    <div class="card">
+      <h4>🔁 序列数量远多于单点数据量</h4>
+      <p>百万级序列 × 每序列上万点，单点省几个字节，总量就是几个数量级的差距。</p>
+    </div>
+    <div class="card">
+      <h4>❌ 可以接受有损（部分场景）</h4>
+      <p>历史监控数据允许降精度/降采样换空间，这是通用数据库没有的自由度。</p>
+    </div>
+  </div><div class="lead warn"><b>要点：</b>这两个特性都是<b>监控类时序</b>的特性。如果是金融行情、高频传感这类剧烈跳变的数据，压缩率会明显下降——选型时要先判断数据形态。</div>
+</section>
+
+<section id="ts">
+  <h2><span class="n">02</span>时间戳压缩：Delta-of-Delta</h2>
+<p>思路是<b>对差分再取一次差分</b>：如果采集完全等间隔，二阶差分恒为 0，那每个时间戳只需要 1 个 bit 来表示「间隔没变」。</p><pre><code>原始时间戳（秒）:  1000   1010   1020   1030   1040
+一阶差分 delta  :    -     10     10     10     10
+二阶差分 DOD    :    -      -      0      0      0     ← 全是 0
+
+Gorilla 的编码（按 DOD 的取值分档，越小用越少 bit）：
+  DOD =  0              → 1 bit   '0'
+  DOD ∈ [-63, 64]       → 9 bit   '10' + 7 bit
+  DOD ∈ [-255, 256]     → 12 bit  '110' + 9 bit
+  DOD ∈ [-2047, 2048]   → 16 bit  '1110' + 12 bit
+  其他                  → 36 bit  '1111' + 32 bit
+
+论文实测：约 96% 的时间戳可以用 1 bit 表示。
+（采集抖动、漏采会让 DOD 非零，所以不会是 100%）</code></pre><div class="table-wrap"><table><thead><tr><th>情况</th><th>编码长度</th><th>占比（论文实测量级）</th></tr></thead><tbody><tr><td>间隔完全没变</td><td><b>1 bit</b></td><td>约 96%</td></tr><tr><td>小幅抖动（±1 分钟内）</td><td>9~12 bit</td><td>少量</td></tr><tr><td>较大跳变（补采、重启）</td><td>16~36 bit</td><td>极少量</td></tr></tbody></table></div><div class="lead ok"><b>要点：</b>这解释了为什么<b>采集间隔抖动会显著劣化压缩率</b>：抖动让 DOD 不再是 0，1 bit 变成 9~12 bit，差了十几倍。</div>
+</section>
+
+<section id="val">
+  <h2><span class="n">03</span>数值压缩：Gorilla XOR</h2>
+<div class="fig">
+    <svg width="720" height="290" viewBox="0 0 720 290">
+  <text x="40" y="24" font-size="13" fill="#56d4dd">时间戳：Delta-of-Delta（差分的差分）</text>
+  <rect x="40" y="36" width="640" height="46" rx="6" fill="#1f2433" stroke="#2b3142"/>
+  <text x="360" y="56" text-anchor="middle" font-size="12" fill="#e2e8f0">原始：10:00:00　10:00:10　10:00:20　10:00:30</text>
+  <text x="360" y="74" text-anchor="middle" font-size="11" fill="#94a3b8">一阶差分：10, 10, 10　→　二阶差分：0, 0　→　等间隔时全部是 0，每个点只需 1 bit</text>
+
+  <text x="40" y="110" font-size="13" fill="#d2a8ff">数值：Gorilla XOR（相邻浮点做异或）</text>
+  <rect x="40" y="122" width="310" height="60" rx="6" fill="#241b33" stroke="#d2a8ff"/>
+  <text x="195" y="144" text-anchor="middle" font-size="12" fill="#d2a8ff">XOR 结果 = 0</text>
+  <text x="195" y="166" text-anchor="middle" font-size="11" fill="#94a3b8">值没变 → 只存 1 个 bit「0」</text>
+
+  <rect x="370" y="122" width="310" height="60" rx="6" fill="#241b33" stroke="#d2a8ff"/>
+  <text x="525" y="144" text-anchor="middle" font-size="12" fill="#d2a8ff">XOR 结果 ≠ 0</text>
+  <text x="525" y="166" text-anchor="middle" font-size="11" fill="#94a3b8">存控制位「10」+ 有意义的位区间 + 有效位</text>
+
+  <rect x="40" y="204" width="640" height="66" rx="10" fill="#171b26" stroke="#7ee787"/>
+  <text x="360" y="228" text-anchor="middle" font-size="12" fill="#7ee787">监控数据的特点让这两个技巧极其有效</text>
+  <text x="360" y="250" text-anchor="middle" font-size="11" fill="#94a3b8">采集间隔固定 → 时间戳二阶差分大量为 0；指标缓慢变化 → 浮点高位几乎不变</text>
+  <text x="360" y="268" text-anchor="middle" font-size="11" fill="#94a3b8">一个 16 字节/点的时间序列，压缩后可降到 1~2 字节/点的量级</text>
+</svg>
+    <div class="cap">时间戳用二阶差分，数值用相邻浮点异或</div>
+  </div><p>浮点值不做差分，而是<b>与前一个值做异或（XOR）</b>。如果值没变，XOR 结果是 0，只存 1 个 bit；如果只有低位变化，XOR 结果的大部分高位是 0，只需存「有意义的那一小段位」。</p><div class="table-wrap"><table><thead><tr><th>情况</th><th>存什么</th><th>长度</th></tr></thead><tbody><tr><td><b>值完全没变</b></td><td>控制位 <code>0</code></td><td><b>1 bit</b></td></tr><tr><td>值变了，但有效位落在上次的窗口内</td><td><code>10</code> + 窗口内的有效位</td><td>约 2 + 有效位长度</td></tr><tr><td>有效位窗口需要重新界定</td><td><code>11</code> + 前导零个数(5b) + 有效长度(6b) + 有效位</td><td>约 13 + 有效位长度</td></tr></tbody></table></div><pre><code># 直观理解：为什么 XOR 这么有效
+import struct
+
+def bits(x: float) -> str:
+    return format(struct.unpack('<Q', struct.pack('<d', x))[0], '064b')
+
+a = 37.5000
+b = 37.5001          # 指标小幅变化
+print("a:", bits(a))
+print("b:", bits(b))
+xor = int(bits(a), 2) ^ int(bits(b), 2)
+print("XOR:", format(xor, '064b'))
+print("前导零个数:", 64 - xor.bit_length())     # 大量前导零 → 只需存中间一小段
+
+# 论文实测：约 59% 的浮点值 XOR 后为 0，可以只用 1 bit 表示
+# 平均下来每个数据点约 1.37 字节（原始是 16 字节：8 字节时间戳 + 8 字节值）</code></pre><div class="lead warn"><b>要点：</b>XOR 对<b>缓慢变化的浮点</b>效果极好；对<b>整数型</b>计数指标，通常改用 Delta / RLE / 位打包，思路不同。</div>
+</section>
+
+<section id="chain">
+  <h2><span class="n">04</span>完整链路与实测预期</h2>
+<ol>
+  <li><b>按序列分组</b>：每条时间序列（series）独立成块压缩——同一序列内才有强相关性。</li>
+  <li><b>时间戳 Delta-of-Delta</b>：把等间隔消掉。</li>
+  <li><b>数值 Gorilla XOR</b>：把缓慢变化消掉。</li>
+  <li><b>再套一层通用压缩</b>（可选）：字节流层面继续消除冗余。</li>
+  <li><b>按块（chunk / block）组织</b>：压缩与查询都以块为单位，块太小则压缩差、块太大则查询要解压的多。</li>
+</ol><div class="table-wrap"><table><thead><tr><th>数据类型</th><th>原始大小</th><th>压缩后（量级）</th><th>说明</th></tr></thead><tbody><tr><td>时间戳 + 浮点值（监控）</td><td>16 字节/点</td><td><b>1~2 字节/点</b></td><td>Gorilla 论文的经典结果</td></tr><tr><td>整数型计数（单调递增）</td><td>8~16 字节/点</td><td><1 字节/点</td><td>Delta + 位打包效果更好</td></tr><tr><td>剧烈跳变的浮点</td><td>16 字节/点</td><td>8~16 字节/点</td><td><b>几乎压不动</b>，要考虑降采样</td></tr><tr><td>高基数标签的字符串</td><td>数十字节</td><td>依赖字典编码</td><td>标签本身应该用字典，别重复存字符串</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>标签（label）的<b>字符串不要在每一点重复存</b>。所有时序库都用「序列元数据字典 + 只存数据点」的方式，这也是为什么<b>基数爆炸会同时搞垮内存和磁盘</b>。</div>
+</section>
+
+<section id="trap">
+  <h2><span class="n">05</span>排障：压缩率不达预期的排查</h2>
+<ul>
+  <li><b>采集间隔抖动</b>：DOD 不为 0 会让时间戳从 1 bit 涨到 9~12 bit。检查采集端是否准时、是否有补采。</li>
+  <li><b>数据剧烈跳变</b>：值域跨度大的指标 XOR 后有效位很多。考虑降采样或降低精度存储。</li>
+  <li><b>块太小</b>：每个块独立压缩，块内样本数少时压缩的「参考窗口」不足。</li>
+  <li><b>写入批次太碎</b>：小块被频繁刷盘，既影响压缩率也增加文件数。</li>
+  <li><b>序列基数爆炸</b>：序列太多时，每个序列的块都没填满，压缩率自然差——<b>这其实是内存问题伪装成了压缩问题</b>。</li>
+  <li><b>用了不适合的编码</b>：浮点用 Delta、整数用 XOR，都可能适得其反。</li>
+</ul><pre><code># Prometheus：看压缩与存储的实际情况（指标名以版本为准）
+#   prometheus_tsdb_compaction_chunk_size_bytes        块大小分布
+#   prometheus_tsdb_head_series                        head 中的活跃序列数
+#   prometheus_tsdb_head_chunks                        head 中的块数
+#   prometheus_tsdb_head_chunks_created_total          累计创建的块数
+
+-- 判断块是否健康：平均每块的样本数
+--   块太小 → 压缩率差 + 文件数多；块太大 → 查询要解压的数据多
+prometheus_tsdb_head_samples_appended_total / prometheus_tsdb_head_chunks_created_total
+
+-- 找出序列数最多的指标（基数问题的入口）
+topk(10, count by (__name__)({__name__=~".+"}))
+
+-- 找出某个指标里基数最高的标签（定位是哪个 label 在爆炸）
+topk(10, count by (label_name) (metric_name))</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+<div class="qa"><b>问：为什么不能直接用 gzip/zstd 压？</b><p>能用，但效果差很多。通用压缩只看到字节流，看不到「时间戳等间隔」「浮点缓慢变化」这些结构。正确做法是<b>先用时序专用编码把结构消掉，再用通用压缩</b>，两级叠加才是最好的结果。</p></div><div class="qa"><b>问：压缩是有损的吗？</b><p>Gorilla 这类编码是<b>无损</b>的。<b>有损的是降采样</b>（downsampling）——把历史数据从 10 秒精度降到 5 分钟精度，这是另一个独立机制，通常由保留策略触发。</p></div><div class="qa"><b>问：压缩会拖慢查询吗？</b><p>会有解压成本，但<b>通常净收益为正</b>：监控查询大多受 IO 限制，数据小了 → 读得少了 → 反而更快。只有 CPU 成为瓶颈时才需要重新权衡。</p></div><div class="qa"><b>问：我的数据压不动，是不是产品不行？</b><p>先看数据形态。<b>剧烈跳变、采集抖动、高基数</b>这三种情况，换哪个产品都压不动。先解决数据侧的问题（稳定采集间隔、治理基数），再谈压缩。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

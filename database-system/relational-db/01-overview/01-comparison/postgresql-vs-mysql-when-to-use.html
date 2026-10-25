@@ -111,6 +111,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <div class="layout">
@@ -424,6 +436,11 @@ SELECT setval(pg_get_serial_sequence('orders','id'), (SELECT max(id) FROM orders
 --   ^ 序列必须手动推进，否则插入立刻主键冲突</code></pre><p class="muted">迁移后第一件事永远是 <code>ANALYZE</code>。PG 的 autovacuum 会做，但大批量导入后统计信息滞后会让执行计划错得离谱（看起来像「PG 很慢」，其实是统计信息没更新）。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 迁移与使用的坑</h2><ul><li><b>反引号 → 双引号，且 PG 会把未加引号的标识符转小写</b>。这是迁移中最高频的错误：<code>SELECT UserName FROM T</code> 在 PG 里会变成 <code>select username from t</code>，如果表是用 <code>"UserName"</code> 建的就找不到。要么全改成小写下划线，要么全程加引号。</li><li><b><code>ONLY_FULL_GROUP_BY</code></b>：MySQL 5.7+ 默认开，但很多老库关了。PG <b>从来不允许</b> SELECT 非聚合列不在 GROUP BY 里。迁移时会大面积报错，要么改写 SQL，要么改用 <code>DISTINCT ON</code>（PG 特有，很好用）。</li><li><b>隐式类型转换</b>：MySQL 很宽松（<code>WHERE id = '123'</code> 能走索引）；PG 严格，<code>where id = '123'</code>（id 是 int）通常也能转，但 <code>where varchar_col = 123</code> 会<b>直接报错</b>，且严格类型会导致索引失效。</li><li><b>序列 vs AUTO_INCREMENT</b>：PG 的序列独立于表，导入数据后<b>必须手动 setval</b>，否则第一条 INSERT 就主键冲突。</li><li><b>PG 的 VACUUM</b>：更新/删除会产生死元组，不清理会导致表和索引膨胀、甚至事务 ID 回绕（<code>autovacuum_freeze_max_age</code> 默认 2 亿，接近时会强制 vacuum）。大表要单独调 <code>autovacuum_vacuum_scale_factor</code>（默认 0.2，大表可以调到 0.01）。</li><li><b>MySQL 的 utf8 是假的</b>：<code>utf8</code> 只支持 3 字节，存不了 emoji 和部分生僻字；必须用 <code>utf8mb4</code>。这是历史包袱。</li><li><b>在线 DDL 的边界</b>：MySQL 8 的 <code>INSTANT</code> 只支持加列（末尾）、改默认值等少数操作；PG 加列带默认值在 11+ 也是瞬时的，但加索引仍需 <code>CREATE INDEX CONCURRENTLY</code>（且失败会留下 INVALID 索引，要手动清理）。</li></ul></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>核心差异来自 <b>MVCC 的实现方式</b>。它决定了两个数据库在「更新代价」「长事务影响」「清理机制」上的全部不同。</p><div class="table-wrap"><table><thead><tr><th>机制</th><th>PostgreSQL（堆内多版本）</th><th>MySQL InnoDB（undo 回滚段）</th></tr></thead><tbody><tr><td>UPDATE 做了什么</td><td>在原表<b>插入一条新版本元组</b>，旧版本原地留在表里</td><td>原地更新，旧版本写入 <b>undo log</b>（集中存放）</td></tr><tr><td>后果</td><td><b>表膨胀</b>：频繁更新的表体积会增长，需要 VACUUM 回收</td><td><b>undo 表空间增长</b>：长事务会让 undo 无法回收</td></tr><tr><td>回滚 / 一致性读</td><td>直接读堆里的旧元组</td><td>沿 undo 链回溯重建旧版本</td></tr><tr><td>长事务的危害</td><td>阻止 VACUUM 清理死元组 → 表和索引膨胀</td><td>阻止 undo 清理 → undo 表空间暴涨（MySQL 8 可独立回收）</td></tr><tr><td>清理方式</td><td><b>VACUUM</b>（autovacuum 自动 + 手动）</td><td><b>purge 线程</b>异步清理 undo</td></tr><tr><td>HOT 优化</td><td>有（同页内更新不更新索引）</td><td>无对应机制</td></tr></tbody></table></div><details><summary>为什么 PG 需要 VACUUM 而 MySQL 不需要（看起来不需要）？</summary><p>因为旧版本的存放位置不同。PG 把旧版本<b>留在表文件里</b>，所以必须有人把「对所有活跃事务都不可见的死元组」标记为空闲——这就是 VACUUM。MySQL 把旧版本<b>放到专门的 undo 表空间</b>，由后台 purge 线程异步回收，对使用者是透明的。所以严格说 MySQL 也有清理，只是不需要用户手动触发。代价是：<b>PG 的代价是表膨胀（需要监控 <code>n_dead_tup</code>），MySQL 的代价是 undo 空间和历史版本链过长导致一致性读变慢</b>——一个长事务跑几小时，MySQL 上后面所有需要回溯的事务都会越来越慢。</p></details><details><summary>PG 进程模型是不是性能瓶颈？</summary><p>是，但只在<b>连接数很多</b>时。每个 PG 连接是一个独立进程，内存开销约 <b>5~10MB</b>（MySQL 线程约 256KB~几 MB），且进程间上下文切换比线程重。所以：几百个连接两者都行；<b>上千个连接时 MySQL 明显更从容</b>。实践解法是 <b>上连接池</b>（PgBouncer，用 transaction 模式），把实际后端连接压到几十个——这几乎是所有 PG 高并发部署的标准做法。换句话说：PG 不是不能扛高并发，而是<b>不能直接扛高并发短连接</b>，需要连接池这一层。</p></details><details><summary>「PG 更适合复杂查询」具体体现在哪？</summary><p>三点最实在：① <b>优化器能力</b>——PG 支持更完整的 Join 形态与并行执行计划（并行 Seq Scan / Hash Join / Aggregate），对大表分析型查询有质变；② <b>索引类型丰富</b>——GIN 让 <code>JSONB</code>、数组、全文检索可以走索引（MySQL 的 JSON 基本只能全表扫），GiST 支撑 GIS 和范围类型，BRIN 让时序大表索引体积缩小几个数量级；③ <b>SQL 表达力</b>——CTE（含 <code>MATERIALIZED</code> 控制）、窗口函数、<code>DISTINCT ON</code>、<code>FILTER</code> 子句、<code>LATERAL</code> 子查询、自定义聚合函数。这三点叠加，让很多在 MySQL 里必须搬到应用层或离线数仓的计算，在 PG 里一条 SQL 就能解决。</p></details><details><summary>什么时候应该坚持用 MySQL？</summary><p>四条实在理由：① <b>团队和现有系统都在 MySQL 上</b>——迁移成本远大于收益；② <b>高并发简单读写为主</b>（典型的 Web CRUD、用户中心、订单），MySQL 的连接模型和生态工具链（分库分表中间件、审计、备份）更成熟；③ <b>依赖 MySQL 专有生态</b>（如某些云 RDS 特性、binlog 订阅生态、已有的分库分表方案）；④ <b>需要极强的主从复制灵活性</b>——MySQL 的 binlog 逻辑复制在级联、过滤、跨版本方面更灵活（PG 的逻辑复制不支持级联、DDL 不复制）。技术选型里「团队能稳定运维」这个因素的权重，通常高于所有特性对比。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="database-architecture.html">Redis & MySQL 架…</a><a href="postgresql-mysql-visual.html">PostgreSQL vs M…</a><a href="../02-data-modeling/database-normal-forms.html">数据库三范式</a><a href="../../02-mysql/03-query/02-join-and-anti-patterns/mysql-join-principles.html">MySQL JOIN 执行计划…</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 关系型数据库</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
 </main>
 </div>
 

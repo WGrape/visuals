@@ -74,6 +74,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -233,5 +245,72 @@ L_HALT: return stack[0];
 // 属性访问 obj.x：第一次走完整查表，之后缓存 "shape/隐藏类 -&gt; 偏移量"
 // 若 shape 未变，直接用偏移量取，省掉哈希查找</code></pre></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>解释器排查清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>解释器很慢</td><td>每次访问变量都查哈希 / 每次执行都遍历 AST</td><td>先编译成字节码；再做内联缓存；最后考虑 JIT</td></tr><tr><td>加了一层循环就慢 10 倍</td><td>循环体里的变量查找、类型判断被重复执行</td><td>做<b>循环不变量外提</b>；缓存查找结果（内联缓存）</td></tr><tr><td>递归报栈溢出</td><td>宿主语言（如 C/Python）的栈被递归耗尽</td><td>改写为显式栈；或做<b>尾调用优化</b>（需要语言明确支持）</td></tr><tr><td>内存占用大</td><td>每个值都装箱成对象（Python 小整数除外）</td><td>用<b>指针标记</b>（tagged pointer）把小整数直接编码进指针；或 NaN-boxing</td></tr><tr><td>GC 停顿明显</td><td>对象分配太快</td><td>对象复用、分代 GC；或用引用计数 + 循环检测</td></tr><tr><td>错误行号不对</td><td>字节码没记录源码位置</td><td>每条指令附带行号；或用「行号表」压缩存储</td></tr><tr><td>调试困难</td><td>字节码不可读</td><td>实现 <code>dis</code> 反汇编；Python 有 <code>dis模块</code> 可直接参考</td></tr></tbody></table></div><p class="muted"><b>CPython 为什么慢</b>：① 字节码是栈式的；② 所有值都是 PyObject，整数加法要拆箱再装箱；③ 每次属性/全局查找都走字典；④ GIL 限制多核。PyPy 靠 JIT + 类型特化做到 <b>4~10×</b> 加速。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 三种执行方式的判定</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>怎么做</th><th>启动速度</th><th>执行速度</th><th>代表</th></tr></thead><tbody><tr><td><b>树遍历解释器</b></td><td>直接递归遍历 AST 求值</td><td><b>最快</b>（无需编译）</td><td>最慢（每次都要重新遍历、大量指针跳转）</td><td>早期 Lisp、教学用解释器</td></tr><tr><td><b>字节码解释器</b></td><td>先编译成字节码，再由虚拟机循环执行</td><td>中（多一步编译）</td><td><b>快得多</b>（线性指令数组，缓存友好）</td><td>CPython、JVM、早期 JavaScript</td></tr><tr><td><b>JIT 编译</b></td><td>运行时把热代码编译成机器码</td><td>慢（要预热）</td><td><b>最快</b>（接近原生）</td><td>V8、HotSpot、PyPy</td></tr></tbody></table></div><p>为什么字节码比树遍历快：<b>AST 是指针满天飞的树结构，遍历时缓存命中率极差</b>；字节码是一条条指令组成的<b>连续数组</b>，配合一个 <code>switch</code> 分发循环，CPU 的分支预测和缓存都能发挥作用。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 一个能跑的最小字节码解释器</h2><pre><code># 极简栈式字节码虚拟机：理解「字节码 + 循环分发」的核心骨架
+from enum import IntEnum
+
+class Op(IntEnum):
+    CONST = 1   # 压常量
+    ADD   = 2   # 弹出两个相加
+    MUL   = 3
+    PRINT = 4
+    HALT  = 5
+
+# 程序 = 指令流 + 常量池（这就是字节码的基本形态）
+CODE  = [Op.CONST, 0, Op.CONST, 1, Op.ADD,
+         Op.CONST, 2, Op.MUL, Op.PRINT, Op.HALT]
+CONST = [3, 4, 5]        # 计算 (3 + 4) * 5
+
+def run(code, consts):
+    stack, pc, i = [], 0, 0
+    while True:
+        op = code[pc]; pc += 1
+        if op == Op.CONST:
+            stack.append(consts[code[pc]]); pc += 1
+        elif op == Op.ADD:
+            b = stack.pop(); a = stack.pop(); stack.append(a + b)
+        elif op == Op.MUL:
+            b = stack.pop(); a = stack.pop(); stack.append(a * b)
+        elif op == Op.PRINT:
+            print(stack.pop())
+        elif op == Op.HALT:
+            break
+    return stack
+
+run(CODE, CONST)      # 输出 35
+
+# 关键点：
+#   1) 栈式：操作数都在一个栈上，指令不带操作数地址 → 指令紧凑
+#   2) 分发：一个 while + 分支，就是最朴素的执行引擎
+#   3) pc（程序计数器）显式推进 → 这就是「解释执行」的本质</code></pre><p>真实虚拟机（CPython、JVM）在此基础上加了：局部变量表、调用帧栈、跳转与异常处理指令、以及大量的<b>特化优化</b>（比如把通用 <code>BINARY_OP</code> 按类型展开成整数加、浮点加等专用指令）。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · JIT 为什么快，以及它的代价</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>做什么</th><th>代价</th></tr></thead><tbody><tr><td><b>解释执行</b></td><td>逐条执行字节码</td><td>慢，但不占额外资源</td></tr><tr><td><b>热点探测</b></td><td>统计哪些函数/循环被执行了很多次</td><td>计数与采样有少量开销</td></tr><tr><td><b>编译优化</b></td><td>把热代码编译成机器码，做内联、逃逸分析等</td><td>编译占用 CPU 和内存</td></tr><tr><td><b>去优化</b></td><td>假设不成立时（如类型变了）回退到解释执行</td><td>回退有性能抖动</td></tr></tbody></table></div><ul><li><b>JIT 的核心武器是「运行时才知道的信息」</b>：编译期不知道变量实际是什么类型，运行时知道——于是可以生成针对性极强的机器码。这是 AOT（提前编译）做不到的。</li><li><b>预热期性能差</b>：刚启动时还在解释执行，短命脚本可能根本没享受到 JIT 的好处。</li><li><b>内存占用更大</b>：要同时存字节码、机器码、 profiling 数据。</li><li><b>性能不确定</b>：去优化会导致偶发的性能抖动，压测时看到的毛刺常来源于此。</li></ul><pre><code># 直观感受解释 vs 编译的差距（同一段计算）
+python3 -c "
+import time
+def f(n):
+    s = 0
+    for i in range(n):
+        s += i * i
+    return s
+t = time.perf_counter(); f(10_000_000); print('python:', round(time.perf_counter()-t, 3), 's')
+"
+
+# 同样的逻辑用 C 编译后运行通常快一到两个数量级
+# 差距来源：
+#   1) 解释执行的每条字节码都要走一次分发循环
+#   2) 变量是动态类型，每次运算都要做类型检查
+#   3) 对象大多在堆上分配，指针跳转多、缓存不友好
+
+# 对策（按性价比）：
+#   1) 用 NumPy 等把内层循环交给 C 实现  ← 最有效
+#   2) 用 PyPy（带 JIT 的 Python 实现）
+#   3) 用 Cython / C 扩展重写热点函数</code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么现代语言都走向混合模式</h2><p>纯解释太慢，纯编译启动太慢、又不灵活。所以主流语言都是<b>混合模式</b>：先解释执行拿到启动速度，同时对热路径做 JIT 编译拿到执行速度。</p><div class="table-wrap"><table><thead><tr><th>语言</th><th>主流实现</th><th>策略</th></tr></thead><tbody><tr><td><b>JavaScript</b></td><td>V8</td><td>基线编译器先出机器码 → 优化编译器处理热点 → 假设失效则去优化</td></tr><tr><td><b>Java</b></td><td>HotSpot</td><td>解释执行 → C1 编译（快速）→ C2 编译（深度优化）分层</td></tr><tr><td><b>Python</b></td><td>CPython</td><td>主要走字节码解释；PyPy 提供 JIT 选项</td></tr><tr><td><b>Lua</b></td><td>LuaJIT</td><td>解释 +  tracing JIT，性能接近 C</td></tr></tbody></table></div><details><summary>解释器和编译器能不能同时存在？</summary><p>能，而且这是常态。同一个语言可以有解释器（便于调试和快速启动）和 JIT 编译器（跑热代码），运行时按情况切换。</p></details><details><summary>为什么 Python 不默认开 JIT？</summary><p>CPython 的生态（大量 C 扩展）与动态语义让 JIT 的收益/复杂度权衡不佳，官方版本长期选择保持解释执行。<b>需要 JIT 可以用 PyPy</b>，但要接受 C 扩展兼容性问题。</p></details><details><summary>字节码和机器码的区别是什么？</summary><p>机器码是 CPU 直接执行的指令；字节码是<b>虚拟机</b>的指令，需要虚拟机解释或编译后执行。字节码的好处是跨平台、体积小、便于做安全检查。</p></details><details><summary>写解释器最该先做什么？</summary><p>按这个顺序：<b>① 词法 → ② 语法（AST）→ ③ 树遍历求值</b>，先把语义跑通；再考虑编译成字节码；JIT 是最后一步，绝大多数场景不需要。</p></details></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="lexical-scope-environments.html">解释器中的词法作用域与环境链</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 程序构建</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

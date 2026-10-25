@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>列存压缩编码：RLE、字典、Delta、位打包与通用压缩</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>列存压缩编码：RLE、字典、Delta、位打包与通用压缩</h1>
+  <p>两级压缩链路、六种编码的适用数据、排序键如何影响压缩率，以及压缩率变差的排查路径</p>
+  <span class="tag">OLAP</span><span class="tag">列存</span><span class="tag">压缩</span><span class="tag">RLE</span><span class="tag">字典编码</span><span class="tag">ZSTD</span>
+</header>
+<nav>
+  <a href="#why">① 为什么好压</a>
+  <a href="#chain">② 两级链路</a>
+  <a href="#codec">③ 六种编码</a>
+  <a href="#tradeoff">④ 取舍</a>
+  <a href="#trap">⑤ 排障</a>
+  <a href="#qa">⑥ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>列存能压到行存的几分之一，靠的不是某一个神奇算法，而是<b>同列数据类型一致、值域相近、按列选编码</b>这三件事叠加。实际存储链路通常是「<b>类型编码</b> → <b>通用压缩</b>」两级：编码负责把值变短变规整（还能直接在编码数据上做谓词下推），通用压缩负责最后的字节级去重。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>为什么列存天生好压</h2>
+<div class="grid">
+    <div class="card">
+      <h4>🧱 同列同类型</h4>
+      <p>一列里全是同一种类型，不需要为每行存类型信息，也不必做跨类型的通用编码。</p>
+    </div>
+    <div class="card">
+      <h4>🔁 重复度高</h4>
+      <p>维度列（省份、状态、品类）基数很低，几十万行里可能只有几十个不同值。</p>
+    </div>
+    <div class="card">
+      <h4>📈 相邻值相近</h4>
+      <p>时间戳、自增 ID、按时间写入的指标，相邻行的差值很小——差分后就是小整数。</p>
+    </div>
+    <div class="card">
+      <h4>🎯 可以按列选算法</h4>
+      <p>行存只能整块压；列存每一列可以单独挑最合适的编码，这是最大的自由度。</p>
+    </div>
+  </div><div class="lead warn"><b>要点：</b>压缩率不是目标本身。<b>压缩要兼顾解压速度</b>——分析查询每次都要把数据读出来解压，压得太狠反而拖慢查询。</div>
+</section>
+
+<section id="chain">
+  <h2><span class="n">02</span>两级链路：编码 + 通用压缩</h2>
+<div class="fig">
+    <svg width="720" height="320" viewBox="0 0 720 320">
+  <text x="40" y="24" font-size="13" fill="#56d4dd">原始列（INT64，8 字节/值）</text>
+  <rect x="40" y="36" width="640" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+  <text x="360" y="57" text-anchor="middle" font-size="12" fill="#e2e8f0">1001　1001　1001　1002　1002　1003　1003　1003</text>
+
+  <text x="40" y="98" font-size="13" fill="#7ee787">① 字典 / RLE 编码：值 → 小整数</text>
+  <rect x="40" y="110" width="640" height="34" rx="6" fill="#172b1f" stroke="#7ee787"/>
+  <text x="360" y="131" text-anchor="middle" font-size="12" fill="#7ee787">0　0　0　1　1　2　2　2　　（字典：0=1001, 1=1002, 2=1003）</text>
+
+  <text x="40" y="172" font-size="13" fill="#7ee787">② 位打包：只按实际需要的位宽存</text>
+  <rect x="40" y="184" width="640" height="34" rx="6" fill="#172b1f" stroke="#7ee787"/>
+  <text x="360" y="205" text-anchor="middle" font-size="12" fill="#7ee787">3 个不同值 → 每个值 2 bit → 8 个值共 16 bit（原来 512 bit）</text>
+
+  <text x="40" y="246" font-size="13" fill="#d2a8ff">③ 通用压缩（LZ4 / ZSTD）：再压一层字节流</text>
+  <rect x="40" y="258" width="640" height="34" rx="6" fill="#241b33" stroke="#d2a8ff"/>
+  <text x="360" y="279" text-anchor="middle" font-size="12" fill="#d2a8ff">编码让数据「变小且规整」，通用压缩负责最后的字节级消除冗余</text>
+</svg>
+    <div class="cap">同一列数据经过「编码 → 位打包 → 通用压缩」逐级变小</div>
+  </div><div class="table-wrap"><table><thead><tr><th>层级</th><th>做什么</th><th>代表算法</th><th>能否在压缩态上直接查询</th></tr></thead><tbody><tr><td><b>编码</b>（Encoding）</td><td>按数据类型与分布重新表示值</td><td>RLE、字典、Delta、位打包、Gorilla</td><td><b>多数可以</b>（这是它比通用压缩更值钱的地方）</td></tr><tr><td><b>通用压缩</b>（Compression）</td><td>字节流的通用冗余消除</td><td>LZ4、ZSTD、Snappy、Gzip</td><td>不能，必须先解压</td></tr></tbody></table></div><p><b>顺序很重要</b>：先编码再通用压缩。编码后的数据更规整（小整数、长游程），通用压缩才能拿到更高的压缩率；反过来做基本没效果。</p><div class="lead warn"><b>要点：</b>判断一个列该用什么编码，先问三个问题：<b>基数高不高？相邻值差得远不远？值域能不能用少量 bit 表示？</b></div>
+</section>
+
+<section id="codec">
+  <h2><span class="n">03</span>六种常见编码与适用数据</h2>
+<div class="table-wrap"><table><thead><tr><th>编码</th><th>原理</th><th>最适合的数据</th><th>典型压缩效果</th><th>不适用</th></tr></thead><tbody><tr><td><b>RLE</b>（游程）</td><td>把连续重复值存成「值 + 次数」</td><td>低基数列、<b>已按该列排序</b>的列</td><td>排序好的低基数列可达数十倍</td><td>高基数且无序（游程长度≈1，反而膨胀）</td></tr><tr><td><b>字典编码</b></td><td>值 → 整数 id，另存字典表</td><td>低基数字符串（状态、省份、品类）</td><td>长字符串替换成 1~2 字节，非常显著</td><td>高基数列（字典本身会膨胀，退化为近似无压缩）</td></tr><tr><td><b>Delta</b>（差分）</td><td>存相邻值的差，再配合位打包</td><td>单调递增的时间戳、自增 ID</td><td>时间戳从 8 字节降到 1~2 字节很常见</td><td>随机无序的大整数（差值仍然很大）</td></tr><tr><td><b>DoubleDelta</b></td><td>差分的差分</td><td><b>等间隔</b>的时间序列（每 10 秒一个点）</td><td>等间隔序列可压到接近常数</td><td>采集间隔抖动的数据</td></tr><tr><td><b>位打包</b>（Bit-packing）</td><td>按实际位宽而非类型宽度存</td><td>值域小的整数（如 0~100 的状态码）</td><td>INT64 存 0~15 可省掉 75%~90%</td><td>值域接近类型上限</td></tr><tr><td><b>Gorilla / XOR</b></td><td>相邻浮点做异或，只存变化位</td><td>浮点型的监控指标（缓慢变化）</td><td>监控类时序压缩比可达 10 倍量级</td><td>剧烈跳变的浮点</td></tr></tbody></table></div><pre><code>-- ClickHouse：在建表时按列指定编码链（先编码，后通用压缩）
+CREATE TABLE events (
+  ts        DateTime CODEC(DoubleDelta, ZSTD),      -- 等间隔时间戳：二次差分再 ZSTD
+  uid       UInt64   CODEC(Delta, ZSTD),            -- 递增 ID：差分再 ZSTD
+  status    LowCardinality(String),                 -- 低基数字符串：字典化（自动）
+  province  LowCardinality(String) CODEC(ZSTD),
+  amount    Decimal(18,2) CODEC(ZSTD),
+  raw_json  String   CODEC(LZ4)                     -- 高基数列：只做快速通用压缩
+) ENGINE = MergeTree
+ORDER BY (province, ts);                            -- 排序键直接影响 RLE 效果
+
+-- 查看各列实际压缩后大小（这是调编码的依据，不要凭感觉）
+SELECT
+  column,
+  formatReadableSize(sum(data_compressed_bytes))   AS compressed,
+  formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed,
+  round(sum(data_uncompressed_bytes) / sum(data_compressed_bytes), 2) AS ratio
+FROM system.columns_data   -- 实际系统表名以版本文档为准
+GROUP BY column ORDER BY compressed DESC;</code></pre><div class="lead ok"><b>要点：</b><code>ORDER BY</code> 的第一列如果是低基数列，RLE 的游程会非常长，压缩率能拉开数量级差距。这是「排序键设计」和「压缩」之间最重要的联系。</div>
+</section>
+
+<section id="tradeoff">
+  <h2><span class="n">04</span>压缩与查询性能的取舍</h2>
+<div class="table-wrap"><table><thead><tr><th>选择</th><th>优点</th><th>代价</th><th>什么时候选</th></tr></thead><tbody><tr><td><b>LZ4</b></td><td>解压极快，CPU 开销小</td><td>压缩率中等</td><td><b>默认首选</b>，热数据、查询频繁的表</td></tr><tr><td><b>ZSTD</b></td><td>压缩率高，可分级（level 越高越慢越小）</td><td>解压稍慢，压缩时 CPU 更高</td><td>冷数据、归档、磁盘成本敏感的表</td></tr><tr><td><b>更高压缩 level</b></td><td>再省一点空间</td><td>压缩耗时明显上升，写入变慢</td><td>只有确认磁盘是瓶颈时才调</td></tr><tr><td><b>不压缩</b></td><td>最快</td><td>空间占用大</td><td>极热的小表、或已由上层缓存挡住的场景</td></tr></tbody></table></div><ul>
+  <li><b>解压是有成本的</b>：一次全表聚合要把几亿行的列读出来解压，压缩算法慢会直接拖长查询。</li>
+  <li><b>压缩率影响 IO</b>：分析型查询多数是 IO 瓶颈，压得小 → 读得少 → 反而更快。这就是「压缩能提速」的来源。</li>
+  <li><b>平衡点通常是 LZ4 或 ZSTD 的低 level</b>：空间省不少，解压还够快。</li>
+  <li><b>编码几乎总是白赚</b>：它既省空间，又能让谓词在编码态上直接跳过整块数据。</li>
+</ul>
+</section>
+
+<section id="trap">
+  <h2><span class="n">05</span>排障：压缩率突然变差的原因</h2>
+<ul>
+  <li><b>换了排序键</b>：原本按低基数列排序形成的长游程被打散，RLE 效果骤降——这是最常见的「压缩率退化」原因。</li>
+  <li><b>低基数判断错了</b>：以为基数低、实际有几百万不同值，字典编码退化成「字典比数据还大」。</li>
+  <li><b>类型用大了</b>：用 <code>UInt64</code> 存 0~100 的状态码，没有位打包就白白浪费 7 个字节。</li>
+  <li><b>数据分布变了</b>：业务上线新枚举值、ID 换成 UUID，都会让原有编码失效，需要重新评估。</li>
+  <li><b>写入批次太小</b>：小批次写入产生的块更小，压缩的「参考窗口」变小，压缩率天然差一些。</li>
+  <li><b>JSON/长文本进了列存</b>：这类高熵数据和列存压缩不兼容，应考虑存成对象存储 + 外表，或只保留需要的字段。</li>
+</ul><pre><code>-- 排查路线：先看每列实际压缩比，再决定改编码还是改排序键
+-- 1) 找出「压缩率最差且占空间最大」的列（优先治理这两项都高的）
+SELECT name, type,
+       formatReadableSize(sum(data_compressed_bytes)) AS comp,
+       round(sum(data_uncompressed_bytes)/greatest(sum(data_compressed_bytes),1), 2) AS ratio
+FROM system.columns
+WHERE table = 'events'
+GROUP BY name, type
+ORDER BY sum(data_compressed_bytes) DESC
+LIMIT 20;
+
+-- 2) 确认基数：高基数列不该用字典/LowCardinality
+SELECT uniqExact(status)   AS status_card FROM events;   -- 几千以内适合字典
+SELECT uniqExact(raw_json) AS json_card   FROM events;   -- 极高的别做字典
+
+-- 3) 改编码需要重写数据（ALTER ... MODIFY COLUMN ... CODEC 会触发该列重写）
+ALTER TABLE events MODIFY COLUMN amount CODEC(Delta, ZSTD);</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+<div class="qa"><b>问：压缩率是不是越高越好？</b><p>不是。压缩率要与<b>解压速度</b>一起看。分析查询每次都要解压，如果为了多省 20% 空间让查询慢 30%，对交互式分析是亏的。热数据优先选快的算法。</p></div><div class="qa"><b>问：为什么我按文档配了编码，压缩率还是不行？</b><p>多半是<b>排序键</b>的问题。RLE 类编码完全依赖「相同值挨在一起」，如果排序键的第一个字段是高基数列，相同值根本不会相邻。先看排序键，再调编码。</p></div><div class="qa"><b>问：字典编码的「低基数」到底多低算低？</b><p>经验上<b>几千到几万</b>个不同值以内效果明显；到几十万就要实测——判断标准是字典表本身的大小能不能被「重复节省的空间」覆盖。用上面那条 <code>uniqExact</code> 实测最准。</p></div><div class="qa"><b>问：能不能对已有的大表改编码？</b><p>能，但会触发该列的数据重写，代价是一次较大的 IO 与磁盘临时空间。建议在低峰做，并先在一个分区或一张小表上验证收益。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP 分析型数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

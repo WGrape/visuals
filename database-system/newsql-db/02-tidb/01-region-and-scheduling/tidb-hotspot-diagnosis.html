@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TiDB 热点 Region 诊断：写入打散、读倾斜与定位路径</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>TiDB 热点 Region 诊断：写入打散、读倾斜与定位路径</h1>
+  <p>Region 是什么、三类热点的成因与对策、以及一套可复用的排查步骤</p>
+  <span class="tag">TiDB</span><span class="tag">Region</span><span class="tag">热点</span><span class="tag">AUTO_RANDOM</span><span class="tag">调度</span>
+</header>
+<nav>
+  <a href="#region">① Region</a>
+  <a href="#hot">② 三类热点</a>
+  <a href="#diag">③ 怎么查</a>
+  <a href="#ops">④ 运维边界</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>TiDB 里最常见的一类性能问题不是 SQL 写得差，而是<b>数据分布不均</b>——所有写入挤在一个 Region、或者查询全打到某几个节点。Region 是 TiDB 调度的最小单位，理解「Region 怎么切、怎么搬、怎么判断热」是运维分布式库的基本功。
+</div>
+
+<section id="region">
+  <h2><span class="n">01</span>Region 是什么：一条数据从哪里开始切</h2>
+<p>TiKV 把整个 key 空间按<b>范围</b>切成一段段 Region（默认大小在几十 MB 到近百 MB 量级，具体以版本文档为准）。每个 Region 是一个 Raft 组，有自己的 leader；PD 负责把 Region 的副本摆在不同机器上，并在负载不均时调度搬移。</p><div class="table-wrap"><table><thead><tr><th>概念</th><th>是什么</th><th>为什么要关心</th></tr></thead><tbody><tr><td><b>Region</b></td><td>key 范围的一段，Raft 组的基本单位</td><td>分裂、迁移、热点的最小粒度</td></tr><tr><td><b>Leader</b></td><td>Region 内负责读写的主副本</td><td>读写都打在 leader 上，leader 分布决定负载均衡</td></tr><tr><td><b>Peer / 副本</b></td><td>Region 的其他副本（默认 3 副本）</td><td>副本位置决定容灾与读延迟</td></tr><tr><td><b>PD</b></td><td>集群元信息与调度中心</td><td>Region 分裂/迁移/打散的决策者</td></tr><tr><td><b>Store</b></td><td>一个 TiKV 实例</td><td>Region 在各 Store 间的分布决定磁盘与 CPU 是否均衡</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>Region 太小 → 元数据与心跳开销大；太大 → 调度粒度粗、迁移慢。<b>别手动频繁调这个默认值</b>，除非有明确的诊断结论。</div>
+</section>
+
+<section id="hot">
+  <h2><span class="n">02</span>三类热点：写入、读取、Region 本身</h2>
+<div class="fig">
+    <svg width="720" height="290" viewBox="0 0 720 290">
+  <rect x="40" y="20" width="640" height="52" rx="10" fill="#171b26" stroke="#ff7b72"/>
+  <text x="360" y="44" text-anchor="middle" font-size="13" fill="#ff7b72">热点写入：自增主键 / 时间序索引</text>
+  <text x="360" y="64" text-anchor="middle" font-size="11" fill="#94a3b8">所有新写入都落在「最右侧」的那一个 Region，其他 Region 闲着</text>
+
+  <rect x="60" y="108" width="92" height="60" rx="8" fill="#1f2433" stroke="#2b3142"/>
+  <text x="106" y="140" text-anchor="middle" font-size="12" fill="#94a3b8">Region 1</text>
+  <rect x="164" y="108" width="92" height="60" rx="8" fill="#1f2433" stroke="#2b3142"/>
+  <text x="210" y="140" text-anchor="middle" font-size="12" fill="#94a3b8">Region 2</text>
+  <rect x="268" y="108" width="92" height="60" rx="8" fill="#1f2433" stroke="#2b3142"/>
+  <text x="314" y="140" text-anchor="middle" font-size="12" fill="#94a3b8">Region 3</text>
+  <rect x="372" y="108" width="92" height="60" rx="8" fill="#1f2433" stroke="#2b3142"/>
+  <text x="418" y="140" text-anchor="middle" font-size="12" fill="#94a3b8">Region 4</text>
+  <rect x="476" y="104" width="92" height="68" rx="8" fill="#2a1b1b" stroke="#ff7b72" stroke-width="1.6"/>
+  <text x="522" y="134" text-anchor="middle" font-size="12" fill="#ff7b72">Region 5</text>
+  <text x="522" y="152" text-anchor="middle" font-size="11" fill="#ff7b72">100% 写入</text>
+  <rect x="580" y="108" width="92" height="60" rx="8" fill="#1f2433" stroke="#2b3142" stroke-dasharray="4 3"/>
+  <text x="626" y="140" text-anchor="middle" font-size="12" fill="#94a3b8">Region 6（空）</text>
+
+  <rect x="40" y="200" width="310" height="70" rx="10" fill="#171b26" stroke="#f0a868"/>
+  <text x="195" y="224" text-anchor="middle" font-size="12" fill="#f0a868">打散方式一：改主键</text>
+  <text x="195" y="246" text-anchor="middle" font-size="11" fill="#94a3b8">AUTO_RANDOM / UUID / 雪花 ID</text>
+  <text x="195" y="264" text-anchor="middle" font-size="11" fill="#94a3b8">写入随机落到多个 Region</text>
+
+  <rect x="370" y="200" width="310" height="70" rx="10" fill="#171b26" stroke="#7ee787"/>
+  <text x="525" y="224" text-anchor="middle" font-size="12" fill="#7ee787">打散方式二：分片打散</text>
+  <text x="525" y="246" text-anchor="middle" font-size="11" fill="#94a3b8">SHARD_ROW_ID_BITS / PRE_SPLIT_REGIONS</text>
+  <text x="525" y="264" text-anchor="middle" font-size="11" fill="#94a3b8">建表时预先切开空 Region</text>
+</svg>
+    <div class="cap">自增主键导致写入集中在最后一个 Region，是 TiDB 最典型的写热点</div>
+  </div><div class="table-wrap"><table><thead><tr><th>热点类型</th><th>典型成因</th><th>现象</th><th>处理方向</th></tr></thead><tbody><tr><td><b>写热点</b></td><td>自增主键、按时间递增的索引</td><td>某个 Region 写入量远高于其他；PD 无法靠分裂缓解（分裂后新的仍是最右）</td><td><b>改主键分布</b>：AUTO_RANDOM、UUID、雪花 ID；或用 SHARD_ROW_ID_BITS 打散</td></tr><tr><td><b>读热点</b></td><td>小表被高频访问、某段 key 被集中扫描</td><td>个别 Region 读 QPS 极高</td><td>小表走缓存；Region 打散；考虑副本读分摊</td></tr><tr><td><b>Region 热点</b></td><td>Region 内 key 过多、副本集中在一组机器</td><td>调度频繁、某些 Store 磁盘/CPU 明显偏高</td><td>检查 PD 调度是否被限流，检查副本放置约束</td></tr></tbody></table></div><pre><code>-- 建表时预先打散：避免「刚建的表只有一个 Region，导入全挤在上面」
+CREATE TABLE orders (
+  id   BIGINT PRIMARY KEY /*T![auto_rand] AUTO_RANDOM(5) */,
+  uid  BIGINT NOT NULL,
+  ctime DATETIME NOT NULL
+) SHARD_ROW_ID_BITS = 4 PRE_SPLIT_REGIONS = 3;
+
+-- 说明：
+--   AUTO_RANDOM(5)        把自增主键换成随机分布，写入不再集中到最右 Region
+--   SHARD_ROW_ID_BITS = 4 把行 ID 的高位打散（16 个分片）
+--   PRE_SPLIT_REGIONS = 3 建表时就预先切好 Region，避开导入初期的单点
+
+-- 注意代价：随机主键会损失范围扫描的局部性，
+--          按主键范围查会变成跨 Region 扫描</code></pre><div class="lead warn"><b>要点：</b><code>AUTO_RANDOM</code> 换来的是写入分散，代价是<b>主键范围查询变散</b>。如果你的查询大量按主键范围扫，改用「业务前缀 + 随机后缀」的复合主键往往更平衡。</div>
+</section>
+
+<section id="diag">
+  <h2><span class="n">03</span>怎么查：热点与倾斜的定位路径</h2>
+<ol>
+  <li><b>先确认是不是热点</b>：看各 Store 的 CPU / 磁盘 / QPS 是否明显不均，还是整体都高（整体高是容量问题，不是热点）。</li>
+  <li><b>定位到 Region</b>：查热点 Region 列表，看读写流量集中在哪些 Region、属于哪张表。</li>
+  <li><b>关联到表与索引</b>：Region 的 key 范围可以反推属于哪个表/索引；确认是主键还是二级索引造成的。</li>
+  <li><b>看执行计划</b>：确认查询是否走了索引、是否有全表扫、估算行数与实际是否差很多。</li>
+  <li><b>决定动作</b>：改主键 / 打散 / 手工分裂 / 调调度参数 / 加机器，按结论选。</li>
+</ol><pre><code>-- ① 看热点 Region（系统表/监控项的名称随版本变化，以文档为准）
+SELECT * FROM information_schema.tidb_hot_regions
+  WHERE type = 'read' ORDER BY max_hot_degree DESC LIMIT 20;
+
+SHOW TABLE orders REGIONS;             -- 看某张表的 Region 切分与分布
+
+-- ② 看 Region 分布是否倾斜
+SELECT store_id, COUNT(*) AS region_cnt
+  FROM information_schema.tikv_region_status
+  GROUP BY store_id ORDER BY region_cnt DESC;
+
+-- ③ 看执行计划与真实行数（估算偏差大往往是统计信息过期）
+EXPLAIN ANALYZE SELECT * FROM orders WHERE uid = 1001;
+SHOW STATS_HEALTHY WHERE db_name='app' AND table_name='orders';   -- 健康度低就先 ANALYZE
+ANALYZE TABLE orders;</code></pre><div class="lead ok"><b>要点：</b><code>EXPLAIN ANALYZE</code> 与 <code>EXPLAIN</code> 不是一回事：后者看优化器的<b>估算</b>，前者看<b>实际执行</b>。热点排查一定要用 ANALYZE 版本。</div>
+</section>
+
+<section id="ops">
+  <h2><span class="n">04</span>运维边界：这些事别乱做</h2>
+<ul>
+  <li><b>不要频繁手工调 Region 大小</b>：它是全局参数，改动影响整个集群的调度行为。</li>
+  <li><b>不要在业务高峰做大规模 Region 迁移</b>：PD 的调度会占用网络与磁盘 IO，通常要设调度窗口/限流。</li>
+  <li><b>不要忽视统计信息</b>：统计信息过期会让优化器选错索引，表现出来像「热点」，实际是计划错误。</li>
+  <li><b>不要只加机器</b>：如果热点源自自增主键，加机器只是让更多机器看着那一个 Region 忙。</li>
+  <li><b>不要在没有基准的情况下调 PD 调度参数</b>：先记录当前指标，一次只改一个参数。</li>
+  <li><b>大导入要分批</b>：单批写入量过大容易触发限流与写 stall，也加剧单点 Region 压力。</li>
+</ul>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：为什么 PD 不自动把热点 Region 分裂开？</b><p>PD <b>会</b>分裂 Region，但对自增主键场景无效：分裂后新写入依然落在「当前最大 key 所在」的那个 Region，热的是「最右端」这个位置，不是某个固定 Region。所以必须从<b>主键分布</b>上解决。</p></div><div class="qa"><b>问：AUTO_RANDOM 和 UUID 主键哪个好？</b><p>AUTO_RANDOM 仍是 8 字节整型，索引与存储更紧凑，且保持一定局部性；UUID 是 36 字节字符串，索引膨胀明显、写入放大。<b>优先 AUTO_RANDOM 或雪花 ID</b>，UUID 作为跨系统全局 ID 更合适。</p></div><div class="qa"><b>问：加了机器还是慢，一定是热点吗？</b><p>不一定。先排除三类：① 执行计划错误（统计信息过期）；② 单机资源瓶颈（CPU/磁盘 IO 打满）；③ 跨地域访问（读写跨了机房）。确认都不是，再看 Region 分布。</p></div><div class="qa"><b>问：小表会被高频读成热点吗？</b><p>会，而且很常见——配置表、字典表被上万 QPS 读，一个 Region 扛不住。这类数据<b>应该在应用侧缓存</b>，而不是靠数据库打散，因为它根本不需要分布式能力。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / NewSQL 分布式关系型数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

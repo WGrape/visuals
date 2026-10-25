@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>时序库存储布局：WAL、内存块、Block 与 compaction</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>时序库存储布局：WAL、内存块、Block 与 compaction</h1>
+  <p>写入路径的每个环节、Block 内部结构、chunk 大小的权衡，以及重启/删除/保留策略的底层行为</p>
+  <span class="tag">时序数据库</span><span class="tag">存储</span><span class="tag">WAL</span><span class="tag">Block</span><span class="tag">compaction</span>
+</header>
+<nav>
+  <a href="#path">① 写入路径</a>
+  <a href="#block">② Block 结构</a>
+  <a href="#chunk">③ Chunk</a>
+  <a href="#ops">④ 运维</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>时序库的写入路径是「<b>先写 WAL 保证不丢，再写内存块保证查询可见</b>」，内存块攒够时间后<b>整块落盘变成只读 Block</b>，后台再把小 Block 合并成大 Block。理解这条链路，才能解释「为什么重启要等 WAL 回放」「为什么删除是标记而非立刻生效」「为什么旧数据不能改」这些行为。
+</div>
+
+<section id="path">
+  <h2><span class="n">01</span>写入路径：WAL + 内存块</h2>
+<div class="fig">
+    <svg width="720" height="300" viewBox="0 0 720 300">
+  <rect x="40" y="20" width="200" height="56" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+  <text x="140" y="44" text-anchor="middle" font-size="12" fill="#56d4dd">写入请求</text>
+  <text x="140" y="64" text-anchor="middle" font-size="11" fill="#94a3b8">samples（序列 + 时间戳 + 值）</text>
+
+  <rect x="280" y="14" width="180" height="46" rx="8" fill="#241b33" stroke="#f0a868"/>
+  <text x="370" y="42" text-anchor="middle" font-size="12" fill="#f0a868">WAL（预写日志）</text>
+  <rect x="280" y="66" width="180" height="42" rx="8" fill="#172b1f" stroke="#7ee787"/>
+  <text x="370" y="92" text-anchor="middle" font-size="12" fill="#7ee787">Head Block（内存）</text>
+
+  <line x1="240" y1="40" x2="276" y2="35" stroke="#6ea8fe" stroke-width="1.6"/>
+  <line x1="240" y1="52" x2="276" y2="88" stroke="#6ea8fe" stroke-width="1.6"/>
+  <text x="258" y="30" font-size="10" fill="#94a3b8">先落盘</text>
+  <text x="258" y="112" font-size="10" fill="#94a3b8">再写内存</text>
+
+  <line x1="370" y1="112" x2="370" y2="146" stroke="#6ea8fe" stroke-width="1.6"/>
+  <text x="382" y="134" font-size="10" fill="#94a3b8">满 2 小时 / 达阈值</text>
+
+  <rect x="280" y="152" width="180" height="46" rx="8" fill="#1f2433" stroke="#d2a8ff"/>
+  <text x="370" y="176" text-anchor="middle" font-size="12" fill="#d2a8ff">持久化 Block（只读）</text>
+  <text x="370" y="190" text-anchor="middle" font-size="11" fill="#94a3b8">含数据块 + 索引</text>
+
+  <line x1="370" y1="202" x2="370" y2="236" stroke="#6ea8fe" stroke-width="1.6"/>
+  <text x="382" y="224" font-size="10" fill="#94a3b8">compaction</text>
+
+  <rect x="280" y="242" width="180" height="46" rx="8" fill="#1f2433" stroke="#d2a8ff"/>
+  <text x="370" y="266" text-anchor="middle" font-size="12" fill="#d2a8ff">合并后的大 Block</text>
+  <text x="370" y="280" text-anchor="middle" font-size="11" fill="#94a3b8">保留策略到期后整块删除</text>
+
+  <rect x="500" y="66" width="180" height="132" rx="10" fill="#171b26" stroke="#2b3142"/>
+  <text x="590" y="92" text-anchor="middle" font-size="12" fill="#e2e8f0">Block 里有什么</text>
+  <text x="590" y="116" text-anchor="middle" font-size="11" fill="#94a3b8">chunks：压缩后的数据块</text>
+  <text x="590" y="138" text-anchor="middle" font-size="11" fill="#94a3b8">index：序列 → chunk 位置</text>
+  <text x="590" y="160" text-anchor="middle" font-size="11" fill="#94a3b8">meta：统计与时间范围</text>
+  <text x="590" y="182" text-anchor="middle" font-size="11" fill="#94a3b8">tombstones：删除标记</text>
+</svg>
+    <div class="cap">写入先落 WAL 再写内存块，攒够后整块落盘，后台再合并</div>
+  </div><ol>
+  <li><b>样本到达</b>：一条样本 = 序列标识 + 时间戳 + 值。</li>
+  <li><b>追加 WAL</b>：先顺序写预写日志（只追加，很快），保证进程崩溃后能恢复。</li>
+  <li><b>写入内存块（Head）</b>：写进当前活跃的 Head Block，此后查询就能看到它。</li>
+  <li><b>攒够后落盘</b>：Head 达到时间跨度或大小阈值后，把这段数据<b>压缩后</b>写成只读 Block。</li>
+  <li><b>后台合并</b>：多个小 Block 被合并成更大的 Block，减少文件数与索引开销。</li>
+  <li><b>到期整块删除</b>：保留策略到期时，<b>整个 Block 一起删</b>——所以删除极快。</li>
+</ol><div class="lead ok"><b>要点：</b>「整块删除」是时序库保留策略能做得极其高效的原因：它不需要逐行 DELETE，直接删目录。代价是<b>保留粒度必须是块/时间，不能精确到某条序列</b>。</div>
+</section>
+
+<section id="block">
+  <h2><span class="n">02</span>Block 里装了什么</h2>
+<div class="table-wrap"><table><thead><tr><th>组成部分</th><th>内容</th><th>作用</th></tr></thead><tbody><tr><td><b>chunks</b></td><td>压缩后的样本数据块</td><td>真正的数据，按序列分组压缩</td></tr><tr><td><b>index</b></td><td>序列 → chunk 的映射 + 倒排索引</td><td>按标签快速定位到序列，再定位到它的数据块</td></tr><tr><td><b>meta</b></td><td>时间范围、序列数、统计信息</td><td>查询前先按时间范围过滤掉整个 Block</td></tr><tr><td><b>tombstones</b></td><td>删除标记（软删除）</td><td>真正的数据要等 compaction 时才物理清除</td></tr></tbody></table></div><p><b>查询时如何利用 Block</b>：先用 meta 的<b>时间范围</b>过滤掉不相关的 Block（这一步几乎不花代价），再用 index 按标签找到目标序列，最后只解压命中的 chunks。这就是为什么时序库查询一个月的数据也可能很快——大部分 Block 在第一层就被跳过了。</p>
+</section>
+
+<section id="chunk">
+  <h2><span class="n">03</span>Chunk：压缩与查询的基本单位</h2>
+<div class="table-wrap"><table><thead><tr><th>设计选择</th><th>块大一点</th><th>块小一点</th></tr></thead><tbody><tr><td><b>压缩率</b></td><td>好（参考窗口长）</td><td>差</td></tr><tr><td><b>查询放大</b></td><td>差（要解压更多无关数据）</td><td><b>好</b></td></tr><tr><td><b>内存占用</b></td><td>head 内存更高</td><td>head 内存低</td></tr><tr><td><b>文件数/元数据</b></td><td>少</td><td>多</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>块大小是<b>压缩率与查询放大</b>之间的经典权衡。时序库通常取「固定跨度的时间」或「固定样本数上限，先到者为准」——具体阈值以产品文档为准，不要凭印象调。</div>
+</section>
+
+<section id="ops">
+  <h2><span class="n">04</span>运维相关：重启、删除与容量</h2>
+<div class="table-wrap"><table><thead><tr><th>行为</th><th>底层发生了什么</th><th>运维含义</th></tr></thead><tbody><tr><td><b>进程重启</b></td><td>回放 WAL 重建内存中的 Head</td><td>WAL 越大，重启越慢。WAL 长时间没被截断通常说明落盘有问题</td></tr><tr><td><b>删除数据</b></td><td>先写 tombstone 标记，compaction 时才真删</td><td><b>删除后磁盘不会立刻释放</b>，要等合并</td></tr><tr><td><b>修改历史数据</b></td><td><b>基本不支持</b></td><td>Block 是只读的，历史数据只能整块重写</td></tr><tr><td><b>保留策略到期</b></td><td>整块删除目录</td><td>极快，但要接受块粒度的时间边界</td></tr><tr><td><b>磁盘写满</b></td><td>通常触发写保护（停止写入）</td><td>监控磁盘水位，别等写满才处理</td></tr></tbody></table></div><pre><code># Prometheus 存储相关的关键指标（名称随版本可能变化，以文档为准）
+prometheus_tsdb_head_series                     # 内存中的活跃序列数 ← 最该盯的
+prometheus_tsdb_head_chunks                     # 内存中的块数
+prometheus_tsdb_wal_fsync_duration_seconds      # WAL 刷盘耗时（慢说明磁盘有问题）
+prometheus_tsdb_wal_corruptions_total           # WAL 损坏次数（>0 要立刻查）
+prometheus_tsdb_compactions_total               # compaction 次数
+prometheus_tsdb_retention_duration_seconds      # 配置的保留时长
+
+# 判断 head 是否过大：序列数 × 每序列块数 是内存占用的主因
+# 序列数暴涨 → 优先查基数问题（见下面的分组查询）
+topk(10, count by (__name__)({__name__=~".+"}))</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：为什么重启要很久？</b><p>因为要<b>回放 WAL</b> 把内存中的 Head Block 重建出来。WAL 积压越大回放越久。正常情况下 WAL 会在 Head 落盘后被截断，如果 WAL 一直很大，说明落盘环节出了问题。</p></div><div class="qa"><b>问：为什么删了数据磁盘没释放？</b><p>删除是<b>软删除</b>（tombstone），物理清除发生在后续的 compaction。想立刻释放需要触发合并，但合并本身有 IO 代价，通常在低峰自动做。</p></div><div class="qa"><b>问：为什么历史数据不能改？</b><p>Block 落盘后是<b>只读且压缩过</b>的，改一个点就要重写并重新压缩整个块。这是时序库的设计取舍：牺牲可修改性，换取极高的写入吞吐与压缩率。需要修正历史数据的场景，通常是<b>删掉重导</b>。</p></div><div class="qa"><b>问：保留策略设多久合适？</b><p>取决于「多旧的数据还要被查」。常见做法是<b>细粒度短期 + 降采样长期</b>：比如 15 秒精度留 15 天，5 分钟精度留 1 年。这样既能查历史趋势，又不占太多空间。</p></div>
+</section>
+
+</main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>容量算账：从采样率到磁盘</h2><p>时序库的容量可以手算，误差通常在 ±20% 以内。核心公式只有一条：<b>字节数 ≈ 点数 × 每样本字节 + 索引开销</b>。每样本字节取决于编码：Gorilla 类（XOR + varint）在缓慢变化的浮点指标上约 1.3~1.7 字节，整型计数器可低到 0.6 字节，而随机噪声序列会退化到接近 8 字节（等于不压缩）。</p><div class="table-wrap"><table><thead><tr><th>采样间隔</th><th>每天点数/测点</th><th>每样本 1.7B 时</th><th>每天</th><th>30 天</th></tr></thead><tbody><tr><td>1s</td><td>86,400</td><td>≈147 KB</td><td>147 KB</td><td>≈4.3 MB</td></tr><tr><td>10s</td><td>8,640</td><td>≈14.7 KB</td><td>14.7 KB</td><td>≈430 KB</td></tr><tr><td>1min</td><td>1,440</td><td>≈2.4 KB</td><td>2.4 KB</td><td>≈72 KB</td></tr><tr><td>5min</td><td>288</td><td>≈0.49 KB</td><td>0.49 KB</td><td>≈14 KB</td></tr></tbody></table></div><p><b>算一个真实规模</b>：10,000 个测点 × 1s 采样 × 保留 30 天 = 10,000 × 86,400 × 30 = 2.59×10¹⁰ 个点；按 1.7 字节算约 44 GB，再加上倒排索引（通常占 5%~15%）和 WAL 预留，规划 <b>55~60 GB</b> 比较稳妥。如果把采样降到 10s，同一份数据只剩 4.4 GB —— 这就是「降采样是最便宜的优化」的原因。</p><p><b>用现网数据反推压缩率（比拍脑袋准）</b></p><pre><code># Prometheus：直接读 TSDB 状态，拿到实际样本数与 chunk 数
+curl -s localhost:9090/api/v1/status/tsdb | jq '.data.headStats'
+# 返回 numSeries / numChunks 后可反推：每序列平均 chunk 数 &gt; 2 说明内存块在被频繁滚动
+
+# 反推每样本字节：用磁盘占用除以样本数
+du -sb /prometheus/data | awk '{print $1}'   # 实际字节
+# 每样本字节 = 实际字节 / (numSeries * 每天点数 * 保留天数)</code></pre><p class="muted">算出来每样本 &gt; 3 字节，通常说明序列基数（cardinality）过高或值抖动剧烈，先查 <code>topk(10, count by (__name__)({__name__=~'.+'}))</code> 这类基数问题，再考虑调采样间隔。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>块参数默认值与运维清单</h2><p>不同时序库的「块」粒度差一个数量级，直接决定查询要读多少文件：</p><div class="table-wrap"><table><thead><tr><th>系统</th><th>块单位</th><th>默认大小/时长</th><th>编码</th><th>保留默认值</th></tr></thead><tbody><tr><td>Prometheus（内存）</td><td>chunk</td><td>最多 120 样本或 2h（<code>--storage.tsdb.max-samples-per-chunk=120</code>）</td><td>XOR + varint，约 1.7 B/样本</td><td>15d</td></tr><tr><td>Prometheus（磁盘）</td><td>block</td><td>2h 固定，到点滚动成只读目录</td><td>block 内 chunk 重编码 + 索引</td><td>15d（<code>--storage.tsdb.retention.time</code>）</td></tr><tr><td>VictoriaMetrics</td><td>part</td><td>按月/日自动分区，后台合并</td><td>自研编码，官方口径 &lt;1 B/样本</td><td>1 个月（<code>-retentionPeriod=1</code>）</td></tr><tr><td>TimescaleDB</td><td>chunk</td><td>默认 7 天（<code>chunk_time_interval</code>）</td><td>行存转列存 + 压缩，官方称 &gt;90%</td><td>由 compression policy 决定</td></tr><tr><td>InfluxDB 1.x</td><td>shard group</td><td>7d（retention &lt; 2d 时自动降为 1h）</td><td>TSM：差分/游程 + Snappy</td><td>由 RP 的 DURATION 决定</td></tr><tr><td>TDengine</td><td>数据文件块</td><td>按 vnode 滚动，一个 vnode 写满即切新文件</td><td>列存 + 二级压缩（Delta / LZ4）</td><td>KEEP 默认 3650 天</td></tr></tbody></table></div><p><b>块参数的三个典型改动</b></p><pre><code># Prometheus：把保留期从 15d 提到 30d，并限制单 block 的样本上限，避免 OOM
+prometheus --storage.tsdb.retention.time=30d            --storage.tsdb.max-samples-per-chunk=120            --storage.tsdb.wal-segment-size=128MB
+
+# TimescaleDB：把 chunk 改成 1 天并开启压缩策略
+SELECT set_chunk_time_interval('metrics', INTERVAL '1 day');
+SELECT add_compression_policy('metrics', INTERVAL '7 days');
+SELECT compress_chunk(i) FROM show_chunks('metrics', older_than =&gt; INTERVAL '7 days') i;
+
+# InfluxDB：查看各 shard 的实际磁盘占用，判断块粒度是否合适
+influx -execute 'SHOW SHARD GROUPS'
+influx_inspect report -detailed /var/lib/influxdb/data</code></pre><p>上线前逐条核对：</p><ul><li>保留期 × 采样率 × 测点数 <b>先算一遍</b>再采购磁盘，时序库的增长是线性的，不是阶梯的。</li><li>单个 block/chunk <b>不要跨天</b>：Prometheus 固定 2h，TimescaleDB 默认 7d，太大会让删除旧数据变成整块重写。</li><li>磁盘留 <b>30% 余量</b>：压缩（compaction）时需要同时存在新旧两份块文件。</li><li>WAL 单独盘放，容量按 <b>2h 写入量 × 4</b> 估算（Prometheus 默认段 128MB，崩溃恢复至少保留 1 个段）。</li><li>删除数据用 <b>API/TTL</b>，不要 <code>rm -rf</code> 数据目录——索引和块是配对的，手工删会留下悬空索引。</li><li>测点数 &gt; 100 万或单序列 &gt; 1 亿点时，先做<b>降采样</b>（1s→1min 聚合留存），比换硬件便宜一个数量级。</li><li>压缩率突然变差（每样本字节数变多），第一嫌疑是<b>标签基数爆炸</b>，不是编码算法。</li><li>冷数据导出：Prometheus 用 <code>promtool tsdb dump</code>，TimescaleDB 用 <code>COPY (...) TO PROGRAM 'gzip'</code>。</li></ul></div></section>
+<footer>
+  <p>Visuals · 数据库系统 / 时序数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

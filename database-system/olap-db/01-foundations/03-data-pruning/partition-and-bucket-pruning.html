@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分区与分桶裁剪：让查询少读一到两个数量级的数据</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>分区与分桶裁剪：让查询少读一到两个数量级的数据</h1>
+  <p>三层裁剪机制、分区粒度怎么选、分桶键的两个相反目标，以及六种让裁剪失效的写法</p>
+  <span class="tag">OLAP</span><span class="tag">分区裁剪</span><span class="tag">分桶</span><span class="tag">执行计划</span><span class="tag">数据跳过</span>
+</header>
+<nav>
+  <a href="#layers">① 三层裁剪</a>
+  <a href="#part">② 分区</a>
+  <a href="#bucket">③ 分桶</a>
+  <a href="#trap">④ 排障</a>
+  <a href="#qa">⑤ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>分析型查询动辄扫几亿行，唯一能让它变快的办法就是<b>少读数据</b>。分区裁剪负责「跳过整个分区」，分桶裁剪负责「在分区内再跳过大部分桶」，MinMax 索引/Zone Map 负责「跳过文件块」。这三层加起来，往往能把扫描量降一到两个数量级。
+</div>
+
+<section id="layers">
+  <h2><span class="n">01</span>三层裁剪：从粗到细</h2>
+<div class="table-wrap"><table><thead><tr><th>层级</th><th>依据</th><th>粒度</th><th>谁决定</th><th>失效后果</th></tr></thead><tbody><tr><td><b>分区裁剪</b></td><td>分区键（通常是日期）</td><td>整个分区目录</td><td>建表时的 PARTITION BY + 查询条件</td><td>扫全部分区</td></tr><tr><td><b>分桶裁剪</b></td><td>分桶键的哈希值</td><td>分区内的桶</td><td>建表时的 DISTRIBUTED BY / BUCKETS</td><td>扫该分区全部桶</td></tr><tr><td><b>块级裁剪</b></td><td>每块的 min/max 统计</td><td>数据块 / Granule</td><td>排序键 + 写入时自动收集的统计</td><td>读进不需要的块</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>三层的<b>前提都是「查询条件直接命中键」</b>。任何对键做函数变换、类型转换，都可能让优化器认不出来，从而全层失效。</div>
+</section>
+
+<section id="part">
+  <h2><span class="n">02</span>分区：怎么切、切多细</h2>
+<p>分区键<b>绝大多数情况下是时间</b>（按天或按月），因为分析查询几乎都带时间范围，而且过期数据要能整块淘汰（TTL）。</p><div class="table-wrap"><table><thead><tr><th>切分粒度</th><th>适合场景</th><th>优点</th><th>问题</th></tr></thead><tbody><tr><td><b>按天</b></td><td>日均有较大数据量、查询常按天过滤</td><td>裁剪粒度细、TTL 灵活</td><td>分区数增长快（一年 365 个），元数据压力上升</td></tr><tr><td><b>按月</b></td><td>数据量中等、查询常按月/跨月</td><td>分区数可控</td><td>按天查也要扫整个月</td></tr><tr><td><b>按小时</b></td><td>数据量极大、且查询集中在最近几小时</td><td>裁剪最激进</td><td>分区数爆炸，慎用</td></tr><tr><td><b>按业务键（如租户）</b></td><td>多租户且查询几乎总带租户</td><td>隔离效果好</td><td>时间过滤失效；低基数租户易倾斜</td></tr></tbody></table></div><pre><code>-- Doris / StarRocks 分区 + 分桶的典型写法
+CREATE TABLE events (
+  dt        DATE           NOT NULL,
+  uid       BIGINT         NOT NULL,
+  province  VARCHAR(32),
+  amount    DECIMAL(18,2)
+)
+PARTITION BY RANGE(dt) (
+  PARTITION p202610 VALUES [('2026-10-01'), ('2026-11-01')),
+  PARTITION p202611 VALUES [('2026-11-01'), ('2026-12-01'))
+)
+DISTRIBUTED BY HASH(uid) BUCKETS 16
+PROPERTIES ("replication_num" = "3");
+
+-- 命中分区键 + 分桶键：两层裁剪都生效
+SELECT province, SUM(amount) FROM events
+WHERE dt BETWEEN '2026-10-01' AND '2026-10-07' AND uid = 9527
+GROUP BY province;
+
+-- 反例：对分区键套了函数 → 优化器无法裁剪，扫全表
+SELECT * FROM events WHERE DATE_FORMAT(dt, '%Y-%m') = '2026-10';
+-- 改写成范围条件，裁剪才能生效
+SELECT * FROM events WHERE dt >= '2026-10-01' AND dt < '2026-11-01';</code></pre><div class="lead warn"><b>要点：</b>分区数不是越多越好。分区过多会让<b>元数据膨胀、导入变慢、计划时间变长</b>。日分区已经能满足绝大多数场景。</div>
+</section>
+
+<section id="bucket">
+  <h2><span class="n">03</span>分桶：选什么键、多少个</h2>
+<p>分桶的作用有两个：<b>裁剪</b>（点查命中单桶）和<b>打散</b>（聚合/JOIN 时并行度）。两者对键的要求是<b>相反的</b>——这决定了你必须先想清楚这张表主要怎么用。</p><div class="table-wrap"><table><thead><tr><th>目标</th><th>该选什么键</th><th>原因</th></tr></thead><tbody><tr><td><b>点查裁剪</b>（WHERE uid = ?）</td><td><b>高频点查的那一列</b></td><td>哈希后直接定位到一桶</td></tr><tr><td><b>聚合并行</b>（GROUP BY uid）</td><td>分组键</td><td>同组数据落在同桶，可本地聚合</td></tr><tr><td><b>JOIN 性能</b></td><td>两表的 JOIN 键（且桶数成倍数关系）</td><td>可以做桶间本地 JOIN（Colocate / Shuffle 消除）</td></tr><tr><td><b>避免倾斜</b></td><td><b>高基数</b>的列</td><td>低基数列会让某些桶特别大</td></tr></tbody></table></div><ul>
+  <li><b>桶数经验起点</b>：与集群的 CPU 核数、节点数有关，常见做法是取「节点数 × 单节点核数」的 1~2 倍量级，再按实测调整。</li>
+  <li><b>不要用低基数列分桶</b>：比如按「省份」分桶，北京上海那几个桶会明显偏大，成为长尾。</li>
+  <li><b>不要用会变的列做分桶键</b>：分桶键一般不可更新，改了就相当于搬数据。</li>
+  <li><b>桶数改起来代价大</b>：改桶数通常要重写整表，所以<b>建表时就要想好</b>。</li>
+  <li><b>小表不要分太多桶</b>：每个桶都有元数据与文件开销，小表分几十个桶是浪费。</li>
+</ul><div class="lead warn"><b>要点：</b>分桶是<b>建表时就要定下来的决策</b>，后期改代价很大。如果拿不准，宁可取稍大一点的桶数。</div>
+</section>
+
+<section id="trap">
+  <h2><span class="n">04</span>排障：裁剪失效的六种常见写法</h2>
+<div class="table-wrap"><table><thead><tr><th>写法</th><th>问题</th><th>改成什么</th></tr></thead><tbody><tr><td><code>WHERE DATE_FORMAT(dt,...) = ...</code></td><td>对分区键套函数，优化器认不出</td><td>改写成 <code>dt >= x AND dt < y</code> 的范围条件</td></tr><tr><td><code>WHERE dt = 20261001</code>（整数 vs DATE）</td><td>类型不一致触发隐式转换</td><td>用与列类型一致的字面量</td></tr><tr><td><code>WHERE dt IN (...) OR province = ...</code></td><td>OR 条件让裁剪无法下推</td><td>拆成两条 SQL 用 UNION ALL</td></tr><tr><td><code>WHERE uid + 0 = 9527</code></td><td>对分桶键做了运算</td><td>直接写 <code>uid = 9527</code></td></tr><tr><td><code>WHERE uid = CAST(? AS ...)</code>（参数类型不定）</td><td>预处理语句类型不确定导致转换</td><td>绑定与列一致的类型</td></tr><tr><td>查询里<b>根本没带</b>分区键</td><td>没有可裁剪依据</td><td>确认业务是否允许补上时间范围</td></tr></tbody></table></div><pre><code>-- 确认裁剪是否生效：看执行计划里的分区/桶数量
+EXPLAIN SELECT province, SUM(amount) FROM events
+WHERE dt BETWEEN '2026-10-01' AND '2026-10-07' AND uid = 9527
+GROUP BY province;
+
+-- 重点看这几项：
+--   partitions    命中的分区数（远小于总分区数 → 分区裁剪生效）
+--   桶/tablet 数   命中的桶数（=1 说明分桶裁剪生效）
+--   扫描行数       估算与实际是否相差一个数量级以上（差太多通常是统计信息过期）
+
+-- 统计信息过期也是「看起来没裁剪」的常见原因
+ANALYZE TABLE events;    -- 或对应产品的统计信息收集命令</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：分区和索引是一回事吗？</b><p>不是。<b>分区是物理目录的切分</b>（数据本身就分开存放），<b>索引是额外的查找结构</b>。分区裁剪是「根本不打开那个目录」，比索引过滤更彻底、成本更低。</p></div><div class="qa"><b>问：为什么我按天分区了，查询还是很慢？</b><p>按顺序排查：① 查询条件里有没有带分区键？② 带了但是不是套了函数/类型不匹配？③ 分区裁剪生效了，但分桶键没命中（扫了整个分区的全部桶）？④ 两层都生效但块级没裁剪（排序键与过滤条件不匹配）？用 EXPLAIN 逐层确认。</p></div><div class="qa"><b>问：分桶键和排序键该选同一列吗？</b><p>看场景。同一列 → 该列的过滤与聚合都最优，但其他列就完全无裁剪。一般<b>分桶键选点查/JOIN 列，排序键选范围过滤列</b>，两者分开覆盖不同的查询模式。</p></div><div class="qa"><b>问：桶数设错了能改吗？</b><p>能，但代价大（通常要重写整表）。所以建表前用「节点数 × 核数」估一个量级，上线后看桶的大小是否均衡（单桶过大或过小都说明桶数不合适）。</p></div>
+</section>
+
+</main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>验证：裁剪到底有没有生效</h2><p>「以为生效」和「真的生效」之间只差一个 <code>EXPLAIN</code>。判据很明确：执行计划里必须出现<b>分区过滤</b>（PartitionFilters / PartitionCount）且数量远小于总分区数。</p><p><b>Spark / Hive / Iceberg 的验证命令</b></p><pre><code>-- Spark：看 PartitionFilters 与 PushedFilters 两行
+df.explain(True)                       -- Scala
+spark.sql('SELECT ...').explain(True)  -- PySpark
+-- 期望看到：
+--   PartitionFilters: [isnotnull(dt), (dt &gt;= 18172), (dt &lt;= 18178)]
+--   PushedFilters: [IsNotNull(uid), GreaterThan(amt, 100)]
+-- 若 PartitionFilters 为空 -&gt; 裁剪没生效，回看 WHERE 的写法
+
+-- Hive：看分区裁剪结果与依赖
+EXPLAIN DEPENDENCY SELECT count(*) FROM events WHERE dt BETWEEN '2026-10-01' AND '2026-10-07';
+SHOW PARTITIONS events;                 -- 先看实际有哪些分区
+
+-- 统计信息（Hive 的裁剪依赖它，没有统计信息可能全表扫）
+ANALYZE TABLE events PARTITION(dt) COMPUTE STATISTICS;
+
+-- Iceberg：隐藏分区 + 元数据表查看扫描了哪些文件
+SELECT * FROM events.snapshots;
+SELECT file_path, record_count FROM events.files WHERE partition.dt = '2026-10-01';</code></pre><div class="table-wrap"><table><thead><tr><th>引擎</th><th>看什么</th><th>生效标志</th><th>失效时怎么办</th></tr></thead><tbody><tr><td>Spark</td><td><code>PartitionFilters</code></td><td>出现且分区数少</td><td>把过滤条件写成对分区列的直接比较，不要套函数</td></tr><tr><td>Spark</td><td><code>PushedFilters</code></td><td>谓词被下推</td><td>UDF 包裹的条件无法下推，改写为内置函数</td></tr><tr><td>Hive</td><td><code>EXPLAIN</code> 的分区列表</td><td>只列出命中的分区</td><td>补 <code>ANALYZE ... COMPUTE STATISTICS</code></td></tr><tr><td>Hive</td><td>map 数量</td><td>map 数与命中分区数相当</td><td>map 数等于全表分区数说明没裁剪</td></tr><tr><td>Iceberg</td><td><code>events.files</code> 元数据表</td><td>扫描文件数少</td><td>用隐藏分区（<code>days(ts)</code>）而非自己存 dt 列</td></tr><tr><td>ClickHouse</td><td><code>system.query_log</code> 的 read_rows</td><td>read_rows ≪ total_rows</td><td>检查 PREWHERE 与主键顺序</td></tr></tbody></table></div><p><b>ClickHouse：量化扫描比例</b></p><pre><code>-- ClickHouse：跑完后看实际读了多少行/多少字节（最硬的证据）
+SELECT query_duration_ms, read_rows, read_bytes,
+       formatReadableSize(read_bytes) AS readable,
+       round(read_rows / greatest(total_rows_approx, 1), 4) AS ratio
+FROM system.query_log
+WHERE type = 'QueryFinish' AND has(tables, 'default.events')
+ORDER BY event_time DESC
+LIMIT 5;</code></pre><p class="muted">裁剪失效最常见的三个写法：<b>①</b> 对分区列套函数（<code>substr(dt,1,7)</code>）；<b>②</b> 分区列参与运算（<code>dt + 1 &gt; x</code>）；<b>③</b> 类型不匹配导致隐式转换（字符串分区列与数字比较）。改回直接比较即可。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>分桶怎么定 + 上线检查清单</h2><p>分区解决「扫多少目录」，分桶解决「目录内怎么切、join 怎么对齐」。分桶定错了，要么小文件爆炸，要么并行度上不去。</p><div class="table-wrap"><table><thead><tr><th>决策项</th><th>怎么定</th><th>典型取值</th><th>定错的后果</th></tr></thead><tbody><tr><td>分区粒度</td><td>按查询最常见的过滤跨度</td><td>天（日志）/ 月（归档）</td><td>太细：小文件多、元数据膨胀；太粗：裁剪没收益</td></tr><tr><td>分区键</td><td>WHERE 里出现频率最高且基数适中</td><td><code>dt</code>、<code>region</code></td><td>选错键等于不裁剪</td></tr><tr><td>分桶键</td><td><b>join key 或高基数的 group by 键</b></td><td>user_id、order_id</td><td>选低基数列会严重倾斜</td></tr><tr><td>分桶数</td><td>集群 executor 核数的整数倍</td><td>核数 × 1~3，且每桶 128MB~1GB</td><td>太多：小文件；太少：并行度不足</td></tr><tr><td>排序键</td><td>过滤 + 排序最常用的列组合</td><td>分区内再按时间排</td><td>没有排序则 min/max 索引失效</td></tr></tbody></table></div><p><b>Spark：分桶表与验证</b></p><pre><code>-- Spark：写分桶表（桶数固定后不能轻易改，先算好）
+CREATE TABLE events_bucketed (
+    uid BIGINT, dt STRING, amt DECIMAL(18,2)
+) USING parquet
+PARTITIONED BY (dt)
+CLUSTERED BY (uid) SORTED BY (uid) INTO 64 BUCKETS;
+
+-- 写入时必须显式分桶，否则只是普通表
+INSERT OVERWRITE TABLE events_bucketed PARTITION (dt='2026-10-01')
+SELECT uid, amt FROM src WHERE dt='2026-10-01'
+CLUSTER BY uid;
+
+-- 启用桶 join（两表桶数相同或成倍数关系才有意义）
+SET spark.sql.autoBroadcastJoinThreshold = -1;   -- 关掉广播强制走 shuffle/bucket join
+SET spark.sql.sources.bucketing.enabled = true;
+
+-- 检查小文件情况
+SELECT dt, count(*) AS files, round(avg(size)/1048576, 2) AS avg_mb
+FROM (SELECT dt, input_file_name() AS f, length(f) AS size FROM events_bucketed WHERE dt='2026-10-01') t
+GROUP BY dt;</code></pre><p>上线前逐条确认：</p><ul><li><b>用 EXPLAIN 确认裁剪生效</b>，而不是凭经验判断——这是唯一可靠的判据。</li><li><b>分区列不要套函数或做运算</b>，否则优化器无法把过滤条件下推。</li><li><b>分区数控制在万级以内</b>：Hive Metastore 在分区数上十万时元数据操作会明显变慢。</li><li><b>单分区文件大小 ≥ 128MB</b>（HDFS 块大小量级），小于 32MB 就应当合并。</li><li><b>分桶数 = 核数整数倍</b>，且能整除未来的扩容规模（如 64 → 128）。</li><li><b>分桶键必须是高基数列</b>，用性别、状态这类低基数列会造成严重倾斜。</li><li><b>两表 join 要桶数成倍数关系</b>才能走 bucket join，否则退化成 shuffle。</li><li><b>统计信息要定期更新</b>：Hive/Spark 的代价估计依赖它，过期会导致选错计划。</li><li><b>归档分区单独处理</b>：冷分区压缩 + 合并小文件，别和热分区用同一套参数。</li></ul></div></section>
+<footer>
+  <p>Visuals · 数据库系统 / OLAP 分析型数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

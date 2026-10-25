@@ -75,6 +75,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -452,6 +464,12 @@ goctl api go -api user.api -dir .
 # 生成后 handler/logic/types/svc 都齐了，只需要在 logic 里填空</code></pre></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>改了 .api 重新生成覆盖了我的代码</td><td>logic 里写的代码被覆盖</td><td>goctl 只覆盖 handler/types，<b>logic 不会覆盖</b>；但新增接口会生成新文件</td></tr><tr><td>路由 404</td><td>prefix/group 拼错；或没注册 handler</td><td>看生成的 <code>routes.go</code>；检查 <code>@server</code> 的 prefix</td></tr><tr><td><code>svcCtx</code> 为 nil</td><td>Logic 没通过 NewXxxLogic 创建</td><td>必须用生成的构造函数，不要 <code>&XxxLogic{}</code></td></tr><tr><td>model 缓存没生效</td><td>没传 CacheRedis 或没设 <code>cache</code> 索引</td><td>生成 model 时要带 cache 参数；查 <code>goctl model</code> 的 <code>-cache</code></td></tr><tr><td>RPC 调不通</td><td>etcd key 不对 / 服务没注册</td><td><code>etcdctl get --prefix</code> 看注册情况；检查 RpcConf 的 Key</td></tr><tr><td>数据库连接不够用</td><td>每个请求新建连接</td><td><b>必须复用 ServiceContext 里的连接</b></td></tr><tr><td>中间件没生效</td><td>只在 .api 里声明但没实现</td><td><code>@server middleware</code> 声明后还要在 svc 里注册 <code>server.Use()</code></td></tr></tbody></table></div><p class="muted"><b>分层的核心价值</b>：Handler 只管 HTTP、Logic 只管业务、Model 只管数据。这样 Logic 可以被单元测试（用 mock 的 svcCtx），也可以被 RPC 复用。把业务逻辑写进 Handler 是最常见的坏味道。</p></div></section>
 <section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 原理与取舍：三种解耦方案怎么选</h2><p>svc 的核心矛盾是：<b>「所有依赖放一起」方便，但会让 util/tool 这类底层包反向依赖 svc，形成循环</b>。三种解法对应不同的解耦强度。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>做法</th><th>解耦强度</th><th>适用场景</th><th>代价</th></tr></thead><tbody><tr><td><b>A 传窄依赖</b></td><td>函数只接收它真正需要的那个依赖（如 <code>*gorm.DB</code>）</td><td>中</td><td><b>推荐起步</b>：util/tool 只要一两个东西</td><td>参数列表会变长</td></tr><tr><td><b>B 接口解耦</b></td><td>在调用方<b>定义接口</b>，由上层注入实现</td><td><b>强</b></td><td>要彻底杜绝循环依赖、要单测 mock</td><td>多写一层接口定义</td></tr><tr><td><b>C 升级为 struct service</b></td><td>把 svc 拆成多个小 service，各自持有自己的依赖</td><td>中</td><td>依赖非常多、svc 过于臃肿</td><td>拆分成本较高</td></tr></tbody></table></div><details><summary>为什么 Go 里「在调用方定义接口」能解决循环依赖？</summary><p>因为 Go 的接口是<b>隐式实现</b>的：调用方自己声明「我需要哪些方法」，不需要 import 实现方。依赖方向因此被反转——原本 util 要 import svc，现在 util 只依赖自己定义的接口，实现由上层传进来。</p></details><details><summary>svc 是不是要一路传到底？</summary><p>不推荐。<b>logic 层持有 svc 就够了</b>，logic 往下调用时应该传具体依赖（如 <code>tx</code>、<code>db</code>），而不是把整个 svc 往下塞。一路传 svc 会让底层函数与框架强耦合，无法单独测试。</p></details><details><summary>util / tool 想用 svc 里的东西怎么办？</summary><p>三种选择：① 把它<b>提升为 logic 层</b>（它其实不是工具，是业务）；② 函数参数化，由调用方传入（方案 A）；③ 实在要共用，抽到独立的基础包里，让 svc 和 util 都依赖它。<b>不要让 util import svc</b>——那说明分层错了。</p></details><details><summary>什么时候可以把所有东西都塞进 svc？</summary><p>小型单体服务、依赖不超过十个、且没有底层包反向依赖它的时候。<b>反例信号</b>：当 util/tool 开始 import svc，或者 svc 里出现「只有某几个接口用到」的依赖，就该拆了。</p></details></div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="go-zero-mvc-directory.html">Go / go-zero 的 …</a><a href="go-zero-svc-dir.html">go-zero 的 svc 目…</a><a href="../00-overview/go-zero-basics.html">go-zero 框架快速上手</a><a href="../00-overview/go-zero-ecosystem.html">Go-Zero 生态与微服务分…</a></div>
+  <div class="xrel-up"><a href="../../../../../index.html">← 返回 Go</a>　·　<a href="../../../../../../../index.html#subjects">知识地图</a></div>
+</div>
 
 </body>
 </html>

@@ -116,6 +116,18 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
   <div class="hero">
@@ -258,6 +270,12 @@ limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
 limit_req zone=api burst=20 nodelay;
 #   burst=20：允许突发 20 个
 #   nodelay：突发的不排队，直接放行（否则会匀速处理）</code></pre><ul><li><b>固定窗口的临界突刺是真实存在的</b>：在窗口切换的瞬间，前 1 秒和后 1 秒各来阈值数量的请求，2 秒内实际通过 2 倍。对严格场景不可接受。</li><li><b>令牌桶是最常用的选择</b>：O(1) 空间、允许突发（符合大多数 API 的真实需求）、实现简单。Guava RateLimiter 和 Go 的 <code>x/time/rate</code> 都是它。</li><li><b>漏桶适合保护下游</b>：当你需要「无论上游多猛，下游收到的速率恒定」时（如保护数据库），漏桶比令牌桶合适。</li><li><b>单机限流的 N 倍问题</b>：10 台机器每台限 100 QPS，实际集群可能是 1000 QPS。要精确控制总量必须用 Redis 分布式限流。</li><li><b>Redis 限流必须用 Lua 保证原子性</b>：分开的 GET + SET 在并发下会失效。</li><li><b>被限流的请求要给 Retry-After</b>：HTTP 429 响应带上 <code>Retry-After</code> 头，让客户端知道多久后重试。</li><li><b>限流要分级</b>：按用户/租户/IP/接口分别限，避免一个租户把整个服务的配额吃光。</li></ul><details><summary>令牌桶和漏桶到底选哪个？</summary><p>核心问题是<b>要不要允许突发</b>。<b>令牌桶</b>：桶里攒着令牌，攒够了多少就能一次性用掉——一个限 100 QPS、桶容量 200 的令牌桶，如果之前 2 秒没人访问，第 3 秒可以<b>瞬间放行 200 个请求</b>。这符合大多数 API 的真实场景（用户不会匀速访问，短时间密集请求是正常的）。<b>漏桶</b>：无论进来多猛，出水速率恒定——100 QPS 的漏桶，哪怕突然来 1000 个请求，也是每秒匀速放行 100 个，其余排队或丢弃。这适合<b>保护下游</b>（如保护数据库不被突发流量打垮），因为下游收到的始终是平滑的速率。<b>判断准则：限流的目的是「保护自己的服务不被打爆」→ 令牌桶（允许合理突发，用户体验好）；目的是「保护下游系统」→ 漏桶（恒定出水，绝对平滑）</b>。工程上令牌桶用得更多，因为它空间 O(1)、实现简单、且更符合用户预期。另外 Go 的 <code>x/time/rate</code> 和 Guava 的 <code>RateLimiter</code> 都是令牌桶。</p></details><details><summary>固定窗口的临界突刺问题有多严重？</summary><p>最坏情况是<b>通过量翻倍</b>。举例：限流 100 QPS，用 1 秒固定窗口。如果在第 1 秒的<b>最后 100ms</b> 来了 100 个请求（窗口内计数到 100，全部通过），然后在第 2 秒的<b>最前 100ms</b> 又来了 100 个请求（新窗口重新计数，也全部通过）——那么<b>200 毫秒内实际通过了 200 个请求，瞬时速率是阈值的 10 倍</b>。这在保护下游的场景下是致命的（你以为限了 100，下游实际收到了瞬时 1000 的速率）。<b>解法三种</b>：① <b>滑动窗口</b>——把 1 秒切成 10 个 100ms 的格子，统计最近 10 个格子的总和，精度由格子粒度决定（格子越细越精确，但内存开销越大）；② <b>滑动日志</b>（Redis ZSet 存每个请求的时间戳）——<b>完全精确</b>，但每个请求存一条记录，内存开销大，只适合低 QPS 场景；③ <b>令牌桶/漏桶</b>——天然没有这个问题，因为它们是按速率补充而不是按窗口计数。<b>实践建议：精确性要求高的用滑动窗口（取 10~60 个格子通常够）；要求简单且允许小误差的用令牌桶</b>。</p></details><details><summary>分布式限流怎么做才准确？</summary><p>核心是<b>原子性</b>——计数和判断必须在一次 Redis 操作里完成，否则并发下会失效（比如两个请求同时读到计数 99，都认为没超限，都放行，实际变成 101）。<b>必须用 Lua 脚本</b>（Redis 保证 Lua 脚本整体原子执行）。三种实现：① <b>令牌桶 Lua</b>（上面的示例）——存 <code>tokens</code> 和 <code>ts</code> 两个 key，每次计算时间差补充令牌，空间 O(1)，最推荐；② <b>INCR + EXPIRE</b>——最简单的固定窗口，但要注意 INCR 和 EXPIRE 不是原子的（INCR 成功但 EXPIRE 失败会导致永久限流），也要用 Lua 包起来；③ <b>ZSet 滑动日志</b>——精确但每条请求存一个 member，只适合低 QPS。<b>几个实践要点</b>：① <b>Redis 挂了怎么办</b>——通常降级为放行（可用性优先），或降级为单机限流；② <b>网络开销</b>——每次限流判断一次 Redis 往返（约 0.5~1ms），高频接口要评估是否可接受；③ <b>批量/预取</b>——可以一次取 10 个令牌，减少 90% 的 Redis 调用；④ <b>集群维度</b>——如果用 Redis Cluster，同一个 key 必须落在同一个 slot（Lua 脚本涉及多个 key 时要保证它们在同一个 hash slot）。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="cache-db-consistency-patterns.html">缓存与数据库一致性模式</a><a href="feed-stream-system-design.html">Feed 流系统设计</a><a href="flash-sale-system-design.html">秒杀系统全链路设计</a><a href="short-url-system-design.html">短链系统设计与实现</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 整体架构</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>© 2026 Visuals · 目录即知识层级</footer>
 <section class="x-sec"><h2>核心速览</h2><div class="x-kv4"><div class="k"><b>一句话</b><span>在给定时间窗内限制请求数量，保护系统不被打垮</span></div><div class="k"><b>四算法</b><span>固定窗口、滑动窗口、漏桶、令牌桶</span></div><div class="k"><b>工程首选</b><span>令牌桶（允许突发）或滑动窗口（平滑且精确）</span></div><div class="k"><b>落地位置</b><span>网关 / SDK / Redis Lua / 单机本地</span></div></div>
 <div class="x-fig"><svg viewBox="0 0 680 172" xmlns="http://www.w3.org/2000/svg"><defs><marker id="mks" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#1a7f37"/></marker></defs><rect x="0" y="8" width="680" height="34" rx="7" fill="#f6f8fa" stroke="#d0d7de"/><rect x="0" y="8" width="5" height="34" rx="2" fill="#bc4c00"/><text x="18" y="29" fill="#0969da" font-size="13" font-weight="600">① 固定窗口</text><text x="200" y="29" fill="#57606a" font-size="12">按整分钟计数，实现最简单</text><path d="M340 42 L340 46" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="48" width="680" height="34" rx="7" fill="#f6f8fa" stroke="#d0d7de"/><rect x="0" y="48" width="5" height="34" rx="2" fill="#0969da"/><text x="18" y="69" fill="#0969da" font-size="13" font-weight="600">② 滑动窗口</text><text x="200" y="69" fill="#57606a" font-size="12">把窗口切成小格，精度高、内存可控</text><path d="M340 82 L340 86" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="88" width="680" height="34" rx="7" fill="#f6f8fa" stroke="#d0d7de"/><rect x="0" y="88" width="5" height="34" rx="2" fill="#8250df"/><text x="18" y="109" fill="#0969da" font-size="13" font-weight="600">③ 漏桶</text><text x="200" y="109" fill="#57606a" font-size="12">以恒定速率出水，削峰填谷</text><path d="M340 122 L340 126" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="128" width="680" height="34" rx="7" fill="#f6f8fa" stroke="#d0d7de"/><rect x="0" y="128" width="5" height="34" rx="2" fill="#1a7f37"/><text x="18" y="149" fill="#0969da" font-size="13" font-weight="600">④ 令牌桶</text><text x="200" y="149" fill="#57606a" font-size="12">以恒定速率产令牌，允许攒起来突发</text></svg><div class="x-cap">四种限流算法：从简单粗糙到平滑可控</div></div></section>

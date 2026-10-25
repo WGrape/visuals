@@ -33,6 +33,24 @@ table.x-tbl td{color:#57606a;padding:8px 10px;border:1px solid #d0d7de;line-heig
 .x-code{background:#f0f3f6;border:1px solid #d0d7de;border-radius:8px;padding:10px 13px;
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#1f2328;overflow-x:auto;margin:12px 0;line-height:1.7;white-space:pre-wrap}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body class="pattern-page"><main class="pattern-shell">
 <a class="pattern-back" href="../../index.html">← 返回设计模式目录</a>
@@ -84,6 +102,67 @@ while iterator.hasNext():
 <details class="pattern-quiz"><summary>把数组换成树，调用方循环要改吗？</summary><p>若迭代器契约相同，就不必改；只换集合内部的迭代实现。</p></details>
 <details class="pattern-quiz"><summary>一个集合只能有一个迭代器吗？</summary><p>不是。可同时提供正序、倒序、深度优先等多个迭代器，且各自保存独立游标。</p></details></section>
 <nav class="pattern-neighbors" aria-label="相邻模式"><a href="../../04-behavioral/03-interpreter/interpreter-pattern.html">上一篇：解释器</a><a href="../../04-behavioral/05-mediator/mediator-pattern.html">下一篇：中介者</a></nav>
+
+<section class="pattern-panel"><div class="x-dry"><h2>第二层 · Go 里四种遍历方式的代价对比</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>内存</th><th>能否提前退出</th><th>适用</th><th>主要代价</th></tr></thead><tbody><tr><td>一次性构造 slice</td><td>O(n) 全量</td><td>能</td><td>数据量小（< 1 万）</td><td>先把全部数据装进内存</td></tr><tr><td>回调（func(yield)）</td><td>O(1)</td><td>能（返回 false）</td><td>Go 1.23 前的通用做法</td><td>控制流反转，break/return 难写</td></tr><tr><td>通道 channel</td><td>O(缓冲)</td><td>能（close + return）</td><td>跨 goroutine / 流水線</td><td><b>忘记退出会泄漏 goroutine</b></td></tr><tr><td>iter.Seq（Go 1.23+）</td><td>O(1)</td><td>能（break 即可）</td><td>惰性序列、数据库游标</td><td>需要 Go 1.23 及以上</td></tr></tbody></table></div><pre><code>// Go 1.23 range-over-func：写一个返回 iter.Seq 的惰性迭代器
+func Lines(r io.Reader) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			if !yield(sc.Text()) { // 调用方 break → yield 返回 false → 这里 return
+				return
+			}
+		}
+	}
+}
+
+// 调用方：语法和普通遍历一样，但内存是 O(1)
+for line := range Lines(file) {
+	if strings.Contains(line, ‘ERROR’) {
+		fmt.Println(line)
+		break // 提前退出会一路传到 yield，文件不会被继续读
+	}
+}
+
+// 带错误的序列用 iter.Seq2（第一项是值，第二项是 error）
+func Rows(q *sql.DB) iter.Seq2[Row, error] {
+	return func(yield func(Row, error) bool) {
+		rs, err := q.Query(‘select id, name from users’)
+		if err != nil {
+			yield(Row{}, err)
+			return
+		}
+		defer rs.Close() // defer 在这里安全：函数返回时一定关闭
+		for rs.Next() {
+			var r Row
+			if err := rs.Scan(&amp;r.ID, &amp;r.Name); err != nil {
+				yield(Row{}, err)
+				return
+			}
+			if !yield(r, nil) {
+				return
+			}
+		}
+	}
+}
+
+// 通道版（跨 goroutine 时用）：重点是有退出路径
+func LinesCh(ctx context.Context, r io.Reader) &lt;-chan string {
+	ch := make(chan string)
+	go func() {
+		defer close(ch) // 关键：无论怎么退出都要 close，否则接收方永远阻塞
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			select {
+			case ch &lt;- sc.Text():
+			case &lt;-ctx.Done(): // 关键：给一个退出出口
+				return
+			}
+		}
+	}()
+	return ch
+}</code></pre><p><b>为什么通道版必须有 ctx</b>：如果接收方提前 return 不再读，发送方会永远卡在 <code>ch &lt;-</code>，goroutine 和它持有的 Reader 都无法回收 —— 这是线上最常见的 goroutine 泄漏来源之一。</p></div></section>
+<section class="pattern-panel"><div class="x-dry"><h2>第三层 · 迭代器的六个高频坑</h2><ul><li><b>遍历中修改集合</b>：增删元素会让迭代器下标错位或死循环；要么先快照，要么用支持并发修改的结构。</li><li><b>通道迭代器泄漏</b>：见上，必须有 <code>defer close(ch)</code> + ctx 退出路径，且接收方要用 <code>for range ch</code>。</li><li><b>迭代器持有大对象</b>：闭包里引用了整个切片或文件句柄，迭代期间这些内存无法释放；只捕获需要的字段。</li><li><b>游标没关</b>：数据库/文件迭代器提前 break 会跳过后续的 <code>Close()</code>；用 <code>defer</code> 写在 yield 函数体内。</li><li><b>无限序列没有退出条件</b>：迭代器天然可以无限（如随机数、心跳包），调用方必须有 <code>break</code> 或 <code>Limit</code>。</li><li><b>并发遍历同一迭代器</b>：迭代器通常有内部状态（当前位置），不可并发共享；每个 goroutine 各自创建一份。</li></ul><p class="muted">选型口诀：<b>小数据用 slice，惰性大数据用 iter.Seq，跨 goroutine 才用 channel</b>。能用 range 就不要手写 <code>HasNext/Next</code>。</p></div></section>
+<section class="pattern-panel"><div class="x-dry"><h2>第四层 · 为什么大多数语言里很少手写迭代器</h2><details><summary>既然语言内置了 for/range，这个模式还有什么用？</summary><p>内置语法只能遍历语言已知的集合（slice、map）。真正需要手写的是<b>数据源不在内存里</b>的场景：数据库游标、分页 API、文件流、树/图遍历、无限序列 —— 这些必须用惰性迭代器避免一次性加载。</p></details><details><summary>迭代器和生成器是一回事吗？</summary><p>生成器是语言提供的一种<b>写法</b>（yield 关键字），产出物就是迭代器；迭代器是<b>接口契约</b>。Go 1.23 之前没有生成器语法，所以用闭包回调或通道模拟，效果相同但写法笨重。</p></details><details><summary>惰性求值的代价是什么？</summary><p>每次取元素都要走一次函数调用（无法内联时约几纳秒级开销），且调试栈变深；所以热路径上的小集合不要为了优雅改成惰性，直接构造 slice 更快也更易读。</p></details></div></section>
 <footer class="pattern-footer">© 2026 Visuals · 行为型模式</footer>
 </main><script src="../../../../assets/pattern-lesson.js"></script><section class="x-sec"><h2>模式速览：把「怎么遍历」从「存什么」里分离出来</h2><p>迭代器解决的是一个很具体的问题：<b>集合的内部结构可能变，但遍历它的方式不应该跟着变</b>。把遍历逻辑挪到独立的迭代器对象里，调用方只需要知道「还有没有下一个」，不需要知道背后是数组、链表还是树。</p><div class="x-kv4"><div class="k"><b>意图</b><span>不暴露集合内部结构，就能顺序访问它的元素</span></div><div class="k"><b>角色</b><span>迭代器（定义接口）与聚合（提供迭代器）</span></div><div class="k"><b>何时用</b><span>需要多种遍历方式、或不想暴露内部结构时</span></div><div class="k"><b>代价</b><span>多一层间接；遍历中修改集合需要额外约定</span></div></div><div class="x-fig"><svg viewBox="0 0 680 204" xmlns="http://www.w3.org/2000/svg"><defs><marker id="mkf" markerWidth="9" markerHeight="9" refX="5" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#1a7f37"/></marker></defs><rect x="10" y="10" width="210" height="62" rx="9" fill="#f6f8fa" stroke="#d0d7de"/><text x="24" y="34" fill="#0969da" font-size="13" font-weight="600">① 客户端要遍历</text><text x="24" y="55" fill="#57606a" font-size="11">只依赖迭代器接口，不关心集合类型</text><line x1="224" y1="41" x2="226" y2="41" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mkf)"/><rect x="230" y="10" width="210" height="62" rx="9" fill="#f6f8fa" stroke="#d0d7de"/><text x="244" y="34" fill="#0969da" font-size="13" font-weight="600">② 向集合索取</text><text x="244" y="55" fill="#57606a" font-size="11">集合返回一个迭代器实例</text><line x1="444" y1="41" x2="446" y2="41" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mkf)"/><rect x="450" y="10" width="210" height="62" rx="9" fill="#f6f8fa" stroke="#d0d7de"/><text x="464" y="34" fill="#0969da" font-size="13" font-weight="600">③ 逐个取元素</text><text x="464" y="55" fill="#57606a" font-size="11">判断有无下一个，有则取出</text><line x1="340" y1="76" x2="340" y2="102" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#mkf)"/><rect x="10" y="106" width="210" height="62" rx="9" fill="#f6f8fa" stroke="#d0d7de"/><text x="24" y="130" fill="#0969da" font-size="13" font-weight="600">④ 遍历结束</text><text x="24" y="151" fill="#57606a" font-size="11">返回结束信号，循环终止</text></svg><div class="x-cap">迭代器把遍历状态从集合里挪出来，放进独立的游标对象</div></div></section>
 <section class="x-sec"><h2>四种遍历方式怎么选</h2><div class="x-tbl-wrap"><table class="x-tbl"><tr><th>方式</th><th>形态</th><th>优点</th><th>适合</th></tr><tr><td>直接下标循环</td><td>用索引访问</td><td>最快最直接</td><td>数组、切片这类连续结构</td></tr><tr><td>迭代器对象</td><td>显式的游标对象</td><td>可支持多种遍历、可暂停恢复</td><td>树、图、需要多种顺序</td></tr><tr><td>生成器风格</td><td>用 yield 逐个产出</td><td>写起来最简洁</td><td>语言支持时优先选择</td></tr><tr><td>回调式遍历</td><td>把处理函数传进去</td><td>省去样板代码</td><td>简单的一次性遍历</td></tr></table></div><div class="x-g2"><div class="x-b2"><h3>迭代器的真正价值</h3><p>不是「能遍历」，而是<b>遍历方式可以独立变化</b>：同一个树可以有前序、中序、层序三种迭代器，客户端代码完全不用改。如果只是数组遍历，直接循环就好。</p></div><div class="x-b2"><h3>为什么有些语言里很少手写它</h3><p>因为语言已经内置了：遍历协议、生成器、range 语法都在做同一件事。这时手写迭代器反而是重复造轮子，真正需要手写的是「非顺序结构的自定义遍历」。</p></div></div></section>

@@ -90,6 +90,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
     <div class="container">
@@ -164,6 +176,12 @@ def get_feed(user_id):
 # 3. 离线用户不推：只给最近 7 天活跃的用户 fanout
 # 4. 正文不进收件箱：收件箱只存 post_id，读时批量查（避免正文重复存储）
 # 5. 多级缓存：Feed 列表 -&gt; 帖子正文 -&gt; 用户信息，分别缓存</code></pre><ul><li><b>答案是推拉结合</b>：普通用户（粉丝 &lt;阈值）走推，大 V 走拉，读的时候合并两份再按时间排序。这是微博、Twitter 的实际做法。</li><li><b>阈值通常设在几千到几万</b>：具体值取决于你的写能力和容忍的延迟。微博公开分享过大约是<b>几万</b>级别。</li><li><b>fanout 必须异步</b>：同步写 1000 万份会导致发帖接口超时。做法是写自己的 outbox 后立刻返回，把 fanout 丢进消息队列异步做。</li><li><b>收件箱只存 ID，不存正文</b>：正文重复存 N 份太浪费。读的时候批量查一次（hydrate）。</li><li><b>收件箱要裁剪</b>：<code>LTRIM</code> 到 1000 条左右。用户几乎不会翻更久之前的 Feed。</li><li><b>离线用户不推</b>：只给最近活跃的用户 fanout，能大幅降低写量（很多粉丝是僵尸号）。</li><li><b>计数要单独处理</b>：点赞数、评论数是高写字段，不要存在 Feed 正文里，用 Redis 计数 + 异步落库。</li></ul><details><summary>推模型和拉模型怎么选？</summary><p>不要二选一，标准答案是<b>推拉结合</b>，判据是<b>粉丝数是否超过阈值</b>。推理过程：假设一个用户有 N 个粉丝、每天发 M 条帖子。<b>用推</b>：每次发帖写 N 份，日写量 = N×M。普通用户 N=200、M=2 → 400 次/天，完全没问题；大 V N=1000 万、M=1 → <b>1000 万次写/条</b>，一条帖子要写几分钟，且占用巨量存储，这就是「大 V 发帖导致微博瘫痪」的原因。<b>用拉</b>：读的时候聚合关注的所有人的帖子，成本 = 关注数。普通用户关注 200 人，每次读要聚合 200 个人的帖子列表再归并排序，读延迟高且放大读 QPS。<b>所以：粉丝少的用推（写便宜、读飞快），粉丝多的用拉（写一份、读时合并）</b>。阈值通常几千到几万，超过阈值的大 V 走拉。读的时候把「推来的收件箱」和「大 V 的 outbox」合并排序即可。</p></details><details><summary>大 V 发帖导致雪崩怎么破？</summary><p>四道防线：① <b>异步 fanout</b>——发帖接口只写自己的 outbox 就返回，把「写给粉丝」这件事丢进 MQ 由 worker 慢慢做。这样即使要写 1000 万份，用户感知到的发帖延迟也是毫秒级；② <b>分流 + 限流</b>——MQ 消费端控制速率，避免瞬间打爆 Redis/存储；可以给不同大 V 分配不同的处理优先级；③ <b>只推活跃用户</b>——1000 万粉丝里可能只有 100 万是周活的，只给活跃用户 fanout，写量直接降 90%；④ <b>对超大 V 直接走拉</b>——超过阈值的大 V 根本不 fanout，读者拉取时实时合并。另外还有个细节：<b>收件箱要设上限</b>（如 1000 条），否则长期累积会让存储爆炸，而且老 Feed 也没人看。实践中这四招通常叠加使用。</p></details><details><summary>Feed 的排序要按时间还是按权重？</summary><p>看产品定位，两种都有：<b>时间序（ chronological）</b>——严格按发布时间倒序，优点是<b>可预期、不会漏、用户有掌控感</b>，适合「关注的人不多、不想错过」的场景（如朋友圈、Twitter 的关注流）。实现简单，收件箱是有序列表，直接读即可；<b>权重序（ranked/algorithmic）</b>——按相关性、互动率、时效性等打分排序，优点是<b>提升 engagement</b>（点赞、停留时长），适合内容过载的场景（如微博首页、抖音推荐流、Facebook）。实现复杂：需要离线算好分数、建<b>倒排 + 排序索引</b>，读时做 top-K 归并，成本远高于时间序。<b>折中方案（也是主流）</b>：<b>推模式用时间序（收件箱天然有序），拉模式/推荐流用权重序</b>；或者默认权重序但提供「切换到最新」的选项。另外要注意：权重序无法做「未读数」的语义（因为顺序会变），设计上要区分。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="cache-db-consistency-patterns.html">缓存与数据库一致性模式</a><a href="flash-sale-system-design.html">秒杀系统全链路设计</a><a href="rate-limit-algorithms.html">限流算法：漏桶、令牌桶与滑动窗口</a><a href="short-url-system-design.html">短链系统设计与实现</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 整体架构</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>
             <p>📚 Feed 流系统设计</p>
             <p>生成时间：<span id="current-time"></span></p>

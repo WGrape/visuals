@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分布式数据库的全局时钟：TSO、HLC 与外部一致性</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>分布式数据库的全局时钟：TSO、HLC 与外部一致性</h1>
+  <p>为什么事务需要一个「全局时间」，三种授时方案各自付出什么代价</p>
+  <span class="tag">NewSQL</span><span class="tag">TSO</span><span class="tag">HLC</span><span class="tag">外部一致性</span><span class="tag">快照读</span>
+</header>
+<nav>
+  <a href="#why">① 为什么需要</a>
+  <a href="#three">② 三种方案</a>
+  <a href="#tso">③ TSO 细节</a>
+  <a href="#read">④ 四种读</a>
+  <a href="#trap">⑤ 排障</a>
+  <a href="#qa">⑥ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  <b>一句话总结：</b>分布式数据库要把「很多台机器上的事件」排成一条线，就必须有<b>全局时间概念</b>。三种主流做法是 <b>TSO 单点/少量节点授时</b>、<b>HLC 混合逻辑时钟</b>、<b>TrueTime 带误差区间的物理时钟</b>。它们解决的是同一个问题（给事务定序），但代价完全不同：TSO 简单但多一次 RPC，HLC 无中心但可能有因果外的偏差，TrueTime 精度高但依赖专用硬件。
+</div>
+
+<section id="why">
+  <h2><span class="n">01</span>为什么必须有全局时钟</h2>
+<div class="grid">
+    <div class="card">
+      <h4>📸 快照读需要「同一时刻」</h4>
+      <p>一条查询要读到「某个时间点的一致性状态」。如果各节点各用自己的物理时钟，同一个快照在 A 节点是 10:00:00.000、在 B 节点是 10:00:00.008，读到的就是撕裂的数据。</p>
+    </div>
+    <div class="card">
+      <h4>🔢 事务需要全序</h4>
+      <p>并发事务要能排序：T1 提交后开始的 T2 必须看见 T1。没有全局时钟就只能靠「谁先拿到锁」这类局部顺序，跨节点时无法成立。</p>
+    </div>
+    <div class="card">
+      <h4>🔁 多副本要能对齐版本</h4>
+      <p>Raft/Paxos 解决副本间的一致，但不解决「读应该看到哪个版本」。时间戳才是读的路径选择依据。</p>
+    </div>
+    <div class="card">
+      <h4>⏱ 跨地域要给出延迟承诺</h4>
+      <p>陈旧读（stale read）要回答「最多旧多久」，这必须由一个可度量的时间基准来表述。</p>
+    </div>
+  </div><div class="lead warn"><b>要点：</b>判断一个分布式库的时间语义，先问一句：<b>它的时间戳是谁发的？</b> 答案决定了延迟、一致性和故障时的行为。</div>
+</section>
+
+<section id="three">
+  <h2><span class="n">02</span>三种授时方案对比</h2>
+<div class="table-wrap"><table><thead><tr><th>方案</th><th>代表产品</th><th>时间从哪来</th><th>能否保证外部一致性</th><th>主要代价</th></tr></thead><tbody><tr><td><b>TSO</b>（时间戳预言机）</td><td>TiDB（PD 授时）</td><td>中心化的授时节点发号，单调递增</td><td><b>能</b>（单点发号天然全序）</td><td>每次取 ts 一次 RPC，中心点故障/抖动影响全局</td></tr><tr><td><b>HLC</b>（混合逻辑时钟）</td><td>CockroachDB</td><td>物理时钟 + 逻辑计数，节点间通信时推进</td><td>能保证<b>因果</b>一致，跨节点无通信的事务可能存在时钟偏差</td><td>无单点；但需处理「不确定区间」和读刷新</td></tr><tr><td><b>TrueTime</b></td><td>Spanner</td><td>GPS + 原子钟，返回<b>区间</b> [earliest, latest]</td><td><b>能</b>（提交时等到区间过去）</td><td>依赖专用硬件；误差越大，提交等待越久</td></tr><tr><td>纯物理时钟 + NTP</td><td>不建议用于强一致事务</td><td>各节点本地时钟</td><td><b>不能</b>（时钟偏移无法界定）</td><td>便宜但读不到正确版本</td></tr></tbody></table></div><p><b>外部一致性（external consistency / linearizability）</b>的通俗定义：如果事务 T1 提交完成后，T2 才开始，那么 T2 一定能读到 T1 的写入。注意它<b>强于</b>「可串行化」——可串行化只要求并发事务等价于某个串行顺序，不要求这个顺序与真实时间一致。</p>
+</section>
+
+<section id="tso">
+  <h2><span class="n">03</span>TSO 是怎么工作的</h2>
+<div class="fig">
+    <svg width="720" height="300" viewBox="0 0 720 300">
+  <defs>
+    <marker id="ah1" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <polygon points="0 0,9 3,0 6" fill="#6ea8fe"/>
+    </marker>
+  </defs>
+  <rect x="250" y="14" width="220" height="42" rx="8" fill="#1f2433" stroke="#d2a8ff" stroke-width="1.4"/>
+  <text x="360" y="40" text-anchor="middle" font-size="13" fill="#d2a8ff">授时服务（PD / 时钟源）</text>
+  <text x="360" y="76" text-anchor="middle" font-size="11" fill="#94a3b8">单调递增的时间戳 / 区间</text>
+
+  <line x1="290" y1="82" x2="150" y2="126" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <line x1="360" y1="82" x2="360" y2="126" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <line x1="430" y1="82" x2="570" y2="126" stroke="#6ea8fe" stroke-width="1.5" marker-end="url(#ah1)"/>
+
+  <rect x="70" y="132" width="160" height="46" rx="8" fill="#171b26" stroke="#56d4dd"/>
+  <text x="150" y="152" text-anchor="middle" font-size="12" fill="#56d4dd">节点 A</text>
+  <text x="150" y="170" text-anchor="middle" font-size="11" fill="#94a3b8">本地物理时钟 t+3ms</text>
+
+  <rect x="280" y="132" width="160" height="46" rx="8" fill="#171b26" stroke="#56d4dd"/>
+  <text x="360" y="152" text-anchor="middle" font-size="12" fill="#56d4dd">节点 B</text>
+  <text x="360" y="170" text-anchor="middle" font-size="11" fill="#94a3b8">本地物理时钟 t-2ms</text>
+
+  <rect x="490" y="132" width="160" height="46" rx="8" fill="#171b26" stroke="#56d4dd"/>
+  <text x="570" y="152" text-anchor="middle" font-size="12" fill="#56d4dd">节点 C</text>
+  <text x="570" y="170" text-anchor="middle" font-size="11" fill="#94a3b8">本地物理时钟 t+7ms</text>
+
+  <rect x="70" y="208" width="580" height="66" rx="10" fill="#171b26" stroke="#7ee787" stroke-dasharray="5 4"/>
+  <text x="360" y="232" text-anchor="middle" font-size="12" fill="#7ee787">事务 T1 拿到 ts=100 提交　→　T2 拿到 ts=101 开始读</text>
+  <text x="360" y="254" text-anchor="middle" font-size="11" fill="#94a3b8">只要 ts 是全序的，T2 一定能看到 T1 —— 这就是「外部一致性」的直观含义</text>
+  <text x="360" y="278" text-anchor="middle" font-size="11" fill="#f0a868">代价：每次取时间戳都可能是一次 RPC；跨地域时 RTT 直接写进事务延迟</text>
+</svg>
+    <div class="cap">中心化授时：所有节点向同一个授时源取时间戳，天然全序</div>
+  </div><p>TiDB 由 PD（Placement Driver）承担授时职责：事务开始时取一个 start_ts，提交时取一个 commit_ts，中间所有读到的数据都按 start_ts 过滤版本。Percolator 风格的两阶段提交第一步「Prewrite」只加锁，第二步「Commit」写入 commit_ts，<b>数据在 commit_ts 生效的瞬间对外可见</b>。</p><div class="table-wrap"><table><thead><tr><th>环节</th><th>发生什么</th><th>延迟构成</th></tr></thead><tbody><tr><td>取 start_ts</td><td>向 PD 请求一个时间戳</td><td>1 次 RPC（PD 在同城约 0.2~1ms 量级）</td></tr><tr><td>Prewrite</td><td>主锁 + 各参与者写入锁与数据</td><td>1 轮到所有参与分片的 RPC，取最慢的那个</td></tr><tr><td>取 commit_ts</td><td>再向 PD 请求一个时间戳</td><td>1 次 RPC</td></tr><tr><td>Commit</td><td>提交主锁，异步提交其余</td><td>写主锁 1 次 RPC 即可返回（其余异步）</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>所以一个最简单的单行事务也要 <b>2 次授时 RPC</b>，这是 TSO 方案最常被吐槽的地方。优化手段通常是「一次取一批时间戳」或「本地缓存+预取」，具体策略与开关需查对应产品文档。</div>
+</section>
+
+<section id="read">
+  <h2><span class="n">04</span>四种读：到底读到哪个版本</h2>
+<div class="table-wrap"><table><thead><tr><th>读的类型</th><th>语义</th><th>延迟</th><th>典型用途</th></tr></thead><tbody><tr><td><b>强一致读</b>（当前读）</td><td>取最新 ts，可能要等未决议的事务 / 遇锁要清锁</td><td><b>最高</b>（可能阻塞在锁冲突上）</td><td>支付、库存扣减等不能读旧的场景</td></tr><tr><td><b>快照读</b>（指定历史 ts）</td><td>读过去某个时间点的一致状态</td><td>中（不需要处理当前锁）</td><td>对账、数据核对、可重复读</td></tr><tr><td><b>陈旧读</b>（stale read）</td><td>允许读几秒前的数据，换更低延迟与更高可用</td><td><b>低</b>（通常可路由到本地/近端副本）</td><td>大量只读查询、看板、报表</td></tr><tr><td><b>Follower / 副本读</b></td><td>从非 leader 副本读，减轻 leader 压力</td><td>低，但一致性取决于产品是否做了副本读的一致性校验</td><td>读多写少、能容忍轻微延迟的场景</td></tr></tbody></table></div><pre><code>-- TiDB：读指定时刻的快照（读到的内容由时间戳决定，不受当前写影响）
+SELECT * FROM orders AS OF TIMESTAMP '2026-10-25 10:00:00' WHERE user_id = 1001;
+
+-- TiDB：陈旧读（读 5 秒前的数据，语法与开关随版本变化，以产品文档为准）
+SELECT * FROM orders AS OF TIMESTAMP NOW(6) - INTERVAL 5 SECOND WHERE user_id = 1001;
+
+-- CockroachDB：跟随者读 / 历史读（同样以版本为准）
+SELECT * FROM orders AS OF SYSTEM TIME '-5s' WHERE user_id = 1001;
+SELECT * FROM orders AS OF SYSTEM TIME '2026-10-25 10:00:00' WHERE user_id = 1001;</code></pre><div class="lead warn"><b>要点：</b>用陈旧读之前必须确认一件事：<b>业务能不能接受这几秒的旧数据</b>。余额、库存、幂等判断一律不能开；列表页、统计看板通常可以。</div>
+</section>
+
+<section id="trap">
+  <h2><span class="n">05</span>排障与边界：时钟相关的坑</h2>
+<ul>
+  <li><b>「读不到自己刚写的」</b>：多半是读走了副本读/陈旧读，或者连接被路由到了还没追上日志的节点。先确认读的一致性级别。</li>
+  <li><b>主从切换后时间回退</b>：授时节点切换时若处理不当，可能发出比之前更小的时间戳。产品一般会用「持久化已发出水位」来防，但故障演练必须覆盖这条。</li>
+  <li><b>跨地域事务延迟陡增</b>：TSO 方案下每次取时间戳都要跨地域 RTT。把事务改成小事务 + 就近读是常见优化方向。</li>
+  <li><b>NTP 抖动</b>：物理时钟参与的方案（HLC、TrueTime）对时钟漂移敏感，节点间时钟偏移过大可能触发事务重试或直接拒绝写入。</li>
+  <li><b>「外部一致性」不是默认项</b>：有些产品的最高隔离级别仍不保证外部一致性，需在文档里确认，别想当然。</li>
+  <li><b>批量任务的时间戳</b>：大事务持锁时间长，会让后续读的锁清理变慢；导入类任务应拆批。</li>
+</ul><pre><code>-- 排查「读不到刚写的数据」的常用路径
+-- 1) 确认当前会话的一致性/陈旧读设置（变量名随产品与版本不同）
+SHOW VARIABLES LIKE '%stale%';
+SHOW VARIABLES LIKE '%read%';
+
+-- 2) 看事务与锁：是否有长时间未决的事务挡住了读
+SELECT * FROM information_schema.data_lock_waits LIMIT 20;      -- TiDB
+SHOW CLUSTER STATEMENTS LIMIT 20;                                -- 看长事务
+
+-- 3) 看副本延迟：副本落后多少决定陈旧读能读到多新的数据
+SELECT * FROM information_schema.tidb_hot_regions LIMIT 20;      -- 热点 Region</code></pre>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+<div class="qa"><b>问：TSO 单点挂了怎么办？</b><p>授时服务本身是高可用的（TiDB 的 PD 是 Raft 组），不是真单点。但它仍是<b>全局关键路径</b>：PD 抖动会影响所有事务取时间戳。所以生产上 PD 的部署位置、网络质量和时钟源都要单独保障。</p></div><div class="qa"><b>问：HLC 有时间偏差，是不是就不安全了？</b><p>HLC 保证的是<b>因果一致</b>：有因果关系的事务一定按顺序可见。两个毫无通信的并发事务，HLC 可能给出与真实物理时间相反的顺序——这在多数业务里无所谓，但如果你的业务依赖「墙钟时间上的先后」，就要显式同步一次（比如让它们访问同一行）来建立因果。</p></div><div class="qa"><b>问：为什么 TrueTime 要「等待」？</b><p>因为它返回的是<b>区间</b>而不是一个点。事务提交时必须等到「自己的时间戳肯定已经过去」，后面的事务才不可能错过它。误差越小等得越短——所以 Google 要上 GPS 和原子钟把误差压到毫秒级。</p></div><div class="qa"><b>问：我做业务开发，需要关心这些吗？</b><p>至少要关心两件事：<b>① 你的读是强一致还是陈旧读</b>（决定能不能读到旧数据）；<b>② 事务里跨了多少个分片</b>（决定延迟和冲突概率）。剩下的交给 DBA。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 数据库系统 / NewSQL 分布式关系型数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

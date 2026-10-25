@@ -397,6 +397,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -1001,5 +1013,11 @@ hdfs dfsadmin -report | grep -E "Configured Capacity|DFS Used|Remaining"
 # 注意：HDFS 默认只能用到 容量 - 预留空间(dfs.datanode.du.reserved)，别算满</code></pre><p class="muted"><b>小文件问题是 HDFS 的头号杀手</b>：每个文件（即使 1 KB）的元数据在 NameNode 内存里约占 <b>150 字节</b>。1000 万个小文件 = <b>1.5 GB</b> 元数据常驻内存，且 MapReduce 会为每个文件起一个 task（<b>1000 万个 task</b>）。标准解法：<b>HAR 归档 / SequenceFile 合并 / 写入时按小时滚动合并</b>。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>批处理 vs 流处理：延迟与吞吐的取舍</h2><div class="table-wrap"><table><thead><tr><th>维度</th><th><b>批处理</b>（MapReduce / Spark）</th><th><b>流处理</b>（Flink / Kafka Streams）</th></tr></thead><tbody><tr><td>数据边界</td><td><b>有界</b>（处理完就结束）</td><td><b>无界</b>（永不结束）</td></tr><tr><td>延迟</td><td><b>分钟 – 小时</b></td><td><b>毫秒 – 秒</b></td></tr><tr><td>吞吐</td><td><b>极高</b>（可攒大批）</td><td>高（但单条开销大）</td></tr><tr><td>容错</td><td>重算失败的任务（简单）</td><td><b>检查点 + 状态恢复</b>（复杂）</td></tr><tr><td>正确性</td><td>容易做到精确一次</td><td>需要 exactly-once 语义支持</td></tr><tr><td>典型场景</td><td>T+1 报表、离线训练、全量回溯</td><td><b>实时风控、实时监控、实时推荐</b></td></tr></tbody></table></div><p><b>现代趋势是“<b>流批一体</b>”</b>：用同一套 API 处理有界和无界数据（Flink 的 <code>BoundedStream</code>、Spark 的 Structured Streaming）。背后的洞察是——<b>批处理是流处理的特例</b>（有界流）。这样一套代码既能跑实时也能跑回溯，避免了 Lambda 架构的双份维护成本。</p></div></section>
 <section class="x-dry-sec" ><div class="x-dry"><h2>深入自检</h2><details><summary>我的数据量算大数据吗？什么时候不该上 Hadoop？</summary><p><b>经验阈值：数据 &lt; 1 TB 且单机能处理，就不要上分布式</b>。一台 64 核 256 GB 的机器 + DuckDB/ClickHouse 单实例，能轻松处理 TB 级分析查询，而且运维成本接近于零。上 Hadoop/Spark 的隐性成本：集群运维、任务调优、小文件治理、数据倾斜排查——这些往往比省下的计算时间更贵。</p></details><details><summary>HDFS 的块为什么设成 128 MB 这么大？</summary><p>为了<b>最小化寻址开销</b>。公式：<code>寻址时间 / (寻址时间 + 传输时间)</code>。磁盘寻道约 10 ms，传输速率 100 MB/s：块 64 MB 时传输 0.64 s，寻址占比 <b>1.5%</b>；块 128 MB 时占比 <b>0.8%</b>。再大收益就很少了，而且块太大会导致 ① Map 任务数太少、并行度不够 ② 失败重算代价高。所以 128 MB 是个平衡点。</p></details><details><summary>数据倾斜怎么发现和处理？</summary><p>发现：<b>Spark UI 看 task 耗时分布</b>——如果 99 个 task 几秒跑完，1 个跑了 10 分钟，就是倾斜。三个解法：① <b>加盐</b>（给 key 加随机前缀 <code>key_0</code>~<code>key_9</code> 先聚合，再去掉前缀二次聚合）；② <b>广播 join</b>——小表（&lt; 100 MB）直接广播，避免 shuffle；③ <b>两阶段聚合</b>——先局部聚合再全局聚合。注意识别<b>空值倾斜</b>（大量 <code>null</code> key 聚到一个 reducer），把它单独处理。</p></details><details><summary>Lambda 架构和 Kappa 架构怎么选？</summary><p><b>Lambda</b> = 批处理层（保证准确）+ 速度层（保证实时）+ 服务层合并，代价是<b>两套代码</b>，逻辑容易不一致。<b>Kappa</b> = 全部走流处理，需要回溯时<b>重放消息队列</b>，代价是要求消息中间件能长期存储（Kafka 保留 7 – 30 天）。现实建议：<b>实时要求不强就用批处理</b>（简单可靠）；要求实时则优先<b>流批一体的引擎</b>（Flink/Spark Structured Streaming），别自己搭 Lambda。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../02-hadoop-ecosystem/hadoop-ecosystem.html">Hadoop 生态全景</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 大数据</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

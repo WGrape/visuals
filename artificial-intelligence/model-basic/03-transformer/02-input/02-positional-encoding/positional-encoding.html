@@ -86,6 +86,18 @@
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <nav class="toc" id="toc"></nav>
@@ -240,6 +252,12 @@ def rope(x, seq_len, dim):
 # 且可通过旋转矩阵自然外推（配合 YaRN/NTK 缩放可扩到百万上下文）</code></pre><div class="table-wrap"><table><thead><tr><th>方案</th><th>注入方式</th><th>是否相对位置</th><th>能否外推到更长</th><th>代表模型</th></tr></thead><tbody><tr><td><b>正弦 Sin/Cos</b></td><td>加到嵌入</td><td>间接（可学）</td><td>能（但效果衰减）</td><td>原 Transformer、早期</td></tr><tr><td><b>可学习绝对</b></td><td>加到嵌入</td><td><b>否</b></td><td><b>不能</b>（超出训练长度即失效）</td><td>BERT、GPT-2</td></tr><tr><td><b>RoPE</b></td><td><b>旋转 Q/K</b></td><td><b>是</b>（<code>qᵀk</code> 只依赖相对距离）</td><td>能（配合缩放）</td><td><b>LLaMA、Qwen、Mistral、GLM</b></td></tr><tr><td><b>ALiBi</b></td><td>给注意力分数加线性偏置</td><td><b>是</b></td><td><b>很强</b>（无需训练即可外推）</td><td>BLOOM、MPT</td></tr><tr><td><b>NoPE</b>（无位置编码）</td><td>不加</td><td>隐式（靠因果 mask）</td><td>有限</td><td>部分研究模型</td></tr></tbody></table></div><p class="muted">判断当前主流：<b>新模型基本都用 RoPE</b>。原因就是「<code>q_mᵀ k_n</code> 天然只依赖 <code>m−n</code>」这条性质——相对位置正是语言最需要的。</p></div></section>
 <section class="fade" ><div class="x-dry"><h2>第三层 · 常见误解与排障清单</h2><ul><li><b>「位置编码加在嵌入上会被后面的层破坏」</b> → 确实会被稀释，但这是设计意图：位置信息只在底层需要，深层已经把顺序信息编码进了表示。实测去掉位置编码后，模型在需要顺序的任务上（如词性标注）性能暴跌，但在词袋任务上几乎不变——说明它精确地在做它该做的事。</li><li><b>「RoPE 和可学习编码只是实现不同」</b> → 不是。可学习绝对编码<b>外推能力为零</b>：训练 2048 长度，推理到 4096 直接崩（因为没见过那些位置向量）。RoPE 因为只依赖相对距离，配合 <b>NTK-aware 缩放</b>或 <b>YaRN</b> 可以外推到几十万甚至百万。这是长上下文模型的关键技术之一。</li><li><b>「正弦编码的 10000 是随便定的」</b> → 不是。它决定了<b>频率分布的下界</b>：<code>10000^(2i/d)</code> 让不同维度的波长从 2π 到 20000π 呈几何级数分布，覆盖从「相邻词」到「整段」的所有尺度。改小会让长程位置分辨率不足。</li><li><b>拼（concat）还是加（add）</b> → 原始论文用了 sin/cos 后<b>相加</b>。相加省参数且不增加维度；拼接表达力更强但维度翻倍。<b>实践上相加就够了</b>，因为后面的线性层可以把两者解耦。</li><li><b>长上下文外推失效</b> → 常见症状：模型在训练长度内正常，超过后开始重复、逻辑混乱。解法：用 <b>NTK-aware RoPE 缩放</b>（动态调整基数）或 <b>YaRN</b>（分频段插值），而不是简单线性插值（后者会破坏高频信息）。</li><li><b>相对位置编码和注意力 mask 混淆</b> → 因果 mask 是「不能看未来」，位置编码是「知道彼此距离」。<b>两者独立</b>：编码器（BERT）没有因果 mask 但仍需位置编码。</li><li><b>实现时维度奇偶对不上</b> → 正弦编码要求 <code>d_model</code> 为偶数（因为 0::2 和 1::2 各占一半）。奇数维度要特殊处理。</li></ul></div></section>
 <section class="fade" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>位置编码的设计目标是三条：<b>① 唯一标识每个位置；② 能表达相对距离；③ 能外推到训练时没见过的长度</b>。三个方案在三条上的取舍完全不同。</p><div class="table-wrap"><table><thead><tr><th>性质</th><th>正弦 Sin/Cos</th><th>可学习绝对</th><th>RoPE</th></tr></thead><tbody><tr><td>唯一性</td><td>✓（不同位置不同向量）</td><td>✓</td><td>✓</td></tr><tr><td>有界（值域稳定）</td><td><b>✓（±1 内）</b></td><td>✗（需正则）</td><td><b>✓（旋转不改模长）</b></td></tr><tr><td>表达相对位置</td><td><b>✓（可线性变换）</b></td><td>✗（模型自己学）</td><td><b>✓✓（数学保证）</b></td></tr><tr><td>外推到更长</td><td>部分</td><td><b>✗</b></td><td><b>✓（配合缩放）</b></td></tr><tr><td>额外参数</td><td><b>0</b></td><td><code>n_max × d</code></td><td><b>0</b></td></tr><tr><td>实现复杂度</td><td>低</td><td><b>最低</b></td><td>中（要改 Q/K 计算）</td></tr></tbody></table></div><ul><li><b>为什么 RoPE 能表达相对位置</b>：把每两个维度看作复平面上的向量，位置 <code>m</code> 的编码等价于把向量<b>旋转角度 <code>mθ</code></b>。那么 <code>q_m</code> 与 <code>k_n</code> 的点积 = <code>|q||k|cos((m−n)θ)</code>——<b>只依赖 <code>m−n</code></b>。这是数学上的保证，不是靠训练学出来的，所以泛化得特别好。</li><li><b>为什么 RoPE 还能保持模长</b>：旋转是正交变换，不改变向量长度。这让数值稳定、且不会像加法那样「污染」语义嵌入的分布。这是它相比加法式编码的另一个优势。</li><li><b>长上下文外推的三种缩放</b>：① <b>线性插值</b>（把位置除以缩放系数）——简单但会压缩高频、损失近距离分辨率；② <b>NTK-aware</b>（动态放大基数 <code>10000</code>）——高频少缩放、低频多缩放，符合直觉且无需微调；③ <b>YaRN</b>（分频段处理 + 注意力温度校正）——目前效果最好，能用极少的微调 token 扩展到 128K+。</li><li><b>什么时候不需要位置编码</b>：某些架构（如状态空间模型 Mamba、以及带强局部卷积的混合架构）本身通过<b>递归/卷积结构</b>隐式携带顺序信息，可以不加显式位置编码。但纯注意力架构<b>必须有</b>。</li></ul><details><summary>为什么现在几乎没人用可学习绝对位置编码了？</summary><p>因为它有一个致命缺陷：<b>无法外推</b>。训练时最大长度是 2048，那么位置 2049 及以后的向量<b>从来没被训练过</b>，推理到 4096 时模型拿到的是随机初始化的向量，表现会断崖式下跌。而现实需求恰恰是「训练用短序列省成本、推理要长上下文」。RoPE/ALiBi 这类相对编码天然支持外推（因为只需要见过「相对距离」而不是「绝对位置」），配合 NTK/YaRN 缩放还能进一步扩展。所以当「长上下文」成为 LLM 的核心竞争力后，可学习绝对编码就被淘汰了——这不是实现细节的差异，是<b>能力上的硬约束</b>。</p></details><details><summary>RoPE 的旋转到底旋转了什么？</summary><p>旋转的是 <b>Q 和 K 向量本身</b>（不是位置向量）。具体做法：把 d 维向量的每两个相邻分量 <code>(x_2i, x_2i+1)</code> 看作复平面上的一个 2D 点，然后按位置 <code>m</code> 和该维度对应的频率 <code>θ_i</code> 旋转 <code>m·θ_i</code> 弧度。位置越靠后转得越多，不同维度转速不同（低频维度转得慢、编码长程；高频维度转得快、编码近程）。旋转后 <code>q_mᵀk_n</code> 自然只依赖 <code>m−n</code>。关键点：<b>位置编码不再是一个「加进去的向量」，而是作用在 Q/K 上的一个变换</b>——这比加法更优雅，也不占用嵌入的数值范围。代价是实现要在注意力计算里插入旋转逻辑，且不能简单地「预计算一次位置表复用」。</p></details><details><summary>位置编码对长上下文的实际影响有多大？</summary><p>非常大，而且是<b>长上下文能力的三个瓶颈之一</b>（另两个是注意力 O(n²) 的算力和 KV Cache 显存）。一个直观例子：用绝对位置编码训练的模型，在超出训练长度后 PPL（困惑度）会急剧上升——不是「稍微变差」，而是「完全不可用」。而用 RoPE + 合适缩放的模型，可以把 4K 训练的模型外推到 32K 而 PPL 基本不涨。另一个实践要点：<b>长上下文能力不只是「能塞进去」，还要「能用好」</b>——很多模型虽然支持 128K 窗口，但在中间位置的信息检索能力会下降（即「lost in the middle」现象）。这与位置编码的衰减特性有关，也是当前研究的活跃方向。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../01-token-embedding/token-embedding.html">Token 嵌入：12 万行表…</a><a href="../03-rope-in-practice/rope-in-practice.html">RoPE 实战：base、配对…</a><a href="../../01-overview/01-what-is-transformer/transformer-explained.html">Transformer 大模型…</a><a href="../../01-overview/02-how-it-works/transformer-how-it-works.html">Transformer 是怎么…</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 模型基础</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer class="wrap">
   <p>© Visuals · 用大白话讲清 AI 高频考点 · 配图与公式均为示意</p>
 </footer>

@@ -74,6 +74,24 @@
   .reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease,transform .6s ease}
   .reveal.in{opacity:1;transform:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -349,6 +367,23 @@
   </div>
 </section>
 
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 预训练到底在学什么</h2><p>一句话：<b>在海量无标注文本上做「预测下一个 token」，把语言规律、世界知识、推理模式压缩进参数里</b>。它不针对任何具体任务，产出的是一个「通才基座模型」，后续靠微调或提示词唤醒特定能力。</p><div class="table-wrap"><table><thead><tr><th>概念</th><th>数据</th><th>目标</th><th>产出</th></tr></thead><tbody><tr><td>预训练</td><td>海量无标注文本</td><td>预测下一个 token</td><td>基座模型（Base）</td></tr><tr><td>继续预训练</td><td>领域文本（论文/代码/法律）</td><td>补领域知识</td><td>领域基座模型</td></tr><tr><td>监督微调 SFT</td><td>少量标注问答对</td><td>学会按指令回答</td><td>对话模型（Instruct）</td></tr><tr><td>RLHF / DPO</td><td>人类偏好数据</td><td>对齐价值观与有用性</td><td>对齐后的可用模型</td></tr></tbody></table></div></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 规模数字与成本量级</h2><div class="table-wrap"><table><thead><tr><th>模型规模</th><th>训练数据量级</th><th>参数×数据关系</th><th>算力量级</th></tr></thead><tbody><tr><td>1B 左右</td><td>20B~100B tokens</td><td>Chinchilla 最优约 20 tokens/参数</td><td>数十 GPU·天</td></tr><tr><td>7B</td><td>1T~2T tokens</td><td>多数开源模型远超 Chinchilla 最优</td><td>数千 GPU·天</td></tr><tr><td>70B</td><td>2T~15T tokens</td><td>推理成本优先时会训练得更久</td><td>数万 GPU·天</td></tr><tr><td>数百 B 以上</td><td>数 T~十几 T tokens</td><td>数据成为瓶颈</td><td>十万级 GPU·天</td></tr></tbody></table></div><p>Chinchilla 定律给出的经验结论：<b>在固定算力预算下，模型参数量与训练 token 数应大致同比放大</b>，约 20 个 token 对应 1 个参数是较优配比。很多开源模型（如 Llama 系列）故意远超这个配比，是因为推理成本比训练成本更重要 —— 小模型训得更久，推理更便宜。</p><p><b>训练算力粗估（6ND 经验公式）</b></p><pre><code># 粗略估算训练算力：6 × N × D  （N=参数量，D=token 数，单位 FLOPs）
+# 例：7B 参数、1T tokens
+python3 -c "
+N = 7e9      # 参数量
+D = 1e12     # token 数
+flops = 6 * N * D
+print('总算力 %.3e FLOPs' % flops)
+# 假设 A100 约 312 TFLOPS 峰值、实际利用率 40%
+eff = 312e12 * 0.40
+sec = flops / eff
+print('单卡需 %.0f 天' % (sec / 86400))
+print('1000 卡并行约 %.1f 天' % (sec / 86400 / 1000))
+" </code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 训练过程中的高频故障</h2><ul><li><b>loss 突然发散变 NaN</b>：八成是学习率过高或梯度爆炸。优先降学习率、加梯度裁剪（clip 常设 1.0）、检查 bf16 下的数值溢出。</li><li><b>loss 下降但评测指标不动</b>：通常是数据重复或数据质量差，检查去重比例与困惑度分布。</li><li><b>OOM</b>：显存主要被参数+优化器状态吃满。Adam 下优化器状态是参数的 2 倍，加上 fp32 主权重，7B 模型全参训练单卡放不下 —— 上 ZeRO 或换成 8bit 优化器。</li><li><b>多机训练吞吐上不去</b>：先查通信占比（NCCL），再看数据加载是否成为瓶颈；batch 太小会导致 GPU 利用率低。</li><li><b>训练到一半挂了</b>：必须做定期 checkpoint，并且验证 checkpoint 能正常续训（很多事故是存了但读不出来）。</li></ul><p class="muted">排查顺序建议：先看 loss 曲线形状 → 再看 GPU 利用率与显存 → 再看数据管道 → 最后调超参。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>为什么「预测下一个 token」能学到知识？因为这个任务要做得好，模型<b>必须隐式建模语法、事实、因果关系</b>——否则无法预测下一个词。压缩即理解：当参数量足够大、数据足够多时，模型会把训练语料里的规律压进权重。</p><div class="table-wrap"><table><thead><tr><th>选择</th><th>收益</th><th>代价</th><th>什么时候选</th></tr></thead><tbody><tr><td>从头预训练</td><td>完全可控、领域贴合</td><td>成本极高，需数据工程</td><td>有大预算且领域特殊</td></tr><tr><td>继续预训练</td><td>成本低、补领域知识</td><td>可能灾难性遗忘</td><td>已有基座，缺领域语料</td></tr><tr><td>直接微调</td><td>最快最省</td><td>补不了大量新知识</td><td>任务明确、知识已够</td></tr><tr><td>RAG 外挂知识</td><td>知识可更新、可溯源</td><td>增加检索链路与延迟</td><td>知识频繁变化</td></tr></tbody></table></div><details><summary>预训练知识怎么「更新」？</summary><p>预训练权重里的知识是静态的。要更新有三条路：① 继续预训练注入新语料（成本高、易遗忘）；② 微调（只适合教「怎么用」，不适合灌大量事实）；③ <b>RAG 外挂检索</b>（知识可随时更新、可溯源，是实务首选）。</p></details><details><summary>涌现能力是真的突然出现的吗？</summary><p>存在争议。有研究指出很多「涌现」是<b>评测指标不连续</b>造成的假象（比如用精确匹配而非连续打分时，曲线看起来是阶跃的）。但总体上，某些多步推理能力确实在规模跨过阈值后才稳定出现。</p></details><details><summary>小模型训更多数据能追上大模型吗？</summary><p>能在<b>特定任务</b>上接近，但通用能力上限受参数量约束。这也是 Llama-3-8B 这类「小模型 + 超大量数据」路线的价值：推理便宜，通用性略逊。</p></details></div></section>
 <footer>
   <div class="wrap">
     <p>大模型预训练（Pre-training）原理图解 · 基于公开资料整理，具体方法以各论文与框架（Megatron / DeepSpeed / PyTorch）文档为准</p>

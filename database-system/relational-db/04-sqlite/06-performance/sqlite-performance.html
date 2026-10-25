@@ -88,6 +88,24 @@
   .cmp td:first-child{color:var(--text);}
   .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -194,6 +212,50 @@ PRAGMA busy_timeout = 5000;      -- 等 5 秒而不是立刻报错
 </section>
   </main>
 </div>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 先判断瓶颈在哪</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>最可能的原因</th><th>验证方法</th></tr></thead><tbody><tr><td>写入很慢（每条都要等）</td><td><b>每条语句一个事务</b>，各自等 fsync</td><td>把批量写包进一个事务，看是否快一个数量级</td></tr><tr><td>读多写少但读也慢</td><td>缺索引，走了全表扫描</td><td><code>EXPLAIN QUERY PLAN</code> 看是否 SCAN</td></tr><tr><td>并发写互相阻塞</td><td>写锁是<b>库级</b>的，写会阻塞所有其他读写</td><td>开 WAL 模式；长的写事务拆小</td></tr><tr><td>数据库文件很大、查询变慢</td><td>碎片 + 统计信息过期</td><td>跑 <code>VACUUM</code> 和 <code>ANALYZE</code></td></tr><tr><td>启动/连接慢</td><td>每次都重新打开并做完整性检查</td><td>复用连接，别反复开关</td></tr></tbody></table></div><p><b>SQLite 的性能问题八成是事务粒度问题</b>，不是 SQL 写得不好。因为默认每条语句都独立成事务，而每个事务提交都要等一次磁盘 fsync——机械盘上一次 fsync 可能是毫秒级，几千条就是几秒。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 五个立竿见影的配置与写法</h2><pre><code>-- ① WAL 模式：读写不再互相阻塞（最关键的一项）
+PRAGMA journal_mode = WAL;          -- 写进 WAL 文件，读仍读主库
+PRAGMA synchronous = NORMAL;        -- WAL 下 NORMAL 已足够安全，比 FULL 快很多
+
+-- ② 批量写必须包进一个事务（差距可达几十倍）
+BEGIN;
+INSERT INTO events(ts, uid, amount) VALUES (?, ?, ?);
+-- ... 重复上千条 ...
+COMMIT;                             -- 只在 COMMIT 时 fsync 一次
+
+-- ③ 索引：看执行计划确认有没有用上
+EXPLAIN QUERY PLAN SELECT * FROM events WHERE uid = 1001;
+--   出现 "SCAN events"       → 全表扫描，需要建索引
+--   出现 "SEARCH ... USING INDEX" → 用上了索引
+CREATE INDEX idx_events_uid ON events(uid);
+
+-- ④ 统计信息：优化器靠它估算代价，数据大变后要刷新
+ANALYZE;
+
+-- ⑤ 内存与临时文件（按需调整，值需按机器内存定）
+PRAGMA cache_size = -16000;         -- 负数表示 KB，这里约 16MB
+PRAGMA temp_store = MEMORY;         -- 临时表/排序放内存</code></pre><div class="table-wrap"><table><thead><tr><th>PRAGMA</th><th>作用</th><th>注意</th></tr></thead><tbody><tr><td><code>journal_mode = WAL</code></td><td>读写并发，写不阻塞读</td><td>会产生 -wal / -shm 文件；需要文件系统支持共享内存</td></tr><tr><td><code>synchronous</code></td><td>控制 fsync 时机</td><td><b>OFF 有丢数据风险</b>；WAL 下 NORMAL 是常见选择</td></tr><tr><td><code>cache_size</code></td><td>页缓存大小</td><td>负值单位是 KB</td></tr><tr><td><code>temp_store</code></td><td>临时数据放内存还是磁盘</td><td>MEMORY 快但吃内存</td></tr><tr><td><code>busy_timeout</code></td><td>遇到锁时等多久再报错</td><td>并发写必设，否则频繁 SQLITE_BUSY</td></tr></tbody></table></div><p><b>WAL 是最值得先做的一项</b>：它把「写阻塞读」变成「读写并发」，代价只是多两个文件。绝大多数并发问题开 WAL 就缓解了。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 排障清单与常见错误</h2><ul><li><b>SQLITE_BUSY 频繁</b>：没设 <code>busy_timeout</code>，或写事务太长。设超时 + 拆小事务。</li><li><b>写入只有几百 TPS</b>：几乎一定是没用事务批量。包进事务后通常能上万。</li><li><b>索引建了没生效</b>：查询条件上对列做了函数或类型转换；或者统计信息过期（跑 ANALYZE）。</li><li><b>复合索引顺序错</b>：遵循<b>等值在前、范围在后</b>；<code>(a, b)</code> 能优化 <code>a=? AND b>?</code>，反过来不行。</li><li><b>SELECT COUNT(*) 很慢</b>：SQLite 没有计数缓存，大表 count 必须扫索引。需要精确值就接受这个代价，或自己维护计数表。</li><li><b>文件只增不减</b>：删数据不会缩小文件，需要 <code>VACUUM</code>（会重写整个库，要额外磁盘空间）。</li><li><b>跨进程并发写</b>：SQLite 写锁是库级的，多进程同时写必然串行。高并发写场景应换客户端/服务器型数据库。</li></ul><pre><code>-- 定位慢查询：先看执行计划，再看索引与统计
+EXPLAIN QUERY PLAN
+SELECT e.* FROM events e JOIN users u ON e.uid = u.id
+WHERE e.ts &gt; '2026-10-01' AND u.city = 'bj';
+--   关注：SCAN（全表扫）出现在哪张表 → 那张表缺索引
+--   关注：join 顺序是否符合「小表驱动大表」
+
+-- 看库的实际状态
+PRAGMA database_list;
+PRAGMA index_list('events');         -- 有哪些索引
+PRAGMA index_info('idx_events_uid'); -- 索引包含哪些列、顺序
+PRAGMA page_count;                   -- 页数（估算体积）
+PRAGMA freelist_count;               -- 空闲页（多 → 该 VACUUM）
+
+-- 慢查询计时（命令行）
+sqlite3 app.db ".timer on" "SELECT ..."
+
+-- 完整性检查（性能突然变差时先排除损坏）
+PRAGMA integrity_check;</code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 什么时候不该用 SQLite</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>SQLite 是否合适</th><th>原因</th></tr></thead><tbody><tr><td>单机应用、移动端、嵌入式</td><td><b>非常合适</b></td><td>零配置、无网络开销</td></tr><tr><td>读多写少的小中型站点</td><td>合适</td><td>配合 WAL 够用</td></tr><tr><td>单机缓存 / 本地分析</td><td><b>非常合适</b></td><td>比文件读写强得多</td></tr><tr><td>高并发写（多进程同时写）</td><td><b>不合适</b></td><td>写锁是库级的，必然串行</td></tr><tr><td>数据量超过单机存储</td><td>不合适</td><td>没有分片能力</td></tr><tr><td>需要网络访问 / 多机共享</td><td>不合适</td><td>它是库文件不是服务</td></tr></tbody></table></div><p>SQLite 的定位是<b>「嵌入式的、零运维的库」</b>，不是「小型的数据库服务器」。它的性能上限很高（在合适的用法下能到上万 TPS），但<b>并发写模型</b>决定了它不适合多写者场景。判断标准就一句：<b>会不会有多个进程同时写？</b></p><details><summary>为什么开了 WAL 写入还是慢？</summary><p>先确认<b>有没有用事务批量</b>。WAL 解决的是读写并发，不解决 fsync 次数。每条 INSERT 一个事务的话，fsync 次数没变，速度不会改善。</p></details><details><summary>synchronous 设成 OFF 安全吗？</summary><p>不安全。断电或崩溃时可能丢失最近提交的事务，甚至损坏数据库。想要性能又想安全，用 <b>WAL + NORMAL</b>，这是最常见的组合。</p></details><details><summary>索引是不是越多越好？</summary><p>不是。每个索引都会<b>拖慢写入</b>（每次 INSERT 都要更新所有索引），也占空间。只在真正被查询条件用到的列上建，并定期检查有没有从未被使用的索引。</p></details><details><summary>VACUUM 能经常跑吗？</summary><p>它会<b>重写整个数据库文件</b>，期间需要额外磁盘空间并持有锁。建议在低峰手动触发，或用 <code>auto_vacuum</code> 让空间逐步回收（但会带来额外碎片整理开销）。</p></details></div></section>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>
 </footer>

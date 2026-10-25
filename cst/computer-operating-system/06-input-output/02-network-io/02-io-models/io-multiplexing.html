@@ -538,6 +538,36 @@
     .stage { flex-direction: column; }
   }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 
@@ -1328,5 +1358,61 @@ function animStep(step) {
   }
 }
 </script>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="network-io-explained.html">网络 IO 全解：从硬件到各语…</a><a href="port-listen-thundering-herd.html">一个端口能被两个程序同时监听吗…</a><a href="reactor.html">Reactor 模式</a><a href="../01-socket/socket-creation.html">Socket 是怎么被创建出来的</a></div>
+  <div class="xrel-up"><a href="../../../index.html">← 返回 操作系统</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第一层 · 三种多路复用机制的判定</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>数据结构</th><th>fd 数量上限</th><th>每次调用的开销</th><th>适用规模</th></tr></thead><tbody><tr><td><b>select</b></td><td>位图 fd_set</td><td><b>有硬上限</b>（通常 1024）</td><td>O(n)：每次都要遍历全部 fd，还要把集合从用户态拷进内核</td><td>小并发 / 兼容性要求</td></tr><tr><td><b>poll</b></td><td>pollfd 数组</td><td>无硬上限（受内存限制）</td><td>仍是 O(n) 遍历 + 全量拷贝</td><td>中等并发</td></tr><tr><td><b>epoll</b></td><td>内核维护的红黑树 + 就绪链表</td><td>很大（受系统限制）</td><td><b>O(1) 拿到就绪列表</b>，fd 只需注册一次</td><td><b>大并发首选</b>（成千上万连接）</td></tr></tbody></table></div><p>选择信号很简单：<b>连接数超过几百就用 epoll</b>。select/poll 的问题不是「不能用」，而是每次调用都要把整个 fd 集合在用户态和内核态之间搬一遍，连接越多搬得越多，而其中绝大多数 fd 其实毫无动静。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · epoll 的三个核心调用与 LT/ET</h2><pre><code>import socket, selectors
+
+# epoll 的三个调用：create → ctl（注册/修改/删除）→ wait（等事件）
+ep = selectors.EpollSelector()
+
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(('0.0.0.0', 8080))
+sock.listen(128)
+sock.setblocking(False)                 # 非阻塞是配合多路复用的前提
+ep.register(sock, selectors.EVENT_READ) # 只注册一次，之后内核记住它
+
+while True:
+    events = ep.select(timeout=1.0)     # 只返回「就绪」的那些，O(就绪数)
+    for key, mask in events:
+        if key.fileobj is sock:
+            conn, addr = sock.accept()  # 监听套接字就绪 = 有新连接
+            conn.setblocking(False)
+            ep.register(conn, selectors.EVENT_READ)
+        else:
+            data = key.fileobj.recv(4096)
+            if not data:                # 对端关闭
+                ep.unregister(key.fileobj)
+                key.fileobj.close()
+            else:
+                key.fileobj.sendall(data)   # 回显</code></pre><div class="table-wrap"><table><thead><tr><th>模式</th><th>含义</th><th>要一次读完吗</th><th>特点</th></tr></thead><tbody><tr><td><b>LT</b>（水平触发，默认）</td><td>只要缓冲区还有数据，每次 wait 都会通知</td><td>不读干净也行，下次还会提醒</td><td><b>安全、好写</b>，但可能重复唤醒</td></tr><tr><td><b>ET</b>（边沿触发）</td><td>只在状态<b>变化</b>的那一刻通知一次</td><td><b>必须循环读到 EAGAIN</b></td><td>唤醒次数少、性能更高，但漏读就再也收不到</td></tr></tbody></table></div><p>LT 与 ET 的取舍：<b>默认用 LT</b>。ET 需要把每个 fd 都设成非阻塞并循环读直到 <code>EAGAIN</code>，写错就会「连接卡死、再也不来数据」——这个 bug 极难发现。只有在确认唤醒开销成为瓶颈时才上 ET。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 五个高频坑</h2><ul><li><b>忘记设非阻塞</b>：多路复用只告诉你「可读」，但 read 仍可能因数据不全而阻塞，把整个循环卡死。</li><li><b>ET 模式没循环读</b>：只读一次就返回，剩下的数据要等下一次「边沿」——而下一次永远不会来。</li><li><b>在回调里做重活</b>：一个耗时操作（如复杂查询）会阻塞整个事件循环，所有连接一起卡住。重活必须丢给线程池。</li><li><b>忘了注销关闭的连接</b>：fd 泄漏，最终打满 fd 上限，表现为「accept 失败」或「too many open files」。</li><li><b>以为 epoll 本身更快</b>：epoll 解决的是<b>大量空闲连接</b>的开销问题。如果连接数少且都很活跃，select/poll 未必更慢。</li></ul><pre><code># 排查「连接卡死 / 不再收到数据」的标准路径
+# 1) 看 fd 是否泄漏：进程打开的 fd 数是否持续增长
+ls /proc/&lt;pid&gt;/fd | wc -l
+cat /proc/&lt;pid&gt;/limits | grep 'open files'
+
+# 2) 看是否阻塞在 read：抓栈
+cat /proc/&lt;pid&gt;/wchan            # 或
+py-spy dump --pid &lt;pid&gt;          # Python
+
+# 3) 确认 ET 模式读循环是否正确：必须读到 BlockingIOError / EAGAIN 才停
+while True:
+    try:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    except BlockingIOError:       # EAGAIN：这次真的读干净了
+        break
+
+# 4) 确认没有在事件循环里做重活
+#    事件循环里只做「读/写/解析」，业务逻辑一律交给线程池或进程池</code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么多路复用能撑起高并发</h2><p>传统「一连接一线程」的问题不在 CPU，而在<b>内存和调度</b>：每个线程要占几 MB 栈空间，上万连接就是几十 GB；上下文切换的开销也会吃掉大量 CPU。多路复用让<b>一个线程监视所有连接</b>，只在真正有数据可读时才动手，所以空闲连接的成本几乎为零——这就是 C10K 问题的核心解法。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>模型</th><th>并发上限的主要约束</th><th>编程难度</th></tr></thead><tbody><tr><td>一连接一线程</td><td>阻塞 IO + 每连接一个线程</td><td><b>内存 + 上下文切换</b></td><td>最简单</td></tr><tr><td>多路复用（Reactor）</td><td>一个线程监视所有 fd，就绪才处理</td><td>CPU（业务逻辑耗时）</td><td>中（要写状态机）</td></tr><tr><td>多路复用 + 线程池</td><td>IO 用事件循环，业务丢线程池</td><td>线程池大小 + CPU</td><td>中高</td></tr><tr><td>异步 IO（io_uring 等）</td><td>连拷贝都由内核完成再通知</td><td>CPU</td><td>高（模型与生态较新）</td></tr></tbody></table></div><details><summary>epoll 比 select 快在哪？</summary><p>两点：<b>① fd 只注册一次</b>，不用每次调用都从用户态拷到内核态；<b>② 返回的是就绪列表</b>（O(就绪数)），不是遍历全部 fd（O(总数)）。连接数越多、活跃比例越低，差距越大。</p></details><details><summary>为什么还要配非阻塞 IO？</summary><p>多路复用只保证「现在读不会阻塞在等待数据上」，但如果数据只有一半，读仍可能卡住。<b>非阻塞保证任何一次 read 都立刻返回</b>，把「没读完」变成可处理的状态而非阻塞。</p></details><details><summary>Redis / Nginx 为什么单线程还这么快？</summary><p>因为它们处理的是<b>内存操作 + 网络 IO</b>，瓶颈在网络等待而不是 CPU。多路复用让单线程能同时照看几万个连接，而这些连接大部分时间在等数据——CPU 几乎一直有活干。</p></details><details><summary>什么时候该上多线程而不是多路复用？</summary><p>当业务逻辑是<b>CPU 密集</b>时（图像处理、复杂计算），单事件循环会被堵死。这时应该多进程/多线程，或者事件循环只管 IO、计算丢给线程池。</p></details></div></section>

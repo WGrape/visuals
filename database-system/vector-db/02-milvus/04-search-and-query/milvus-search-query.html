@@ -60,6 +60,24 @@
   a{color:var(--accent)}
   footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -265,6 +283,42 @@ res = client.hybrid_search(collection_name=<span class="str">"docs"</span>,
 
 </main>
 
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 检索参数怎么调：方向、区间与代价</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>常见取值</th><th>调大的效果</th><th>代价</th></tr></thead><tbody><tr><td>nprobe（IVF 系列）</td><td>1 → 16 / 32 / 64</td><td>召回率上升（典型 70% → 95%+）</td><td>耗时近似线性上升</td></tr><tr><td>ef（HNSW 检索期）</td><td>≥ 4 × top_k，常用 64~512</td><td>召回率上升</td><td>耗时上升，收益递减点在 ~10× top_k</td></tr><tr><td>efConstruction（建索引）</td><td>200~500</td><td>索引质量上升</td><td>建索引时间与内存上升</td></tr><tr><td>M（HNSW 图连接数）</td><td>16~32</td><td>高维数据召回更好</td><td>内存占用上升（每向量多 M×2 条边）</td></tr><tr><td>top_k / limit</td><td>10~100（单次 ≤ 16384）</td><td>返回更多候选</td><td>超过几百时建议用 iterator 分页</td></tr><tr><td>radius / range_filter</td><td>按业务标定</td><td>范围检索代替 top_k</td><td>结果数不可控，要有上限</td></tr><tr><td>consistency_level</td><td>Bounded（默认）/ Strong</td><td>能读到刚写入的数据</td><td>Strong 明显更慢，且要等同步</td></tr></tbody></table></div><pre><code>from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
+
+client = MilvusClient(uri='http://localhost:19530', db_name='default')
+
+# 1) 基础向量检索：注意 metric_type 决定 score 的方向
+res = client.search(
+    collection_name='docs',
+    data=[query_vec],
+    limit=10,                       # top_k
+    filter='tenant_id == 42 and publish_at &gt; 1730000000',   # 标量过滤，语法不是 SQL
+    output_fields=['id', 'title'],  # 只取需要的字段，别图省事不写
+    search_params={'metric_type': 'IP', 'params': {'nprobe': 32}},
+    consistency_level='Bounded',
+)
+# 判读：IP（内积）越大越相似；L2（欧氏距离）越小越相似。用反了会得到最不相关的结果
+
+# 2) 混合检索：多个 AnnSearchRequest + 融合排序
+reqs = [
+    AnnSearchRequest([vec_dense], 'vec_dense', {'metric_type': 'IP', 'params': {'nprobe': 32}}, limit=50),
+    AnnSearchRequest([vec_sparse], 'vec_sparse', {'metric_type': 'IP'}, limit=50),
+]
+res = client.hybrid_search(
+    collection_name='docs', reqs=reqs,
+    ranker=RRFRanker(k=60),         # RRF 融合，k 越大越削弱排名靠前项的优势
+    limit=10, output_fields=['id', 'title'],
+)
+
+# 3) 大结果集用 iterator 深翻，不要用 offset 一页页跳
+it = client.search_iterator(collection_name='docs', data=[query_vec],
+                            batch_size=1000, limit=50000,
+                            search_params={'metric_type': 'IP', 'params': {'nprobe': 16}})
+for batch in it:
+    handle(batch)</code></pre><p><b>score 方向记忆法</b>：<code>IP / COSINE</code> 越大越好（越相似），<code>L2</code> 越小越好（越近）。设阈值时务必先跑一批真实数据看 score 分布，不要拍脑袋定 0.8。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 检索结果不对/太慢的排查顺序</h2><ul><li><b>先确认 metric_type 与建索引时一致</b>：建索引用 COSINE、检索用 L2 会得到完全错误的结果且不报错。</li><li><b>刚写入查不到</b>：一致性级别是 Bounded/Eventually 时，写入后立即可查不到属正常；要强一致用 Strong 或用主键 query。</li><li><b>过滤后结果变少甚至为空</b>：Milvus 默认先过滤还是后过滤取决于版本与索引；表达式里的字段必须建了标量索引才快。</li><li><b>output_fields 拉了大字段</b>：把正文/向量本身也取回来，网络与反序列化成为瓶颈；只取 id 与展示字段。</li><li><b>深翻很慢</b>：offset 越大越慢（要算完前面所有结果），改用 <code>search_iterator</code> 游标式取。</li><li><b>召回不达标</b>：先用 <code>nprobe/ef</code> 拉到最大测召回上限；若仍不达标，是 embedding 或切分的问题，不是参数问题。</li><li><b>内存暴涨</b>：单次 limit 过大（如上万）会一次性构造大结果集；分批并限制并发检索数。</li></ul><p class="muted">排查顺序固定为：<b>metric 一致性 → 过滤表达式 → 一致性级别 → 参数（nprobe/ef）→ 字段与分页</b>。前三项是「结果不对」，后两项是「结果慢」。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · search / query / hybrid_search 的本质差别</h2><details><summary>query 和 search 到底选哪个？</summary><p>query 是<b>纯标量过滤</b>（按 ID、按属性取），不做向量相似度，走的是倒排/主键索引，毫秒级；search 是<b>向量近似检索</b>，走 ANN 索引。判断标准：你的条件里有没有向量。</p></details><details><summary>过滤应该在向量检索前还是后？</summary><p>在 Milvus 里由执行计划决定：过滤率高（能筛掉 90% 以上）时先过滤更快，否则先 ANN 再过滤。工程上如果过滤条件非常严格，考虑直接按过滤字段分 collection 或分区，比依赖执行计划更可控。</p></details><details><summary>hybrid_search 的融合排序怎么选？</summary><p>RRF（倒数排名融合）不要求两边分数可比，适合稠密+稀疏混合，是最稳的默认选择；只有当你知道各路分数的量纲、且想显式加权时，才用加权融合。</p></details></div></section>
 <footer>
   
   把 Milvus 用好，一半功夫在 <code>search</code> 之外：过滤字段有没有索引、<code>output_fields</code> 有没有克制、批量有没有用上、一致性级别是否匹配业务。这四件事往往比换索引更能决定线上表现。<br>

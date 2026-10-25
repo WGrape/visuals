@@ -66,6 +66,18 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 .x-dry summary{cursor:pointer;font-weight:700}
 .x-dry details p{margin:8px 0 0}
 </style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -205,6 +217,12 @@ CREATE TABLE orders_cdc (
   'server-id' = '5400-5405',                  # 并发读要一段 id 范围
   'scan.incremental.snapshot.enabled' = 'true' # 无锁全量 + 增量无缝切换
 );</code></pre><div class="table-wrap"><table><thead><tr><th>问题</th><th>原因</th><th>解法</th></tr></thead><tbody><tr><td>位点丢失，数据重复</td><td>位点存在本地文件，实例迁移就没了</td><td>位点改存 DB / ZooKeeper；消费侧做<b>幂等</b></td></tr><tr><td>DDL 导致解析失败</td><td>表结构变了，旧解析器不认</td><td>Canal 默认忽略 DDL；要 DDL 就开 <code>tsdb</code> 存历史表结构</td></tr><tr><td>大事务把 Canal 卡死</td><td>单个事务 binlog 很大，解析内存爆</td><td>拆事务；调大 Canal 的 <code>transaction.size</code></td></tr><tr><td>主备切换后拉不到</td><td>位点在新主上不存在</td><td><b>开 GTID</b>（<code>gtid_mode=ON</code>），按 GTID 定位而非文件名+位置</td></tr><tr><td>下游积压</td><td>消费速度 &lt; 生产速度</td><td>加大并行度（按表/按主键分区）；异步化写入</td></tr><tr><td>乱序</td><td>并发消费 + 分区键选错</td><td><b>按主键</b>做分区键，保证同一行的变更有序</td></tr></tbody></table></div><ul><li><b>全量 + 增量的衔接</b>是 CDC 最容易出错的地方：正确做法是「先记位点 → 全量快照 → 从位点追增量 → 合并去重」，而不是「全量完再开始拉增量」（会丢中间的变更）。Flink CDC 的 <code>scan.incremental.snapshot.enabled=true</code> 就是帮你做这件事。</li><li><b>消费侧必须幂等</b>：CDC 的语义是<b>至少一次</b>，重复投递是常态。落地时按主键做 <code>UPSERT</code>，或按 <code>(binlog_file, position)</code> 去重。</li><li><b>删除事件</b>：ROW 格式的 DELETE 只有前镜像（无后镜像），下游要能识别 <code>op='d'</code> 并做软删除或物理删除，别当成普通更新。</li><li><b>延迟监控</b>：监控「binlog 当前位点 - 消费位点」的<b>字节差值</b>而不是时间，时间在低流量时会假性正常。</li></ul><details><summary>CDC 和定时抽取（Sqoop/DataX）什么时候用哪个？</summary><p>看<b>是否需要增量和实时性</b>。首次全量迁移用 DataX/Sqoop（简单、可控、可限速）；之后持续同步必须 CDC。CDC 的优势是<b>毫秒级、只传变更、能拿到删除事件</b>；定时抽取做不到这三点（删除尤其麻烦，只能靠全量对账）。</p></details><details><summary>为什么 Canal 会拖垮 MySQL？</summary><p>正常情况不会（只是读文件）。但三种情况会：① <b>全量快照</b>时 Canal 会对表做 <code>SELECT *</code>，大表瞬间打满 IO；② <b>binlog 堆积</b>导致磁盘满，MySQL 无法写；③ Canal 伪装 slave 后，MySQL 的 <code>sync_binlog</code> 与半同步复制会受从库数量影响。解法：全量放在低峰、限速；binlog 保留 ≥3 天并监控磁盘。</p></details><details><summary>怎么保证 CDC 数据不丢？</summary><p>三个层次：① <b>位点持久化</b>（不存本地文件）+ 位点与业务写入<b>同一事务</b>（或用支持事务的下游如 Kafka 事务）；② <b>至少一次 + 下游幂等</b>（最实用）；③ <b>定期对账</b>——按时间窗口比对源表和目标表的 checksum/count，这是兜底的最后一道防线，任何 CDC 方案都该配。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="kafka-ingestion.html">Kafka 数据采集</a><a href="logstash-filebeat.html">Logstash 与 File…</a><a href="../01-offline-collection/datax.html">DataX 离线数据同步</a><a href="../01-offline-collection/flume.html">Flume 日志采集</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 大数据</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 <footer>© 2026 Visuals · 大数据系统 / 数据采集 / CDC</footer>
 </body>
 </html>

@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -269,6 +287,38 @@ SETTINGS index_granularity = 8192;</code></pre>
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 关键参数默认值与调参后果</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th><th>什么时候动</th></tr></thead><tbody><tr><td>index_granularity</td><td>8192 行</td><td>一个 granule 的行数，稀疏索引粒度</td><td>点查多可降到 4096，扫描多保持 8192</td></tr><tr><td>index_granularity_bytes</td><td>0（关闭）</td><td>按字节自适应 granule</td><td>行宽差异大时设 10MB 更稳</td></tr><tr><td>merge_max_block_size</td><td>8192 行</td><td>合并时的块大小</td><td>基本不动</td></tr><tr><td>parts_to_delay_insert</td><td>150</td><td>活跃 part 数超过就减速写入</td><td>写入并发高时上调</td></tr><tr><td>parts_to_throw_insert</td><td>300</td><td>超过就报 Too many parts</td><td>配合批量写入一起调</td></tr><tr><td>inactive_parts_to_throw_insert</td><td>0（旧版）/ 300（新版）</td><td>非活跃 part 上限</td><td>长期不合并时排查方向</td></tr><tr><td>max_bytes_to_merge_at_max_space_in_pool</td><td>约 150 GB</td><td>单次合并的体量上限</td><td>大表合并慢时可下调</td></tr><tr><td>ttl_only_drop_parts</td><td>false</td><td>TTL 是否整 part 删除</td><td>按分区过期可设 true 免重写</td></tr><tr><td>mutations_sync</td><td>0（异步）</td><td>ALTER DELETE/UPDATE 是否等完成</td><td>脚本里需要确认结果时设 1</td></tr></tbody></table></div><pre><code>-- 看一张表有多少 part、多大、多久没合并（Too many parts 的第一现场）
+SELECT partition, name, rows, bytes_on_disk / 1024 / 1024 AS mb,
+       modification_time, active
+FROM system.parts
+WHERE table = 'events' AND database = 'default'
+ORDER BY modification_time DESC
+LIMIT 20;
+
+-- 正在进行的合并与进度
+SELECT database, table, elapsed, progress, num_parts, total_size_bytes_compressed / 1024 / 1024 AS mb
+FROM system.merges;
+
+-- 每个分区的 part 数（&gt; 100 就该警惕）
+SELECT partition, count() AS parts, sum(rows) AS rows
+FROM system.parts
+WHERE table = 'events' AND active
+GROUP BY partition
+ORDER BY parts DESC;
+
+-- 紧急止血：暂停合并（注意：只是临时手段，不解决根因）
+SYSTEM STOP MERGES;   -- 恢复： SYSTEM START MERGES;
+
+-- 强制合并（慎用：会吃掉大量 IO 与 CPU，别在业务高峰跑）
+OPTIMIZE TABLE events FINAL;
+
+-- 异步 mutation：删数据不会立刻生效，要查进度
+ALTER TABLE events DELETE WHERE dt &lt; '2026-01-01' SETTINGS mutations_sync = 0;
+SELECT mutation_id, command, is_done, parts_to_do
+FROM system.mutations WHERE table = 'events' AND NOT is_done;</code></pre></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · MergeTree 的六个高频故障与处理</h2><ul><li><b>Too many parts (300)</b>：根因是单次写入行数太少（几百行就 commit）。处理：客户端攒批到 1 万~10 万行或 10~50 MB 再写，而不是调大阈值。</li><li><b>写入成功但查不到</b>：数据落在未合并的 part 里且查询走了 FINAL 之外的去重假设；ReplacingMergeTree 要去重必须用 <code>FINAL</code> 或 <code>argMax</code> 聚合，别指望后台合并。</li><li><b>磁盘只增不减</b>：删除是异步 mutation，且旧 part 要等合并才回收；查 <code>system.mutations</code>，必要时 <code>SYSTEM STOP MERGES</code> 排查后被卡住的 mutation。</li><li><b>OPTIMIZE FINAL 之后空间反而涨</b>：合并期间新旧 part 同时存在，峰值需要约 2 倍空间；确保磁盘余量 > 最大分区的 2 倍。</li><li><b>COUNT 很快、带条件很慢</b>：没命中主键前缀。稀疏索引只在 <code>ORDER BY</code> 前缀上有用，条件字段要放进主键前几列或加跳数索引。</li><li><b>TTL 没生效</b>：TTL 依赖合并触发，part 不合并就不删；用分区直接 <code>DROP PARTITION</code> 更干脆，或设 <code>ttl_only_drop_parts</code>。</li></ul><p class="muted">排查顺序固定为：<code>system.parts</code> 看 part 数与大小 → <code>system.merges</code> 看是否卡住 → <code>system.mutations</code> 看删改是否完成 → 最后才考虑 OPTIMIZE。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么是稀疏索引而不是 B+ 树</h2><details><summary>为什么不能像 MySQL 一样每行建索引？</summary><p>分析型表单表动辄数十亿行，行级索引的体积会超过数据本身，且索引维护会拖垮批量写入。稀疏索引每 8192 行才记一条，索引体积约为数据的千分之一，代价是只能定位到 granule，再在 granule 内扫描。</p></details><details><summary>granule 为什么要设为 8192？</summary><p>它是‘索引体积’与‘扫描浪费’的折中：调小索引变大、点查更准；调大索引变小、但每次多扫无关行。8192 是按典型压缩块与内存页量级取的经验值，除非有实测依据否则不要动。</p></details><details><summary>主键和 ORDER BY 为什么必须一致（或主键是前缀）？</summary><p>数据按 ORDER BY 物理排序，稀疏索引记录的是每个 granule 的 ORDER BY 首值；如果主键不是排序键前缀，索引记录的值就无法用于定位范围，索引形同虚设。</p></details></div></section>
 <footer>
   <p>Visuals · 数据库系统 / OLAP / ClickHouse · MergeTree ·
   <a href="../../index.html">← 返回 OLAP 分析型数据库</a> ·
