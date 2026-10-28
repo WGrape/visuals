@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -142,6 +160,18 @@ go tool pprof -http=:8080 cpu.out</code></pre><ul>
 </ul>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：pprof 看哪类瓶颈</h2><p>pprof 能采五类：<b>CPU、堆分配(heap)、goroutine、block（阻塞）、mutex（锁竞争）</b>。先根据现象选类型：CPU 高看 CPU、内存涨看 heap、协程堆积看 goroutine。</p><div class="tw"><table><thead><tr><th>现象</th><th>看哪个 profile</th></tr></thead><tbody><tr><td>CPU 跑满</td><td>cpu</td><td>热点函数</td></tr><tr><td>内存只涨不跌</td><td>heap（inuse）</td><td>谁在分配</td></tr><tr><td>协程数暴涨</td><td>goroutine</td><td>谁在泄漏</td></tr><tr><td>并发上不去</td><td>mutex / block</td><td>锁或等待</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：采集与查看</h2><div class="tw"><table><thead><tr><th>动作</th><th>命令</th><th>说明</th></tr></thead><tbody><tr><td>开 HTTP 端点</td><td>import _ net/http/pprof</td><td>自动挂 /debug/pprof</td></tr><tr><td>采 30s CPU</td><td>go tool pprof http://ip/debug/pprof/profile?seconds=30</td><td>默认 30s</td></tr><tr><td>看堆</td><td>go tool pprof http://ip/debug/pprof/heap</td><td>默认 inuse_space</td></tr><tr><td>交互</td><td>top / svg / web</td><td>排行/火焰图</td></tr></tbody></table></div><p class="x-dry-cap">pprof 采集与火焰图</p><pre><code># 代码里引入（仅副作用）
+import _ "net/http/pprof"
+go func(){ http.ListenAndServe("0.0.0.0:6060", nil) }()
+
+# 命令行采 CPU 30s 并起网页火焰图
+go tool pprof -http=:8080 \
+    http://localhost:6060/debug/pprof/profile?seconds=30
+
+# 堆：看累计分配(alloc)还是常驻(inuse)
+go tool pprof http://localhost:6060/debug/pprof/heap
+(pprof) top10          # 按当前默认维度排行
+(pprof) svg            # 导出火焰/调用图</code></pre><p><b>数量级：</b>CPU 采样默认 <b>100Hz</b>（每 10ms 一次），开销约 1%–5%；heap profile 是<b>周期性快照</b>而非全量记录，所以看的是「采样时刻的分配」而非每行精确字节。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>只看 CPU 忽略 alloc</b>：CPU 不高但 GC 压力大，问题在分配频率——必须看 heap(alloc_space) 而非只看 cpu</li><li><b>inuse 与 alloc 混淆</b>：inuse 是「现在占着」，alloc 是「累计分配」；找泄漏看 inuse，找分配热点看 alloc</li><li><b>生产开 pprof 端口裸奔</b>：/debug/pprof 暴露内部信息，必须加鉴权或仅内网/临时开</li><li><b>采样开销影响结论</b>：CPU 采样会让程序略慢、且 100Hz 抓不到极短函数——微优化要看更细手段</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 pprof 是采样而不是全量记录？</summary><p>因为<b>全量记录每个分配/每次调用栈的代价无法接受</b>——会拖慢程序几个数量级、内存爆掉。采样（CPU 100Hz、堆周期性快照）用极小固定开销换「统计上准确」的热点分布。代价是极短/低频的代码片段可能漏采，但定位 90% 的性能问题足够。</p></details><details><summary>inuse_space 和 alloc_space 该看哪个？</summary><p>想找<b>内存泄漏/常驻大户</b>看 inuse_space（现在还占着多少）；想找<b>GC 压力来源</b>看 alloc_space（累计分配了多少，即使已释放）。一个函数 alloc 巨大但每次释放，inuse 不高却让 GC 忙死——这种必须靠 alloc 才能现形。</p></details><details><summary>火焰图为什么比 top 列表更好定位？</summary><p>因为 top 只给「每个函数自身耗时」，<b>看不出调用链和谁调用了谁</b>；火焰图的横轴是栈、宽度是耗时，一眼能看出「A 调 B 调 C，C 最宽」这种调用路径热点，且能下钻到具体的调用上下文，定位更快更准。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · Go 语言 ·

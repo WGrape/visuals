@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -118,6 +136,15 @@ gc.collect()                  # 手动触发循环 GC
 </ul><div class="qa"><b>问：为什么不能把 GOGC 调很小来换低延迟？</b><p>GC 更频繁意味着每次回收的活对象少、停顿短，但 CPU 花在回收上的比例上升，总吞吐下降。低延迟和高吞吐是天平两端，要根据业务（API 要低延迟、批处理要高吞吐）取舍。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：先定调优目标</h2><p>GC 调优只有两个对立目标：<b>低延迟（STW 短、毛刺少）</b>或<b>高吞吐（总 GC 时间占比低）</b>。先问业务是「怕卡」还是「怕慢」，再动手，否则互相矛盾。</p><div class="tw"><table><thead><tr><th>业务画像</th><th>目标</th><th>手段倾向</th></tr></thead><tbody><tr><td>在线交易/网关</td><td>低延迟</td><td>减小单次回收量</td></tr><tr><td>离线批处理</td><td>高吞吐</td><td>减小 GC 频率</td></tr><tr><td>大堆长驻</td><td>两者兼顾</td><td>分代/调比例</td></tr><tr><td>内存敏感容器</td><td>控峰值</td><td>降 GOGC/上限</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：关键旋钮</h2><div class="tw"><table><thead><tr><th>运行时</th><th>参数</th><th>含义</th></tr></thead><tbody><tr><td>Go</td><td>GOGC=100</td><td>堆增 100% 触发 GC</td></tr><tr><td>Go</td><td>GOMEMLIMIT</td><td>软内存上限</td></tr><tr><td>Java</td><td>-Xmx / -Xms</td><td>堆上下限</td></tr><tr><td>Java</td><td>MaxGCPauseMillis</td><td>停顿目标</td></tr></tbody></table></div><p class="x-dry-cap">Go/Java GC 关键参数</p><pre><code># Go：默认 GOGC=100（堆翻倍才 GC）；调小更频繁但每次更轻
+GOGC=50 ./app              # 增 50% 即回收，延迟更稳、吞吐略降
+GOMEMLIMIT=4GiB ./app      # 软上限，避免 OOMKill
+
+# Java：吞吐与停顿的平衡
+java -Xms4g -Xmx4g -XX:+UseG1GC      -XX:MaxGCPauseMillis=200 -jar app.jar
+
+# 看 GC 真实开销
+java -Xlog:gc*:file=gc.log:time,level,tags -jar app.jar</code></pre><p><b>数量级：</b>GOGC 从 100 降到 50，<b>GC 频率约翻倍、单次 STW 约减半</b>；Go 默认 STW 已压到亚毫秒级，调优重点是「堆增长带来的长尾」而非总耗时。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>只盯吞吐忽略毛刺</b>：平均 GC 时间漂亮，但偶发一次 200ms 停顿拖垮 p99——在线服务要看分布不是平均</li><li><b>GOGC 盲目调小</b>：GC 太频繁反而吃光 CPU，吞吐反降——先量再调，别拍脑袋</li><li><b>大对象/大切片没释放</b>：底层数组被一个小引用挂着，GC 清不掉，表现为内存只涨不跌</li><li><b>容器内存上限与 GOGC 脱节</b>：没设 GOMEMLIMIT，堆按宿主内存增长，被 cgroup 限额 OOMKill</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>GOGC 到底控制什么，怎么权衡？</summary><p>GOGC 是<b>触发 GC 的堆增长百分比</b>：100 表示「相比上次回收后存活量再涨 100% 就回收」。调小 → 更频繁、单次回收少、停顿短但 CPU 开销大（吞吐降）；调大 → 反之。本质是<b>内存换 CPU、延迟换吞吐</b>的旋钮，配合 GOMEMLIMIT 在容器里兜住峰值更稳。</p></details><details><summary>为什么分代 GC（Java）能兼顾吞吐与延迟？</summary><p>因为<b>大多数对象朝生夕死</b>：分代把新对象放年轻代，用复制算法快速回收（暂停短），只有存活久的才晋升老年代（少发生、可并发）。这样高频的轻量回收覆盖绝大多数垃圾，低频的重量级回收只处理长命对象，整体吞吐高、毛刺少。Go 目前不分代，靠并发三色标记 + 调 GOGC 来平衡。</p></details><details><summary>GOMEMLIMIT 相比 GOGC 解决了什么？</summary><p>GOGC 是「相对增长」触发，<b>不知道绝对内存上限</b>，在容器 cgroup 限额下容易超界被 OOMKill。GOMEMLIMIT 直接给一个<b>软上限</b>，GC 会主动把堆压到限制内，宁可多 GC 也不越界。两者配合：GOGC 控节奏、GOMEMLIMIT 控生死，是容器部署的推荐组合。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 运行时机制 ·

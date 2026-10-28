@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -124,6 +142,18 @@ FROM (SELECT id FROM items ORDER BY embedding &lt;=&gt; '[...]' LIMIT 10) sub;</
 
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：IVFFlat 还是 HNSW</h2><p>pgvector 两种 ANN 索引：<b>IVFFlat（倒排文件，构建快、内存省、需调 probes）</b>和<b>HNSW（图，查询快、召回稳、构建慢占内存）</b>。数据量/查询延迟要求决定选型。</p><div class="tw"><table><thead><tr><th>维度</th><th>IVFFlat</th><th>HNSW</th></tr></thead><tbody><tr><td>查询速度</td><td>中（靠 probes）</td><td>快</td></tr><tr><td>召回率</td><td>依赖 probes</td><td>高且稳</td></tr><tr><td>构建成本</td><td>低</td><td>高（建图慢）</td></tr><tr><td>内存</td><td>省</td><td>大</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：建索引与召回</h2><div class="tw"><table><thead><tr><th>参数</th><th>含义</th><th>经验</th></tr></thead><tbody><tr><td>lists（IVFFlat）</td><td>倒排簇数</td><td>sqrt(行数) 量级</td></tr><tr><td>probes（IVFFlat）</td><td>查几个簇</td><td>越大召回越高越慢</td></tr><tr><td>m（HNSW）</td><td>每层邻居数</td><td>默认 16</td></tr><tr><td>ef（HNSW）</td><td>查询候选</td><td>越大越准越慢</td></tr></tbody></table></div><p class="x-dry-cap">pgvector HNSW/IVFFlat 建索引</p><pre><code>-- HNSW：查询快、召回稳，适合在线
+CREATE INDEX ON items USING hnsw (emb vector_l2_ops) WITH (m=16, ef_construction=64);
+
+-- IVFFlat：省内存、构建快，适合大批量
+CREATE INDEX ON items USING ivfflat (emb vector_l2_ops) WITH (lists=100);
+
+-- 查询时影响召回（IVFFlat 必调，HNSW 调 ef）
+SET ivfflat.probes = 10;     -- 查更多簇提升召回
+SET hnsw.ef_search = 40;     -- HNSW 查询候选
+
+SELECT id, embedding &lt;-&gt; '[...]' AS d
+FROM items ORDER BY d LIMIT 10;</code></pre><p><b>数量级：</b>lists 经验取 <b>sqrt(行数)</b> 附近；IVFFlat 召回率随 probes 上升而升，probes 太小（默认 1）召回极低——必须调；HNSW 构建内存约为向量的数倍。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>没建索引做顺序扫</b>：百万向量上 ORDER BY distance LIMIT 全表算距离，慢到不可用——必须建 ANN 索引</li><li><b>probes/lists 太小</b>：IVFFlat 默认只查 1 个簇，召回率惨不忍睹，还以为向量库不准——probes 调到 10+</li><li><b>向量没归一化</b>：用内积(ip)却没 L2 归一化，相似度数值失真——cosine 前先归一</li><li><b>维度/距离算子不匹配</b>：建索引用 l2 查询用 cosine，索引不生效或结果不对——算子要一致</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>IVFFlat 和 HNSW 的本质权衡是什么？</summary><p>IVFFlat 把向量空间<b>聚类成 lists 个倒排桶</b>，查询时只搜最近的 probes 个桶，构建极快、内存小，但召回靠 probes 调，且桶不平衡时效果不稳；HNSW 建一张<b>多层近邻图</b>，查询沿图快速逼近最近邻，召回高且稳、延迟低，但建图慢、占内存多。取舍：离线大批量/内存紧 → IVFFlat；在线低延迟/要高召回 → HNSW。</p></details><details><summary>为什么 IVFFlat 的 probes 这么关键？</summary><p>因为 IVFFlat 查询只搜索与查询向量最近的 probes 个簇，<b>目标向量若落在没被搜到的簇里就永远找不到</b>。probes=1 时召回率可能只有 50% 甚至更低，调大到 10–20 才能到 95%+，但每加一个 probes 就多扫一个簇、变慢。所以 IVFFlat 的「召回-延迟」旋钮就是 probes，必须按业务容忍度调。</p></details><details><summary>向量一定要归一化吗，为什么？</summary><p>如果用<b>内积(ip)或余弦(cosine)距离</b>，未归一化的向量模长不同会污染相似度（长向量内积天然大）。归一化把模长统一为 1，让 cosine/ip 只反映方向差异，结果才有可比性。L2 距离则不需要。所以「算子选择 + 是否归一化」必须配套，否则召回数字会是错的。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 向量数据库 ·

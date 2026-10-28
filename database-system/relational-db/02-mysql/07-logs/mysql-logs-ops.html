@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -129,6 +147,19 @@ SET GLOBAL innodb_max_undo_log_size=1073741824;   -- 超过 1G 触发截断</cod
 
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：五种日志各管什么</h2><p>MySQL 核心日志：<b>错误日志（启停/报错）、慢查询日志（定位慢 SQL）、binlog（主从/恢复/审计）、redo（崩溃恢复）、undo（回滚）</b>。排查先选对日志。</p><div class="tw"><table><thead><tr><th>要干什么</th><th>看哪个日志</th></tr></thead><tbody><tr><td>实例起不来/报错</td><td>error log</td><td>最直接</td></tr><tr><td>哪条 SQL 慢</td><td>slow query log</td><td>配阈值</td></tr><tr><td>主从不一致/误删恢复</td><td>binlog</td><td>按位点/时间</td></tr><tr><td>崩溃后数据丢失否</td><td>redo / undo</td><td>自动</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：关键开关</h2><div class="tw"><table><thead><tr><th>参数</th><th>建议值</th><th>作用</th></tr></thead><tbody><tr><td>slow_query_log</td><td>ON</td><td>开慢日志</td></tr><tr><td>long_query_time</td><td>0.5–1s</td><td>慢阈值</td></tr><tr><td>log_queries_not_using_indexes</td><td>ON（谨慎）</td><td>抓全表扫</td></tr><tr><td>binlog_format</td><td>ROW</td><td>主从安全</td></tr><tr><td>expire_logs_days</td><td>7–14</td><td>防 binlog 爆盘</td></tr></tbody></table></div><p class="x-dry-cap">MySQL 慢日志与 binlog 运维</p><pre><code>-- 在线开启慢日志，不必重启
+SET GLOBAL slow_query_log = ON;
+SET GLOBAL long_query_time = 0.5;          -- 秒
+SET GLOBAL log_queries_not_using_indexes = ON;
+
+-- 看慢日志内容
+mysqldumpslow -s t /var/log/mysql/slow.log | head
+pt-query-digest /var/log/mysql/slow.log     # Percona 更细
+
+-- binlog 按时间恢复示例
+mysqlbinlog --start-datetime='2026-01-01 00:00:00' \
+            --stop-datetime='2026-01-01 01:00:00' \
+            mysql-bin.000123 | mysql -u root -p</code></pre><p><b>数量级：</b>long_query_time 设 0.5s 通常合适；全表扫日志开 ON 后量很大，<b>只适合临时排查</b>，长期开会拖慢且占盘；binlog 保留 7–14 天兼顾恢复与容量。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>慢日志压根没开</b>：默认 OFF，线上「慢」却无任何记录——先确认 slow_query_log=ON 再谈优化</li><li><b>binlog 爆盘</b>：expire_logs_days 没设或设太大，磁盘写满实例挂——定时清理 + 监控剩余空间</li><li><b>long_query_time 设太大</b>：设 10s 只抓极慢，大量 1–2s 的「温水煮青蛙」SQL 全漏掉</li><li><b>log_queries_not_using_indexes 长期开</b>：全表扫日志海量，既拖性能又淹没有用信息——排查完即关</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>binlog 和 redo log 到底有什么区别？</summary><p>binlog 是<b>服务层、逻辑级</b>的追加日志，记录「做了什么改动」，用于主从复制和点位恢复，所有引擎共用；redo log 是<b>InnoDB 层、物理级</b>的循环日志，记录「页怎么改」，用于崩溃后把已提交事务刷回磁盘（WAL）。两者职责不同：redo 保持久性、binlog 保复制与恢复。两阶段提交正是为了让他俩一致。</p></details><details><summary>为什么慢查询日志是定位慢 SQL 的首选？</summary><p>因为它<b>直接给出执行时间、锁等待、扫描行数、是否用索引</b>，比自己猜执行计划快得多，且能配合 mysqldumpslow/pt-query-digest 聚合出『最该优化的 Top N』。配合 log_queries_not_using_indexes 还能抓出全表扫的隐性慢 SQL。是性能排查的入口。</p></details><details><summary>为什么 binlog_format 推荐 ROW 而不是 STATEMENT？</summary><p>STATEMENT 记录 SQL 文本，<b>遇到 now()/uuid()/触发器 主从可能不一致</b>；ROW 记录每行实际变更，主从绝对安全、还能做行级恢复，代价是日志量更大（尤其大批量更新）。在数据一致性优先的今天，ROW 是默认且推荐的选择。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 关系型数据库 ·

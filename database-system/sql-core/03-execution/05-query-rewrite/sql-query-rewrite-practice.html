@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -115,6 +133,22 @@ SELECT * FROM orders USE INDEX(idx_user) WHERE user_id=42;
 <div class="table-wrap"><table><thead><tr><th>反模式</th><th>问题</th><th>改写</th></tr></thead><tbody><tr><td>SELECT *</td><td>无法覆盖索引</td><td>只选需要的列</td></tr><tr><td>DATE(col)=x</td><td>索引失效</td><td>范围区间比较</td></tr><tr><td>LIMIT 100000,20</td><td>扫 10 万行</td><td>游标分页 id>last</td></tr><tr><td>a=1 OR b=2</td><td>全表扫</td><td>UNION ALL 两份索引查</td></tr></tbody></table></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：什么时候该重写 SQL</h2><p>重写信号来自执行计划：<b>全表扫描、嵌套子查询爆炸、深分页、对列套函数导致索引失效</b>。先 EXPLAIN 看 type/rows/Extra，再决定怎么改。</p><div class="tw"><table><thead><tr><th>执行计划信号</th><th>改写方向</th></tr></thead><tbody><tr><td>type=ALL（全表扫）</td><td>加/用索引、缩范围</td></tr><tr><td>DEPENDENT SUBQUERY</td><td>子查询改 JOIN</td></tr><tr><td>Using filesort</td><td>利用有序索引/少排</td></tr><tr><td>LIMIT 大 offset</td><td>游标/keyset 分页</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：EXPLAIN 与改写</h2><div class="tw"><table><thead><tr><th>手段</th><th>写法</th><th>收益</th></tr></thead><tbody><tr><td>先 EXPLAIN</td><td>EXPLAIN SELECT ...</td><td>看真实代价</td></tr><tr><td>子查询→JOIN</td><td>LEFT JOIN 替代 IN(SELECT)</td><td>避免逐行执行</td></tr><tr><td>避免 SELECT *</td><td>只取所需列</td><td>覆盖索引/少 IO</td></tr><tr><td>深分页</td><td>WHERE id > ? LIMIT n</td><td>避免 OFFSET 大</td></tr></tbody></table></div><p class="x-dry-cap">SQL 重写：子查询/JOIN/深分页/函数</p><pre><code>-- 1. 子查询改 JOIN（避免 DEPENDENT SUBQUERY 逐行执行）
+-- 慢：
+SELECT * FROM orders
+WHERE user_id IN (SELECT id FROM users WHERE city='BJ');
+-- 快：
+SELECT o.* FROM orders o
+JOIN users u ON o.user_id = u.id AND u.city='BJ';
+
+-- 2. 深分页用 keyset 代替 OFFSET
+-- 慢：SELECT * FROM t ORDER BY id LIMIT 10 OFFSET 1000000;
+-- 快：
+SELECT * FROM t WHERE id &gt; 1000000 ORDER BY id LIMIT 10;
+
+-- 3. 列上别套函数，否则索引失效
+-- 慢：WHERE DATE(created) = '2026-01-01'
+-- 快：WHERE created &gt;= '2026-01-01' AND created &lt; '2026-01-02'</code></pre><p><b>数量级：</b>深分页 OFFSET 到百万级时，<b>数据库要先扫描并丢弃前 100 万行</b>，耗时从毫秒变秒级；keyseet 改写法把复杂度从 O(offset+n) 降到 O(n)。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>列上套函数导致索引失效</b>：WHERE DATE(created)=... / WHERE amount*1.1&gt;... 让优化器只能全表扫——把函数移到常量侧</li><li><b>隐式类型转换</b>：字符串列传数字、或反之，MySQL 做转换后索引同样失效——类型要对齐</li><li><b>OR 连接非索引列</b>：OR 一端没索引，整体退回全表扫——改 UNION 或补索引</li><li><b>深分页无脑 LIMIT OFFSET</b>：越翻越慢，还占临时空间——上 keyset/游标分页</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么嵌套子查询常比 JOIN 慢？</summary><p>因为早期 MySQL 对 DEPENDENT SUBQUERY 是<b>外层每行都执行一次子查询</b>（O(N×M)），而 JOIN 能让优化器用哈希/索引连接一次性完成（接近 O(N+M)）。改写 JOIN 后优化器还有更多选择（连接顺序、索引），代价模型更准确。所以「子查询改 JOIN」是第一优先的改写。</p></details><details><summary>深分页为什么 OFFSET 越大越慢，keyset 怎么解？</summary><p>因为 OFFSET 1000000 要求数据库<b>先读出前 100 万行再丢弃</b>，扫描和临时排序成本随 offset 线性涨。keyset 分页用「上一页最后的主键」做 WHERE id &gt; last_id，<b>直接从索引定位起点</b>，跳过前面所有行，复杂度只与本次 LIMIT 有关，与页数无关。</p></details><details><summary>为什么对列套函数会让索引失效？</summary><p>因为索引是按<b>列的原始值</b>排序的，一旦列被函数处理（DATE()/计算/转换），优化器无法确定索引的有序性还能用，只能放弃索引改全表扫。正确做法是把函数移到等号右边作用在常量上，让列保持「裸」状态参与比较，索引才生效。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · SQL 核心 ·
