@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go pprof 实战：CPU / 内存 / goroutine 火焰图</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Go pprof 实战：CPU / 内存 / goroutine 火焰图</h1>
+  <p>基准采 CPU、运行时采堆、常用子命令与排障清单</p>
+  <span class="tag">pprof</span><span class="tag">性能</span><span class="tag">调优</span><span class="tag">Go</span>
+</header>
+<nav>
+  <a href="#profiles">类型</a>
+  <a href="#bench">CPU</a>
+  <a href="#runtime">HTTP</a>
+  <a href="#commands">子命令</a>
+  <a href="#flame">火焰图</a>
+  <a href="#checklist">清单</a>
+</nav>
+<main>
+
+<div class="lead">
+  pprof 内置在标准库，无需第三方依赖。它采集的是『采样』而非全量，所以优先看占比最高的函数。
+</div>
+
+<section id="profiles">
+  <h2><span class="n">1</span>有哪些 profile 可采</h2>
+<div class="table-wrap"><table><thead><tr><th>类型</th><th>采集方式</th><th>排查什么</th></tr></thead><tbody><tr><td>cpu</td><td>go test -cpuprofile / runtime</td><td>CPU 时间花在哪</td></tr><tr><td>heap</td><td>堆分配采样</td><td>内存分配热点 / 泄漏</td></tr><tr><td>goroutine</td><td>协程栈快照</td><td>协程泄漏 / 阻塞</td></tr><tr><td>block</td><td>阻塞事件</td><td>锁 / channel 争用</td></tr><tr><td>mutex</td><td>锁持有采样</td><td>锁竞争热点</td></tr><tr><td>trace</td><td>执行时间线</td><td>调度 / GC / 系统调用</td></tr></tbody></table></div>
+</section>
+
+<section id="bench">
+  <h2><span class="n">2</span>基准测试采集 CPU</h2>
+<pre><code># 跑基准并把 CPU profile 落到文件
+go test -bench=. -benchmem -cpuprofile=cpu.out
+
+# 进入交互式分析，按累计耗时排序看前 20
+go tool pprof cpu.out
+(pprof) top20
+(pprof) web        # 生成调用图（需 graphviz）
+(pprof) list main.doWork</code></pre><div class="lead warn"><b>要点：</b>默认采样频率 100Hz（每 10ms 一次）。函数太短或调用太分散时可能采不到，属正常。</div>
+</section>
+
+<section id="runtime">
+  <h2><span class="n">3</span>运行时采集 HTTP 服务的堆 / goroutine</h2>
+<pre><code>import _ "net/http/pprof" // 注册到 /debug/pprof/
+
+func main() {
+    go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
+    // ... 业务服务
+}
+
+# 采集 30s 的堆分配
+go tool pprof http://localhost:6060/debug/pprof/heap
+# 看当前 goroutine 数量与栈
+go tool pprof http://localhost:6060/debug/pprof/goroutine</code></pre><div class="lead warn"><b>要点：</b>生产环境不要长期对外暴露 6060；用临时开关或带鉴权的 sidecar。</div>
+</section>
+
+<section id="commands">
+  <h2><span class="n">4</span>最常用的 pprof 子命令</h2>
+<pre><code>(pprof) top            # 按 flat 排序
+(pprof) top -cum      # 按累计（含子调用）排序
+(pprof) list 函数名   # 看该函数逐行开销
+(pprof) web           # 调用图 SVG（需 graphviz 的 dot）
+(pprof) png           # 导出图片
+(pprof) peek 函数名   # 谁调用它 / 它调用谁</code></pre>
+</section>
+
+<section id="flame">
+  <h2><span class="n">5</span>火焰图（可视化）</h2>
+<pre><code># 直接起本地 Web，自动开火焰图
+go tool pprof -http=:8080 cpu.out</code></pre><ul>
+  <li>横轴是采样占比、纵轴是调用栈深度；越宽的函数越值得优化。</li>
+  <li>火焰图里『平顶山』（没有子调用的大块）就是热点本身。</li>
+</ul>
+</section>
+
+<section id="checklist">
+  <h2><span class="n">6</span>实战排障清单</h2>
+<ul>
+  <li>内存只增不减 → 看 heap 的 inuse_space，定位未释放的对象与引用链。</li>
+  <li>协程数飙升 → 看 goroutine profile，找 chan receive / semacquire 卡住的栈。</li>
+  <li>CPU 跑满 → cpu profile 的 top -cum，顺调用链往下找到叶子热点。</li>
+  <li>怀疑锁竞争 → 开 mutex / block profile 对比加锁前后。</li>
+</ul>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · Go 语言 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

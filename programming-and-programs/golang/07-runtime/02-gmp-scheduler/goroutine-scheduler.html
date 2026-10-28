@@ -1119,6 +1119,16 @@ runtime.NumCPU()           // CPU 核数
 # pprof
 go tool pprof http://localhost:6060/debug/pprof/goroutine</code></pre><ul><li><b>阻塞型 syscall 会占用 M</b>：大量阻塞系统调用会创建新 M（线程），这是 goroutine 数正常但线程数暴涨的常见原因。</li><li><b>CPU 密集型不要开太多 goroutine</b>：GOMAXPROCS 已经限制了并行度，远超核数的 goroutine 只会增加调度与切换开销。</li><li><b>IO 密集型可以多开</b>：等 IO 时 G 不占 M，所以 goroutine 数可以远大于核数。</li><li><b>goroutine 泄漏的判定</b>：<code>NumGoroutine()</code> 持续单调增长且不回落。把这条做成告警指标，比事后查 pprof 有用得多。</li><li><b>调度延迟</b>：Go 1.14 前的协作式调度会被「无函数调用的死循环」卡住，异步抢占解决了这个问题，但 GC 扫描仍需要协作点。</li></ul></div></section>
 <section class="section"><div class="x-dry"><h2>常见误区与自检</h2><details><summary>GOMAXPROCS 设大能变快吗？</summary><p>对 CPU 密集任务：设成核数是合理默认，设更大通常无益（反而增加切换）。容器里要注意 Go 会自动读取 cgroup 的 CPU 配额，一般不用手设。</p></details><details><summary>goroutine 泄漏最常见的原因是什么？</summary><p>三类：channel 没人接收/发送导致永久阻塞、timer/ticker 没 Stop、以及下游调用没有超时（context 没传或没设 deadline）。</p></details><details><summary>为什么我的程序 CPU 没跑满但吞吐上不去？</summary><p>典型是锁竞争或 channel 阻塞，而不是调度问题。用 <code>pprof</code> 的 mutex/block profile 定位，别先怀疑调度器。</p></details><details><summary>M 的数量会无限增长吗？</summary><p>不会，受 SetMaxThreads 限制（默认 10000），超了会 panic。线程数异常增长通常说明有大量阻塞型 syscall。</p></details></div></section>
+<section class="section"><div class="x-dry"><h2>第二层 · 调度器的关键参数与可观测手段</h2><div class="table-wrap"><table><thead><tr><th>参数 / 常量</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td>GOMAXPROCS</td><td>机器逻辑核数</td><td>决定 P 的数量；新版本在容器里会参考 CPU 配额</td></tr><tr><td>P 的数量</td><td>= GOMAXPROCS</td><td>每个 P 持有一条本地可运行队列</td></tr><tr><td>本地队列容量</td><td>256</td><td>满了就溢出到全局队列</td></tr><tr><td>G 初始栈</td><td>2 KB</td><td>按需倍增/减半，64 位上限 1 GB</td></tr><tr><td>sysmon 巡检</td><td>最长 10 ms 一轮</td><td>负责抢占、网络轮询、强制 GC 等后台动作</td></tr><tr><td>异步抢占</td><td>运行超 10 ms 的 G</td><td>1.14 起补齐，解决密集循环卡住 P 的问题</td></tr></tbody></table></div><p><b>三条最有用的观测命令</b></p><pre><code># 每秒打印一次调度器状态（schelay 行表示调度延迟）
+GODEBUG=schedtrace=1000 ./your-app
+
+# 看 goroutine 栈全景（阻塞在哪个调用上一目了然）
+curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 | head -80
+
+# 抓取 30 秒的阻塞/互斥事件
+go tool pprof http://127.0.0.1:6060/debug/pprof/block?seconds=30</code></pre><p>在代码里直接取：runtime.NumGoroutine() 看数量趋势，runtime.GOMAXPROCS(0) 看当前 P 数，runtime.ReadMemStats 看栈内存占用。</p></div></section>
+<section class="section"><div class="x-dry"><h2>第三层 · 排障：goroutine 泄漏与调度卡顿</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>最可能的原因</th><th>怎么确认</th></tr></thead><tbody><tr><td>数量只涨不跌</td><td>channel 读端退出后写端还在阻塞</td><td>pprof 里大量 chan send / chan receive</td></tr><tr><td>大量 IO wait</td><td>网络/磁盘慢，G 挂在 netpoll 上</td><td>看 netpoll 与 epollwait 栈</td></tr><tr><td>CPU 上不去</td><td>锁竞争或 P 数被容器限制</td><td>pprof -seconds=30 mutex / 对比 CPU quota</td></tr><tr><td>延迟毛刺</td><td>GC 辅助标记抢占了 P</td><td>GODEBUG=gctrace=1 看 STW 时长</td></tr></tbody></table></div><ul><li>泄漏三件套：无缓冲 channel 没人读、context 没向下传递导致取消不到、time.Ticker 没 Stop（for range ticker.C 退出循环不会停表）</li><li>用 errgroup + WithContext，让取消信号能级联到所有子 goroutine；不要用 for + go 无上限地开协程处理队列</li><li>worker pool 的容量按「下游能承受的并发」定，不按 CPU 核数定</li><li>容器里务必显式设 GOMAXPROCS 或保证 CPU limit 被识别，否则默认取宿主机核数会导致 P 过多、上下文切换暴涨</li></ul></div></section>
+
 
     </div>
 

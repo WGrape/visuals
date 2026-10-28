@@ -16,6 +16,26 @@
 <section class="panel"><h2>让评测集能解释产品风险</h2><p>评测集应拆成开发集、固定回归集与最近线上失败样本。开发集可用于调参，固定集用于比较版本，线上失败集用于发现新分布；若持续对固定集调规则，分数会过拟合，不能再代表未见样本。保存原始音频、参考转写、录音设备、场景标签和审核记录，人工参考也可能错，尤其是同音字、方言和多人对话。抽样复核参考答案是评测的一部分。</p><p>当 WER 改善时，还要检查删除和插入是否同时变化。例如模型更保守，少插入幻听词，却漏掉更多弱音；总 WER 可能相近，用户感受到的故障却不同。若产品涉及实时交互，还应比较最终结果延迟和被端点切断的比例。一个指标无法同时表达准确性、速度和安全性，发布判断应基于关键任务的组合门槛。</p></section>
 <section class="panel" data-depth-note><h2>从分数走向成本</h2><p>相同一次替换，在普通聊天和医疗药名中代价不同。可先保持标准 WER/CER 作为可比基线，再单独设业务加权指标：关键实体完全正确、数字串完全正确、危险误识别次数和人工纠错时长。加权指标必须透明，不能随版本调整权重来制造进步。比较两个模型时，同一测试集逐样本并排观察退化案例，尤其是少数高风险类别。若线上分布明显变化，应新增代表性样本，但保留旧的固定回归集，以便分辨模型提升与语料更换。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>发布前可在相同样本上做配对比较：列出新模型改善与退化的每个句子，按关键实体、噪声和设备分组查看。只看两个总体数字，可能看不见模型把易样本变得更好、难样本变得更差。对参考文本存在争议的样本先人工复核，避免把标注噪声当成模型错误。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：三类错误与 WER</h2><p>语音识别的错误只有三类，所有评测指标都由它们推导。识别结果要做对齐后比较：与标准答案做最小编辑距离对齐，每个位置上的差异归入三类之一。</p><div class="table-wrap"><table><thead><tr><th>错误类型</th><th>符号</th><th>例子（标准 → 识别）</th><th>业务影响</th></tr></thead><tbody><tr><td>替换错误</td><td><b>Sub</b></td><td>今天天气 → 今天天<b>汽</b></td><td>语义可能完全改变</td></tr><tr><td>删除错误</td><td><b>Del</b></td><td>今天天气真好 → 今天<b>（漏）</b>真好</td><td>丢信息，短句影响大</td></tr><tr><td>插入错误</td><td><b>Ins</b></td><td>今天天气 → 今天天<b>气了</b></td><td>多出无意义词</td></tr></tbody></table></div><p><b>WER（词错误率）=（Sub + Del + Ins）÷ 标准答案总词数。</b>两个易错点：① 分母是<b>标准答案</b>的词数，不是识别结果的词数；② WER 可能<b>超过 100%</b>（插入很多时），不需要截断。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：WER 怎么算、多少算好</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>WER 参考区间</th><th>说明</th></tr></thead><tbody><tr><td>安静环境、标准普通话、朗读</td><td><b>2% – 5%</b></td><td>接近人类水平（人类约 4%）</td></tr><tr><td>电话信道、一般对话</td><td><b>8% – 15%</b></td><td>商用系统常见水平</td></tr><tr><td>远场、带口音、嘈杂环境</td><td><b>20% – 40%</b></td><td>需要麦克风阵列与前端增强</td></tr><tr><td>强噪声 / 多人重叠说话</td><td><b>&gt; 40%</b></td><td>基本不可用，需要说话人分离</td></tr><tr><td>中文 CER（字错误率）</td><td>比 WER 高 <b>5 – 10 个点</b></td><td>中文无空格，字级标注更常见</td></tr></tbody></table></div><p><b>用 jiwer 计算 WER 与错误分解</b></p><pre><code># 用 jiwer 计算 WER 与三类错误分解（Python）
+pip install jiwer
+
+from jiwer import wer, compute_measures
+
+truth = '今天天气真好 适合出门'
+hypo  = '今天天汽真好 适合出门'
+
+print('WER:', wer(truth, hypo))
+
+m = compute_measures(truth, hypo)
+print('替换 Sub:', m['substitutions'])
+print('删除 Del:', m['deletions'])
+print('插入 Ins:', m['insertions'])
+print('总词数 N:', m['truth'])
+
+# 中文需先分词，或改用字级 CER：
+# 把字符串切成单字列表再计算，避免分词误差混进指标</code></pre><p><b>数量级直觉：</b>WER 每降低 1 个百分点，在 5 分钟音频（约 800 词）里就少错 8 个词 —— 这 8 个词往往决定了下游任务能不能做对。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界：错误类型指向的病因</h2><div class="table-wrap"><table><thead><tr><th>观察到的错误形态</th><th>最可能的原因</th><th>优先排查方向</th></tr></thead><tbody><tr><td>大量<b>删除</b>，且集中在句尾</td><td>VAD 截断 / 端点检测过早</td><td>检查 VAD 阈值与尾点超时</td></tr><tr><td>大量<b>删除</b>，集中在句首</td><td>音频起头被切掉</td><td>检查前端缓冲与首包处理</td></tr><tr><td>替换集中在<b>同音字</b></td><td>缺语言模型或热词</td><td>加业务热词、接 LM rescoring</td></tr><tr><td>替换集中在<b>专有名词</b></td><td>词表未覆盖</td><td>加自定义词表 / 类目短语</td></tr><tr><td>大量<b>插入</b>且是语气词</td><td>模型把噪声识别成词</td><td>加前端降噪、提高 VAD 门限</td></tr><tr><td>整体 WER 突然升高</td><td>音频编码 / 采样率变了</td><td>核对采样率 16k、单声道、PCM</td></tr><tr><td>某些说话人 WER 明显高</td><td>口音 / 年龄 / 语速</td><td>做说话人自适应或针对性微调</td></tr></tbody></table></div><p><b>排查三条铁律：</b></p><ul><li>① <b>先确认音频本身没问题</b>：采样率 16 kHz、单声道、无削波、音量适中（约 −20 到 −12 dBFS）</li><li>② <b>先分错误类型再动手</b>：Sub / Del / Ins 指向的病因完全不同，不分类就是瞎调</li><li>③ <b>用固定测试集对比</b>：每次改动只在同一个测试集上比 WER，否则数据波动会骗人</li><li>④ 测试集要<b>分层</b>：安静 / 嘈杂、男声 / 女声、标准 / 口音各一层，只看总 WER 会掩盖问题</li><li>⑤ <b>数字与专有名词</b>要单独统计，它们错一个字业务就废了</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>WER 低就等于业务可用吗？</summary><p>不必然。WER 是<b>词级</b>指标，但业务关心的是<b>语义</b>。比如把「转账给张三」识别成「转账给章三」，WER 只算 1 个词错，但业务上是致命错误。所以生产上要额外统计<b>关键字段准确率</b>（实体 / 槽位准确率），把人名、金额、日期、地名单独拎出来评估。</p></details><details><summary>为什么中文常报 CER 而不是 WER？</summary><p>因为中文没有空格，<b>分词本身就有误差</b>，不同分词器切出来的词数不同，WER 的分母就不一致，跨系统不可比。字错误率（CER）以单字为单位，<b>无歧义、可复现</b>。中文论文与工业报告普遍用 CER，英文用 WER。</p></details><details><summary>测试集多大才够？</summary><p>取决于你要分辨多小的差异。经验上：<b>要分辨 1% 的 WER 差异，至少需要几千词</b>（约 30 分钟以上语音）。小测试集（几百句）的 WER 波动可能高达 ±3%，会导致你把噪声当成改进。正式结论必须给<b>置信区间</b>。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>为什么两套分词器算出的中文 WER 不能直接比较？</summary><p>词边界改变了参考词数和编辑操作数；必须先统一分词与归一化规则。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/asr-foundations.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

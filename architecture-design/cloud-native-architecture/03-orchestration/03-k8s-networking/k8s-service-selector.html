@@ -242,6 +242,24 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
   .xrel-up a{color:inherit;text-decoration:none}
   .xrel-up a:hover{opacity:1;text-decoration:underline}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -695,6 +713,20 @@ kubectl run tmp --rm -it --image=busybox -- nslookup &lt;svc>.&lt;ns>.svc.cluste
 <details class="x-qa2"><summary>Service 能做会话保持吗？</summary><p>可以，设置 <code>sessionAffinity: ClientIP</code>，并可用 <code>sessionAffinityConfig</code> 设超时。但要注意它基于客户端 IP，经过 NAT 后多个用户可能被当成同一个，且会影响负载均衡均匀度。</p></details>
 <details class="x-qa2"><summary>EndpointSlice 和 Endpoints 有什么区别？</summary><p>Endpoints 把所有后端塞进一个对象，规模大时更新代价高；<b>EndpointSlice</b> 把后端切成多个（默认每片最多 100 个），更新只影响小片，显著降低了大规模服务下的控制面压力（k8s 1.21+ 默认启用）。</p></details>
 <details class="x-qa2"><summary>跨命名空间怎么访问？</summary><p>用<b>全限定域名</b>：<code>svc.namespace.svc.cluster.local</code>。Service 的 selector 只能选本命名空间的 Pod，跨命名空间访问需要显式写全域名，或用 ExternalName 做一层映射。</p></details></section>
+<section class="x-sec"><div class="x-dry"><h2>第二层 · kube-proxy 模式与转发链路参数</h2><div class="table-wrap"><table><thead><tr><th>模式</th><th>工作方式</th><th>规模上限</th><th>适用</th></tr></thead><tbody><tr><td>userspace</td><td>转发回用户态进程</td><td>很小，已基本不用</td><td>仅历史版本</td></tr><tr><td>iptables</td><td>写 iptables 规则做 DNAT</td><td>规则上万条后更新变慢</td><td>中小规模默认</td></tr><tr><td>IPVS</td><td>内核哈希表 + 多种调度算法</td><td>可支撑上万 Service</td><td>大规模集群首选</td></tr><tr><td>nftables</td><td>新一代包过滤框架</td><td>较新版本提供</td><td>逐步替代 iptables 的方向</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数 / 对象</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td>EndpointSlice 每片 endpoint 数</td><td>100</td><td>超过就自动再开一片</td></tr><tr><td>kube-proxy 同步周期</td><td>30 s（含抖动）</td><td>全量同步代价随规模增长</td></tr><tr><td>Service ClusterIP</td><td>从 --service-cidr 分配</td><td>纯三层虚拟 IP，ping 不通是正常的</td></tr><tr><td>conntrack 表容量</td><td>依节点内存而定</td><td>打满会丢包并报 table full</td></tr><tr><td>NodePort 端口范围</td><td>30000-32767</td><td>默认受限，可调整</td></tr><tr><td>externalTrafficPolicy</td><td>Cluster</td><td>改 Local 可保留源 IP，但要承担跨节点转发</td></tr></tbody></table></div><p><b>排查常用命令</b></p><pre><code># 看 Service 选中了哪些 Pod
+kubectl get endpointslices -l kubernetes.io/service-name=my-svc -o yaml
+kubectl get ep my-svc                      # 旧版 Endpoints 对象
+
+# 看转发规则（iptables 模式）
+iptables-save -t nat | grep -i my-svc
+# IPVS 模式
+ipvsadm -Ln | grep -A2 -i cluster-ip
+
+# conntrack 打满的自查
+cat /proc/sys/net/netfilter/nf_conntrack_count
+cat /proc/sys/net/netfilter/nf_conntrack_max</code></pre></div></section>
+<section class="x-sec"><div class="x-dry"><h2>第三层 · 访问不通时的排查顺序</h2><ul><li>第一步：kubectl get endpointslices 看有没有 endpoint —— 为空说明<b> selector 没匹配到 Pod</b>，先核对 Pod 的 label</li><li>第二步：kubectl get pod --show-labels 确认 label 拼写与命名空间，Service 只能选到<b>同命名空间</b>的 Pod</li><li>第三步：进 Pod 里直接 curl ClusterIP:port，排除 DNS 干扰</li><li>第四步：curl PodIP:port 直连，能通说明问题在转发链路上</li><li>第五步：看 readinessProbe —— 未就绪的 Pod 不会进 endpoint，这是最高频的坑</li><li>第六步：节点上查 conntrack 与 iptables/IPVS 规则是否同步</li></ul><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>endpoint 为空</td><td>label 不匹配或 Pod 未就绪</td><td>修 label / 修 readinessProbe</td></tr><tr><td>ClusterIP 偶发超时</td><td>conntrack 表满或规则未同步</td><td>扩容 conntrack 或换 IPVS</td></tr><tr><td>能通但源 IP 不对</td><td>externalTrafficPolicy=Cluster 做了 SNAT</td><td>改 Local（需保证本节点有 Pod）</td></tr><tr><td>Headless 解析不到</td><td>没用 ClusterIP=None 或 Pod 未就绪</td><td>检查 Service 定义与就绪状态</td></tr><tr><td>跨节点不通</td><td>CNI 插件或节点防火墙问题</td><td>查网络插件状态与节点安全组</td></tr></tbody></table></div></div></section>
+
 <div class="xrel">
   <h2 class="xrel-t">相关页面</h2>
   <div class="xrel-l"><a href="../01-k8s-architecture/docker-k8s.html">Docker & K8S 架构…</a><a href="../01-k8s-architecture/k8s-architecture.html">K8S 架构与 Ingress…</a><a href="../02-k8s-workload/k8s-requests-limits-scheduling-oom.html">Kubernetes requ…</a><a href="../02-k8s-workload/k8s-startup-readiness-liveness-probes.html">Kubernetes 三种探针…</a></div>

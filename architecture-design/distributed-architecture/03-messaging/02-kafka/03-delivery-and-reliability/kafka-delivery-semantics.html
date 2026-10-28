@@ -294,6 +294,24 @@
   .xrel-up a{color:inherit;text-decoration:none}
   .xrel-up a:hover{opacity:1;text-decoration:underline}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
     <div class="container">
@@ -807,6 +825,33 @@ try {
   <div class="xrel-up"><a href="../../../index.html">← 返回 architecture-design</a>　·　<a href="../../../../../index.html#subjects">知识地图</a></div>
 </div>
 
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 三种语义靠哪些参数实现</h2><div class="table-wrap"><table><thead><tr><th>语义</th><th>生产者配置</th><th>消费者做法</th><th>代价</th></tr></thead><tbody><tr><td>最多一次（at most once）</td><td>acks=0 或 1，不重试</td><td>先提交 offset 再处理</td><td>可能丢，但绝不重复</td></tr><tr><td>最少一次（at least once）</td><td>acks=all + retries>0</td><td><b>先处理再提交 offset</b></td><td>不丢，但可能重复</td></tr><tr><td>精确一次（exactly once）</td><td>enable.idempotence=true + 事务</td><td>read_committed + 事务提交 offset</td><td>吞吐下降、配置复杂</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr><td>acks</td><td>1（旧版默认）/ all（新版）</td><td>all 表示等所有 ISR 副本确认</td></tr><tr><td>enable.idempotence</td><td>false</td><td>开启后单分区内不会因重试产生重复</td></tr><tr><td>max.in.flight.requests.per.connection</td><td>5</td><td>开启幂等时 ≤5 才能保证顺序</td></tr><tr><td>retries / delivery.timeout.ms</td><td>整数次 / 120000 ms</td><td>重试次数与总超时上限</td></tr><tr><td>min.insync.replicas</td><td>1</td><td>设为 2 后 acks=all 才真正抗一副本故障</td></tr><tr><td>transactional.id</td><td>无</td><td>跨分区原子写需要它</td></tr><tr><td>enable.auto.commit</td><td>true</td><td>要精确控制就设 false 手动提交</td></tr></tbody></table></div><pre><code>// 生产者：最少一次的推荐配置（不丢，靠消费端幂等解决重复）
+Properties p = new Properties();
+p.put('acks', 'all');                       // 等 ISR 全部确认
+p.put('enable.idempotence', 'true');        // 防止重试造成的重复
+p.put('max.in.flight.requests.per.connection', 5);
+p.put('retries', 3);
+p.put('delivery.timeout.ms', 120000);
+
+// 精确一次：跨分区原子写（生产 + 消费-处理-生产 的原子链路）
+p.put('transactional.id', 'order-service-1');
+producer.initTransactions();
+try {
+    producer.beginTransaction();
+    producer.send(new ProducerRecord&lt;&gt;(topic, key, value));
+    producer.sendOffsetsToTransaction(offsets, 'consumer-group'); // offset 一起提交
+    producer.commitTransaction();
+} catch (Exception e) {
+    producer.abortTransaction();
+    throw e;
+}
+
+// 消费端：精确一次要配隔离级别
+consumerProps.put('isolation.level', 'read_committed');  // 不读未提交的事务消息
+consumerProps.put('enable.auto.commit', 'false');        // 手动控制提交时机</code></pre><p><b>顺序保证的边界</b>：Kafka 只保证<b>分区内</b>有序。想让同一业务 key 的消息严格有序，就要按 key 分区；开了重试又允许多个在途请求时，还可能乱序 —— 这就是为什么要开幂等且限制在途数。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 五个高频坑与排查顺序</h2><ul><li><b>以为 acks=all 就高枕无忧</b>：<code>min.insync.replicas=1</code> 时 acks=all 仍可能只在单副本上落盘；要设成 2（配合 3 副本）。</li><li><b>重试导致乱序</b>：不开幂等又在途数 >1，重试会让后发的消息先到；开幂等后 Kafka 会在服务端缓冲并按序提交。</li><li><b>消费端先提交 offset 后处理</b>：这是「最多一次」，处理失败就永久丢失；绝大多数业务应该反过来。</li><li><b>重复消费没做幂等</b>：最少一次 + 重平衡必然产生重复；消费端要用唯一键去重或设计成幂等操作。</li><li><b>事务用得太随意</b>：事务会明显降低吞吐并增加延迟，只在「必须跨分区原子」时用；单分区场景幂等就够。</li><li><b>排查顺序</b>：先确认语义目标（能不能接受重复）→ 再查生产者配置 → 再查消费端提交时机 → 最后查副本与 ISR 状态。</li></ul><p class="muted">一句话选型：<b>能接受重复就选「最少一次 + 消费端幂等」</b>，这是成本与可靠性的最佳平衡点；真正需要精确一次的场景比想象中少得多。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么精确一次这么贵</h2><details><summary>幂等和事务是一回事吗？</summary><p>不是。幂等解决的是<b>单分区内因重试产生的重复</b>，开销很小；事务解决的是<b>跨分区（以及消费-生产链路）的原子性</b>，需要协调者与事务日志，开销大得多。</p></details><details><summary>为什么消费端「处理完再提交」仍可能重复？</summary><p>因为处理成功但提交 offset 前发生重平衡，下个消费者会从旧 offset 重新消费。这是最少一次的固有代价，只能靠业务幂等消除影响。</p></details><details><summary>端到端精确一次真的存在吗？</summary><p>严格来说只在<b>Kafka 内部链路</b>成立；一旦涉及外部系统（写数据库、调接口），就需要外部系统配合幂等或两阶段提交，否则仍会重复。</p></details></div></section>
 <footer>
             <p>📚 深入Kafka系列 | 技术深度解析</p>
             <p>生成时间：2026-05-25</p>

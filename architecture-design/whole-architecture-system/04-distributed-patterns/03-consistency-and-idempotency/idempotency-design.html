@@ -194,11 +194,7 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
     <div class="qa"><h2>面试高频问答</h2><div class="qcard"><div class="q">Q：GET 天然幂等，POST 不幂等，怎么处理？</div><div class="a">A：REST 语义上 GET/PUT/DELETE 应幂等，POST 不幂等。对必须安全的写操作，用『幂等键 + 去重表』把非幂等接口变成幂等，或改用 PUT（带资源标识）。</div></div><div class="qcard"><div class="q">Q：幂等键存多久？</div><div class="a">A：至少要覆盖『请求可能重复到达』的窗口（通常几小时到一天），并定期清理；同时配合业务状态机，即使键过期也能靠状态兜底。</div></div></div>
 <div class="back"><a href="../../index.html">← 返回整体架构系统</a></div>
   </div>
-  <div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="saga-pattern.html">Saga 分布式事务</a><a href="../01-entry-and-discovery/api-gateway.html">API 网关架构模式</a><a href="../01-entry-and-discovery/service-discovery.html">服务发现架构模式</a><a href="../02-resilience-and-traffic/circuit-breaker.html">断路器与熔断</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 整体架构</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
+  
 
 <footer>© 2026 Visuals · 目录即知识层级</footer>
 <script src="../../../../assets/pattern-lesson.js"></script>
@@ -238,10 +234,40 @@ ON DUPLICATE KEY UPDATE msg_id = msg_id;   -- 冲突时不做任何变更
 -- 判断 ROW_COUNT()：
 --   1  → 首次处理，继续执行业务逻辑
 --   0  → 重复消息，直接 ACK 返回</div></section>
+<section class="x-sec"><h2>四类典型重复场景</h2><div class="x-mini-grid"><div class="x-mini"><b>用户重复提交</b><span>双击 / 刷新 / 返回再提交 → 重复下单</span></div><div class="x-mini"><b>网络超时重试</b><span>客户端 / 网关重试 → 重复扣款</span></div><div class="x-mini"><b>消息重复投递</b><span>MQ at-least-once → 重复加积分</span></div><div class="x-mini"><b>上游回调重放</b><span>第三方回调多次 → 重复发货</span></div></div><p>四类来源各异，但兜底手段一致：用<b>唯一标识 + 存储约束</b>把重复挡在业务副作用之外。</p></section>
+<section class="x-sec"><h2>落地代码示例：去重表 / Token / 重试</h2><p>方案落到代码上，关键是<b>把判断交给存储约束</b>（唯一索引、Lua 原子脚本），而不是应用层「先查后写」。下面三段是工程里最常见的最小可用实现。</p><div class="x-tbl-wrap"><table class="x-tbl"><tr><th>问题</th><th>推荐实现</th><th>选型要点</th></tr><tr><td>创建类去重</td><td>去重表 + 唯一索引（INSERT 抢占）</td><td>与业务同事务；冲突返回首次结果</td></tr><tr><td>防重复提交</td><td>Token 预领取 + Lua 原子核销</td><td>Redis SETNX / Lua；比对 value 防误删</td></tr><tr><td>写操作重试</td><td>退避 + 抖动 + 上限</td><td>避免重试风暴打垮下游</td></tr></table></div><p><b>去重表建表（MySQL）</b></p><div class="x-code">CREATE TABLE idempotent_record (
+    biz_id    VARCHAR(64)  NOT NULL,
+    biz_type  VARCHAR(32)  NOT NULL,
+    result    VARCHAR(2048),
+    status    TINYINT      NOT NULL,   -- 0 处理中 / 1 成功 / 2 失败
+    expire_at DATETIME     NOT NULL,
+    PRIMARY KEY (biz_type, biz_id)      -- 唯一索引是幂等的根基
+) ENGINE=InnoDB;</div><p><b>Token 原子核销（Lua）</b></p><div class="x-code">-- KEYS[1]=token key, ARGV[1]=期望业务指纹
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])     -- 命中：删除并返回 1
+else
+  return 0                              -- 未命中或指纹不符：拒绝
+end</div><p><b>带抖动的指数退避（Python）</b></p><div class="x-code">import random, time
+
+def retry(fn, times=4, base=0.1):
+    for i in range(times):
+        try:
+            return fn()
+        except RetryableError:
+            if i == times - 1: raise
+            sleep = base * (2 ** i) * (0.8 + 0.4 * random.random())  # ±20% 抖动
+            time.sleep(sleep)
+# 4 次重试等待约 1.2~1.8s（含抖动）</div><p><b>Redis 还是 MySQL？</b> 并发极高、允许少量丢失用 Redis（SETNX + 过期）；要求绝对可靠用 MySQL（唯一索引 + 事务）。金融类业务一般用 MySQL。幂等记录务必设 TTL（7~30 天）并定期归档，否则表无限膨胀。</p></section>
 <section class="x-sec"><h2>幂等设计的常见误区</h2><div class="x-g2"><div class="x-b2"><h3>把幂等做成「先查后写」</h3><p>这是最高频的错误。检查和写入之间有天然的并发窗口。</p><ul class="x-ol"><li>必须用<b>原子操作</b>：唯一索引、CAS、带条件的 UPDATE</li><li>「查一下再决定」在多实例下必然漏</li></ul></div><div class="x-b2"><h3>去重键选错粒度</h3><ul class="x-ol"><li>太粗：用「用户 ID」去重 → 用户第二笔正常订单被误拦</li><li>太细：每次请求生成新 UUID → 完全起不到去重作用</li><li>正确：键应等于「业务上一次真实意图」，如「订单 ID + 操作类型」</li></ul></div><div class="x-b2"><h3>忽略返回结果的一致性</h3><p>幂等不等于「第二次返回空」。客户端重试时期望拿到<b>与第一次语义相同的结果</b>。</p><ul class="x-ol"><li>应缓存首次执行结果并返回</li><li>否则客户端可能把「已处理」误判为「失败」继续补偿</li></ul></div><div class="x-b2"><h3>去重数据不清理</h3><ul class="x-ol"><li>幂等记录会无限增长，成为新的大表</li><li>按业务保留周期（如 7~30 天）定期归档删除</li><li>保留期要大于最大可能的重复到达间隔</li></ul></div></div></section>
 <section class="x-sec"><h2>深入自检</h2><details class="x-qa2"><summary>GET 请求一定幂等吗？</summary><p>从 HTTP 语义规范上 GET、PUT、DELETE 是幂等的，POST 不是。但工程上要看实现：一个 GET 接口如果内部做了「查询并写入浏览记录 + 计数 +1」，那它就不幂等。反之，一个 POST 接口如果带了幂等键并在服务端去重，它对外表现为幂等。所以幂等是<b>接口的契约</b>，不是由 HTTP 方法自动保证的——设计接口时要显式声明并保证。</p></details>
 <details class="x-qa2"><summary>扣款这种操作怎么做到幂等？</summary><p>关键是不要写「UPDATE account SET balance = balance - 100」这种相对操作，而要基于状态机或流水：① 为每笔扣款生成唯一流水号（业务幂等键），扣款表以流水号建唯一索引；② 扣款前先插入流水（状态=处理中），冲突则说明已处理过；③ 执行 UPDATE 时带条件（如 WHERE balance >= 100）并用乐观锁 version；④ 流水与余额变更在同一事务；⑤ 最终结果记录在流水上，重复请求直接返回该结果。核心是把「相对操作」转化为「基于唯一标识的绝对状态流转」。</p></details>
 <details class="x-qa2"><summary>分布式锁做幂等有什么坑？</summary><p>三个典型问题：① 锁超时——业务执行时间超过锁的 TTL，锁被别人拿到，两个请求同时进入临界区；② 误释放——线程 A 的锁过期后被 B 获得，A 结束时 DEL 掉了 B 的锁（需 value 存唯一标识，用 Lua 比对再删）；③ Redis 主从切换——主节点写入锁后未同步就宕机，从节点提升为主，锁丢失。所以对资金类场景，优先用数据库唯一约束而非分布式锁；必须加锁时用 Redlock 或带 fencing token 的方案。</p></details>
 <details class="x-qa2"><summary>幂等键过期时间设多久？</summary><p>原则是「大于最大可能的重复到达间隔，小于业务允许的存储成本」。考虑几个来源：客户端重试窗口（通常分钟级）、消息队列最大重试时长（可能小时级）、人工补偿与对账周期（可能天级）。实践上：纯防网络重试留 24 小时足够；涉及资金对账的关键流水建议永久保留（或至少保留到对账完成 + 一个争议期）。不要用「几秒钟」——那防不住队列积压导致的延迟重投。</p></details></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="saga-pattern.html">Saga 分布式事务</a><a href="../01-entry-and-discovery/api-gateway.html">API 网关架构模式</a><a href="../01-entry-and-discovery/service-discovery.html">服务发现架构模式</a><a href="../02-resilience-and-traffic/circuit-breaker.html">断路器与熔断</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 整体架构</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

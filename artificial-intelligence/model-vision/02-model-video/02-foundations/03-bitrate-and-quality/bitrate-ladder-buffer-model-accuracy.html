@@ -12,6 +12,28 @@
 <section class="panel"><h2>人眼好看与模型可用不一定一致</h2><p>监控视频里的远处车牌占 20×8 像素，压缩器可能把它当作不显眼的高频细节优先牺牲，整体 VMAF 仍不错，但 OCR 正确率明显下降。动作识别需要足够帧率捕捉运动，物体检测需要空间细节；同样的 2 Mbps 应在 720p30、1080p15 等候选之间按任务验证，不能只按人眼偏好选。下游模型还应按小目标、暗场、雨雪、快速运动和字幕切片测试。</p><p>有些视频分析不必存整段最高码率，可在边缘端裁剪感兴趣区域或保存触发事件前后高质量片段。但裁剪可能丢上下文，必须确认任务所需视野。</p></section>
 <section class="panel"><h2>画质指标怎样用</h2><p>PSNR、SSIM 需要与源视频对齐比较；VMAF 等感知指标能帮助筛选主观体验，但各有数据分布与场景限制。质量评测还要测编码/解码延迟、码率峰值、播放器卡顿率和切档频率。若目标是 AI 推理，把业务正确率或召回率放入同一张对照表：某档视觉分只少一点，却让小目标召回跌 15%，就不该仅凭视觉分上线。</p><p>码率还影响存储。4 Mbps 连续一小时约 1.8 GB 十进制视频数据，未计音频、容器和副本；一千路摄像头持续保存会快速放大成本。保留策略需与任务和法规要求一起设计。</p></section>
 <section class="panel"><h2>验收三种网络条件</h2><p>分别用稳定 5 Mbps、稳定 3 Mbps、在 1–5 Mbps 波动的网络播放三档。记录首帧时间、卡顿总时长、切换次数、P95 片段下载时间和缓冲最低值；同时把解码后帧送给目标 OCR/检测模型，记录关键字段准确率和小目标召回。选定 ABR 策略后再模拟网络突然下降与恢复，确认升档有足够余量、降档及时。结论要写清是直播还是点播、端到端延迟预算与模型任务，而不是一句“2 Mbps 最佳”。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：码率阶梯是什么</h2><p><b>码率阶梯（Bitrate Ladder）</b>是把同一路视频预先编码成多个「分辨率 × 码率」档位，播放时按带宽选档。这是 ABR（自适应码率）流媒体的基础。</p><div class="table-wrap"><table><thead><tr><th>档位</th><th>分辨率</th><th>推荐码率（H.264）</th><th>推荐码率（H.265/AV1）</th></tr></thead><tbody><tr><td>240p</td><td>426×240</td><td><b>300 – 500 Kbps</b></td><td>200 – 350 Kbps</td></tr><tr><td>360p</td><td>640×360</td><td><b>700 – 1000 Kbps</b></td><td>450 – 700 Kbps</td></tr><tr><td>480p</td><td>854×480</td><td><b>1 – 1.5 Mbps</b></td><td>700 – 1100 Kbps</td></tr><tr><td>720p</td><td>1280×720</td><td><b>2 – 4 Mbps</b></td><td>1.5 – 2.5 Mbps</td></tr><tr><td>1080p</td><td>1920×1080</td><td><b>4 – 8 Mbps</b></td><td>3 – 5 Mbps</td></tr><tr><td>1440p</td><td>2560×1440</td><td><b>8 – 16 Mbps</b></td><td>6 – 10 Mbps</td></tr><tr><td>4K</td><td>3840×2160</td><td><b>15 – 35 Mbps</b></td><td>10 – 22 Mbps</td></tr></tbody></table></div><p><b>判定原则：</b>相邻档位的码率差不要太大（通常 <b>1.5–2 倍</b>），否则带宽刚好卡在两档之间时会频繁来回切换，体验很差。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：HLS/DASH 的关键参数</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>典型值</th><th>影响</th></tr></thead><tbody><tr><td><b>分片时长</b></td><td>HLS 常 <b>6 s</b>，低延迟 <b>2–4 s</b></td><td>越长越省请求、但起播与切换越慢</td></tr><tr><td><b>播放列表窗口</b></td><td>通常 <b>3–10</b> 个分片</td><td>影响可回退的缓冲时长</td></tr><tr><td><b>目标缓冲</b></td><td><b>10 – 30 s</b></td><td>越抗抖动，但起播延迟越大</td></tr><tr><td><b>起播缓冲阈值</b></td><td><b>2 – 4 s</b></td><td>决定首屏时间</td></tr><tr><td><b>GOP 大小</b></td><td>常 <b>2 s</b>（与分片对齐）</td><td>GOP 必须与分片边界对齐才能无缝切档</td></tr></tbody></table></div><p><b>用 FFmpeg 生成 HLS 码率阶梯</b></p><pre><code># 用 FFmpeg 生成一个标准码率阶梯（H.264 + HLS）
+# 1080p 档
+ffmpeg -i input.mp4 -c:v libx264 -preset medium -b:v 5M \
+       -maxrate 6M -bufsize 10M -g 60 -keyint_min 60 -sc_threshold 0 \
+       -c:a aac -b:a 128k -hls_time 6 -hls_playlist_type vod \
+       -hls_segment_filename '1080p_%03d.ts' 1080p.m3u8
+
+# 720p 档（建议用 2-pass 保证码率准确）
+ffmpeg -i input.mp4 -c:v libx264 -b:v 3M -maxrate 3.5M -bufsize 6M \
+       -vf scale=w=1280:h=720 -g 60 -keyint_min 60 -sc_threshold 0 \
+       -c:a aac -b:a 128k -hls_time 6 720p.m3u8
+
+# 关键参数含义：
+#   -g 60            GOP=60 帧（30fps 时 = 2 秒），必须与分片时长整除
+#   -keyint_min 60   最小 GOP，强制固定间隔关键帧
+#   -sc_threshold 0  关闭场景切换自动插关键帧（保证 GOP 固定）
+#   -maxrate/bufsize 限制码率峰值，防止超出档位导致切档失败
+
+# 生成主播放列表（master playlist）
+# 各档位之间必须 GOP 对齐，否则切档会花屏或卡顿</code></pre><p><b>数量级直觉：</b>一路 1080p 5 Mbps 的直播，1 小时产生约 <b>2.2 GB</b> 数据；做成 5 档阶梯则存储约 <b>6 GB</b>（含低码率档），这是转码存储成本的主要来源。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>处理方向</th></tr></thead><tbody><tr><td>切档时画面<b>卡顿或花屏</b></td><td>各档位 GOP 未对齐</td><td>统一 GOP 与关键帧间隔</td></tr><tr><td>频繁上下切档（振荡）</td><td>码率阶梯档位间隔不合理</td><td>缩小相邻档位间隔、加切换滞回</td></tr><tr><td>起播慢</td><td>初始缓冲目标设太大</td><td>降低起播阈值、先起低码率再升档</td></tr><tr><td>卡顿但带宽足够</td><td><b>缓冲区模型过于激进</b></td><td>提高目标缓冲、降低升档速度</td></tr><tr><td>画质差但带宽够</td><td>码率定得太低</td><td>提高该分辨率的码率或用 H.265/AV1</td></tr><tr><td>直播延迟大</td><td>分片时长太长</td><td>缩短分片（低延迟 HLS），但会更依赖网络稳定</td></tr></tbody></table></div><p><b>排查清单：</b></p><ul><li>① 先确认<b>各档位 GOP 对齐</b> —— 这是切档正常的前提</li><li>② 检查实际带宽估算是否准确（ABR 算法的输入）</li><li>③ 确认 <code>maxrate</code> 有设置，否则码率会冲高导致后续切档失败</li><li>④ 检查缓冲区模型参数：目标缓冲、升档/降档阈值</li><li>⑤ 统计<b>卡顿率、起播时间、切档次数</b>三个指标，缺一不可</li><li>⑥ 直播场景还要看端到端延迟，它与抗抖动能力天然矛盾</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>码率阶梯为什么不能只做两个档（高清+标清）？</summary><p>因为带宽是连续分布的，而码率是离散的。只有两档时，带宽 1.8 Mbps 的用户看 480p（1.2 M）会浪费画质余量，又不敢上 720p（3 M）会卡顿 —— <b>只能停在明显低于其带宽的档位</b>。多几档能让不同带宽的用户都贴近自己的上限，代价是转码与存储成本上升（约按档位数线性增长）。</p></details><details><summary>缓冲和延迟为什么不能兼得？</summary><p>因为<b>缓冲区是拿延迟换稳定性</b>。缓冲 30 秒意味着你看到的是 30 秒前的内容，但网络抖动 20 秒也不会卡；缓冲 3 秒则几乎实时，但网络一抖就卡。直播场景尤其明显：低延迟 HLS（分片 2 s）已经把端到端压到 5–10 秒，代价是抗抖动能力明显下降。<b>点播可以重缓冲，直播只能二选一。</b></p></details><details><summary>H.265/AV1 能省多少？值得吗？</summary><p>同等画质下，<b>H.265 比 H.264 省约 40–50% 码率，AV1 再多省 20–30%</b>。对带宽成本大户（长视频、直播）收益巨大。但代价有三：① <b>编码算力</b>显著提升（AV1 实时编码尤其贵）；② <b>兼容性</b>：老设备不支持 AV1，需要保留 H.264 档做兜底；③ <b>专利与授权</b>复杂度。现实做法通常是<b>多编码并存</b>：同一内容出 H.264 + H.265 两套阶梯。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>网络稳定 3 Mbps，持续选 4 Mbps 视频档并只看平均画质分，能保证播放与 AI 识别都好吗？</summary><p>不能。4 Mbps 长期超过可用吞吐会耗尽缓冲；压缩还可能损伤小目标，需同时测卡顿和任务效果。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="bitrate-quality.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../../assets/knowledge-lesson.js"></script></body></html>

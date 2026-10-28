@@ -81,4 +81,24 @@
   <div class="xrel-up"><a href="../../index.html">← 返回 计算机组成</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
 </div>
 
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：闪存的三个固有约束</h2><p>闪存（NAND）有三个和磁盘完全不同的性质，SSD 的所有复杂机制都是为了绕开它们。</p><div class="table-wrap"><table><thead><tr><th>性质</th><th>含义</th><th>带来的后果</th></tr></thead><tbody><tr><td><b>写前需擦除</b></td><td>不能直接覆盖写，必须先擦</td><td>产生了垃圾回收（GC）</td></tr><tr><td><b>读写单位 ≠ 擦除单位</b></td><td>页 4–16 KB，块含数百页（几 MB）</td><td>擦大块要搬走其中的有效数据</td></tr><tr><td><b>擦写有寿命</b></td><td>P/E 次数有限（TLC 约 <b>1000–3000</b> 次）</td><td>需要磨损均衡（Wear Leveling）</td></tr></tbody></table></div><p><b>FTL（Flash Translation Layer）</b>是 SSD 内部的「翻译层」：把主机看到的逻辑地址映射到真实的物理页，主机以为在覆盖写，实际是写到新页 + 更新映射表。它同时负责 GC 与磨损均衡。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：写放大到底多大</h2><p><b>写放大（Write Amplification, WA）= 实际写入闪存的数据量 ÷ 主机请求写入的数据量。</b>WA = 1 是理想情况（写多少就存多少），随机小写入会让 WA 远大于 1。</p><div class="table-wrap"><table><thead><tr><th>写入模式</th><th>WA 典型值</th><th>说明</th></tr></thead><tbody><tr><td><b>大块顺序写</b></td><td><b>接近 1</b></td><td>整块写满，几乎无需搬数据</td></tr><tr><td><b>4 KB 随机写（空闲盘）</b></td><td><b>3 – 5</b></td><td>需要搬移有效页</td></tr><tr><td><b>4 KB 随机写（满盘）</b></td><td><b>5 – 15</b></td><td>空间紧张，GC 频繁，最坏情况</td></tr><tr><td><b>有 OP 预留空间</b></td><td>可降到 <b>2 – 4</b></td><td>预留空间给 GC 喘息</td></tr><tr><td><b>稳态企业级 SSD</b></td><td>通常 <b>&lt; 3</b></td><td>大 OP + 强 FTL 算法</td></tr></tbody></table></div><p><b>测量写放大与 SSD 磨损</b></p><pre><code># 用 fio 测随机写的写放大（对比主机写入量 vs NAND 写入量）
+fio --name=randwrite --ioengine=libaio --rw=randwrite --bs=4k \
+    --size=10G --numjobs=4 --iodepth=32 --runtime=300 \
+    --time_based --direct=1 --group_reporting --output=fio.log
+
+# 读取 SMART 中的 NAND 实际写入量（不同厂商字段不同）
+smartctl -a /dev/nvme0 | grep -iE 'data units written|host writes|percentage used'
+# NVMe 常见字段：
+#   Data Units Written       : 以 512B×1000 为单位
+#   Host Write Commands      : 主机发起的写命令数
+# 计算：WA = (Data Units Written × 512000) / (主机实际写入字节数)
+
+# 看 SSD 已用寿命百分比
+smartctl -a /dev/nvme0 | grep -i 'percentage used'
+# 100 表示已超出标称寿命（不代表立刻坏）
+
+# 手动触发 TRIM / discard，帮助 GC 提前回收
+fstrim -v /</code></pre><p><b>寿命直觉：</b>一块 1 TB、标称 600 TBW 的 SSD，若 WA = 5、每天写 100 GB 主机数据，实际每天消耗 500 GB 寿命 —— <b>600 TBW ÷ 0.5 TB/天 = 1200 天</b>，约 3 年多。WA 从 5 降到 2.5，寿命直接翻倍。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>原因</th><th>处理方向</th></tr></thead><tbody><tr><td>写入延迟突然飙高</td><td><b>GC 在搬数据</b>（写放大发作）</td><td>留 OP、避免满盘、改用顺序写</td></tr><tr><td>用了很久后写变慢</td><td>空闲块耗尽，每次写都要先 GC</td><td>做 TRIM、降低使用率到 80% 以下</td></tr><tr><td>SSD 寿命掉得快</td><td>WA 高 + 写入量大</td><td>检查是否有不必要的小随机写</td></tr><tr><td>顺序读写也慢</td><td><b>不是 GC 问题</b>，可能是温度过高降频</td><td>查温度、检查散热</td></tr><tr><td>读延迟抖动大</td><td>GC 与读操作争抢闪存带宽</td><td>减少前台 GC 频率、留 OP</td></tr></tbody></table></div><p><b>降低写放大的实操清单：</b></p><ul><li>① <b>别把盘写满</b>：使用率控制在 <b>70–80%</b> 以下，留空间给 GC</li><li>② <b>留 OP 预留空间</b>：企业盘常见 7–28% OP，消费盘可手动留</li><li>③ <b>开启 TRIM / discard</b>：让 SSD 知道哪些块可以提前回收</li><li>④ <b>批量写代替零散写</b>：把小写合并成大写，WAL 类场景尤其注意</li><li>⑤ <b>对日志类数据考虑单独盘</b>：高频小写单独放，避免拖累主盘 GC</li><li>⑥ 监控 <code>Percentage Used</code>，提前规划更换</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么 SSD 不能直接覆盖写？</summary><p>因为 NAND 的物理特性：<b>写（program）以页为单位，擦（erase）以块为单位</b>，且擦除的粒度远大于写入。要改一个页里的数据，不能只擦那一页，必须<b>整个块擦掉</b>，而块里其他页的有效数据会一起被抹掉。所以只能把有效数据搬走、擦块、再写回 —— 这一整套就是 GC，多出来的写入就是<b>写放大</b>的根源。</p></details><details><summary>OP（预留空间）为什么能降写放大？</summary><p>因为 GC 需要<b>空的块作为搬运目的地</b>。盘接近写满时，几乎找不到空块，每一次小写入都要先搬走一整块的有效数据，WA 陡增。留出 10–20% 的 OP 后，GC 总能找到空块直接写新数据，不必频繁搬运。<b>代价是可用容量变小</b>，这是拿容量换性能与寿命的交易。</p></details><details><summary>TRIM 到底做了什么？</summary><p>文件系统删除文件时，<b>只是标记删除，不会通知 SSD</b>。SSD 一直以为那些页还有数据，GC 时会老老实实搬走它们 —— 白搬。TRIM 就是<b>告诉 SSD「这些逻辑地址已经作废」</b>，SSD 收到后可以把对应页标记为无效，GC 时直接跳过。所以定期 <code>fstrim</code> 能显著降低 WA、延长寿命。现代系统多用 <code>discard</code> 挂载选项或定时 TRIM。</p></details></section>
 <footer>© 2026 Visuals · 计算机组成原理</footer></main><script src="../../../../assets/knowledge-lesson.js"></script></body></html>

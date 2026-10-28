@@ -18,7 +18,19 @@
 .mini{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin:14px 0}
 .mini div{background:#1b2c40;border:1px solid #40556c;border-radius:8px;padding:9px 11px;font-size:.88rem}
 .mini b{display:block;color:#edf4fa}.mini span{color:#9fb3c6;font-size:.85rem}
-</style></head>
+</style><style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
+</head>
 <body><main class="lesson"><a class="back" href="../../index.html">← 返回组成原理</a>
 <header><span class="eyebrow">VISUALS · 组成原理 · 存储层次</span><h1>写策略与替换算法：dirty 位、写分配与 LRU 的近似实现</h1><p class="lead">读可以随便缓存，写不行——因为内存里还留着一份旧值。写直达还是写回、写未命中要不要先载入、dirty 位怎么维护、LRU 为什么在硬件里只能「近似」，这一篇讲清缓存写路径的全部选择。</p></header>
 <section class="panel"><h2>一句话定位：写操作要决定「什么时候让内存知道」</h2>
@@ -55,4 +67,28 @@
 <section class="panel"><h2>原理与取舍：写回是「延迟一致性换带宽」</h2>
 <p>写回把「内存何时更新」推迟到替换时刻，用 dirty 位记录欠账。它把 N 次写合并成 1 次，代价是任何想读这块数据的核都要先跟持有者打交道。换句话说：<b>写回优化了带宽，把复杂度转嫁给了缓存一致性协议</b>。这也是为什么多核时代一致性协议成为芯片里最复杂的部分之一。</p><details class="qa"><summary>写直达一定比写回慢吗？</summary><p>不一定。写少读多的负载里两者差别很小；写直达实现简单、无需 dirty 位与回写逻辑，某些嵌入式场景更划算。</p></details><details class="qa"><summary>为什么 L1 也用写回？</summary><p>L1 写回可以减少对 L2 的写流量（L2 带宽有限）。早期有些设计用写直达 L1 + 写回 L2，现代多为写回。</p></details><details class="qa"><summary>LRU 的最坏情况是什么？</summary><p>顺序扫描一个比缓存大的数组。LRU 会把整个缓存冲干净，之后热点数据全部 miss。这也是 RRIP 这类「抗扫描」算法出现的原因。</p></details>
 </section>
-<footer>© 2026 Visuals · 计算机组成原理</footer></main><script src="../../../../assets/knowledge-lesson.js"></script></body></html>
+
+<section class="panel"><h2>第二层 · 写策略与替换策略的对照清单</h2><div class="table-wrap"><table><thead><tr><th>策略</th><th>写命中时</th><th>写缺失时</th><th>优点</th><th>代价</th></tr></thead><tbody><tr><td>Write-through（写直达）</td><td>同时写缓存和主存</td><td>直接写主存（不分配）</td><td>一致性简单</td><td>每次写都慢</td></tr><tr><td>Write-back（写回）</td><td>只写缓存，标记为脏</td><td>分配行，写入缓存</td><td>写速度快</td><td>需要脏位与回写逻辑</td></tr><tr><td>Write-allocate（写分配）</td><td>—</td><td>先把行读入缓存再写</td><td>后续写可命中</td><td>多一次读</td></tr><tr><td>No-write-allocate</td><td>—</td><td>直接写主存</td><td>不污染缓存</td><td>后续写仍缺失</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>替换策略</th><th>思路</th><th>实现成本</th><th>典型命中率</th></tr></thead><tbody><tr><td>LRU</td><td>淘汰最久未用</td><td>需维护顺序，成本高</td><td>较高</td></tr><tr><td>PLRU / 伪 LRU</td><td>用树位近似 LRU</td><td>低</td><td>接近 LRU</td></tr><tr><td>Random</td><td>随机挑一个淘汰</td><td>最低</td><td>略低但够用</td></tr><tr><td>FIFO</td><td>淘汰最早进入的</td><td>低</td><td>一般（可能淘汰热点）</td></tr><tr><td>NRU（近似）</td><td>按访问位/脏位分档</td><td>低</td><td>实用</td></tr></tbody></table></div><pre><code># 用 perf 实测缓存行为（Linux）
+# 1) 看缓存未命中事件（需要 PMU 支持，虚拟机里可能不可用）
+perf stat -e cache-references,cache-misses ./your_program
+#   未命中率 = cache-misses / cache-references，超过 10% 就值得优化数据布局
+
+# 2) 更细分（Intel 平台上常用这些事件，名称因 CPU 而异）
+perf stat -e mem_load_retired.l1_miss,mem_load_retired.l3_miss ./your_program
+
+# 3) 用 cachegrind 做离线分析（不需要 PMU，慢但稳）
+valgrind --tool=cachegrind ./your_program
+cg_annotate cachegrind.out.&lt;pid&gt; | head -40
+#   会直接给出每行代码的未命中数，定位热点最直观
+
+# 4) 自己写个微基准感受「行大小」（64 字节是关键数字）
+#   步长从 1 加到 64 元素，耗时会在跨过缓存行边界时明显变化</code></pre><p><b>写回策略的代价</b>：缓存里的脏行在替换时才写回主存，因此存在「缓存与主存不一致」的窗口。多核下这正是需要缓存一致性协议（如 MESI）的原因 —— 写策略与一致性协议是绑定的。</p></section>
+<section class="panel"><h2>第三层 · 六个常见误区与排查清单</h2><ul><li><b>误区：命中率越高越好，越高越好就行</b>：还要看未命中的代价（L2 未命中和内存未命中差一个数量级）。</li><li><b>误区：LRU 一定最优</b>：它对手工构造的循环访问模式可能表现很差，实现成本也高，所以实际多用近似。</li><li><b>误区：写回一定比写直达快</b>：写回把成本推后了；突发大量脏行回写会造成明显卡顿。</li><li><b>误区：替换策略只影响性能</b>：它还会影响<b>安全性相关的时序</b>（侧信道攻击常利用缓存状态）。</li><li><b>排查清单</b>：① 看未命中率；② 看未命中发生哪一级；③ 看访问步长是否跨缓存行；④ 看是否有伪共享；⑤ 看写回是否集中爆发。</li><li><b>优化优先级</b>：先改<b>数据布局与访问顺序</b>（收益最大），再考虑分块（tiling），最后才是调策略参数。</li></ul><p class="muted">一句话实践指导：<b>顺序访问、按行访问、让相关数据挨在一起</b>，这三条比任何策略参数都管用。</p></section>
+<section class="panel"><h2>第四层 · 为什么写回成为主流</h2><details><summary>为什么现代 CPU 普遍用写回？</summary><p>因为<b>写操作大多是局部的</b>：一个值常常被反复写，写回可以把多次写合并成一次主存写。写直达每次都走主存，带宽立刻成为瓶颈。</p></details><details><summary>写回带来的一致性问题怎么解决？</summary><p>靠缓存一致性协议（MESI 及其变体）保证其它核能看到最新值，靠内存屏障与 volatile/原子指令在软件层面控制可见性与顺序。</p></details><details><summary>替换策略为什么不用真正的 LRU？</summary><p>真正 LRU 需要维护精确的访问顺序，在路数多、频率高的缓存里硬件成本过高。所以实际实现普遍用<b>近似 LRU</b>（伪 LRU、NRU），效果接近而成本低得多。</p></details></section>
+<footer>© 2026 Visuals · 计算机组成原理</footer></main><script src="../../../../assets/knowledge-lesson.js"></script><div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../00-overview/cpu-memory-explained.html">CPU 取指与存储层次协同</a><a href="../01-cache-basics/cache-mapping-and-organization.html">Cache 的组织方式：直接映…</a><a href="../02-cache-policy/cache-set-associativity-conflict-miss.html">CPU 缓存组相联手算：为什么…</a><a href="../02-cache-policy/cpu-cache-guide.html">CPU 三级缓存与缓存行</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 计算机组成</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
+</body></html>

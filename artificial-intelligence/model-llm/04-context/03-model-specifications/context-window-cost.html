@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>上下文窗口的钱与显存怎么算</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>上下文窗口的钱与显存怎么算</h1>
+  <p>输入/输出成本公式、KV Cache 显存估算、四个降本杠杆与裁剪顺序</p>
+  <span class="tag">上下文</span><span class="tag">成本</span><span class="tag">KV Cache</span><span class="tag">推理</span>
+</header>
+<nav>
+  <a href="#s1">成本公式</a>
+  <a href="#s2">KV 显存</a>
+  <a href="#s3">降本杠杆</a>
+  <a href="#s4">常见误判</a>
+</nav>
+<main>
+('\n<div class="lead">\n  上下文窗口不是越大越好：成本、显存、延迟三项都随长度线性上升。本节给出可代入自己数字的计算方式，以及最有效的四个降本手段。\n</div>\n\n<section id="s1">\n  <h2><span class="n">01</span>成本怎么算：两个乘法</h2>\n<pre><code># 一次请求的成本（输入 + 输出分别计价）\ncost = input_tokens  * price_in_per_1k  / 1000 \\\n     + output_tokens * price_out_per_1k / 1000\n\n# 一个对话会话的成本（多轮会把历史反复重发！）\n#   第 n 轮的输入 ≈ 系统提示 + 前 n-1 轮全部内容 + 本轮输入\n#   所以 N 轮对话的总输入量是 O(N^2) 级别，不是 O(N)\ndef session_input(turn_sizes):\n    total = 0\n    prefix = 0\n    for s in turn_sizes:\n        prefix += s          # 历史不断累加\n        total += prefix\n    return total\n\nprint(session_input([200, 300, 400, 500]))   # 200+500+900+1400 = 3000\n# 关键：第 4 轮发的不是 500 token，而是 1400 token\n\n# 有前缀缓存时：能复用的前缀按缓存价（通常是输入价的 1/10 甚至更低）\ncost_with_cache = (total_input - cached) * price_in / 1000 \\\n                + cached * price_cached / 1000</code></pre><div class="table-wrap"><table><thead><tr><th>项</th><th>典型量级</th><th>说明</th></tr></thead><tbody><tr><td>输入单价</td><td>每百万 token 几元到几十元</td><td>按模型不同差异大</td></tr><tr><td>输出单价</td><td>输入的 3~5 倍</td><td>所以限制输出长度很有效</td></tr><tr><td>前缀缓存价</td><td>输入的 1/10 左右</td><td>要求前缀完全一致</td></tr><tr><td>长上下文单价</td><td>可能比标准窗口更贵</td><td>超过一定长度后分段计价</td></tr><tr><td>1 万汉字</td><td>约 1 万~1.5 万 token</td><td>中文 1 字 ≈ 1~1.5 token</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>最常见的成本失控来源：<b>多轮对话把历史反复重发</b>。十轮对话的实际输入量是单轮的 5 倍以上，这就是「聊着聊着变贵」的原因。</div>\n</section>
+<section>
+  <div class="fig">
+    <svg viewBox="0 0 720 240" role="img" aria-label="上下文成本构成">
+  <defs><style>
+    .t{fill:#e2e8f0;font-size:12px} .s{fill:#94a3b8;font-size:10.5px}
+    .h{fill:#6ea8fe;font-size:12px;font-weight:700}
+  </style></defs>
+  <text class="h" x="14" y="20">一次长上下文请求的成本 = 输入钱 + 输出钱 + 显存占用 + 延迟</text>
+  <text class="s" x="14" y="38">前两项能直接算，第三项决定能不能跑，第四项决定体验</text>
+
+  <rect x="14" y="54" width="168" height="110" rx="8" fill="#171b26" stroke="#6ea8fe"/>
+  <text class="t" x="26" y="78" font-weight="700" fill="#6ea8fe">① 输入费用</text>
+  <text class="s" x="26" y="98">输入 token × 单价</text>
+  <text class="s" x="26" y="116">长上下文被反复重发</text>
+  <text class="s" x="26" y="134">→ 缓存命中可大幅降低</text>
+  <text class="s" x="26" y="152">做法：前缀稳定 + 复用</text>
+
+  <rect x="192" y="54" width="168" height="110" rx="8" fill="#171b26" stroke="#7ee787"/>
+  <text class="t" x="204" y="78" font-weight="700" fill="#7ee787">② 输出费用</text>
+  <text class="s" x="204" y="98">输出 token × 单价</text>
+  <text class="s" x="204" y="116">通常比输入贵数倍</text>
+  <text class="s" x="204" y="134">做法：限制 max_tokens</text>
+  <text class="s" x="204" y="152">结构化输出省字数</text>
+
+  <rect x="370" y="54" width="168" height="110" rx="8" fill="#171b26" stroke="#f0a868"/>
+  <text class="t" x="382" y="78" font-weight="700" fill="#f0a868">③ 显存 KV Cache</text>
+  <text class="s" x="382" y="98">随序列长度线性增长</text>
+  <text class="s" x="382" y="116">随并发批大小线性增长</text>
+  <text class="s" x="382" y="134">做法：量化 / 分页管理</text>
+  <text class="s" x="382" y="152">决定能撑多少并发</text>
+
+  <rect x="548" y="54" width="158" height="110" rx="8" fill="#171b26" stroke="#d2a8ff"/>
+  <text class="t" x="560" y="78" font-weight="700" fill="#d2a8ff">④ 延迟</text>
+  <text class="s" x="560" y="98">首 token 随输入长度上升</text>
+  <text class="s" x="560" y="116">每 token 随上下文上升</text>
+  <text class="s" x="560" y="134">做法：裁剪无关上下文</text>
+  <text class="s" x="560" y="152">长文本不等于好结果</text>
+
+  <rect x="14" y="178" width="692" height="50" rx="8" fill="#171b26" stroke="#2b3142"/>
+  <text class="s" x="28" y="198">成本量级直觉：上下文从 4k 涨到 128k，输入费用约涨 30 倍，KV Cache 显存也涨 30 倍</text>
+  <text class="s" x="28" y="218">所以「能塞多少塞多少」是最贵也最慢的做法，裁剪才是第一优化手段</text>
+</svg>
+    <div class="cap">长上下文成本的四个组成部分</div>
+  </div>
+</section>\n', '\n<section id="s2">\n  <h2><span class="n">02</span>KV Cache 显存怎么估</h2>\n<pre><code># KV Cache 显存（每 token 占用）的基本公式\n#   per_token_bytes = 2 (K 和 V) * layers * kv_heads * head_dim * dtype_bytes\n#   总显存 = per_token_bytes * seq_len * batch_size\n\ndef kv_cache_gb(layers, kv_heads, head_dim, seq_len, batch, dtype_bytes=2):\n    per_token = 2 * layers * kv_heads * head_dim * dtype_bytes\n    return per_token * seq_len * batch / (1024**3)\n\n# 例：32 层、8 个 KV head、head_dim=128、fp16(2 字节)\n#     单条 32k 上下文：\nprint(round(kv_cache_gb(32, 8, 128, 32768, 1), 2))     # 约 2.0 GB\n#     并发 16 条：\nprint(round(kv_cache_gb(32, 8, 128, 32768, 16), 2))    # 约 32 GB\n\n# 换成 int8 量化 KV：直接减半\nprint(round(kv_cache_gb(32, 8, 128, 32768, 16, 1), 2)) # 约 16 GB\n\n# 结论：并发 × 上下文长度 决定显存，不是模型参数量\n#   7B 模型 fp16 权重约 14 GB；而 16 路 32k 并发的 KV 要 32 GB\n#   → 长上下文场景下，显存的大头是 KV Cache 而不是权重</code></pre><div class="table-wrap"><table><thead><tr><th>因素</th><th>影响方向</th><th>可控手段</th></tr></thead><tbody><tr><td>上下文长度</td><td>线性增长</td><td>裁剪、摘要、滑动窗口</td></tr><tr><td>并发路数</td><td>线性增长</td><td>限流、批处理调度</td></tr><tr><td>层数 / KV head 数</td><td>线性增长</td><td>选模型时确定，改不了</td></tr><tr><td>dtype</td><td>fp16→int8 减半</td><td>KV 量化（精度略有损）</td></tr><tr><td>分页管理</td><td>减少碎片浪费</td><td>PagedAttention 类机制</td></tr></tbody></table></div><ul>\n  <li><b>估算数量级</b>：中等模型（约 30 层、8 KV head、head_dim 128）fp16 下，每 1k token 约 60~70 MB；32k 上下文单条约 2 GB。</li>\n  <li><b>并发是放大器</b>：单条 2 GB 看着不多，16 并发就是 32 GB，往往超过模型权重本身。</li>\n  <li><b>显存不够的表现</b>：不是报错，而是排队变长、延迟飙升，最后 OOM。</li>\n</ul>\n</section>\n', '\n<section id="s3">\n  <h2><span class="n">03</span>四个降本杠杆（按收益排序）</h2>\n<ol>\n  <li><b>裁剪上下文</b>：只保留与当前问题相关的片段。收益最大，因为费用、显存、延迟三项同时下降。</li>\n  <li><b>稳定前缀换缓存命中</b>：把系统提示、工具定义、固定文档放在最前面且保持不变，命中前缀缓存后输入费用可降一个量级。</li>\n  <li><b>限制输出长度与格式</b>：输出单价更高，用结构化输出（JSON schema）避免冗长客套。</li>\n  <li><b>分级路由</b>：简单问题走小模型/短上下文，复杂问题才上大模型 —— 往往 70% 的请求不需要最强的模型。</li>\n</ol><pre><code># 一个简单的成本观测：记录每次调用的 token 与估算费用\nimport time\n\nclass CostLog:\n    def __init__(self, price_in, price_out):\n        self.price_in = price_in    # 每 1k token\n        self.price_out = price_out\n        self.rows = []\n\n    def add(self, name, ti, to):\n        cost = ti * self.price_in / 1000 + to * self.price_out / 1000\n        self.rows.append((name, ti, to, round(cost, 4)))\n\n    def report(self):\n        # 按调用名聚合，找出最贵的环节\n        agg = {}\n        for name, ti, to, c in self.rows:\n            a = agg.setdefault(name, [0, 0, 0.0])\n            a[0] += ti; a[1] += to; a[2] += c\n        for name, (ti, to, c) in sorted(agg.items(), key=lambda x: -x[1][2]):\n            print(f\'{name:24s} in={ti:>8d} out={to:>6d} cost={c:>8.2f}\')\n\n# 用法：在每次调用后 add 一条，一天跑一次 report\n# 绝大多数团队第一次跑都会发现「某个环节占了 60% 以上的钱」</code></pre>\n</section>\n', '\n<section id="s4">\n  <h2><span class="n">04</span>常见误判</h2>\n<div class="qa"><b>问：上下文越长回答越好吗？</b><p>不一定。上下文变长会带来<b>中间信息被忽略</b>的现象（位置靠中间的内容召回率低于首尾），同时噪声变多。把无关内容塞进去通常比不放更差。</p></div><div class="qa"><b>问：为什么同样的请求第二次便宜很多？</b><p>命中了前缀缓存。前提是与之前某次请求的<b>前缀完全一致</b>，所以系统提示、工具清单里不要放时间戳这类每次都变的东西。</p></div><div class="qa"><b>问：把所有资料都塞进上下文，还是用检索？</b><p>资料量小且每条都用得上时才全塞；只要有一部分用不上，就应该检索后再塞。判断标准很简单：<b>算一下这条内容的命中率</b>，低于一半就别塞。</p></div>\n</section>\n')
+</main>
+<footer>
+  <p>Visuals · 大语言模型 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

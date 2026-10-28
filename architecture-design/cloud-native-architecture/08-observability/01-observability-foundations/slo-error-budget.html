@@ -15,6 +15,30 @@
 <section class="panel"><h2>告警窗口与低流量陷阱</h2><p>短窗口能迅速发现大面积故障，但 10 次请求中失败 1 次就得到 10% 的失败率，在低流量服务上容易触发尖峰告警。长窗口能平滑抖动，却可能把刚发生的严重故障拖到很晚才报警。可以组合短窗与长窗燃烧率，并要求最小请求数或加入绝对失败数。阈值应通过历史故障回放验证：哪些告警能及时发现真实用户影响，哪些只是统计噪声。</p><p>错误预算也需要明确重置和追溯口径。滚动 30 天窗口每天都会变化，不等同于每月一号清零的日历月；业务方若拿两种口径对比，很容易产生争议。请求成功也未必代表用户体验成功：返回 200 但内容错误、关键操作超时或下游异步任务失败，都可能需要独立的用户旅程 SLI。选择少数能代表真实服务目标的指标，避免在大量无关指标中稀释注意力。</p></section>
 <section class="panel" data-depth-note><h2>预算消耗后的复盘</h2><p>故障结束后，应按同一 SLI 口径计算它消耗了多少预算，再把时间线与发布、容量、依赖异常关联。预算耗尽不自动意味着停止所有功能工作；它提示团队应把下一步资源投入到恢复可靠性、降低重复风险和改善观测。若大量预算被同一类部署故障消耗，可优先改灰度、回滚和验证门槛；若被下游依赖消耗，则要审视隔离、超时与降级。把预算只当考核数字会诱导改变分母或隐藏失败，必须保留可审计的定义与原始事件。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>计算燃烧率时，分子和分母必须使用同一请求集合。如果目标 SLI 只覆盖用户请求，却把健康检查失败也加进告警分子，燃烧率会被放大。每次调整过滤规则，应回放历史数据并标记口径变更时间，否则新旧预算曲线无法直接比较。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：三个词别再混用</h2><div class="table-wrap"><table><thead><tr><th>术语</th><th>是谁</th><th>内容</th><th>违反后果</th></tr></thead><tbody><tr><td><b>SLI</b></td><td>指标</td><td>怎么测量，如成功率 = 好请求数 / 有效请求数</td><td>只是一个度量，谈不上违反</td></tr><tr><td><b>SLO</b></td><td>内部目标</td><td>SLI 要达到的目标值，如 99.9%</td><td>内部共识，超了要改流程</td></tr><tr><td><b>SLA</b></td><td>对外承诺</td><td>对客户承诺 + 违约后果（退款等）</td><td><b>有法律 / 商业后果</b></td></tr></tbody></table></div><p><b>错误预算 = 1 − SLO。</b>比如 SLO 是 99.9%，错误预算就是 0.1% —— 这 0.1% 是你可以<b>合法用于冒险</b>的额度：发新版、做变更、做实验。用完了就冻结变更，这是它真正的价值。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：几个 9 对应多少时间</h2><div class="table-wrap"><table><thead><tr><th>可用性</th><th>每年不可用</th><th>每月（30 天）</th><th>每周</th><th>典型场景</th></tr></thead><tbody><tr><td>99%（两个 9）</td><td>3.65 天</td><td><b>7.2 小时</b></td><td>1.68 小时</td><td>内部系统、批处理</td></tr><tr><td>99.9%（三个 9）</td><td>8.76 小时</td><td><b>43.2 分钟</b></td><td>10.1 分钟</td><td>大多数在线服务</td></tr><tr><td>99.95%</td><td>4.38 小时</td><td><b>21.6 分钟</b></td><td>5 分钟</td><td>核心业务</td></tr><tr><td>99.99%（四个 9）</td><td>52.6 分钟</td><td><b>4.32 分钟</b></td><td>1 分钟</td><td>支付、交易核心</td></tr><tr><td>99.999%（五个 9）</td><td>5.26 分钟</td><td><b>26 秒</b></td><td>6 秒</td><td>电信级，代价极高</td></tr></tbody></table></div><p><b>基于错误预算的 burn rate 告警规则</b></p><pre><code># 多窗口 burn rate 告警（Google SRE 实践，PromQL）
+# 快窗口：5 分钟内消耗 14.4% 的月度预算 → 严重告警（page）
+- name: SLOBurnFast
+  rules:
+  - alert: HighErrorBudgetBurn
+    expr: |
+      (
+        sum(rate(http_requests_total{code=~'5..'}[5m]))
+        / sum(rate(http_requests_total[5m]))
+      ) &gt; (14.4 * 0.001)
+    for: 2m
+    labels: {severity: page}
+
+# 慢窗口：6 小时内趋势性消耗 → 工单告警（ticket）
+  - alert: SlowErrorBudgetBurn
+    expr: |
+      (
+        sum(rate(http_requests_total{code=~'5..'}[6h]))
+        / sum(rate(http_requests_total[6h]))
+      ) &gt; (6 * 0.001)
+    for: 30m
+    labels: {severity: ticket}</code></pre><p><b>burn rate 换算：</b>burn rate = 实际错误率 ÷ 错误预算率。burn rate = 1 表示<b>刚好用完</b>预算；burn rate = 14.4 表示按此速度，<b>30 天预算 2 天内烧光</b>（30 ÷ 14.4 ≈ 2）。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界：落地时最常犯的错</h2><p><b>决策表：预算还剩多少 → 该做什么</b></p><div class="table-wrap"><table><thead><tr><th>剩余预算</th><th>状态</th><th>允许的行动</th></tr></thead><tbody><tr><td>> 75%</td><td>健康</td><td>正常发布，可以做有风险的实验</td></tr><tr><td>50% – 75%</td><td>关注</td><td>正常发布，但暂缓高风险变更</td></tr><tr><td>25% – 50%</td><td>警戒</td><td>只发必要变更，需要额外评审</td></tr><tr><td>< 25% 或 burn rate 高</td><td><b>危险</b></td><td><b>冻结非必要变更</b>，优先修稳定性</td></tr><tr><td>= 0 或已超支</td><td><b>违约</b></td><td>只做修复，触发复盘</td></tr></tbody></table></div><p><b>高频坑清单：</b></p><ul><li>① <b>SLI 选错</b>：拿 CPU 使用率当 SLI —— 用户根本不关心 CPU，要选用户可感知的指标（成功率、延迟）</li><li>② <b>目标拍脑袋</b>：直接抄 99.99%，但架构撑不住，导致预算天天超支、告警疲劳</li><li>③ <b>分母污染</b>：把客户端 4xx（用户填错参数）算进失败，错误率虚高</li><li>④ <b>窗口过短</b>：用 1 分钟窗口算可用性，会漏掉长尾故障</li><li>⑤ <b>预算用完了没人管</b>：定了 SLO 但没有对应的变更冻结机制，等于没定</li><li>⑥ <b>SLO 太多</b>：几十个 SLO 互相矛盾，团队不知道该保哪个 —— 先定 3 到 5 个核心的</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么不直接监控错误率，非要套一层错误预算？</summary><p>因为错误率只是数字，<b>错误预算是决策依据</b>。错误率 0.5% 到底是好是坏？脱离目标无法判断。而「预算还剩 30%」能直接驱动行动：是继续发布还是冻结。它把<b>技术指标翻译成了管理语言</b>，让研发和运维能用同一套规则争论。</p></details><details><summary>SLO 定得越高越好吗？</summary><p>不是。每多一个 9 的<b>成本是非线性增长</b>（要冗余、要跨地域、要更严格的变更流程），而用户感知的提升却很小 —— 用户分辨不出 99.9% 和 99.99%。更重要的代价是<b>创新速度</b>：极高 SLO 意味着几乎没有犯错空间，变更要层层审批，产品迭代变慢。<b>SLO 应该按用户真实需求定，而不是按虚荣心定。</b></p></details><details><summary>为什么用多窗口而不是单一阈值告警？</summary><p>单一阈值无法区分<b>突发大故障</b>和<b>慢性消耗</b>。短窗口（5 分钟）能快速发现突发故障，但对短暂抖动过度敏感、误报多；长窗口（6 小时）能捕捉趋势但不及时。Google 的多窗口配比（快 14.4 倍 + 慢 6 倍）同时解决两个问题：快的负责<b>要马上叫醒人</b>的严重故障，慢的负责<b>白天处理</b>的趋势问题。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>请求量翻倍而失败比例不变，允许失败次数如何变化？</summary><p>在请求型 SLO 中，允许失败次数随合格请求总数翻倍；时间型可用性预算不是同一口径。</p></details></section>
 <footer>继续阅读：<a href="cloud-native-observability.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

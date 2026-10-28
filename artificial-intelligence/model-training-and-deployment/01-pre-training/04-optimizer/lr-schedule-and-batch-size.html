@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -141,6 +159,34 @@ done
 <div class="qa"><b>问：为什么大模型一定要 warmup？</b><p>训练初期参数是随机的、梯度方差很大，<b>直接用大学习率会让参数一步走偏到不可逆的区域</b>。warmup 让模型先用小步走稳，再加速。批量越大warmup 越要长。</p></div><div class="qa"><b>问：batch 越大越好吗？</b><p><b>不是。</b>批量大到一定程度后，<b>同样的 epoch 数下更新次数变少，泛化会变差</b>，而且收益递减（GPU 已经跑满，再大也不会更快）。实践中常有一个「临界批量」，超过后继续放大需要同步加大学习率且收益有限。</p></div><div class="qa"><b>问：微调时学习率为什么比预训练小？</b><p>因为预训练权重已经接近一个好的解，<b>大学习率会把已学到的表示破坏掉</b>。类比：预训练是「从零建楼」，微调是「在楼里改装修」，后者不能用大锤。</p></div><div class="qa"><b>问：LoRA 的学习率为什么能比全参数微调大？</b><p>因为 LoRA 只训练少量新增参数（通常是原模型的 0.1%~1%），<b>需要更大的学习率才能在有限步数内收敛</b>，而且不会破坏原权重。典型值是全参数微调的 5~10 倍。</p></div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：两个互相牵扯的旋钮</h2><p><b>学习率（LR）</b>决定每步参数更新多大；<b>批大小（batch size）</b>决定每步看多少样本的平均梯度。二者不是独立的：<b>batch 变大，LR 通常要同步变大</b>（linear scaling rule）。调不对，要么不收敛，要么震荡发散。</p><div class="table-wrap"><table><thead><tr><th>现象</th><th>多半是 LR 的问题</th><th>多半是 batch 的问题</th></tr></thead><tbody><tr><td>loss 一直很高不降</td><td>LR 太小</td><td>——</td></tr><tr><td>loss 剧烈震荡/NaN</td><td>LR 太大</td><td>——</td></tr><tr><td>训练慢但稳</td><td>——</td><td>batch 太小</td></tr><tr><td>泛化差、过拟合快</td><td>——</td><td>batch 太大</td></tr><tr><td>初期 loss 爆掉</td><td>缺 warmup</td><td>——</td></tr></tbody></table></div><p><b>一句话判定：</b>先定 batch（受显存限制），再按 linear scaling 定 LR 基线，最后用 warmup+cosine 平滑。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：公式与调度</h2><div class="table-wrap"><table><thead><tr><th>策略</th><th>关键参数</th><th>适用</th><th>注意</th></tr></thead><tbody><tr><td>Linear Scaling</td><td>LR ∝ batch</td><td>batch 大改</td><td>成立有前提</td></tr><tr><td>Warmup</td><td>warmup_steps 0~5% 总步数</td><td>几乎所有大模型</td><td>防止初期炸</td></tr><tr><td>Cosine</td><td>周期=总步数</td><td>预训练/微调</td><td>后期自然衰减</td></tr><tr><td>Step/Plateau</td><td>milestone / 监控指标</td><td>传统 CV</td><td>需手动设</td></tr></tbody></table></div><p><b>warmup + cosine + 梯度累积代码</b></p><pre><code># PyTorch：warmup + cosine 最常用组合
+import torch
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr)  # base_lr 已按 batch 放大
+total = 100_000
+warmup = 2_000
+
+warm = LinearLR(optimizer, start_factor=0.01, total_iters=warmup)
+cos  = CosineAnnealingLR(optimizer, T_max=total - warmup)
+sched = SequentialLR(optimizer, schedulers=[warm, cos], milestones=[warmup])
+
+for step in range(total):
+    loss = train_one_step()
+    sched.step()   # 每步调用
+
+# Linear Scaling Rule：batch 从 256 提到 2048(8x)，LR 也从 1e-3 提到 8e-3
+# 等效做法：保持 LR，用梯度累积模拟大 batch
+acc = 8
+for i, (xb, yb) in enumerate(loader):
+    loss = model(xb, yb) / acc
+    loss.backward()
+    if (i+1) % acc == 0:
+        optimizer.step(); optimizer.zero_grad()</code></pre><p><b>数量级：</b>AdamW 常见 base_lr 在 <b>1e-4 ~ 3e-4</b>（小模型）到 <b>1e-3 ~ 3e-3</b>（大模型配合大 batch）；warmup 步数常占总步数 <b>1%~5%</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑</h2><p><b>训练不稳的清单：</b></p><ul><li><b>LR 太大</b>：loss 震荡、出现 NaN/Inf，首步就可能爆</li><li><b>LR 太小</b>：loss 几乎不动，浪费算力</li><li><b>缺 warmup</b>：大模型初期随机权重 + 大 LR 必然炸，必须从小 LR 爬升</li><li><b>batch 太大</b>：泛化变差、陷入尖锐角点，且显存不够 OOM</li><li><b>梯度累积近似误差</b>：acc 步内用平均梯度，和真正大 batch 的 BN 统计量不一致</li><li><b>Linear Scaling 失效</b>：batch 放大超过 ~8~16 倍后，继续线性放大 LR 反而伤泛化</li></ul><p><b>诊断顺序：</b>① 看 loss 曲线形状（平/震/爆）；② 确认 warmup 是否生效；③ 用更小的 batch 先跑通，再按 linear scaling 放大并观察泛化是否掉。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><details><summary>为什么一定要 warmup？</summary><p>训练初期<b>权重是随机的、batch 统计量（BN/LN 的均值方差）也很不准</b>，此时用大 LR 一步更新会把参数推到很差的 regions 且难以挽回。warmup 让 LR 从小缓慢爬升，等统计量稳定、梯度方向变一致后再加速，是<b>大模型训练稳定收敛的关键保险</b>。</p></details><details><summary>Linear Scaling Rule 为什么不是永远成立？</summary><p>它假设「大 batch 的平均梯度方向 ≈ 小 batch 梯度方向」，在小倍数（≤8）下近似成立。但 batch 过大时，<b>梯度方差被压得太低，容易收敛到尖锐极小值（sharp minima），泛化变差</b>；而且优化轨迹变「直」，丧失小 batch 的隐式正则化。所以超大 batch 要额外加正则或减小 LR 放大倍数。</p></details><details><summary>Cosine 衰减为什么比 Step 更受欢迎？</summary><p>Step 在固定 milestone 突降，曲线不平滑、需手动调；Cosine 在<b>训练中后期平滑减速</b>，符合「先快收敛、后精调」的直觉，且对总步数不敏感、少超参。大模型预训练几乎默认 cosine + warmup。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 人工智能 / 模型训练与部署 ·

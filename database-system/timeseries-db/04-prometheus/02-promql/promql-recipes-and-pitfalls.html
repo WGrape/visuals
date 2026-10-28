@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -148,6 +166,24 @@ groups:
 <div class="qa"><b>问：rate 和 irate 该用哪个？</b><p>看趋势用 <b>rate</b>（对窗口内所有点做平均，平滑）；看瞬时毛刺用 <b>irate</b>（只取最后两个点，敏感但抖）。<b>告警用 rate，画「当前有多高」用 irate。</b>注意 irate 对长窗口没有意义。</p></div><div class="qa"><b>问：为什么我的 P99 比最大值还大？</b><p>因为 <b>histogram_quantile 是在 bucket 之间做线性插值</b>，当 bucket 边界设置不合理（比如只有 0.1/1/10 三档）时，插值结果会失真，甚至超过实际最大值。解决方法是把 bucket 划细，或改用 <code>_sum/_count</code> 算平均值。</p></div><div class="qa"><b>问：查询很慢怎么办？</b><p>三个方向：<b>① 减少参与计算的序列数</b>（先在标签上过滤）；<b>② 缩短时间范围与窗口</b>；<b>③ 用 recording rule 预计算</b>。如果慢查询来自高基数标签，则要从采集侧降基数。</p></div><div class="qa"><b>问：Prometheus 里查不到数据怎么排查？</b><p>按顺序查：<b>① 目标是否 UP</b>（Targets 页）；<b>② 指标名/标签是否写对</b>（用 <code>{__name__=~".*keyword.*"}</code> 搜）；<b>③ 是否有数据但被过滤掉</b>（去掉标签条件重试）；<b>④ 时间范围是否正确</b>。</p></div>
 </section>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：先分清四种基本量</h2><p>PromQL 的坑大多源于<b>没分清数据类型</b>。核心是：<b>Counter</b>（只增的累计量，必须配 rate）、<b>Gauge</b>（可增可减的瞬时值，直接看）、<b>Histogram</b>（分桶统计，看分位数）、<b>Summary</b>（服务端算好分位数）。</p><div class="table-wrap"><table><thead><tr><th>需求</th><th>该用的函数</th><th>错用后果</th></tr></thead><tbody><tr><td>看 QPS / 错误率</td><td>rate(counter[5m])</td><td>直接看 counter 只看到累计值</td></tr><tr><td>看当前内存占用</td><td>node_memory 直接取</td><td>套 rate 毫无意义</td></tr><tr><td>看 P99 延迟</td><td>histogram_quantile</td><td>用 avg 会严重失真</td></tr><tr><td>判断某指标是否存在</td><td>absent()</td><td>靠人工盯</td></tr></tbody></table></div><p><b>一句话判定：</b>Counter 永远先 rate 再算，Gauge 直接看，分位数用 Histogram。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：range 与配方</h2><div class="table-wrap"><table><thead><tr><th>函数</th><th>窗口建议</th><th>含义</th><th>坑</th></tr></thead><tbody><tr><td>rate</td><td>≥ 2 个采样点（常 1m~5m）</td><td>每秒平均增速</td><td>窗口太短噪声大</td></tr><tr><td>irate</td><td>2 个最近点</td><td>瞬时速率</td><td>抖动大、不适合画长图</td></tr><tr><td>increase</td><td>任意</td><td>窗口内增量</td><td>含 counter 重置</td></tr><tr><td>histogram_quantile</td><td>配 le 桶</td><td>分位数估计</td><td>桶边界要覆盖目标值</td></tr></tbody></table></div><p><b>最常用的 4 个 PromQL 配方</b></p><pre><code># 1) 错误率：5xx / 总请求
+sum(rate(http_requests_total{code=~"5.."}[5m]))
+/ sum(rate(http_requests_total[5m]))
+
+# 2) P99 延迟：必须按 le 聚合、且用 rate 而非瞬时
+histogram_quantile(0.99,
+  sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# 3) 某实例是否还活着（不存在就告警）
+absent(up{job="api"} == 1)
+
+# 4) 同比：和昨天同一时刻比（用 offset）
+sum(rate(http_requests_total[5m]))
+- sum(rate(http_requests_total[5m] offset 24h))</code></pre><p><b>数量级：</b>scrape 间隔 15s 时，rate 窗口<b>至少 1m</b>（4 个点）才稳；P99 要准，histogram 桶必须覆盖到目标分位附近（如 0.5/1/2.5/5/10 秒）。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑</h2><p><b>查询结果离谱的清单：</b></p><ul><li><b>counter 直接画</b>：看到的是单调递增累计值，不是速率，曲线永远向上</li><li><b>rate 窗口 &lt; 抓取间隔</b>：取不到两个点，返回空或乱跳</li><li><b>histogram_quantile 漏 by (le)</b>：分位数算出来是跨实例乱炖，毫无意义</li><li><b>counter 重置没处理</b>：进程重启后累计值归零，rate 会算出巨大负值尖刺（rate 已自动处理，increase 部分场景仍要注意）</li><li><b>聚合丢 label</b>：sum() 不加 by，把区分维度的标签全吃掉，无法下钻</li><li><b>子查询滥用</b>：嵌套 rate(rate(...)) 或 step 太小，查询爆炸式变慢</li></ul><p><b>排查顺序：</b>① 先在 Graph 里把原始表达式拆开，分别看 counter、rate 各自长啥样；② 确认 label 在聚合后是否还保留；③ 分位数问题优先查桶配置。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><details><summary>rate、irate、increase 到底差在哪？</summary><p>rate 取窗口内<b>首尾两个点的线性拟合斜率</b>，平滑、适合画图和告警；irate 只看<b>最后两个点</b>，灵敏但抖；increase 是 rate×窗口时长，给出绝对增量。三者都自动处理 counter 重置（resets）。画长期趋势用 rate，抓瞬时尖峰用 irate。</p></details><details><summary>为什么 P99 用 Histogram 而不是 Summary？</summary><p>Summary 的分位数在<b>客户端/被采集端</b>算好，无法在 PromQL 里跨实例聚合、也无法事后改分位（想要 P99.9 就得重采）。Histogram 把分桶原始数据上报，<b>服务端用 histogram_quantile 任意分位、任意维度聚合</b>，代价是分位数只是桶内线性插值的<b>估计值</b>。</p></details><details><summary>为什么聚合一定要写 by (...)？</summary><p>因为 sum/avg 默认<b>去掉所有标签</b>，只留结果。如果不 by，你以为在算「按实例的 QPS」，实际把所有实例揉成一个数，既没法在面板里按 host 分线，也无法在告警里定位到出问题的那一台。</p></details></div></section>
 </main>
 <footer>
   <p>Visuals · 数据库系统 / TSDB ·

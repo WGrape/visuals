@@ -196,7 +196,7 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
       <div class="step" data-n="Q2"><div class="step-title">锁过期时间设多少？业务没跑完怎么办？</div><div class="step-desc">宁大勿小易死锁，宁小勿大易并发。正解是<strong>看门狗自动续期</strong>：业务在跑就不断续，掉线就停止续期自然释放。</div></div>
       <div class="step" data-n="Q3"><div class="step-title">Redis 和 ZK 锁怎么选？</div><div class="step-desc">高并发、能接受极小概率双持 → Redis；金融级强一致、正确性优先 → ZK。也可 Redlock 折中（注意其争议）。</div></div>
     </div>
-    <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">锁在进程内、数据库和分布式层级的整体分类见<a href="../../../high-performance-concurrency-availability/02-high-concurrency/04-lock/lock-taxonomy.html" style="color:var(--accent-blue);text-decoration:none;">锁体系总览</a>。延伸阅读：<a href="../../../../database-system/nosql-db/01-kv/02-redis/05-concurrency/redis-distributed-lock.html" style="color:var(--accent-blue);text-decoration:none;">Redis 分布式锁实现详解</a> · <a href="../../../cache-system/00-overview/01-distributed-cache/distributed-cache.html" style="color:var(--accent-blue);text-decoration:none;">分布式缓存与三大问题</a> · <a href="../02-zookeeper/zookeeper.html" style="color:var(--accent-blue);text-decoration:none;">ZooKeeper 详解</a></p>
+    <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">锁在进程内、数据库和分布式层级的整体分类见<a href="../../../high-performance-concurrency-availability/02-high-concurrency/04-lock/lock-taxonomy.html" style="color:var(--accent-blue);text-decoration:none;">锁体系总览</a>。延伸阅读：<a href="../../../../database-system/nosql-db/01-kv/02-redis/05-concurrency/redis-distributed-lock.html" style="color:var(--accent-blue);text-decoration:none;">Redis 分布式锁实现详解</a> · <a href="../../../../system-engineering/cache-system/00-overview/01-distributed-cache/distributed-cache.html" style="color:var(--accent-blue);text-decoration:none;">分布式缓存与三大问题</a> · <a href="../02-zookeeper/zookeeper.html" style="color:var(--accent-blue);text-decoration:none;">ZooKeeper 详解</a></p>
   </section>
 
 <section class="x-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：三种方案怎么选</h2><p>一句话判据：<b>要性能选 Redis，要强一致选 ZooKeeper/etcd，实在没有中间件才用数据库</b>。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>一致性</th><th>性能</th><th>什么时候用</th></tr></thead><tbody><tr><td><b>Redis</b>(SET NX PX)</td><td>最终一致，主从切换可能丢锁</td><td><b>最高（万级 QPS）</b></td><td>绝大多数业务互斥场景</td></tr><tr><td><b>Redlock</b></td><td>号称更强，但争议大</td><td>中（要写多个实例）</td><td>只有在对锁正确性要求极高且能接受复杂度时</td></tr><tr><td><b>ZooKeeper / etcd</b></td><td><b>强一致（靠 ZAB / Raft + 临时顺序节点）</b></td><td>中（千级 QPS）</td><td>选主、强一致编排</td></tr><tr><td>数据库（唯一键 / for update）</td><td>取决于 DB 隔离级别</td><td>最低</td><td>兜底，没有中间件时</td></tr></tbody></table></div><ul><li>信号一：锁只是为了「防止重复处理」（如幂等、防止重复发券）→ Redis 足够，偶尔失效可接受。</li><li>信号二：锁错了会造成<b>资金或数据损坏</b> → 上 ZooKeeper/etcd，或用 DB 行锁 + 版本号。</li><li>信号三：锁的持有时间很短（毫秒级）→ Redis；持有时间长（秒级以上）→ 必须考虑续租。</li></ul><p class="muted">最常见的认知错误：<b>以为 Redis 分布式锁是「绝对互斥」的</b>。它在主从异步复制下会失效——主节点写完锁后宕机、从节点提升为主但锁未同步，第二个客户端就能再拿到锁。</p></div></section>
@@ -223,11 +223,7 @@ redis-cli --latency-history -i 5      # 看延迟是否影响续租
 redis-cli slowlog get 10</code></pre></div></section>
 <section class="x-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍：Redlock 为什么有争议</h2><p>Redlock 的思路是「在 N 个独立节点上抢锁，拿到多数就算成功」，以此规避单点与主从切换问题。但 Martin Kleppmann 指出：<b>它依赖「时钟大致正确」这一隐含假设</b>，而 GC 停顿、时钟回拨、网络延迟都可能破坏它，导致两个客户端同时认为自己持有锁。</p><div class="table-wrap"><table><thead><tr><th>方案</th><th>正确性</th><th>性能</th><th>复杂度</th><th>适用</th></tr></thead><tbody><tr><td>单 Redis + 随机 value</td><td>基本可用（主从切换有风险）</td><td>高</td><td>低</td><td><b>90% 场景</b></td></tr><tr><td>Redlock</td><td>在时钟可靠时才更强</td><td>中</td><td>高</td><td>要求极高且不信任单实例</td></tr><tr><td>ZooKeeper 临时顺序节点</td><td><b>强（ZAB 保证）</b></td><td>中</td><td>中</td><td>选主、严格互斥</td></tr><tr><td>etcd + Lease</td><td><b>强（Raft 保证）</b></td><td>中</td><td>中</td><td>K8s 生态首选</td></tr><tr><td>DB 行锁 + 版本号</td><td>取决于隔离级别</td><td>低</td><td>低</td><td>兜底 / 已有 DB</td></tr></tbody></table></div><details><summary>锁失效了会怎样，一定要上 Redlock 吗？</summary><p>不必。绝大多数业务里，锁只是「降低并发冲突概率」的优化，真正的正确性靠<b>业务层幂等</b>或<b>数据库唯一约束 / 乐观锁版本号</b>兜底。锁偶尔失效时，兜底机制会拦住。</p></details><details><summary>fencing token 是什么？</summary><p>每次加锁返回一个<b>单调递增的令牌</b>，资源侧记录见过的最大令牌，拒绝更小令牌的写请求。这样即使客户端「以为自己还持有锁」（实际已过期被别人拿走），它的写也会被资源侧拒绝——从服务端堵住问题，而不依赖客户端的锁正确性。</p></details><details><summary>为什么 ZooKeeper 的锁更可靠？</summary><p>因为它是<b>强一致 + 会话感知</b>的：客户端与 ZK 的 session 断开后，临时节点自动消失，锁自动释放，不存在「客户端卡住导致锁长期不释放」的问题；且写入经过 ZAB 多数派确认，不会出现主从异步复制丢锁的情况。</p></details></div></section>
 </main>
-<div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="../02-zookeeper/zookeeper.html">ZooKeeper</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 architecture-design</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
+
 
 <footer><p>分布式锁 · Redis / ZooKeeper / 数据库</p><p style="margin-top:6px;"><a href="../../index.html" style="color:var(--accent-blue);text-decoration:none;">← 返回分布式系统总目录</a></p></footer>
 <script>
@@ -269,5 +265,11 @@ end
 <details class="x-qa2"><summary>锁的粒度怎么定？</summary><p>尽量小。锁「订单 123」而不是锁「所有订单」。粒度越细，并发度越高，冲突越少。但要避免过细导致锁数量爆炸和复杂度上升。</p></details>
 <details class="x-qa2"><summary>用 etcd / ZooKeeper 会更好吗？</summary><p>一致性更强（基于 Raft/ZAB），支持临时节点与顺序节点，天然解决「客户端宕机锁不释放」的问题。代价是性能低于 Redis、运维更复杂。对一致性要求高的场景（如选主）优先选它们。</p></details>
 <div class="x-mini-grid"><div class="x-mini"><b>记住一句</b><span>锁只管性能，正确性靠存储层兜底</span></div><div class="x-mini"><b>加锁三要素</b><span>NX + PX + 唯一 value</span></div><div class="x-mini"><b>解锁必须</b><span>Lua 校验后删</span></div><div class="x-mini"><b>超时对策</b><span>看门狗续期 + 业务兜底</span></div></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../02-zookeeper/zookeeper.html">ZooKeeper</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 architecture-design</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

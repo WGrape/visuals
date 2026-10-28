@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL 查询改写实战：先 EXPLAIN 再对症下药</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>SQL 查询改写实战：先 EXPLAIN 再对症下药</h1>
+  <p>一套可复用的读执行计划方法与反模式→改写对照，覆盖索引失效、深分页等。</p>
+  <span class="tag">SQL</span><span class="tag">执行计划</span><span class="tag">调优</span><span class="tag">索引</span>
+</header>
+<nav>
+  <a href="#explain">读计划</a>
+  <a href="#rewrite">改写</a>
+  <a href="#hint">提示</a>
+  <a href="#cmp">对照</a>
+</nav>
+<main>
+
+<div class="lead">
+  调 SQL 不是猜，是先看 EXPLAIN，再对症下药。这里给一套可复用的读计划方法和常见反模式→改写对照。
+</div>
+
+<section id="explain">
+  <h2><span class="n">01</span>先会读 EXPLAIN</h2>
+<p>重点看三列：type（访问类型，const>ref>range>index>ALL，ALL 是全表扫描要警惕）、rows（估算扫描行数）、Extra（Using filesort / Using temporary / Using where 都是信号）。</p><pre><code>EXPLAIN SELECT * FROM orders WHERE user_id=42 AND status='paid' ORDER BY created_at;
+-- 关注：
+-- type: 若是 ALL，又没有 Using index，说明没用上索引
+-- key:  实际用到的索引（NULL = 没用）
+-- rows: 估算行数，越大越慢
+-- Extra: Using filesort(额外排序) / Using temporary(用临时表) 都要优化
+-- MySQL 8 可用 EXPLAIN ANALYZE 看真实耗时与行数</code></pre>
+</section>
+
+<section id="rewrite">
+  <h2><span class="n">02</span>常见改写套路</h2>
+<ul>
+  <li>避免 SELECT *：只取需要的列，才可能走覆盖索引（Extra 出现 Using index）。</li>
+  <li>函数包列会让索引失效：WHERE DATE(created_at)='2026-10-01' → WHERE created_at>='2026-10-01' AND created_at<'2026-10-02'。</li>
+  <li>大 IN 改成 JOIN 小表，或拆成多批；IN 列表过长优化器会放弃索引。</li>
+  <li>OR 跨不同列常导致全表扫：(a=1 OR b=2) → UNION ALL 两个索引查询。</li>
+  <li>深分页 LIMIT 100000,20 极慢：改用游标 WHERE id>last_id ORDER BY id LIMIT 20。</li>
+</ul><div class="lead warn"><b>要点：</b>索引失效第一元凶：对列做运算/函数、隐式类型转换、前模糊 '%abc'、or 条件组合不当。</div>
+</section>
+
+<section id="hint">
+  <h2><span class="n">03</span>索引提示与覆盖</h2>
+<p>优化器选错索引时用提示纠正；优先构造覆盖索引避免回表。</p><pre><code>-- 强制走某索引（慎用，版本升级后可能失效）
+SELECT * FROM orders USE INDEX(idx_user) WHERE user_id=42;
+-- 覆盖索引：索引本身含查询所需全部列，无需回表
+-- CREATE INDEX idx_cover ON orders(user_id, status, created_at);
+-- 这样 (user_id,status) 过滤 + created_at 排序都可在此索引完成</code></pre>
+</section>
+
+<section id="cmp">
+  <h2><span class="n">04</span>反模式 → 改写</h2>
+<div class="table-wrap"><table><thead><tr><th>反模式</th><th>问题</th><th>改写</th></tr></thead><tbody><tr><td>SELECT *</td><td>无法覆盖索引</td><td>只选需要的列</td></tr><tr><td>DATE(col)=x</td><td>索引失效</td><td>范围区间比较</td></tr><tr><td>LIMIT 100000,20</td><td>扫 10 万行</td><td>游标分页 id>last</td></tr><tr><td>a=1 OR b=2</td><td>全表扫</td><td>UNION ALL 两份索引查</td></tr></tbody></table></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · SQL 核心 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

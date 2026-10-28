@@ -78,6 +78,24 @@
   .cmp td:first-child{color:var(--text);}
   .tagline{display:inline-block;color:var(--cyan);font-size:.86rem;border:1px solid rgba(57,197,207,.35);border-radius:20px;padding:2px 12px;margin-bottom:14px;}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="hero">
@@ -191,7 +209,17 @@ CREATE INDEX idx_users_email_lower ON users (lower(email));</code></pre>
 <div class="qa"><b>Q：覆盖索引（INCLUDE）对分页有什么帮助？</b><p>A：分页查询通常需要<strong>先按索引顺序定位，再回表取完整行</strong>。若索引里已包含列表页所需的列（用 <code>INCLUDE (col1, col2)</code> 或建成复合索引），就可以走 <strong>index-only scan</strong>，<strong>完全不回表</strong>，随机 IO 大幅减少。<strong>前提</strong>：① 可见性映射（VM）已设置，否则仍需回表检查可见性——所以<strong>要及时 VACUUM</strong>；② 索引不能太大，否则得不偿失；③ INCLUDE 列不参与索引排序，只作为「附带数据」（PG 11+）。</p></div>
 <div class="qa"><b>Q：服务端游标（CURSOR）适合做分页吗？</b><p>A：<strong>不适合交互式分页，适合大批量导出。</strong>游标是<strong>有状态的</strong>：占用连接、持有事务快照、阻止 VACUUM 回收，在 Web 应用中（请求之间连接会被复用/释放）难以管理。<strong>正确用法</strong>：离线导出、ETL、批处理中声明游标并 <code>FETCH</code> 分批读取，读完后关闭。<strong>Web 分页请用 keyset（无状态）</strong>——它把「位置」编码在查询条件里，天然适合无状态的 HTTP 请求。</p></div>
 </section>
-  </main>
+  
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定</h2><p>分页有两种本质不同的做法：</p><ul><li><b>OFFSET 分页</b>（LIMIT offset, size）：按固定顺序跳过前 N 行，适合随机跳页、后台遍历，但深度翻页代价高。</li><li><b>游标/Keyset 分页</b>（WHERE key &gt; last_key ORDER BY key LIMIT size）：基于上一页最后一条的排序键向后取，适合「上一页/下一页」无限滚动，深度无关。</li><li>判定信号：需要跳到第 100 页 → OFFSET；只需要连续翻 → Keyset。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化</h2><p>OFFSET 翻页延迟随偏移线性增长，因为数据库要先扫描并丢弃前 offset 行：</p><p><b>两种写法对比</b></p><pre><code>-- 深度翻页：越深越慢
+SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 200000;
+
+-- Keyset 游标分页：稳定且快（id 为索引唯一键）
+SELECT * FROM orders WHERE id &gt; 200000 ORDER BY id LIMIT 20;</code></pre><p>Keyset 要求 <b>ORDER BY 的列必须唯一且带索引</b>，否则会出现重复或漏数据。复合排序键时条件要写成「上一页最后一个 (a,b) 之后的下一个」：</p><pre><code>SELECT * FROM t WHERE (a, b) &gt; (10, 50) ORDER BY a, b LIMIT 20;
+-- 等价于 a&gt;10 OR (a=10 AND b&gt;50)，需配合行值比较或展开条件</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界</h2><ul><li><b>深度翻页慢</b>：OFFSET 500000 时 EXPLAIN 看到 Seq Scan/Index Scan 但仍丢弃大量行；改 Keyset 或延迟物化（先取 id 再 join）。</li><li><b>翻页重复/漏数据</b>：ORDER BY 无唯一键，并发插入导致游标错位；务必把主键纳入排序。</li><li><b>COUNT(*) 全量计数慢</b>：精确总数在大表上昂贵；前端改用「估算值」或去掉总数、只做无限滚动。</li><li><b>ORDER BY 与索引不一致</b>：用了 Keyset 但排序方向反了，条件要同向（都 ASC 或都 DESC）。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>OFFSET 越深越慢的根因是它<b>无法利用索引跳过</b>，必须从结果集起点顺序扫描并丢弃。Keyset 则把「下一页从哪开始」编码为索引范围条件，走 Index Range Scan，扫描量恒等于一页大小。</p><details><summary>为什么不直接用 LIMIT size OFFSET？</summary><p>OFFSET 翻页复杂度 O(offset+size)，而 Keyset 是 O(size)；百万元级数据翻到末页，前者可能慢几十到上百倍。</p></details><details><summary>复合排序键怎么写 Keyset？</summary><p>用行值比较 (a,b) > (last_a,last_b)，或展开为 a>last_a OR (a=last_a AND b>last_b)，并保证 (a,b) 有联合索引。</p></details></div></section>
+</main>
 </div>
 <footer>
   <p><a href="../../index.html">&larr; 返回关系型数据库索引</a> · <a href="../../../../index.html#subjects">返回知识地图</a></p>

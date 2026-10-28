@@ -968,14 +968,7 @@ function updateSizeLabel() {
 // 初始渲染
 updateDistillation();
 </script>
-<div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="distillation-data-and-evaluation.html">知识蒸馏的数据、温度与效果评估</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 训练与部署</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
 
-</body>
-</html>
 
 <section class="x-dry-sec"><div class="x-dry"><h2>第一层 ·  distillation 解决什么问题</h2><div class="table-wrap"><table><thead><tr><th>目标</th><th>手段</th><th>典型收益</th><th>代价</th></tr></thead><tbody><tr><td>把大模型能力搬进小模型</td><td>用大模型的输出当软标签</td><td>参数量降到 1/5~1/10</td><td>仍达不到教师上限</td></tr><tr><td>降低推理成本</td><td>小模型部署</td><td>延迟与显存大幅下降</td><td>需要额外的训练成本</td></tr><tr><td>保留分布信息</td><td>用软标签而非硬标签</td><td>比直接训同规模模型更好</td><td>需要教师模型推理一遍</td></tr><tr><td>迁移到专用任务</td><td>任务数据 + 教师指导</td><td>小模型专项表现接近</td><td>泛化能力下降</td></tr></tbody></table></div></div></section>
 <section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 损失函数与温度参数</h2><p>蒸馏损失 = <b>软标签损失（KL 散度）+ 硬标签损失（交叉熵）</b>，温度 T 用来「软化」教师的概率分布，让原本被 softmax 压平的次要类别信息暴露出来。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>常见取值</th><th>作用</th></tr></thead><tbody><tr><td>温度 T</td><td>2~10（常用 4）</td><td>越大分布越软，暗知识越多</td></tr><tr><td>α（软标签权重）</td><td>0.5~0.9</td><td>平衡软硬标签</td></tr><tr><td>教师 logits</td><td>需与学生的 T 一致</td><td>两边用同一个 T 才可比</td></tr><tr><td>梯度回传</td><td>教师冻结</td><td>教师只做前向，不更新</td></tr><tr><td>损失缩放</td><td>乘 T²</td><td>补偿软化后梯度变小</td></tr></tbody></table></div><p><b>蒸馏损失的核心实现</b></p><pre><code>import torch
@@ -1003,3 +996,11 @@ for x, y in loader:
     opt.zero_grad(); loss.backward(); opt.step()</code></pre></div></section>
 <section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 蒸馏常见问题</h2><ul><li><b>只用了硬标签，等于没蒸馏</b>：必须用教师的 logits（软标签），只用教师预测的 argmax 就叫「伪标签训练」，效果差很多。</li><li><b>两边温度不一致</b>：学生和教师必须用<b>同一个 T</b> 软化后再比，否则 KL 没有意义。</li><li><b>忘了乘 T²</b>：软化后概率更平，梯度幅度变小，不补偿的话软标签那一项几乎不起作用。</li><li><b>教师忘了 eval / no_grad</b>：教师参与更新或用了 dropout，输出不稳定，学生会学歪。</li><li><b>α 设成 1.0</b>：完全扔掉真实标签，在教师有偏见时会把错误也学过去，一般保留 0.1~0.5 的硬标签。</li><li><b>学生与教师词表不一致</b>：tokenizer 不同时 logits 维度对不上，要先对齐词表再做蒸馏。</li></ul><p class="muted">验收：分别评测「同规模从头训」与「蒸馏得到」的学生，差距不明显说明蒸馏没起作用，先查温度与 α。</p></div></section>
 <section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>软标签的价值在于它编码了<b>类别之间的相似性</b>：教师输出「猫 0.7、狗 0.25、汽车 0.05」，告诉学生猫和狗更像；硬标签只有「是猫」，丢掉了这部分信息。这就是所谓「暗知识」。</p><div class="table-wrap"><table><thead><tr><th>蒸馏方式</th><th>对齐什么</th><th>适用</th><th>难度</th></tr></thead><tbody><tr><td>响应蒸馏（logits）</td><td>最终输出分布</td><td>分类、通用语言模型</td><td>最简单</td></tr><tr><td>特征蒸馏</td><td>中间层表示</td><td>结构差异大时</td><td>需处理维度对齐</td></tr><tr><td>注意力蒸馏</td><td>注意力矩阵</td><td>Transformer 间迁移</td><td>层/头数要能对应</td></tr><tr><td>关系蒸馏</td><td>样本间关系</td><td>捕捉结构信息</td><td>实现较复杂</td></tr></tbody></table></div><details><summary>蒸馏和微调、量化有什么区别？</summary><p>目标不同：<b>蒸馏是把能力搬到更小的模型</b>，<b>量化是降低表示精度</b>，<b>微调是适配具体任务</b>。三者可以叠加：先蒸馏出小模型 → 微调到任务 → 量化部署。</p></details><details><summary>为什么蒸馏后的小模型还是不如教师？</summary><p>因为<b>容量上限</b>由参数量决定，蒸馏只是让小模型更好地逼近教师，不能超越。经验上蒸馏能拿到教师 90%+ 的性能，但复杂推理任务的差距更明显。</p></details><details><summary>没有教师模型还能蒸馏吗？</summary><p>可以「自蒸馏」（同模型互相教、或深层教浅层），但收益远小于有强教师的情况。实务上蒸馏最大的价值来自<b>用大模型教小模型</b>，这也是很多开源小模型质量不错的原因。</p></details></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="distillation-data-and-evaluation.html">知识蒸馏的数据、温度与效果评估</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 训练与部署</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
+</body>
+</html>

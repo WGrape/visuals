@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时语音对话的延迟预算与打断处理</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>实时语音对话的延迟预算与打断处理</h1>
+  <p>端到端延迟四项分解、VAD 参数、流式取舍与打断的三步处理</p>
+  <span class="tag">实时语音</span><span class="tag">VAD</span><span class="tag">延迟</span><span class="tag">打断</span>
+</header>
+<nav>
+  <a href="#s1">延迟分解</a>
+  <a href="#s2">VAD 参数</a>
+  <a href="#s3">打断</a>
+  <a href="#s4">排障</a>
+</nav>
+<main>
+
+<div class="lead">
+  实时语音对话的体验几乎完全由延迟决定。人会容忍回答不聪明，但很难容忍「问完要等一秒」。延迟是加出来的，所以优化必须一项一项砍，而不是笼统地换模型。
+</div>
+
+<section id="s1">
+  <h2><span class="n">01</span>端到端延迟的四项分解</h2>
+<div class="table-wrap"><table><thead><tr><th>环节</th><th>常见耗时（量级）</th><th>优化手段</th></tr></thead><tbody><tr><td>VAD 端点检测</td><td>几十 ~ 200 ms</td><td>缩短尾部静音判定，用更激进的阈值</td></tr><tr><td>ASR 识别</td><td>60 ~ 200 ms</td><td>流式识别、减小 chunk、就近部署</td></tr><tr><td>LLM 生成</td><td>200 ~ 500 ms</td><td>流式首 token、用小模型、裁剪提示</td></tr><tr><td>TTS 合成</td><td>80 ~ 150 ms</td><td>流式合成、首包优先、就近部署</td></tr><tr><td>网络往返</td><td>10 ~ 100 ms</td><td>就近接入、长连接复用、协议选型</td></tr></tbody></table></div><ul>
+  <li>人对停顿的敏感阈值<b>约 500~800 毫秒</b>，超过就开始觉得对话不自然</li>
+  <li>总延迟 = 说话结束 → VAD 判定 → ASR → LLM 首 token → TTS 首包 → 出声</li>
+  <li>优化顺序按<b>占比从大到小</b>：LLM 通常最大，网络最容易被忽略</li>
+  <li>流式是唯一能显著降低感受延迟的手段：边生成边念，把串行变成流水</li>
+</ul><div class="lead warn"><b>要点：</b>一个常被忽略的收益点：<b>让模型边生成边合成</b>。等全部生成完再合成，用户要多等一整句的时间，这是最浪费的一项。</div>
+</section>
+<section>
+  <div class="fig">
+    <svg viewBox="0 0 720 240" role="img" aria-label="实时语音对话端到端延迟分解">
+  <defs><style>
+    .t{fill:#e2e8f0;font-size:12px} .s{fill:#94a3b8;font-size:10.5px}
+    .h{fill:#6ea8fe;font-size:12px;font-weight:700}
+  </style></defs>
+  <text class="h" x="14" y="20">端到端延迟是加出来的，优化也要按项逐个砍</text>
+  <text class="s" x="14" y="38">人对对话停顿的敏感阈值大约在 500~800 毫秒，超过就会觉得「卡」</text>
+
+  <text class="s" x="14" y="60">0 ms</text>
+  <rect x="60" y="48" width="70" height="30" fill="#171b26" stroke="#6ea8fe"/>
+  <text class="s" x="68" y="67">VAD</text>
+  <rect x="130" y="48" width="90" height="30" fill="#171b26" stroke="#7ee787"/>
+  <text class="s" x="140" y="67">ASR 60~200</text>
+  <rect x="220" y="48" width="100" height="30" fill="#171b26" stroke="#ffd33d"/>
+  <text class="s" x="230" y="67">LLM 200~500</text>
+  <rect x="320" y="48" width="80" height="30" fill="#171b26" stroke="#ff7b72"/>
+  <text class="s" x="330" y="67">TTS 80~150</text>
+  <rect x="400" y="48" width="70" height="30" fill="#171b26" stroke="#d2a8ff"/>
+  <text class="s" x="408" y="67">播放</text>
+  <text class="s" x="480" y="67">≈ 500~900 ms 总计（单位：毫秒，量级参考）</text>
+
+  <text class="t" x="14" y="106" font-weight="700">四项里谁是瓶颈：取决于模型与网络，但顺序通常固定</text>
+  <rect x="14" y="116" width="170" height="54" rx="6" fill="#171b26" stroke="#ffd33d"/>
+  <text class="s" x="22" y="136" font-weight="700">LLM 生成通常最大</text>
+  <text class="s" x="22" y="154">首 token 时间决定感受</text>
+  <text class="s" x="22" y="168">用流式输出边生成边念</text>
+  <rect x="192" y="116" width="170" height="54" rx="6" fill="#171b26" stroke="#7ee787"/>
+  <text class="s" x="200" y="136" font-weight="700">ASR 其次</text>
+  <text class="s" x="200" y="154">chunk 越小越快但越不准</text>
+  <text class="s" x="200" y="168">0.4~0.6 秒是常用折中</text>
+  <rect x="370" y="116" width="170" height="54" rx="6" fill="#171b26" stroke="#ff7b72"/>
+  <text class="s" x="378" y="136" font-weight="700">TTS 也不小</text>
+  <text class="s" x="378" y="154">首包延迟要单独优化</text>
+  <text class="s" x="378" y="168">流式合成边生成边播</text>
+  <rect x="548" y="116" width="158" height="54" rx="6" fill="#171b26" stroke="#d2a8ff"/>
+  <text class="s" x="556" y="136" font-weight="700">网络常被忽略</text>
+  <text class="s" x="556" y="154">跨地域往返几十毫秒起</text>
+  <text class="s" x="556" y="168">就近接入能省一大截</text>
+
+  <rect x="14" y="184" width="692" height="44" rx="6" fill="#171b26" stroke="#2b3142"/>
+  <text class="s" x="26" y="202">打断处理：检测到用户说话 → 立刻停 TTS 播放 → 清空已生成但未播出的音频 → 把新输入送进 LLM</text>
+  <text class="s" x="26" y="220">漏判与误判的取舍：<b>宁可偶尔误判</b>（用户没说话就停了），也不要漏判（用户说话了还在念）</text>
+</svg>
+    <div class="cap">实时语音对话的端到端延迟分解与打断处理</div>
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>VAD 的三个关键参数</h2>
+<div class="table-wrap"><table><thead><tr><th>参数</th><th>作用</th><th>调大</th><th>调小</th></tr></thead><tbody><tr><td>起始判定阈值</td><td>多大能量算开始说话</td><td>更不容易误触发</td><td>更灵敏，容易把噪声当说话</td></tr><tr><td>尾部静音时长</td><td>静音多久算说完了</td><td>不容易打断长停顿</td><td>更快结束，但会切断自然停顿</td></tr><tr><td>最小语音段时长</td><td>短于此不算说话</td><td>过滤咳嗽等噪声</td><td>可能漏掉「嗯」「好」等短回应</td></tr></tbody></table></div><pre><code># 常见取舍（量级参考，具体要按场景调）
+VAD_CONFIG = {
+    'start_threshold': 0.5,      # 起始判定：0.3~0.7
+    'end_silence_ms': 400,       # 尾部静音：300~800 ms，是延迟与容错的分界
+    'min_speech_ms': 200,        # 最小语音段：小于它会漏掉短回应
+    'max_speech_ms': 30000,      # 超时保护，防止用户一直说
+}
+
+# 端点判定的两条策略
+# 保守：等 700ms 静音才结束 -> 不容易切断说话，但明显更慢
+# 激进：等 300ms 静音就结束 -> 更快，但用户思考时会抢话</code></pre><div class="lead warn"><b>要点：</b>尾部静音时长是<b>唯一同时影响延迟与误判</b>的参数。300 ms 更快但会抢话，700 ms 不抢话但明显更慢，常见取值落在 400~600 ms。</div>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>打断处理的三步与取舍</h2>
+<ol>
+  <li>检测到用户开始说话 → <b>立刻停止 TTS 播放</b>，不要等说完</li>
+  <li>清空已经生成但还没播出的音频，否则停了之后会继续冒出声音</li>
+  <li>把新输入送进 LLM，同时决定是否要丢弃上一轮未完成的生成</li>
+</ol><div class="table-wrap"><table><thead><tr><th>策略</th><th>做法</th><th>代价</th></tr></thead><tbody><tr><td>全丢</td><td>检测到打断就放弃上一轮生成</td><td>响应快，但用户可能只是附和</td></tr><tr><td>保留上下文</td><td>保留已生成内容，只停止播放</td><td>更自然，但延迟表现不变</td></tr><tr><td>区分插入语</td><td>「嗯」「好的」这类不打断</td><td>需要额外分类，实现复杂</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>取舍建议：<b>宁可误判也不要漏判</b>。用户说话了系统还在念，是非常糟糕的体验；反过来用户只是清嗓子导致打断，代价小得多。</div>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>排障顺序与常见坑</h2>
+<ol>
+  <li>先分段打点：VAD / ASR / LLM / TTS 各自单独计时，<b>不要只看总延迟</b></li>
+  <li>确认流式是否真的生效：如果 TTS 等整句生成完才开始，延迟会凭空多几百毫秒</li>
+  <li>检查网络：跨地域往返几十毫秒起，就近接入往往比换模型更有效</li>
+  <li>回声问题单独排查：设备外放被自己录进去会导致 ASR 识别混乱</li>
+</ol><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>整体慢但分段都不慢</td><td>串行了，没有流水线</td><td>改成流式，边生成边合成</td></tr><tr><td>用户说话被抢断</td><td>尾部静音太短</td><td>调到 500~700 ms</td></tr><tr><td>用户说完了没反应</td><td>尾部静音太长</td><td>调到 300~400 ms</td></tr><tr><td>系统自己念自己录</td><td>回声消除没做</td><td>开 AEC 或改耳机</td></tr><tr><td>打断后还继续出声</td><td>只停了生成没清播放队列</td><td>清空已生成未播出的音频</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>最后一条经验：<b>先测再优化</b>。把四段的耗时打点输出成日志，优化才有方向，否则很容易改了半天没改到瓶颈上。</div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 语音模型 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

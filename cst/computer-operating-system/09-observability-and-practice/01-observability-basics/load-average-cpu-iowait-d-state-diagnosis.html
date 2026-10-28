@@ -12,6 +12,33 @@
 <section class="panel"><h2>容器里的限额陷阱</h2><p>Kubernetes Pod 设了 CPU limit，例如 1 核，但宿主机有 8 核。应用在高峰需要短时 2 核，cgroup 会对超出额度的运行时间节流；业务 P99 升高、容器限额计数增长，宿主整体 CPU 仍可能很低。此时盲目增加线程数可能让争用更严重。要结合容器 CPU 使用、节流次数/时间、请求并发与线程运行队列分析，并区分 requests 决定调度预留、limits 决定硬限额的角色。</p><p>不同 cgroup 版本和监控代理对节流指标的采集口径会变化，不能只看一个“throttled 事件数”绝对值。应在相同负载下调整限额或优化 CPU 工作量，观察业务延迟是否改善。</p></section>
 <section class="panel"><h2>一个故障时间线</h2><p>10:00 用户反馈 API 延迟从 80 毫秒升到 2 秒，8 核主机 load 从 2 升到 12，CPU 总使用率从 25% 到 30%。若同时发现 D 状态任务数从 0 升到 10、存储设备 P99 读延迟从 5 毫秒升到 800 毫秒，而 on-CPU 火焰图没有新热点，优先怀疑 I/O 路径；接着核对挂载点、设备错误、存储服务健康和受影响进程。若 D 状态不多，却有容器 CPU 节流明显上升，就走限额方向。一个证据链必须包含业务症状、等待主体和资源异常的同一时间窗口。</p><p>将故障期与正常期同样长度的样本对照，比“现在 top 看起来正常”可靠。问题恢复后，平滑的 15 分钟 load 仍可能高一阵，不表示故障仍在发生。</p></section>
 <section class="panel"><h2>修复后的验收</h2><p>若确认存储延迟导致等待，修复设备或减少随机 I/O 后，在相同流量下应看到 D 状态与存储尾延迟下降，业务 P99 恢复；若是 CPU 节流，调整限额或减少计算后应看到节流与请求尾延迟同步改善。保留变更前后请求量、缓存命中和依赖状态，避免把流量自然下降误认为修复有效。对偶发事件可加上进程状态、设备延迟和容器节流的联合告警，但不应只凭 load 单指标自动重启。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：三个指标各在说什么</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>统计的是什么</th><th>容易误解的点</th></tr></thead><tbody><tr><td><b>load average</b></td><td>可运行态 + <b>不可中断睡眠态</b>的进程数均值</td><td>包含等 IO 的进程，<b>不等于 CPU 使用率</b></td></tr><tr><td><b>CPU iowait</b></td><td>CPU 空闲<b>且有未完成 IO</b>的时间占比</td><td>高 iowait 只是「闲着等 IO」，<b>不代表磁盘满了</b></td></tr><tr><td><b>D 状态（uninterruptible sleep）</b></td><td>进程在等内核 IO 完成，<b>无法被信号打断</b></td><td>kill 杀不掉，只能等 IO 完成或重启</td></tr><tr><td><b>CPU 使用率</b></td><td>非空闲时间的占比（含 sys/usr/等）</td><td>与 load 无必然关系</td></tr></tbody></table></div><p><b>判定口诀：</b>load 高 + CPU 使用率高 = <b>真的在算</b>（计算瓶颈）；load 高 + CPU 使用率低 + iowait 高 = <b>在等 IO</b>（IO 瓶颈）；load 高 + CPU 低 + iowait 低 = 有大量 <b>D 状态</b>进程（可能在等锁或存储异常）。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：多少算高</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>健康区间</th><th>需关注</th><th>危险</th></tr></thead><tbody><tr><td>load / CPU 核数<br>（每个核的负载）</td><td><b>&lt; 0.7</b></td><td>0.7 – 1.0</td><td><b>&gt; 1.0</b> 说明请求多于处理能力</td></tr><tr><td>iowait 占比</td><td><b>&lt; 5%</b></td><td>5% – 20%</td><td><b>&gt; 30%</b> 存储已成瓶颈</td></tr><tr><td>D 状态进程数</td><td><b>0 – 少数</b></td><td>几十个</td><td>成百上千说明存储/网络异常</td></tr><tr><td>1/5/15 分钟 load 形态</td><td>平稳</td><td>5 分钟高于 15 分钟（在涨）</td><td>1 分钟远高于 5 分钟（突发）</td></tr></tbody></table></div><p><b>定位 load 与 IO 问题的完整命令链</b></p><pre><code># ① 先看 load 的三个值，判断是在涨还是在落
+cat /proc/loadavg
+# 输出：0.35 0.42 0.38 2/1437 123456
+#       |    |    |    |      └─ 最后 PID
+#       |    |    |    └─ 可运行数/总进程数
+#       └─ 1 / 5 / 15 分钟均值
+
+# ② 看 CPU 各部分占比，重点关注 wa（iowait）与 st（steal）
+top -bn1 | head -5
+# 或更直观
+vmstat 1 5
+# 关键列：r（运行队列）= load 的来源；b（阻塞）= D 状态进程数
+#          wa = iowait；us/sy/id 分别用户态/内核态/空闲
+
+# ③ 找磁盘问题：util 接近 100% 说明设备已饱和
+iostat -x 1 3
+# 关键列：%util（设备利用率）、await（平均等待 ms）、svctm（服务时间）
+#         rkB/s + wkB/s（吞吐）、aqu-sz（平均队列长度）
+
+# ④ 找出到底哪些进程在 D 状态
+ps -eo stat,pid,comm,wchan:30,cmd | awk '$1 ~ /D/'
+
+# ⑤ 看进程卡在内核哪个函数（wchan 字段）
+cat /proc/&lt;PID&gt;/wchan; echo
+cat /proc/&lt;PID&gt;/stack   # 需要 root，能直接看到调用栈</code></pre><p><b>数量级直觉：</b>4 核机器上 load = 4 表示<b>刚好跑满</b>；load = 8 表示有<b>一半请求在排队</b>。所以 load 一定要<b>除以核数</b>才有意义。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><p><b>高频坑清单：</b></p><ul><li>① <b>拿 load 绝对值判断</b>：64 核机器 load=30 很正常，2 核机器 load=10 已经爆了</li><li>② <b>以为 iowait 高就是 CPU 忙</b>：恰恰相反，iowait 高说明 CPU <b>闲着</b>在等 IO</li><li>③ <b>用 kill -9 杀 D 状态进程</b>：杀不掉，它会一直等到 IO 返回</li><li>④ <b>忽略 steal（st）</b>：虚拟机上 st 高说明被宿主机抢了 CPU，不是你的问题</li><li>⑤ <b>只看 1 分钟 load</b>：瞬时尖峰会被 15 分钟均值平滑掉，要看趋势</li><li>⑥ <b>把 nice 进程算漏</b>：load 包含所有可运行进程，不区分优先级</li></ul><p><b>标准排查顺序（记住这个链条）：</b></p><ul><li>① <code>uptime</code> 看 load 趋势（是在涨还是在落）</li><li>② <code>vmstat 1</code> 看 r 与 b：r 高是 CPU 竞争，b 高是 IO 阻塞</li><li>③ <code>top</code> 看 CPU 分布：us 高是应用，sy 高是内核，wa 高是 IO</li><li>④ <code>iostat -x</code> 看磁盘：<code>%util</code> 接近 100% 且 <code>await</code> 远超 <code>svctm</code> 就是饱和</li><li>⑤ <code>ps</code> 找 D 状态进程，再用 <code>/proc/PID/stack</code> 定位卡在哪</li><li>⑥ 如果是网络存储（NFS/Ceph），还要查<b>网络</b>而不只是本地磁盘</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么 D 状态进程杀不掉？</summary><p>因为 D 状态（TASK_UNINTERRUPTIBLE）的设计目的就是<b>保证内核 IO 路径不被打断</b>。如果允许信号打断正在写磁盘的进程，可能导致数据结构处于半更新状态、数据损坏。所以内核让进程<b>必须等 IO 完成</b>，任何信号都先挂起。这也是为什么存储故障时会出现大量 D 状态进程堆积 —— 它们不是卡死，是在等一个永远不会返回的 IO。</p></details><details><summary>iowait 高但磁盘 util 不高，是怎么回事？</summary><p>常见两种情况：① <b>网络存储</b>（NFS、iSCSI、Ceph）—— 本地 <code>iostat</code> 看不到远端设备的繁忙，iowait 却会正常统计；② <b>单个慢设备</b>拖累 —— 系统有一个设备 %util 100%，其他设备空闲，平均下来 util 不高但进程在等。所以要<b>逐设备看</b>，别只看汇总。</p></details><details><summary>load 高但所有 CPU 指标都正常，还可能是什么？</summary><p>最容易被忽略的是<b>锁竞争</b>和<b>内存压力</b>：① 大量线程阻塞在互斥锁上 —— 它们不在运行队列，但 load 统计的是可运行+不可中断，实际的等待可能来自 futex；② 内存不足导致频繁回收 —— 进程看似在跑，实际在等页回收；③ 容器 CPU 配额（cfs quota）被限流 —— CPU 看着不高，实际被 throttle，表现为 load 升高与延迟上升。这三种只用 top 看不出来，需要 perf 和 cgroup 指标。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>8 核机器 load average=12、CPU 使用率 30%，是否能直接把 load 当成 150% CPU 使用率？</summary><p>不能。load 还可能计入不可中断等待任务；应核对时间窗、任务状态、I/O 延迟和容器限额。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="os-observability.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

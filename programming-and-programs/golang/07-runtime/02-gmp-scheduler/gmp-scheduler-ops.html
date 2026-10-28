@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go GMP 调度观测与调优：schedtrace / trace 怎么用</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Go GMP 调度观测与调优：schedtrace / trace 怎么用</h1>
+  <p>GOMAXPROCS 容器陷阱、调度器观测、syscall/GC 阻塞排查与调优旋钮。</p>
+  <span class="tag">Go</span><span class="tag">GMP</span><span class="tag">调度器</span><span class="tag">性能</span>
+</header>
+<nav>
+  <a href="#gomaxtprocs">GOMAXPROCS</a>
+  <a href="#observe">观测</a>
+  <a href="#block">阻塞</a>
+  <a href="#cmp">旋钮</a>
+</nav>
+<main>
+
+<div class="lead">
+  G-M-P 模型下，goroutine 太多、syscall 蒙住 M、GC STW，都会让吞吐掉下去。关键是能用 schedtrace / trace 把问题看清楚。
+</div>
+
+<section id="gomaxtprocs">
+  <h2><span class="n">01</span>GOMAXPROCS 与容器陷阱</h2>
+<p>GOMAXPROCS 决定并行执行的 OS 线程上限（P 的数量）。在容器里若没设 GOMAXPROCS，Go 会按宿主物理核数初始化，可能远超容器 CPU quota，导致大量时间片争抢与 throttling。用 uber 的 automaxprocs 自动对齐。</p><pre><code># 启动前设（容器里强烈建议）
+export GOMAXPROCS=4
+go run main.go
+
+# Go 1.25+ 已内置自动按 cgroup 限额设 GOMAXPROCS；老版本引入：
+import _ "go.uber.org/automaxprocs"   # 自动设成 cgroup CPU quota
+
+# 运行时也能改
+runtime.GOMAXPROCS(4)</code></pre>
+</section>
+
+<section id="observe">
+  <h2><span class="n">02</span>怎么观测调度</h2>
+<ul>
+  <li>GODEBUG=schedtrace=1000：每 1 秒打印调度器摘要（gomaxprocs、idle、runqueue 长度）。</li>
+  <li>GODEBUG=schedtrace=1000,scheddetail=1：再展开每个 P 的本地队列。</li>
+  <li>runtime.NumGoroutine()：实时 goroutine 数，暴涨常意味泄漏。</li>
+  <li>pprof：goroutine / threadcreate profile 看阻塞点。</li>
+</ul><pre><code>GODEBUG=schedtrace=1000 ./app
+# 输出示例：
+# SCHED 1000ms: gomaxprocs=4 idleprocs=1 threads=8 spinningthreads=1 \
+#   idlethreads=3 runqueue=3 [2 0 1 0]  &lt;- 方括号内是各 P 的本地运行队列长度
+# runqueue 长期很大 =&gt; 生产者远快于消费者，需限流或加 worker</code></pre>
+</section>
+
+<section id="block">
+  <h2><span class="n">03</span>常见阻塞与排查</h2>
+<p>syscall 会占用一个 M（P 被解开去找别的 M），大量阻塞 syscall 会耗尽线程；GC STW 与 mark 阶段也会暂停所有 G。用 go tool trace 看时间线最准。</p><pre><code># 生成 trace（运行时开启）
+import "runtime/trace"
+f, _ := os.Create("trace.out")
+trace.Start(f); defer trace.Stop()
+// 复现负载后退出，用浏览器打开看 G/M 阻塞、GC、syscall 时间线
+go tool trace trace.out
+
+# 常见信号
+# - Syscall 占比高 =&gt; 减少阻塞系统调用，或挪到专用 worker
+# - GC 频繁/STW 长 =&gt; 降分配、调 GOGC、看 heap profile</code></pre>
+</section>
+
+<section id="cmp">
+  <h2><span class="n">04</span>调优旋钮</h2>
+<div class="table-wrap"><table><thead><tr><th>旋钮</th><th>作用</th><th>何时动</th></tr></thead><tbody><tr><td>GOMAXPROCS</td><td>并行度</td><td>容器里没自动对齐时</td></tr><tr><td>GOGC</td><td>GC 触发阈值</td><td>分配多、想降 GC 频率</td></tr><tr><td>GODEBUG=schedtrace</td><td>看队列积压</td><td>怀疑调度不均时</td></tr><tr><td>GODEBUG=gctrace=1</td><td>看 GC 频率</td><td>怀疑 GC 拖累时</td></tr></tbody></table></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · Go 语言 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

@@ -856,14 +856,7 @@ if (typeof d3 !== 'undefined') {
   window.addEventListener('load', initAll);
 }
 </script>
-<div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="../03-query/02-join-and-anti-patterns/mysql-join-principles.html">MySQL JOIN 执行计划…</a><a href="../03-query/02-join-and-anti-patterns/mysql-query-anti-patterns.html">MySQL查询性能陷阱</a><a href="../04-pagination/mysql-limit-optimization.html">MySQL LIMIT 深度分…</a><a href="../06-locks/mysql-how-locking-works.html">MySQL 是怎么加锁的？——…</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 关系型数据库</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
 
-</body>
-</html>
 
 <section class="x-dry-sec"><div class="x-dry"><h2>参数默认值与容量估算</h2><p>Redo/Undo/Binlog 三个日志各有各的容量问题。上线前必须算清楚，否则磁盘会被日志吃光。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>默认值</th><th>含义</th><th>调整建议</th></tr></thead><tbody><tr><td><code>innodb_flush_log_at_trx_commit</code></td><td><b>1</b></td><td>每次提交都刷盘（1=最安全，2=每秒刷，0=每秒写）</td><td>主库保持 1；从库/允许丢 1 秒数据时用 2</td></tr><tr><td><code>sync_binlog</code></td><td><b>1</b></td><td>每次提交同步 binlog（0=由 OS 决定）</td><td>主库保持 1，配合上面才真正不丢</td></tr><tr><td><code>innodb_redo_log_capacity</code></td><td><b>100 MB</b>（8.0.30+）</td><td>Redo 总容量（替代旧的 log_file_size×2）</td><td>写密集调到 1~4 GB，减少检查点抖动</td></tr><tr><td><code>innodb_log_file_size</code></td><td>48 MB（8.0.30 前，共 2 个=96MB）</td><td>单个 Redo 文件大小</td><td>旧版本建议 1~2 GB</td></tr><tr><td><code>innodb_log_buffer_size</code></td><td>16 MB</td><td>Redo 缓冲区</td><td>大事务多时调 64~256 MB</td></tr><tr><td><code>max_binlog_size</code></td><td>1 GB（1073741824）</td><td>单个 binlog 上限</td><td>默认即可，不要设太大</td></tr><tr><td><code>binlog_expire_logs_seconds</code></td><td>2592000（30 天）</td><td>binlog 保留时长（8.0 起取代 expire_logs_days）</td><td>按备份周期与磁盘定，7~14 天常见</td></tr><tr><td><code>binlog_format</code></td><td><b>ROW</b>（8.0 默认）</td><td>binlog 格式</td><td>保持 ROW；STATEMENT 有不确定风险</td></tr><tr><td><code>innodb_undo_tablespaces</code></td><td>2（8.0 默认）</td><td>Undo 表空间数量</td><td>8.0 可在线增删，长事务多时增加</td></tr></tbody></table></div><p>Redo 容量怎么定：经验值是<b>能容纳 1 小时的写入量</b>。Redo 写满会强制检查点刷脏页，表现为周期性卡顿。<code>innodb_redo_log_capacity</code> 太小 → 频繁检查点 → 写入抖动；太大 → 崩溃恢复时间变长。</p><p><b>观测命令</b></p><pre><code>-- 看当前配置
 SHOW VARIABLES LIKE 'innodb_flush_log_at_trx_commit';
@@ -898,3 +891,11 @@ mysqlbinlog binlog.000123 | grep -c '^###'      # 粗估事件数
 mysql -e 'PURGE BINARY LOGS BEFORE NOW() - INTERVAL 7 DAY;'
 # 或依赖 binlog_expire_logs_seconds 自动清理</code></pre><p class="muted"><code>innodb_flush_log_at_trx_commit=1</code> 与 <code>sync_binlog=1</code> 是<b>双一配置</b>，只有两个都是 1 才能保证崩溃后不丢已提交事务。把前者改成 2 能显著提升吞吐，代价是宕机可能丢失最后 1 秒的提交——这是一个明确的取舍，不是免费的优化。</p></div></section>
 <section class="x-dry-sec"><div class="x-dry"><h2>两阶段提交与排障清单</h2><p>两阶段提交解决的是<b>Redo 与 Binlog 两份日志状态不一致</b>的问题。判断逻辑只有一条：<b>以 binlog 是否完整为准</b>。</p><div class="table-wrap"><table><thead><tr><th>崩溃时刻</th><th>Redo 状态</th><th>Binlog 状态</th><th>恢复动作</th></tr></thead><tbody><tr><td>写 Redo（prepare）之前</td><td>无</td><td>无</td><td>回滚</td></tr><tr><td>prepare 之后、写 binlog 之前</td><td>prepare</td><td>无</td><td><b>回滚</b>（binlog 没有，主从会不一致）</td></tr><tr><td>binlog 写完、Redo 未 commit</td><td>prepare</td><td><b>完整</b></td><td><b>提交</b>（binlog 有就必须提交）</td></tr><tr><td>Redo commit 之后</td><td>commit</td><td>完整</td><td>无需处理</td></tr></tbody></table></div><p>这个判断在崩溃恢复时由<b>扫描 binlog 中的 XID</b> 完成：Redo 里处于 prepare 的事务，如果能在 binlog 里找到对应的 XID 就提交，否则回滚。这也是为什么 <code>binlog</code> 必须开 —— 它不只是用于主从复制和数据恢复，<b>它是崩溃恢复时判断事务该提交还是回滚的依据</b>。</p><p>排障与配置逐条核对：</p><ul><li><b>双一配置要同时设</b>：<code>innodb_flush_log_at_trx_commit=1</code> + <code>sync_binlog=1</code>，缺一不可靠。</li><li><b>Redo 太小会周期性卡顿</b>：看 <code>Innodb_log_waits</code>，大于 0 就该调大。</li><li><b>Redo 也不要太大</b>：崩溃恢复时间与容量成正比，1~4 GB 通常够用。</li><li><b>长事务会让 Undo 暴涨</b>：一个跑了 2 小时的事务会让 undo 无法回收，要监控长事务。</li><li><b>binlog 必须开</b>：它既用于复制，也是崩溃恢复判定事务提交与否的依据。</li><li><b>binlog_format 用 ROW</b>：STATEMENT 在主从上有不确定函数（如 UUID、NOW）风险。</li><li><b>清理 binlog 用 PURGE 命令</b>，不要手工 rm 文件，否则索引与实际文件不一致。</li><li><b>保留期要 ≥ 一个全备周期</b>：否则要做时间点恢复（PITR）时 binlog 已被清掉。</li><li><b>磁盘要单独规划日志目录</b>：redo 与 binlog 顺序写，与数据文件随机写混在一起会互相拖累。</li><li><b>大事务要拆</b>：单次删除 1000 万行会让 redo/undo 与复制延迟同时爆炸。</li><li><b>恢复演练要定期做</b>：备份 + binlog 能恢复到什么时间点，必须实测过才知道。</li></ul></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../03-query/02-join-and-anti-patterns/mysql-join-principles.html">MySQL JOIN 执行计划…</a><a href="../03-query/02-join-and-anti-patterns/mysql-query-anti-patterns.html">MySQL查询性能陷阱</a><a href="../04-pagination/mysql-limit-optimization.html">MySQL LIMIT 深度分…</a><a href="../06-locks/mysql-how-locking-works.html">MySQL 是怎么加锁的？——…</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 关系型数据库</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
+</body>
+</html>

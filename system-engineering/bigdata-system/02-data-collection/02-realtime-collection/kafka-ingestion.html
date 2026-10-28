@@ -60,6 +60,24 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
   .xrel-up a{color:inherit;text-decoration:none}
   .xrel-up a:hover{opacity:1;text-decoration:underline}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -156,6 +174,22 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
   <div class="xrel-up"><a href="../../index.html">← 返回 大数据</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：数据怎么进 Kafka</h2><p>「摄入（ingestion）」指把各源数据写进 Kafka topic。常见入口有三类：<b>业务 producer 直写</b>、<b>Kafka Connect / CDC</b>（从数据库捕获变更）、<b>日志/采集 agent</b>（Filebeat/Flink 等）。topic 下的 <b>partition</b> 是并行与顺序的单位。</p><div class="table-wrap"><table><thead><tr><th>入口方式</th><th>适用</th><th>顺序保证</th></tr></thead><tbody><tr><td>Producer SDK</td><td>业务埋点/事件</td><td>同 key 同分区有序</td></tr><tr><td>Kafka Connect</td><td>数据库 CDC、SaaS</td><td>按表/主键分区</td></tr><tr><td>Agent/流式</td><td>日志、流计算输出</td><td>视 key</td></tr></tbody></table></div><p><b>一句话判定：</b>摄入设计先定 <b>partition 数（并行度）</b> 和 <b>key（顺序与倾斜）</b> 两件事。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：可靠性与吞吐</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>取值</th><th>含义</th><th>取舍</th></tr></thead><tbody><tr><td>acks</td><td>all / 1 / 0</td><td>写入确认级别</td><td>all 最稳但有延迟</td></tr><tr><td>retries</td><td>≥ 3</td><td>失败重试</td><td>防瞬断丢</td></tr><tr><td>batch.size</td><td>16~64 KB</td><td>攒批大小</td><td>大=吞吐高、延迟高</td></tr><tr><td>linger.ms</td><td>5~20</td><td>等待攒批</td><td>同上</td></tr><tr><td>compression</td><td>lz4/snappy</td><td>压缩</td><td>省带宽</td></tr><tr><td>replication</td><td>3</td><td>副本数</td><td>容灾</td></tr></tbody></table></div><p><b>Kafka Producer 可靠性配置</b></p><pre><code>// Java Producer 关键配置（兼顾可靠与吞吐）
+Properties p = new Properties();
+p.put("bootstrap.servers", "k1:9092,k2:9092,k3:9092");
+p.put("acks", "all");              // 等 ISR 全确认，防丢
+p.put("retries", "5");
+p.put("enable.idempotence", "true"); // 去重，配合 exactly-once 基础
+p.put("batch.size", "65536");       // 64KB 攒批
+p.put("linger.ms", "10");           // 最多等 10ms 攒批
+p.put("compression.type", "lz4");
+
+// key 决定分区：同一 userId 落到同一分区，保证该用户事件有序
+producer.send(new ProducerRecord&lt;&gt;("events", userId, payload));</code></pre><p><b>数量级：</b>单 partition 顺序写吞吐约 <b>数 MB/s~数十 MB/s</b>；acks=all 相对 acks=1 增加 <b>一个网络 RTT</b> 的延迟，但能避免 leader 切换丢数据。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑</h2><p><b>数据链路出问题的清单：</b></p><ul><li><b>丢数据</b>：acks=0/1 + leader 切换，未同步副本丢消息；或 producer 没等回调就认为成功</li><li><b>重复数据</b>：at-least-once 语义下重试必然重复，下游必须幂等或去重</li><li><b>消费积压</b>：consumer lag 暴涨，consumer 太慢或分区数不够并行</li><li><b>分区倾斜</b>：key 分布不均，个别 partition 成热点、lag 永远清不掉</li><li><b>消息过大</b>：超过 max.message.bytes 被拒，或单条压缩后仍太大</li><li><b>topic 建太大/太小</b>：分区数定死后扩分区会打乱 key 分布，初期要估准</li></ul><p><b>排查顺序：</b>① 看 consumer group 的 lag（kafka-consumer-groups --describe）；② 查 producer 的 ack/retry 配置；③ 检查分区 key 分布与热点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><details><summary>为什么 Kafka 默认是 at-least-once 而不是 exactly-once？</summary><p>exactly-once 需要<b>生产者幂等 + 事务 + 消费者幂等</b>三者配合，有额外协调开销。很多场景「重复」比「丢失」好处理（下游做幂等即可），所以默认 at-least-once 换取更高吞吐与更简单模型。需要精确一次时用 enable.idempotence + 事务性消费。</p></details><details><summary>partition 数怎么定才不会后悔？</summary><p>partition 是<b>并行度上限</b>也是<b>消费有序的单位</b>。太少则无法横向扩展消费；太多则 controller 管理开销、文件句柄暴涨，且<b>扩分区不会改变已有 key 的映射</b>会使按 key 的顺序出现短暂错乱。经验：按「目标吞吐 ÷ 单分区吞吐」再留 2~3 倍余量。</p></details><details><summary>acks=all 会不会很慢？</summary><p>相对 acks=1 多花<b>一个 RTT</b>（等 ISR 副本确认），吞吐略有损但数据不丢。配合 <b>攒批（batch.size+linger.ms）</b> 和压缩，这个 RTT 被摊薄到整批上，实测吞吐下降通常可控，是可靠性与性能的甜点配置。</p></details></div></section>
 <footer>© 2026 Visuals · 大数据系统 / 数据采集 / Kafka 接入</footer>
 </body>
 </html>

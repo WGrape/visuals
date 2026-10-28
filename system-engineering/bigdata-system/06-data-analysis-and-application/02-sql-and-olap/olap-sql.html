@@ -48,6 +48,36 @@ ol.tight { margin:10px 0; padding-left:22px; }
 ol.tight li { margin:8px 0; }
 footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+<style>
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -153,6 +183,23 @@ FROM daily_sales;</code></pre>
 <div class="qa"><div class="qa-q">Q：为什么同样的 SQL 在 OLAP 引擎上快几十倍？</div><div class="qa-a">A：主要是<b>列式存储 + 向量化执行</b>。聚合查询通常只用到少数几列（如只看 amount 和 region），列存让引擎<b>只读取这两列的数据</b>，跳过其他几十列，IO 量可能减少 90% 以上。再加上向量化执行（批量处理而非逐行处理）、压缩编码、预聚合等技术，综合起来就是几十倍的差距。<b>代价是单行读写变慢</b>——所以 OLAP 引擎不适合做事务处理。</p></div></div>
 <div class="qa"><div class="qa-q">Q：分析查询跑得慢，一般怎么优化？</div><div class="qa-a">A：排查顺序：<b>① 有没有加分区过滤</b>——全表扫描是最常见的性能杀手；<b>② 扫描了多少数据量</b>——看执行计划的 scan 行数，能先过滤就先过滤；<b>③ JOIN 顺序与数据量</b>——先把各表聚合到最小再 JOIN，小表放右边（广播）；<b>④ 是否重复计算</b>——用 CTE 复用中间结果，或建物化视图；<b>⑤ 数据倾斜</b>——某个 key 特别大导致单任务极慢，需要加盐或单独处理。</p></div></div>
 </div>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定</h2><p>OLAP 面向分析型查询（聚合、分组、多表关联、窗口函数），与 OLTP 的短事务点查截然不同：</p><ul><li>特征：扫描大量行、少更新、读多写少、结果集可被聚合压缩。</li><li>引擎底层多为<b>列存 + 向量化 + MPP 并行</b>（如 ClickHouse/Doris/Spark SQL）。</li><li>判定：一条 SQL 涉及 GROUP BY/SUM/窗口/大表 JOIN → 走 OLAP 优化思路，而不是加索引了事。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化</h2><p>核心优化手段与量化效果：</p><div class="table-wrap"><table><thead><tr><th>手段</th><th>作用</th><th>典型收益</th></tr></thead><tbody><tr><td>分区裁剪（PARTITION BY 时间）</td><td>只扫相关分区</td><td>扫描量降 1~2 个数量级</td></tr><tr><td>物化视图 / 预聚合</td><td>把聚合结果落盘</td><td>查询从秒级降到毫秒级</td></tr><tr><td>列裁剪 + 列存</td><td>不读无关列</td><td>IO 减少 5~10×</td></tr><tr><td>JOIN 广播小表</td><td>避免大表 shuffle</td><td>shuffle 数据降 1~2 阶</td></tr></tbody></table></div><p><b>示例</b></p><pre><code>-- 用分区裁剪 + 预聚合代替全表 GROUP BY
+SELECT dt, city, count(*) FROM events
+WHERE dt BETWEEN '2026-10-01' AND '2026-10-07'
+GROUP BY dt, city;
+
+-- 近似去重（大基数去重用 HyperLogLog 类函数）
+SELECT uniqExact(user_id), uniqApprox(user_id) FROM events;</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界</h2><ul><li><b>数据倾斜</b>：某 key 占比极高，单个 task 拖垮整段；用 salt 打散或两阶段聚合。</li><li><b>大表 JOIN 内存溢出</b>：非广播侧过大触发 spill 或 OOM；调大 shuffle 内存或改分桶 JOIN。</li><li><b>SELECT * 全列扫描</b>：列存优势被浪费，显式列出需要的列。</li><li><b>窗口函数无界帧</b>：ROWS BETWEEN UNBOUNDED 在大窗口上极慢，尽量用 RANGE 或限制帧。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>列存把同一列连续存放，聚合时只读相关列且天然压缩（同类型重复值多）；向量化按批（1024 行）调用 SIMD 指令，摊薄解释开销。MPP 把查询切成 stage 在多节点并行，shuffle 是主要网络瓶颈。</p><details><summary>为什么 OLAP 不靠 B+ 树索引？</summary><p>分析查询扫描比例高，索引的「精确定位少量行」优势消失，列存+分区裁剪的扫描效率更高。</p></details><details><summary>精确去重和大基数去重怎么选？</summary><p>精确（uniqExact/COUNT DISTINCT）代价 O(去重基数)，超千万易慢；允许误差用近似（HyperLogLog）换 1~2 个数量级提速。</p></details></div></section>
 <footer>© 2026 Visuals · 大数据系统 / 数据分析应用 / OLAP SQL</footer>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../01-data-warehouse/warehouse-layering.html">数仓分层 ODS/DWD/DW…</a><a href="../03-bi-and-visualization/bi-visualization.html">BI 与数据可视化</a><a href="../04-ai-and-recommendation/recommendation-system.html">推荐系统</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 大数据</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

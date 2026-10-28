@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -142,6 +160,30 @@ hdfs dfs -du -h /warehouse/events/dt=2026-10-25 | awk '{s+=$1; n++} END {print n
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 四种格式的量化对比与实测方法</h2><div class="table-wrap"><table><thead><tr><th>格式</th><th>组织方式</th><th>典型压缩比</th><th>适合</th><th>不适合</th></tr></thead><tbody><tr><td>CSV / TSV</td><td>行式文本</td><td>1×（不压缩）</td><td>交换、人读</td><td>分析查询（无 schema、无裁剪）</td></tr><tr><td>JSON / JSONL</td><td>行式半结构</td><td>2× ~ 4×</td><td>嵌套、日志</td><td>大表扫描（解析成本高）</td></tr><tr><td>Avro</td><td>行式二进制 + schema</td><td>2× ~ 4×</td><td>写入密集、管道中间层</td><td>只查少数列</td></tr><tr><td>Parquet / ORC</td><td>列式 + 统计信息</td><td>4× ~ 10×</td><td>分析查询、列裁剪</td><td>频繁整行更新</td></tr></tbody></table></div><pre><code># 1) 实测压缩比：直接看 HDFS/对象存储上的目录体积
+hdfs dfs -du -h /warehouse/events/dt=2026-10-25
+#   对比同一份数据存成 text 与 parquet 的体积，是最直观的说服材料
+
+# 2) 看 Parquet 文件的内部结构（row group / 列统计）
+parquet-tools meta  part-0000.parquet | head -40
+parquet-tools schema part-0000.parquet
+#   关键：row group 大小、每列的 min/max（这决定能不能跳过分块）
+
+# 3) 用 pyarrow 量一次：读两列 vs 读全部列的耗时差
+python - &lt;&lt;'PY'
+import pyarrow.parquet as pq, time
+t = pq.read_table('data.parquet')
+t0 = time.perf_counter(); t.select(['user_id']); print('读 1 列', time.perf_counter()-t0)
+t0 = time.perf_counter(); t.to_pandas();        print('读全部', time.perf_counter()-t0)
+# 典型结果：列裁剪能省掉数倍的 IO 与解析时间
+PY
+
+# 4) Spark 侧确认裁剪是否生效
+spark.sql('EXPLAIN SELECT user_id FROM events WHERE dt=2026-10-25').show(truncate=False)
+#   看 Plan 里有没有 PushedFilters 与列裁剪信息</code></pre><p><b>核心判据一句话</b>：<b>查询只用到少数列 → 列式；需要整行读写、频繁追加 → 行式</b>。绝大多数分析场景只碰少数列，所以列式是默认选择。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 五个高频坑与小文件治理</h2><ul><li><b>小文件太多</b>：每个文件都有元数据与打开成本，上万个小文件会让查询变慢数倍；用 compaction 合并到 128 MB ~ 1 GB。</li><li><b>分区字段选错</b>：按高基数字段（如 user_id）分区会产生海量目录；按日期分区最稳，且分区数要有上限。</li><li><b>row group 太大或太小</b>：太大则裁剪粒度粗，太小则元数据膨胀；常见目标 128 MB ~ 512 MB。</li><li><b>以为列式就不用排序</b>：文件内按常用过滤列排序，配合 min/max 统计才能跳过整个 row group。</li><li><b>嵌套结构滥用</b>：多层嵌套会让列式展开出很多列；超深嵌套先拍平再用。</li><li><b>治理动作</b>：定期 compaction、按分区清理过期数据、给高频列建统计、把小文件合并进更大的块。</li></ul><p class="muted">排查顺序：<b>先看目录与文件大小分布 → 再看 EXPLAIN 有没有裁剪 → 最后看单文件内的 row group 与统计信息</b>。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么列式在更新上吃亏</h2><details><summary>列式这么好，为什么 OLTP 不用？</summary><p>因为列式把一行的值拆到不同列的块里，<b>单行写入要改多处</b>，且压缩需要攒够一批才能做。它天生为「一次写、多次扫」设计，与 OLTP 的「频繁单行更新」冲突。</p></details><details><summary>Parquet 和 ORC 怎么选？</summary><p>两者能力接近：Parquet 生态更广（Spark、Arrow、各类引擎通吃），ORC 在 Hive 系与 ACID 事务表上更成熟。没有特殊需求时按<b>团队主要引擎</b>选。</p></details><details><summary>什么时候该保留一份行式副本？</summary><p>当需要<b>按主键快速捞整行、或做增量回放</b>时：常见做法是「行式做接入与变更流，列式做分析底座」的双层结构。</p></details></div></section>
 <footer>
   <p>Visuals · 系统工程 / 大数据系统 ·
   <a href="../../index.html">返回目录</a> ·

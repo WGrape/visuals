@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fsync 与原子 rename：让写文件断电不丢、不半份</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>fsync 与原子 rename：让写文件断电不丢、不半份</h1>
+  <p>崩溃一致性靠的不是 write，而是 fsync + 原子 rename；附性能取舍与验证方法。</p>
+  <span class="tag">文件系统</span><span class="tag">fsync</span><span class="tag">持久化</span><span class="tag">崩溃一致性</span>
+</header>
+<nav>
+  <a href="#pattern">三步法</a>
+  <a href="#sync">fsync</a>
+  <a href="#tune">取舍</a>
+  <a href="#test">验证</a>
+</nav>
+<main>
+
+<div class="lead">
+  断电或进程崩溃时，你写入的文件可能只落了一半。要做到「要么完整新版本、要么还是旧版本」，靠的不是 write，而是 fsync + 原子 rename 的组合拳。
+</div>
+
+<section id="pattern">
+  <h2><span class="n">01</span>安全写文件三步法</h2>
+<p>永远不要原地覆盖热文件。先写同目录临时文件，fsync 它，再 rename 到目标名——rename 在同一文件系统上是原子的，读方要么看到旧版、要么看到完整新版，绝不会看到半份。</p><pre><code># Python：原子替换一个配置文件
+import os, tempfile
+def atomic_write(path, data: bytes):
+    d = os.path.dirname(path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=d)          # 同目录临时文件
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())               # 数据真正落到盘
+        os.replace(tmp, path)                  # 原子改名（跨平台）
+    except BaseException:
+        os.unlink(tmp)                         # 失败清场，绝不留半份
+        raise
+# 不要直接 open(path,'w').write(...) —— 崩溃会留下半份文件</code></pre>
+</section>
+
+<section id="sync">
+  <h2><span class="n">02</span>fsync / fdatasync / sync 怎么用</h2>
+<p>write() 只是把数据交给内核页缓存，电一断就没了。fsync 强制刷盘（数据+元数据），fdatasync 只刷数据（若大小不变可省一次元数据写），sync 刷全系统。</p><pre><code># 命令行观测与强制刷新
+sync                                   # 把所有脏页刷盘（全系统）
+sudo sh -c 'sync; echo 3 &gt; /proc/sys/vm/drop_caches'  # 刷盘并清缓存（调试用）
+
+# 磁盘 writeback 参数（决定脏页多久被内核自动刷）
+cat /proc/sys/vm/dirty_expire_centisecs   # 脏页最长可逗留(厘秒)，默认 3000=30s
+cat /proc/sys/vm/dirty_ratio             # 脏页占内存比例上限，触发同步写
+
+# C：O_DSYNC 让每次写都等价于 fdatasync
+fd = open("log", O_WRONLY|O_DSYNC); write(fd, buf)   # 返回即已落盘</code></pre>
+</section>
+
+<section id="tune">
+  <h2><span class="n">03</span>持久化 vs 性能的取舍</h2>
+<ul>
+  <li>每写必 fsync 最安全但最慢（数据库 WAL 是批量+周期 fsync 折中）。</li>
+  <li>数据库层常见旋钮：innodb_flush_log_at_trx_commit=1（每次提交落盘）、=2（只写 OS 缓存，靠 OS 刷）、=0（每秒）。</li>
+  <li>ext4 的 barrier 默认开，保证「先数据后元数据」顺序；关掉能提速但掉电可能丢更多。</li>
+  <li>SSD 有电容断电保护的，可以适度放宽 fsync 频率；机械盘/HDD 不建议。</li>
+</ul><div class="lead warn"><b>要点：</b>判断标准：丢一条能否接受？能接受→每秒 fsync；不能→每次 fsync 或 O_DSYNC。永远别用『默认写缓存』当持久化保证。</div>
+</section>
+
+<section id="test">
+  <h2><span class="n">04</span>怎么验证崩溃一致性</h2>
+<ul>
+  <li>用 dm-delay / dm-flakey 注入「写一半断电」，再挂载检查文件是否仍是完整旧版或完整新版。</li>
+  <li>chaos 工具随机 kill -9 进程，重启后跑校验脚本比对哈希。</li>
+  <li>数据库侧：kill -9 后重启，看能否正常 recovery，binlog/redo 是否连续。</li>
+</ul><div class="table-wrap"><table><thead><tr><th>手段</th><th>模拟什么</th><th>验证点</th></tr></thead><tbody><tr><td>dm-flakey</td><td>设备层掉电</td><td>文件不出现半份</td></tr><tr><td>kill -9</td><td>进程崩溃</td><td>重启后数据完整</td></tr><tr><td>dd oflag=direct</td><td>绕内核缓存写</td><td>性能/语义对照</td></tr></tbody></table></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 操作系统 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

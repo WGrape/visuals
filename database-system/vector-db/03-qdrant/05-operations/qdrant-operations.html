@@ -60,6 +60,24 @@
   a{color:var(--accent)}
   footer{max-width:1000px;margin:30px auto 0;padding:20px;color:var(--muted);font-size:13px;border-top:1px solid var(--border)}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 
@@ -89,6 +107,30 @@ POST /collections/aliases
     { "create_alias": { "collection_name": "docs_v2", "alias_name": "docs" } }
   ]
 }</code></pre><div class="note">别名不只是方便，它是<b>唯一能让切换动作原子的手段</b>。应用直接写死 collection 名的项目，每次重建都要改配置重启，既慢又容易出错。</div></section><section id="debug"><h2><span class="n">③</span>七类高频故障对照表</h2><p>按「现象 → 最可能原因 → 验证方法」组织，覆盖线上最高频的七类：</p><table><tr><th>现象</th><th>最可能原因</th><th>怎么验证</th></tr><tr><td>导入后查询很慢（秒级）</td><td>优化器还没建 HNSW，数据在未索引缓冲</td><td>看 <code>indexed_vectors_count</code> 是否等于 <code>points_count</code></td></tr><tr><td>内存持续上涨不回落</td><td>vacuum 未触发；或 payload 进了内存</td><td>调低 <code>deleted_threshold</code>；开 <code>on_disk_payload</code></td></tr><tr><td>删除后仍能搜到</td><td>标记删除 + vacuum 异步</td><td>等待 vacuum，或显式触发优化</td></tr><tr><td>过滤查询极慢</td><td>过滤字段没建 payload 索引</td><td>看是否走了全段扫描；补建索引</td></tr><tr><td>召回明显低于预期</td><td>量化未开 rescore / oversampling</td><td>关量化对比；开 <code>rescore: true</code></td></tr><tr><td>写入突然变慢</td><td>段过多 + 合并抢占 IO；或索引构建占 CPU</td><td>看段数；限 <code>max_optimization_threads</code></td></tr><tr><td>数据丢失（重启后）</td><td>存储卷没挂载到宿主机</td><td><b>先查 volume 挂载</b>，这是容器部署第一坑</td></tr></table></section><section id="upgrade"><h2><span class="n">④</span>升级与迁移的三个前提</h2><p>升级和迁移有两件事必须先确认，否则回退会很痛苦：</p><ul><li><b>存储格式兼容性</b>：Qdrant 大版本升级可能涉及数据格式变更，必须先在快照副本上演练，不要直接升生产。</li><li><b>快照是否可降级恢复</b>：通常高版本快照无法被低版本读取，回退方案只能是「部署高版本再导出兼容格式」或「保留原数据卷」。</li><li><b>容器镜像固定版本号</b>：用 <code>qdrant/qdrant:v1.x.y</code> 而不是 <code>latest</code>，避免重建容器时被动升级。</li></ul><div class="danger">容器化部署的两个致命细节：<b>存储目录必须挂载到持久卷</b>（否则容器一重启数据全没），<b>快照必须外传</b>（否则和容器一起丢）。这两条在演练里各翻车过一次，代价都是全量重建。</div></section><section id="checklist"><h2><span class="n">⑤</span>上线自检清单</h2><p>上线前把这份清单过一遍：</p><ul><li>存储目录挂载到持久卷，且写入了宿主机路径核对无误</li><li>快照定时任务已配，且做过一次真实恢复演练</li><li>要过滤的字段都建了 payload 索引，未过滤字段没有多余索引</li><li>量化已开 rescore + oversampling，并用 ground truth 量过 recall</li><li>压测在索引建完之后做，指标含 p99 而非均值</li><li>应用通过<b>别名</b>访问集合，不写死 collection 名</li><li>内存告警阈值按「向量本体 + 图 + payload」的真实估算设置，不是拍脑袋</li></ul></section><section id="card"><h2><span class="n">⑥</span>速记卡</h2><div class="grid2"><div class="card"><h4>监控基座</h4><p><code>/metrics</code> Prometheus 格式；别忘看进程 RSS。</p></div><div class="card"><h4>零停机重建</h4><p>双写 → 对比 recall → <b>别名原子切换</b>。</p></div><div class="card"><h4>最高频故障</h4><p>导入后查询慢 = 索引没建完（看 indexed_vectors_count）。</p></div><div class="card"><h4>内存不降</h4><p>vacuum 阈值 + payload 落盘两个开关。</p></div><div class="card"><h4>容器第一坑</h4><p>存储卷没挂载 → 重启即丢数据。</p></div><div class="card"><h4>备份第一坑</h4><p>快照只落本地 → 容器重建备份一起没。</p></div><div class="card"><h4>升级纪律</h4><p>固定版本号，在快照副本上演练，别跳大版本。</p></div><div class="card"><h4>上线自检</h4><p>七条清单逐条过，尤其「压测在索引建完之后」。</p></div></div></section>
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：向量库运维在管什么</h2><p>Qdrant 是开源向量数据库，核心单元是 <b>Collection</b>（一张向量表），里面存 <b>Point（向量 + 可选 payload 元数据）</b>。检索默认用 <b>HNSW 近似近邻（ANN）</b>，配合 payload 做<b>带过滤的向量检索</b>。</p><div class="table-wrap"><table><thead><tr><th>对象</th><th>是什么</th><th>运维关注</th></tr></thead><tbody><tr><td>Collection</td><td>向量表（固定维度/距离）</td><td>维度、距离、分片数</td></tr><tr><td>Point</td><td>一条向量 + payload</td><td>写入/删除/更新</td></tr><tr><td>HNSW</td><td>图索引</td><td>内存、召回率</td></tr><tr><td>Snapshot</td><td>集合快照</td><td>备份/迁移</td></tr></tbody></table></div><p><b>一句话判定：</b>运维三大件 = <b>索引参数调召回、内存容量规划、payload 过滤正确性</b>。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：HNSW 与部署</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>含义</th><th>默认/建议</th><th>调大的代价</th></tr></thead><tbody><tr><td>vector_size</td><td>向量维度</td><td>模型决定</td><td>内存线性增</td></tr><tr><td>distance</td><td>cosine/dot/euclid</td><td>按模型</td><td>影响排序</td></tr><tr><td>m</td><td>每层邻居数</td><td>16</td><td>内存↑、召回↑</td></tr><tr><td>ef_construct</td><td>建索引时的候选</td><td>100</td><td>建索引变慢</td></tr><tr><td>ef</td><td>查询时候选</td><td>随 ef_construct</td><td>查询变慢、更准</td></tr><tr><td>shard_number</td><td>分片数</td><td>= 节点数</td><td>并行度</td></tr></tbody></table></div><p><b>建集合、调 HNSW、过滤检索、快照</b></p><pre><code># 建集合并写入（Python client）
+from qdrant_client import QdrantClient
+c = QdrantClient("localhost", port=6333)
+
+c.recreate_collection(collection_name="docs", vectors_config={
+    "size": 768, "distance": "Cosine"  # size 必须和 embedding 模型一致
+})
+
+# HNSW 调优（提高召回的代价是内存）
+c.update_collection(
+    collection_name="docs",
+    hnsw_config={"m": 32, "ef_construct": 200})
+
+# 带 payload 过滤的检索：只在一部分里做 ANN
+c.search("docs", query_vector=v,
+         query_filter={"must":[{"key":"lang","match":{"value":"zh"}}]},
+         limit=10, with_payload=True)
+
+# 快照备份（运维必备）
+c.create_snapshot(collection_name="docs")</code></pre><p><b>数量级：</b>每条 768 维 float32 向量约 <b>3 KB</b>（不含 payload），HNSW 图本身另占向量体积的 <b>1~2 倍</b>内存；100 万条 ≈ 3 GB+，必须按内存规划节点。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑</h2><p><b>上线后出问题的清单：</b></p><ul><li><b>维度不匹配</b>：collection 设 768 却写入 1024 向量，直接报错，常见于换 embedding 模型后忘改</li><li><b>召回率不够</b>：m/ef 太小，ANN 漏掉近邻，结果「搜不到明明该有的」</li><li><b>内存爆</b>：全量驻留内存，数据量涨了没扩容，OOM 被杀死</li><li><b>payload 过滤误解</b>：过滤是先滤后搜还是先搜后滤？Qdrant 是<b>带约束的 ANN</b>，过滤太严会导致候选不足、召回骤降</li><li><b>批量写入太慢</b>：逐条 upsert，应改成每批几百上千条</li><li><b>忘记快照/备份</b>：节点故障后只能重建索引</li></ul><p><b>排查顺序：</b>① 确认维度和距离配置；② 用 recall 测试集量化召回率；③ 监控节点内存与段数量；④ 压测批量写入吞吐。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><details><summary>为什么 Qdrant 默认用 HNSW 而不是暴力检索？</summary><p>向量检索是<b>高维距离计算</b>，暴力检索每查一次都要和全量点积，百万级数据一次查询就是百万次乘法，太慢。HNSW 用分层图把复杂度降到<b>对数级</b>，牺牲少量召回换几百倍加速，是向量库的事实标准。</p></details><details><summary>召回率和内存怎么权衡？</summary><p>m（邻居数）和 ef 越大，图越密、召回越高，但<b>内存和查询耗时同步上升</b>。生产上先用 recall 测试集定一个能接受的最低召回（如 0.95），再在这个约束下把参数往小调以省内存。量化（scalar/产品量化）可进一步压缩内存。</p></details><details><summary>什么时候不该用向量库？</summary><p>数据量小（几万条）或要求<b>100% 精确召回</b>时，直接用 NumPy/FAISS 暴力检索更简单更快；需要强事务、复杂联表、和关系型数据深度耦合时，向量库也不是合适的主存储。</p></details></div></section>
 </main>
 
 <footer>

@@ -189,7 +189,7 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
       <div class="step" data-n="Q2"><div class="step-title">先更新 DB 还是先删缓存？</div><div class="step-desc">先更新 DB，再删缓存（Cache Aside）。原因：反序会造成"删缓存→读旧值回填→更新DB"的脏数据；正序窗口更小。</div></div>
       <div class="step" data-n="Q3"><div class="step-title">布隆过滤器误判怎么办？</div><div class="step-desc">误判只发生在"说存在其实可能不存在"——此时会放行进 DB 一次，但绝不会漏掉"真正不存在"的。配合空值缓存即可兜底。</div></div>
     </div>
-    <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">延伸阅读：<a href="../../../distributed-architecture/02-coordination/01-lock/distributed-lock.html" style="color:var(--accent-blue);text-decoration:none;">分布式锁</a> · <a href="../../../distributed-architecture/05-storage/02-replication-and-hashing/replication.html" style="color:var(--accent-blue);text-decoration:none;">数据复制</a></p>
+    <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">延伸阅读：<a href="../../../../architecture-design/distributed-architecture/02-coordination/01-lock/distributed-lock.html" style="color:var(--accent-blue);text-decoration:none;">分布式锁</a> · <a href="../../../../architecture-design/distributed-architecture/05-storage/02-replication-and-hashing/replication.html" style="color:var(--accent-blue);text-decoration:none;">数据复制</a></p>
   </section>
 
 <section class="x-sec" data-dry-goods><div class="x-dry"><h2>分布式缓存的路由与容量</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>原理</th><th>扩容时的数据迁移</th></tr></thead><tbody><tr><td><b>取模 hash</b></td><td><code>hash(key) % N</code></td><td><b>全部失效</b>（N 变了所有 key 重映射）</td></tr><tr><td><b>一致性哈希</b></td><td>key 与节点映射到同一 hash 环</td><td>只迁移 <b>1/N</b> 的数据</td></tr><tr><td><b>一致性哈希 + 虚拟节点</b></td><td>每节点 100~200 个虚拟节点</td><td>负载均衡，迁移量 <b>1/N</b></td></tr><tr><td><b>哈希槽</b>（Redis Cluster）</td><td><b>16384</b> 个固定槽</td><td>按槽迁移，精确可控</td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th>参数 / 指标</th><th>值</th><th>说明</th></tr></thead><tbody><tr><td>Redis Cluster 槽数</td><td><b>16384</b></td><td>为什么是 16384：心跳包用 bitmap 表示，16384/8=2KB，正好合适</td></tr><tr><td>虚拟节点数</td><td><b>100~200</b> 每物理节点</td><td>太少不均，太多内存开销</td></tr><tr><td>缓存命中率目标</td><td><b>&gt; 90%</b></td><td>低于 80% 说明容量或 key 设计有问题</td></tr><tr><td>单 Redis 实例 QPS</td><td><b>10 万级</b>（简单命令）</td><td>单线程模型</td></tr><tr><td>集群节点数上限</td><td>Redis Cluster 官方建议 <b>&lt; 1000</b></td><td>节点多了 gossip 开销大</td></tr><tr><td><code>cluster-node-timeout</code></td><td><b>15000ms</b></td><td>节点失联判定时间，影响故障切换速度</td></tr><tr><td>大 key 阈值</td><td><b>&gt; 10KB（string）/ &gt; 5000 元素（集合）</b></td><td>大 key 造成阻塞与迁移困难</td></tr></tbody></table></div><p><b>一致性哈希为什么能只迁移 1/N</b>：节点和 key 都在同一个 <code>0~2³²</code> 的环上，key 顺时针找最近的节点。加一个节点时，<b>只有该节点逆时针到上一个节点之间的 key</b> 需要迁移，其余 key 的归属完全不变。从 3 个节点扩到 4 个，只迁移约 <b>1/4</b> 的数据，而取模 hash 会迁移 <b>几乎全部</b>（命中率瞬间跌到接近 0）。</p></div></section>
@@ -227,11 +227,7 @@ redis-cli --bigkeys                            # 找大 key
 # 热 key 解决方案：本地缓存一份 / key 打散（key:1 ~ key:10 随机后缀）</code></pre></div></section>
 <section class="x-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>扩容后命中率暴跌</td><td>用了取模 hash</td><td>换一致性哈希或哈希槽；或做双写迁移</td></tr><tr><td>数据分布不均</td><td>节点数少且没用虚拟节点</td><td>加虚拟节点；Redis Cluster 用槽手动均衡</td></tr><tr><td>某个节点特别热</td><td>热 key 集中</td><td>本地缓存；key 打散；读写分离</td></tr><tr><td>延迟突然变大</td><td>有大 key / 慢命令 / 迁移中</td><td><code>--bigkeys</code> 查；避免 <code>KEYS</code>；用 SCAN</td></tr><tr><td><code>CLUSTERDOWN</code></td><td>有槽没被覆盖（节点挂了且无副本）</td><td>检查 <code>--cluster check</code>；补副本</td></tr><tr><td>缓存雪崩（同时大量失效）</td><td>TTL 设置相同</td><td><b>TTL 加随机抖动</b>（如 base ± 20%）</td></tr><tr><td>网络分区后数据不一致</td><td>主从切换期间丢数据</td><td>异步复制必然有窗口；关键数据用 <code>WAIT</code> 或走 DB</td></tr></tbody></table></div><p class="muted"><b>TTL 加随机抖动是必做的</b>：<code>ttl = base + random(0, base*0.2)</code>。如果一批 key 在同一秒写入且 TTL 相同，它们会在同一秒集体失效，那一瞬间全部请求打向 DB —— 这就是<b>缓存雪崩</b>。</p></div></section>
 </main>
-<div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="../02-cache-value-and-cost/cache-value-and-cost.html">缓存的收益、代价与适用边界</a><a href="../03-cache-glossary-and-path/cache-glossary-and-path.html">缓存术语地图与学习路径</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
+
 
 <footer><p>分布式缓存 · 更新策略与三大经典问题</p><p style="margin-top:6px;"><a href="../../index.html" style="color:var(--accent-blue);text-decoration:none;">← 返回缓存系统总目录</a></p></footer>
 <script>
@@ -257,5 +253,11 @@ redis-cli --bigkeys                            # 找大 key
 <details class="x-qa2"><summary>缓存节点宕机一定会导致雪崩吗？</summary><p>只要做了三件事就不会：TTL 加随机抖动错开失效、熔断/降级兜底、以及缓存集群本身的高可用（主从切换）。最危险的是「冷启动后瞬间全量回源」。</p></details>
 <details class="x-qa2"><summary>多 key 操作（MGET、事务）在集群下怎么办？</summary><p>Redis Cluster 要求所有 key 在同一槽，可用 hashtag 强制：把 key 写成 user:{1001}:profile 与 user:{1001}:orders，只对大括号内的部分做哈希，就能落在同一槽。</p></details>
 <div class="x-mini-grid"><div class="x-mini"><b>记住一句</b><span>共享一份换一致性，代价是一跳网络</span></div><div class="x-mini"><b>路由首选</b><span>哈希槽（Redis Cluster）</span></div><div class="x-mini"><b>三大坑</b><span>热点 key / 大 key / 缓存雪崩</span></div><div class="x-mini"><b>一致性默认解</b><span>更新 DB 后删除缓存</span></div></div></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="../02-cache-value-and-cost/cache-value-and-cost.html">缓存的收益、代价与适用边界</a><a href="../03-cache-glossary-and-path/cache-glossary-and-path.html">缓存术语地图与学习路径</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

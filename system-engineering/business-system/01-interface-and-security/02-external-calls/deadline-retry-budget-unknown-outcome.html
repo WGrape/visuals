@@ -11,6 +11,25 @@
 <section class="panel"><h2>状态机处理未知结果</h2><p>本地订单可有 INIT、SUBMITTING、UNKNOWN、SUCCESS、FAILED 等状态。发出第三方请求后若超时，先记录 UNKNOWN，并用原幂等键查询或重试同一操作；拿到权威终态才转 SUCCESS 或 FAILED。不要把“超时”直接标成 FAILED，因为下游可能已成功；也不要在 UNKNOWN 状态再次生成新的业务单号。异步回调、主动查询和对账可能同时到达，需要按版本或事务约束只允许合法状态转移。</p><p>结果查询接口如果也超时，可以稍后异步补偿，给用户展示“处理中”。前端应允许刷新后看到同一订单的最新状态，而不是重新提交。对于不可幂等的第三方接口，调用方要与供应商约定去重标识或人工核查流程，不能凭网络层重试“保证一次”。</p></section>
 <section class="panel"><h2>故障放大算例</h2><p>假设下游正常每秒处理 1000 次请求，入口每秒来 800 次。故障时 20% 请求超时，若每个超时都立即重试两次，粗略新增 320 次/秒，合计可能超过容量；下游更慢又触发更多超时，形成正反馈。真实概率与重试到达分布更复杂，但这个算例说明容量应覆盖故障路径。限流、熔断和排队上限可保护系统，但不能替代调用方处理未知结果。</p><p>服务恢复时若所有客户端一起放出积压，还会出现第二波冲击。恢复策略要观察下游成功率、在途请求数、等待队列和重试比例，逐步释放流量。</p></section>
 <section class="panel"><h2>怎样验收</h2><p>在调用前、写入后回包前、回包途中分别注入故障，观察是否只生成一个业务订单。记录统一 trace ID、幂等键、总截止时间、每次尝试序号、下游请求 ID 和最终状态。检查客户端取消后下游是否仍执行，若已执行如何把结果交付给用户。再测供应商返回 429、500、慢响应和半开连接时，整体耗时是否仍守住 2 秒用户预算。</p><p>最终指标应区分用户可见成功率、下游单次尝试成功率、平均重试次数、UNKNOWN 积压年龄和重复操作阻断次数。单次调用成功率下降不等于用户业务失败，反之“SDK 自动重试后成功”也可能藏着重复副作用。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：三个常被混淆的概念</h2><div class="table-wrap"><table><thead><tr><th>概念</th><th>是什么</th><th>解决什么问题</th></tr></thead><tbody><tr><td><b>Deadline（截止时间）</b></td><td>请求必须在某个绝对时刻前完成</td><td>防止上游放弃后下游还在空转</td></tr><tr><td><b>Timeout（超时）</b></td><td>单次调用的等待上限</td><td>防止单次调用无限等待</td></tr><tr><td><b>Retry Budget（重试预算）</b></td><td>重试请求占总请求的比例上限</td><td>防止重试风暴把下游打垮</td></tr><tr><td><b>Unknown Outcome（未知结果）</b></td><td>不知道操作到底成功没有</td><td>决定能不能安全重试</td></tr></tbody></table></div><p><b>最关键的一条判定：</b>超时 ≠ 失败。请求超时只说明<b>你没等到结果</b>，下游可能已经执行成功了。把超时当失败去重试，对非幂等操作就是<b>重复扣款</b>。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>推荐默认</th><th>说明</th></tr></thead><tbody><tr><td>重试预算比例</td><td><b>10%</b> – 20%</td><td>重试请求数 ÷ 总请求数上限</td></tr><tr><td>单次重试退避基数</td><td><b>100 ms</b></td><td>指数退避：100ms、200ms、400ms</td></tr><tr><td>退避抖动</td><td><b>±50%</b> 或全抖动</td><td>打散重试时间，避免重试同步形成尖峰</td></tr><tr><td>最大重试次数</td><td><b>2 – 3 次</b></td><td>再多收益递减、放大风险</td></tr><tr><td>Deadline 传递余量</td><td>预留 <b>10%</b></td><td>下游 deadline 要比上游留的时间少一点</td></tr><tr><td>超时阶梯</td><td>连接 1 s、读 3 s</td><td>连接超时应远小于读超时</td></tr></tbody></table></div><p><b>Go 中的 deadline 传递与错误分类</b></p><pre><code># Go 里用 context 做 deadline 传递（自动向下传播）
+ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
+defer cancel()
+
+req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+resp, err := http.DefaultClient.Do(req)
+if errors.Is(err, context.DeadlineExceeded) {
+    // 注意：这只代表「我们等到了超时」，不代表对方没执行
+    log.Warn("deadline exceeded, outcome UNKNOWN")
+}
+
+# 判断错误类型，只重试「确定没生效」的
+if isTimeout(err) {
+    // 结果未知，非幂等操作绝不能直接重试
+} else if isConnectionRefused(err) {
+    // 连接都没建立，对方一定没执行，可以安全重试
+}</code></pre><p><b>重试放大公式：</b>下游成功率从 100% 降到 50% 时，若每个失败请求重试 2 次，下游收到的请求量变成 <b>3 倍</b> —— 这就是<b>重试风暴</b>的正反馈起点。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><p><b>高频坑清单：</b></p><ul><li>① <b>层层累加超时</b>：网关 30 s、服务 A 30 s、服务 B 30 s，实际用户可能等 90 s</li><li>② <b>重试没有预算</b>：下游故障时上游疯狂重试，把 1000 QPS 放大成 3000 QPS</li><li>③ <b>对非幂等操作盲目重试</b>：超时后重试导致重复扣款、重复下单</li><li>④ <b>重试不加抖动</b>：所有客户端同时重试，形成同步尖峰</li><li>⑤ <b>只设总超时不设连接超时</b>：连接卡住会耗尽连接池</li><li>⑥ <b>把 5xx 全部重试</b>：500 可能是业务校验失败，重试无意义还放大流量</li></ul><p><b>排查顺序：</b></p><ul><li>① 先分清是<b>超时</b>还是<b>失败</b> —— 这决定能否重试</li><li>② 看重试流量占比，确认重试预算是否生效</li><li>③ 画调用链的超时阶梯，确认没有层层累加</li><li>④ 确认 timeout 是<b>传递</b>的还是每层重新算的</li><li>⑤ 对非幂等接口，确认有<b>幂等键 / 去重表</b>兜底</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么不把超时设短一点，早早重试？</summary><p>因为<b>重试是最贵的操作</b> —— 它既给了下游双倍压力，又延长了用户等待。如果下游只是偶尔慢（如 GC 停顿），短超时会把本来能成功的请求判死，然后重试又撞上同样的慢，形成正反馈。正确做法：超时按 <b>P99 延迟</b>设定（不是 P50），并且<b>先熔断再重试</b> —— 下游已经明确不可用时，根本不该重试。</p></details><details><summary>deadline 和 timeout 到底该用哪个？</summary><p>两个都要，但作用不同。<b>timeout 是相对的</b>（这次调用等多久），<b>deadline 是绝对的</b>（这个请求必须在几点前完成）。deadline 的优势是<b>自动向下传递且天然递减</b>：上游 deadline 是 12:00:01，传给下游时它只剩 900 ms，下游再传又只剩 700 ms —— 天然避免了层层累加。gRPC 就是这么设计的（context deadline），HTTP 生态多用相对 timeout。</p></details><details><summary>结果未知时到底该不该重试？</summary><p>取决于<b>操作的幂等性</b>：① <b>天然幂等</b>（查询、按 ID 覆盖写）→ 可以重试；② <b>非幂等</b>（扣款、下单）→ <b>不能直接重试</b>，必须先带<b>幂等键</b>去查状态（如先查订单是否已创建），或用<b>去重表</b>保证同键只生效一次。生产上的黄金法则：<b>非幂等操作必须先有幂等键，才允许有重试。</b></p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>第三方写接口在回包途中超时，调用方能否直接认定操作失败并换新单号重试？</summary><p>不能。操作可能已提交，应保留原业务标识和幂等键，查询或重试同一操作直到得到权威结果。</p></details><p>练习：改动本例的一个输入条件，重新手推流程，并指出应该观察哪一个中间结果来验证判断。</p></section>
 <footer>继续阅读：<a href="api-call-guide.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

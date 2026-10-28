@@ -60,6 +60,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -177,6 +195,31 @@ print(logmel.shape)   # (80, T)  T = 时长(s) × 62.5
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 声学特征的关键参数与可运行代码</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>常见取值</th><th>含义</th><th>调错会怎样</th></tr></thead><tbody><tr><td>采样率</td><td>16k / 22.05k / 24k / 44.1k</td><td>每秒采样点数</td><td>与训练数据不一致 → 音质明显变差</td></tr><tr><td>帧长（window）</td><td>20 ~ 50 ms</td><td>一帧覆盖多长时间</td><td>太长模糊、太短不稳定</td></tr><tr><td>帧移（hop）</td><td>10 ~ 12.5 ms</td><td>相邻帧间隔</td><td>决定时间分辨率与序列长度</td></tr><tr><td>Mel 通道数</td><td>80（常见）</td><td>频带压缩后的维度</td><td>太少 → 音质糊</td></tr><tr><td>FFT 点数</td><td>512 / 1024 / 2048</td><td>频域分辨率</td><td>与帧长配套</td></tr><tr><td>声码器</td><td>HiFi-GAN 等</td><td>梅尔谱 → 波形</td><td>决定最终听感</td></tr><tr><td>时长预测</td><td>音素时长/对齐</td><td>决定节奏</td><td>对不齐 → 漏字重复</td></tr></tbody></table></div><pre><code>import librosa, numpy as np, soundfile as sf
+
+# 1) 提取梅尔谱（TTS 训练的标准前置步骤）
+y, sr = librosa.load('a.wav', sr=24000)      # 采样率必须与训练时一致
+mel = librosa.feature.melspectrogram(
+    y=y, sr=sr, n_fft=1024, hop_length=256,  # 1024/24000≈42ms 帧长, 256/24000≈10.7ms 帧移
+    n_mels=80, fmin=0, fmax=sr // 2)
+log_mel = librosa.power_to_db(mel, ref=np.max)   # 取对数，动态范围更适合建模
+print('mel shape', log_mel.shape)   # (80, T)：T 是帧数，也就是声学模型的序列长度
+
+# 2) 序列长度换算：1 秒音频有多少帧？
+frames_per_sec = sr / 256
+print(f'1 秒 ≈ {frames_per_sec:.1f} 帧')   # 24k/256 → 约 94 帧/秒
+# 这决定了模型的推理成本：10 秒语音 ≈ 940 帧的自回归/非自回归解码
+
+# 3) 用声码器还原波形（示意，实际用训练好的 HiFi-GAN）
+# wav = vocoder(mel)      # (80, T) -&gt; (samples,)
+# sf.write('out.wav', wav, sr)
+
+# 4) 常见对齐检查：文本长度与音频时长是否匹配
+#   经验：中文约每秒 4~6 个字，英文约每秒 12~15 个音素
+#   明显偏离说明对齐或时长预测有问题</code></pre><p><b>推理成本怎么估</b>：序列帧数 ≈ 音频时长（秒）× 每秒帧数。24 kHz、hop=256 时约 94 帧/秒，一段 10 秒语音就是约 940 帧 —— 这就是声学模型的解码长度，也是为什么长文本合成要分段。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 六个高频问题与排查</h2><ul><li><b>声音发闷/失真</b>：先查采样率与 mel 参数是否与训练一致，其次查声码器是否匹配。</li><li><b>漏字、重复、拖长</b>：这是<b>对齐/时长预测</b>问题，不是声学模型容量问题；检查注意力对齐图。</li><li><b>机械感强</b>：通常是训练集不够或韵律建模不足；加长训练、补充多说话人数据比调参更有效。</li><li><b>音量忽大忽小</b>：特征没做归一化或能量建模缺失；检查 mel 的归一化方式是否与训练一致。</li><li><b>合成速度慢</b>：看是声学模型还是声码器占大头；非自回归模型 + 轻量声码器通常能大幅提速。</li><li><b>排查顺序</b>：先对齐图 → 再特征参数 → 再声码器 → 最后才怀疑模型结构。</li></ul><p class="muted">TTS 排障有个很实用的经验：<b>80% 的问题出在特征参数与对齐，而不是模型结构</b>。先把 mel 谱画出来看一眼，往往比调超参更快定位。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 声学模型与声码器为什么分开</h2><details><summary>为什么要先出梅尔谱再由声码器还原波形？</summary><p>因为<b>波形维度太高、冗余太多</b>，让模型直接学波形难度大；梅尔谱是压缩过且符合听觉的特征，先建模它更稳，再由专门的声码器还原细节。</p></details><details><summary>自回归和非自回归的取舍？</summary><p>自回归逐帧生成，音质与自然度好但慢；非自回归并行生成，快但对时长预测依赖更强。线上服务通常用非自回归，离线精品合成可用自回归。</p></details><details><summary>端到端 TTS 会取代这个两段式吗？</summary><p>趋势是越来越端到端（甚至直接建模离散音频 token），但两段式因为<b>可调试、可替换、成本低</b>，在工程上仍然是主流选择。</p></details></div></section>
 <footer>
   <p>Visuals · 人工智能 / 语音模型 ·
   <a href="../../index.html">返回目录</a> ·

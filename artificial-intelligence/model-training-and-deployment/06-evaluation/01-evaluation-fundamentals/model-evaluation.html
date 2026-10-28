@@ -257,6 +257,30 @@ from scipy.stats import bootstrap
 #   1000 条样本，胜 520 平 180 输 300：
 #   净胜率 = (520-300)/1000 = 22%  -&gt; 显著（样本够大）
 #   100 条样本，胜 55 输 45：净胜 10% -&gt; 不显著（p 值远大于 0.05）</code></pre><details><summary>为什么 LLM 评测这么难？</summary><p>三个原因：① <b>答案不唯一</b>——「写一首关于春天的诗」没有标准答案，无法用精确匹配；② <b>维度多</b>——有用性、安全性、事实性、流畅度、指令遵循，这些维度可能互相冲突（更安全就更保守）；③ <b>分布漂移</b>——评测集很快被「训练进去」或不再代表真实分布。所以现在的共识是<b>多指标 + 人工抽检 + 线上 A/B</b> 三管齐下，任何单一指标都不可信。</p></details><details><summary>过拒绝（over-refusal）是什么，怎么测？</summary><p>模型把正常请求也当成有害请求拒绝掉（如「如何制作炸弹」该拒，但「如何制作蛋糕」也拒就是过拒）。测法：构造一批<b>看似敏感但实际无害</b>的 query（如「kill a process」「how to kill time」），统计被拒比例。健康值 &lt;10%。过拒是安全对齐做过了头的典型症状，会严重伤害体验——这也是为什么对齐时要同时看「有害内容率」和「过拒率」两条曲线。</p></details><details><summary>小样本（几十条）能不能评估？</summary><p>能做<b>定性判断</b>（明显变好/变坏），不能做<b>定量结论</b>（提升 3% 不可信）。经验：① &lt;100 条只能看有没有<b>明显退步</b>（回归测试）；② 300~1000 条能区分 5 个点以上的差异；③ 要区分 1~2 个点需要数千条 + 显著性检验。所以小样本评测的正确用法是<b>做红线测试</b>（确保不退化），而不是用来排名。</p></details></div></section>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 各阶段该看什么指标</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>必看指标</th><th>合格判据</th><th>只看它会漏掉什么</th></tr></thead><tbody><tr><td>预训练</td><td>loss 曲线、困惑度</td><td>平滑下降且无突刺</td><td>下游能力</td></tr><tr><td>继续预训练</td><td>领域困惑度、原能力保留</td><td>领域降、通用不退化</td><td>灾难性遗忘</td></tr><tr><td>指令微调</td><td>指令跟随率、格式正确率</td><td>格式正确率 > 95%</td><td>事实性与安全性</td></tr><tr><td>对齐（RLHF/DPO）</td><td>胜率、有害率、长度</td><td>胜率 > 50% 且不靠长度</td><td>过度拒答、谄媚</td></tr><tr><td>上线前</td><td>延迟、成本、失败率</td><td>P99 在预算内</td><td>长尾 bad case</td></tr></tbody></table></div><pre><code># 1) 困惑度（perplexity）：语言模型的基础体检指标
+import math
+def perplexity(total_nll, total_tokens):
+    # total_nll: 所有 token 的负对数似然之和
+    return math.exp(total_nll / total_tokens)
+# 判读：同 tokenizer、同数据集下才能横向比较；
+#   换了 tokenizer 或数据集，困惑度数值没有可比性
+
+# 2) 评估必须报方差，不能只报平均分
+import statistics
+scores = [...]          # 多次采样或不同 seed 的分数
+print(f'mean={statistics.mean(scores):.2f} std={statistics.pstdev(scores):.2f}')
+# 关键：生成任务单次波动很大，只跑一次的分数不可信
+
+# 3) 长度偏置检查（对齐类评估必做）
+# 把「长度差」与「胜率」放一起看，防止模型靠写长来赢
+import collections
+win_by_len = collections.Counter()
+for rec in records:
+    win_by_len[rec['chosen_longer']] += 1 if rec['win'] else 0
+print('胜率随长度变化:', dict(win_by_len))</code></pre><p><b>评估样本量怎么定</b>：想检测出 5 个百分点的差异，通常需要<b>数百到上千条</b>样本；样本太少（几十条）时，看到的差异大概率是噪声。这就是为什么「改一点就涨 3 分」往往不可信。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 六个高频问题</h2><ul><li><b>测试集污染</b>：评估数据出现在训练集里，分数虚高；用未公开数据或留出集复核，并做去重检查。</li><li><b>只报平均分</b>：生成任务方差大，必须同时报标准差或置信区间，否则差异不可判断。</li><li><b>只看自动指标</b>：BLEU/ROUGE 与人工感受相关性有限；关键场景必须有人评环节。</li><li><b>忽略长度偏置</b>：模型靠写更长来赢，胜率虚高；评估时要做长度对照。</li><li><b>评估集长期不变</b>：模型会隐式过拟合到评估集；定期更换或补充新样本。</li><li><b>不看失败案例</b>：平均分掩盖了长尾；每次评估都要抽样看 20~50 条失败案例并归类。</li></ul><p class="muted">一条实用规则：<b>每次改动只改一个变量，评估至少跑两次</b>。同时改多个超参又只跑一次，得到的结论基本没有参考价值。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么评估这么难</h2><details><summary>为什么不能只用一个分数衡量模型？</summary><p>因为「好」是多维的：正确性、安全性、有用性、简洁性彼此可能冲突。单一分数会诱导模型在某个维度上刷分（例如靠写长取胜）。</p></details><details><summary>自动评估和人工评估怎么配合？</summary><p>自动评估用于<b>高频回归</b>（每次改动都跑，快速发现退化）；人工评估用于<b>关键节点</b>（版本发布前、重大改动后），样本不必多但要有代表性。</p></details><details><summary>评估集应该多大？</summary><p>取决于要检测的差异大小：差异越大需要的样本越少。作为起点，<b>分类类 500~1000 条、生成类 200~500 条</b>，并始终报方差。</p></details></div></section>
 <footer>
   <div class="wrap">
     <p>模型评估 · 基于公开资料整理，具体基准以各官方榜单与评测论文为准</p>

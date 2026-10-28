@@ -60,6 +60,24 @@ footer { text-align:center; color:var(--muted); padding:30px; font-size:13px; }
   .xrel-up a{color:inherit;text-decoration:none}
   .xrel-up a:hover{opacity:1;text-decoration:underline}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header class="topbar">
@@ -181,6 +199,32 @@ return val;</code></pre>
   <div class="xrel-up"><a href="../../index.html">← 返回 缓存</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
 </div>
 
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定：击穿≠穿透≠雪崩</h2><p>三个概念常被混用，必须先分清：</p><div class="table-wrap"><table><thead><tr><th>问题</th><th>触发条件</th><th>影响范围</th><th>解法方向</th></tr></thead><tbody><tr><td><b>击穿</b></td><td>单个<b>热点 key 失效</b>瞬间</td><td>这一个 key</td><td>互斥重建/逻辑过期</td></tr><tr><td>穿透</td><td>查<b>不存在的数据</b></td><td>持续的空查询</td><td>布隆过滤器/空值缓存</td></tr><tr><td>雪崩</td><td><b>大量 key 同时失效</b></td><td>整片缓存</td><td>错峰 TTL/高可用</td></tr></tbody></table></div><p><b>一句话判定：</b>「某个爆款被疯狂访问、偏偏它这一刻过期」= 击穿；大量请求直接打到 DB 把库打挂。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化：互斥与逻辑过期</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td>互斥锁重建</td><td>只有一个线程查 DB 重建</td><td>数据一致</td><td>锁等待、怕死锁</td></tr><tr><td>逻辑过期</td><td>value 带过期时间，异步重建</td><td>无锁、响应快</td><td>短期返回旧值</td></tr><tr><td>singleflight</td><td>并发请求合并成一次</td><td>简单有效</td><td>依赖框架</td></tr><tr><td>预热+错峰TTL</td><td>提前加载、加随机</td><td>治本</td><td>需预估热点</td></tr></tbody></table></div><p><b>Redis 互斥锁 / singleflight 防击穿</b></p><pre><code># Redis 互斥锁重建（防止击穿）：用 SET NX 抢锁
+import redis, json, time
+r = redis.Redis()
+
+def get_with_guard(key, load_from_db, expire=300, lock_ttl=3):
+    val = r.get(key)
+    if val is not None:
+        return json.loads(val)
+    # 抢锁：只有一个请求去查 DB
+    lock = r.set(f"lock:{key}", "1", nx=True, ex=lock_ttl)
+    if not lock:
+        time.sleep(0.05)            # 没抢到，稍等重试取缓存
+        return get_with_guard(key, load_from_db, expire, lock_ttl)
+    try:
+        data = load_from_db()        # 唯一查 DB 的线程
+        r.set(key, json.dumps(data), ex=expire)
+        return data
+    finally:
+        r.delete(f"lock:{key}")      # 释放锁，务必 finally
+
+# 更省事的 singleflight（Go 标准库 extended 或 golang.org/x/sync/singleflight）
+# 同一 key 的并发请求，只有一个真正执行，其余直接拿结果</code></pre><p><b>数量级：</b>锁 TTL 设 <b>几秒</b> 即可（重建 DB 查询通常毫秒~百毫秒级）；热点 key 的 QPS 可能 <b>上万</b>，不加保护 DB 连接瞬间被占满。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界：高频坑</h2><p><b>防护失效的清单：</b></p><ul><li><b>把击穿当穿透治</b>：布隆过滤器对「存在的热点 key 失效」无效，白忙一场</li><li><b>锁没设超时</b>：重建线程挂了，锁永不释放，key 永久无缓存</li><li><b>锁粒度太粗</b>：用一把全局锁，所有 key 串行重建，雪上加霜</li><li><b>逻辑过期没兜底</b>：异步重建失败，长期返回旧数据甚至脏数据</li><li><b>TTL 设成整点</b>：热点集中整点过期，等于人工制造击穿窗口</li><li><b>没预热</b>：大促前热点未提前加载，开门瞬间击穿</li></ul><p><b>排查顺序：</b>① 监控 DB QPS 与缓存命中率，命中率骤降且 DB 飙升 = 击穿信号；② 看是否集中在某个/少数 key；③ 检查 TTL 分布是否有尖峰。</p></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><details><summary>互斥锁和逻辑过期该选哪个？</summary><p>要<b>强一致、不能返回旧值</b> → 互斥锁（代价是抢不到锁的线程要等/可能超时）；要<b>极低延迟、能容忍极短旧值</b> → 逻辑过期（异步重建，请求不阻塞）。实践中常组合：平时逻辑过期保性能，极端热点再加单飞（singleflight）兜底。</p></details><details><summary>为什么热点 key 失效那一刻最危险？</summary><p>因为平时这些请求<b>全被缓存接住了</b>，DB 根本没承受过这个量。一旦同时失效，原本被缓存屏蔽的巨量并发瞬间穿透到 DB，而 DB 的连接池和 CPU 远小于缓存层，于是被瞬间打满、连锁超时——所以击穿的破坏力来自「平时被保护、毫无准备」。</p></details><details><summary>singleflight 为什么比手写锁更稳？</summary><p>它把<b>同一 key 的并发请求合并成一次执行</b>，天然无死锁风险、无需手动释放锁，且请求方拿的是同一份结果、零额外等待。手写 Redis 锁容易漏 finally、漏超时，singleflight 在进程内解决，少一次网络往返，是防击穿的工程甜点方案。</p></details></div></section>
 <footer>© 2026 Visuals · 缓存异常 / 击穿</footer>
 </body>
 </html>

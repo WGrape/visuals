@@ -15,6 +15,26 @@
 <section class="panel"><h2>边界与误区</h2><p>百分位数通常不能通过“平均各窗口 P99”合并。需要保存可合并分布摘要或重新读取原始样本；算法与精度依产品而定。</p></section>
 <section class="panel"><h2>迟到数据会改变已经算好的窗口</h2><p>设备离线后补传上午十点的样本，可能在中午才到达。若降采样按“写入时间”聚合，它会落进中午窗口，历史曲线被扭曲；按“事件时间”聚合，则需允许历史窗口被更新。设计时要说明迟到容忍时长、去重键和窗口重算策略。原始点过期前应完成最后一次重算，并记录哪些窗口已经封存。</p><p>例如一台设备每 10 秒上报一次温度，停网半小时后补传 180 个点。降采样任务如果只处理最新一分钟，就会漏掉这些点；如果每次重扫两小时窗口，需要评估重复计算成本。可用增量状态、可重算窗口或离线补算机制，取决于产品能力。向用户展示历史趋势时，也要标明近期聚合可能因迟到数据变化。</p><p>保留策略还应与告警追责和审计需求对齐。若故障复盘通常发生在两周后，却只保留一周原始点，事后只能看到平均曲线而无法分析短时尖峰。决定过期周期前，应拿真实故障案例验证“保留下来的信息足够回答什么问题”。</p></section>
 <section class="panel" data-depth-note><h2>保留策略要能回答故障复盘</h2><p>如果故障常在两周后才复盘，原始点只保留七天，届时短暂尖峰和单实例异常就可能无法查证。可以挑选过去真实故障，模拟只拥有降采样数据时还能否定位原因，再决定原始数据保留多久。不同指标不必共用同一周期：高频性能样本可较短，合规审计与计费明细可能要进入独立归档。调整保留期时还要检查备份、副本和冷存储的成本，以及删除是否真正满足数据治理要求。一个清晰的生命周期表应写明粒度、保存期、可重算窗口和责任查询。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：保留与降采样是两件事</h2><div class="table-wrap"><table><thead><tr><th>机制</th><th>解决什么问题</th><th>数据精度</th><th>典型做法</th></tr></thead><tbody><tr><td><b>保留策略（Retention）</b></td><td>磁盘无限增长</td><td><b>不降精度</b>，到期直接删</td><td>保留 30 天原始数据</td></tr><tr><td><b>降采样（Downsampling）</b></td><td>长期查询太慢、太贵</td><td><b>主动降精度</b>，聚合成粗粒度</td><td>原始数据 7 天后聚成 5 分钟粒度</td></tr><tr><td><b>连续查询（CQ）</b></td><td>降采样的执行引擎</td><td>同上</td><td>数据库内部定时跑聚合写入新表</td></tr><tr><td><b>分层存储</b></td><td>冷数据成本</td><td>不降精度，换便宜介质</td><td>热数据 SSD、冷数据对象存储</td></tr></tbody></table></div><p><b>判定原则：</b>先看查询的时间跨度需求，再反推要保留什么粒度。查最近 1 小时要秒级精度，查去年同月只要天级精度 —— <b>降采样的本质是用精度换存储与查询速度</b>。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：能省多少</h2><div class="table-wrap"><table><thead><tr><th>配置</th><th>存储量级</th><th>说明</th></tr></thead><tbody><tr><td>原始 10 秒粒度，保留 30 天</td><td>每 series 约 <b>26 万个点</b></td><td>约 400 KB（压缩后）</td></tr><tr><td>降到 5 分钟粒度</td><td>点数变为 <b>1/30</b></td><td>同样 30 天只需约 13 KB</td></tr><tr><td>再降到 1 小时粒度</td><td>点数再降 <b>1/12</b></td><td>长期留存几乎无成本</td></tr><tr><td>Prometheus 默认保留</td><td><b>15 天</b></td><td>由 <code>--storage.tsdb.retention.time=15d</code> 控制</td></tr><tr><td>InfluxDB 保留策略</td><td>默认<b>无限</b></td><td>必须显式设置，否则磁盘会满</td></tr></tbody></table></div><p><b>InfluxDB 与 Prometheus 的保留 / 降采样配置</b></p><pre><code># InfluxDB：创建保留策略 + 连续查询，实现自动降采样
+# ① 原始精度只留 7 天
+CREATE RETENTION POLICY rp_raw ON telegraf DURATION 7d REPLICATION 1 DEFAULT
+
+# ② 建一个 1 年的粗粒度 RP
+CREATE RETENTION POLICY rp_1y ON telegraf DURATION 52w REPLICATION 1
+
+# ③ 连续查询：每小时把原始精度聚合成 5 分钟均值，写入粗粒度 RP
+CREATE CONTINUOUS QUERY cq_5m ON telegraf
+BEGIN
+  SELECT mean(*) INTO telegraf.rp_1y.:MEASUREMENT
+  FROM telegraf.rp_raw./.*/ GROUP BY time(5m), *
+END
+
+# Prometheus 侧：调整保留时间
+prometheus --storage.tsdb.retention.time=30d
+# 或用 2.x 的 size 保留（保留不超过 50GB）
+prometheus --storage.tsdb.retention.size=50GB</code></pre><p><b>成本直觉：</b>100 万 series、10 秒粒度保留 30 天约需 <b>400 GB</b>；若降到 1 分钟粒度则只需约 <b>67 GB</b>，省下 80% 以上。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><p><b>高频坑清单：</b></p><ul><li>① <b>InfluxDB 默认无限保留</b>：不显式设置 RP，磁盘必然被写满，这是新手最常见的生产事故</li><li>② <b>降采样把 peak 值平均掉了</b>：用 <code>mean</code> 聚合会抹掉尖峰，监控场景要同时保留 <code>max</code></li><li>③ <b>聚合函数选错</b>：计数器类指标（如请求总数）要用 <code>sum</code> 或 <code>last</code>，用 <code>mean</code> 会失真</li><li>④ <b>CQ 只处理新数据</b>：InfluxDB 的 CQ <b>不会回溯</b>历史数据，建 CQ 之前的旧数据仍是原始精度</li><li>⑤ <b>降采样后查不到细节</b>：故障复盘时要看秒级细节却发现只有 5 分钟粒度 —— 原始精度至少要留够排障窗口</li><li>⑥ <b>时区问题</b>：按天聚合时注意 <code>GROUP BY time(1d)</code> 的对齐起点是 UTC 零点</li></ul><p><b>排查顺序：</b>磁盘涨 → 先查各 RP 的实际占用 → 确认 CQ 是否真的在跑 → 再确认降采样后的数据是否被正常查询（而不是只写不读）。</p></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么不干脆永久保留原始数据？</summary><p>成本之外，还有<b>查询性能</b>问题：查一年跨度、10 秒粒度，要扫描 315 万个点，即使列存也要几秒。而查一年、1 小时粒度只要 8760 个点，毫秒级返回。更关键的是<b>收益递减</b>：三个月前的秒级数据，几乎不会有人去逐秒看，它只占空间不产生价值。</p></details><details><summary>降采样会丢掉告警能力吗？</summary><p>会，而且是常被忽略的点。<code>mean</code> 会把短促尖峰平均掉，比如某接口 1 分钟内 5xx 突增到 50%，5 分钟均值的 <code>mean</code> 可能只有 5%，告警就漏了。<b>正确做法是聚合时同时保留多个统计量</b>：<code>mean</code> 用于看趋势、<code>max</code> 用于告警、<code>count</code> 用于算速率。</p></details><details><summary>连续查询和定时任务（cron）比有什么优劣？</summary><p>CQ 的优势是<b>由数据库内部执行、无需外部依赖、不会重复或漏跑</b>；劣势是<b>只处理新数据、调试困难、复杂逻辑写不了</b>。外部任务（如 Spark 批处理）能做任意复杂聚合与回溯，但要自己解决调度、幂等、失败重试。简单降采样用 CQ，复杂数仓加工用外部任务。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>为什么不能把每天 24 个小时 P99 直接取平均作为全天 P99？</summary><p>百分位依赖全部样本的排序分布；小时 P99 的平均值不保留样本数量和分布信息。</p></details></section>
 <footer>继续阅读：<a href="../00-overview/tsdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

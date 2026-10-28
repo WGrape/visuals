@@ -105,6 +105,24 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;color:#
   .xrel-up a{color:inherit;text-decoration:none}
   .xrel-up a:hover{opacity:1;text-decoration:underline}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header><div class="topbar">
@@ -212,12 +230,34 @@ const secs=[...document.querySelectorAll('.section')];
 const obs=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){const id=e.target.id;links.forEach(l=>l.classList.toggle('active',l.getAttribute('href')==='#'+id));}});},{rootMargin:'-30% 0px -60% 0px'});
 secs.forEach(s=>obs.observe(s));
 </script>
-<div class="xrel">
-  <h2 class="xrel-t">相关页面</h2>
-  <div class="xrel-l"><a href="dpo-explained.html">DPO 直接偏好优化全流程</a><a href="../00-overview/post-training-overview.html">大模型后训练（Post-tra…</a><a href="../01-cpt/continued-pre-training.html">CPT 继续预训练全流程</a><a href="../02-sft/fine-tuning-selection-guide.html">大模型微调方法怎么选</a></div>
-  <div class="xrel-up"><a href="../../index.html">← 返回 训练与部署</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
-</div>
 
+
+
+<section class="section"><div class="x-dry"><h2>第二层 · DPO 的关键参数与数据要求</h2><div class="table-wrap"><table><thead><tr><th>参数</th><th>常见取值</th><th>作用</th><th>调错的后果</th></tr></thead><tbody><tr><td>beta</td><td>0.1 ~ 0.5</td><td>偏离参考模型的惩罚强度</td><td>太小 → 过度偏离、能力退化；太大 → 学不动</td></tr><tr><td>学习率</td><td>5e-7 ~ 1e-6</td><td>比 SFT 小一个量级</td><td>太大会直接崩掉</td></tr><tr><td>epochs</td><td>1 ~ 3</td><td>偏好数据很容易过拟合</td><td>超过 3 轮通常开始退化</td></tr><tr><td>batch size</td><td>8 ~ 32（有效）</td><td>配合梯度累积</td><td>太小梯度噪声大</td></tr><tr><td>偏好对数量</td><td>数千 ~ 数十万</td><td>数据量决定对齐上限</td><td>太少只学到表面风格</td></tr><tr><td>参考模型</td><td>冻结的 SFT 模型</td><td>提供 KL 约束的锚点</td><td>更新它就失去约束意义</td></tr></tbody></table></div><pre><code># DPO 损失的核心直觉（示意代码，非训练框架原样）
+import torch
+
+def dpo_loss(policy_chosen_logp, policy_rejected_logp,
+             ref_chosen_logp, ref_rejected_logp, beta=0.1):
+    # 策略模型相对参考模型的「相对优势」
+    logits = (policy_chosen_logp - ref_chosen_logp) \
+           - (policy_rejected_logp - ref_rejected_logp)
+    # beta 越大，越不允许偏离参考模型
+    return -torch.log(torch.sigmoid(beta * logits)).mean()
+
+# 关键理解：DPO 不需要单独训练奖励模型
+#   RLHF(PPO) 流程：SFT → 奖励模型 → PPO 强化学习（三阶段、四个模型）
+#   DPO 流程     ：SFT → 直接在偏好对上优化（两阶段、两个模型）
+#   这就是 DPO 更简单、更省显存的原因
+
+# 数据格式必须是 (prompt, chosen, rejected) 三元组
+sample = {
+    'prompt':   '解释一下什么是索引',
+    'chosen':   '索引就像书的目录……（详细且准确）',
+    'rejected': '不知道。',        # 太差会导致模型只学到「别写太短」
+}
+# 注意：rejected 不要选「明显垃圾」的回答，否则模型学不到细粒度偏好</code></pre><p><b>beta 的直觉</b>：它控制「<b>允许多大程度偏离 SFT 模型</b>」。调小 → 更敢改，容易越过头导致能力退化；调大 → 更保守，几乎学不到偏好。实践上从 0.1 起步，配合监控胜率与通用能力是否退化。</p></div></section>
+<section class="section"><div class="x-dry"><h2>第三层 · 五个高频坑</h2><ul><li><b>rejected 质量太差</b>：偏好对差距过大，模型只学到「不要写废话」，没学到真正的偏好；要收集<b>相近但有好坏之分</b>的样本。</li><li><b>学率沿用 SFT</b>：DPO 对学习率极其敏感，通常要小一个量级（5e-7 量级）。</li><li><b>训练轮数过多</b>：偏好数据很快就会过拟合，常见现象是「胜率还在涨，但通用能力明显下降」。</li><li><b>只监控胜率</b>：还要同时看长度、拒答率、通用 benchmark，否则容易被长度偏置欺骗。</li><li><b>参考模型被更新</b>：DPO 的 KL 约束依赖冻结的参考模型；不小心一起训练会让约束失效。</li><li><b>不做遗忘检查</b>：对齐后要回测原有能力（数学、代码、推理），确认没有灾难性退化。</li></ul><p class="muted">判断 DPO 是否成功的三条线：<b>胜率上升、长度不失控、通用能力不下降</b>。只有第一条不算成功。</p></div></section>
+<section class="section"><div class="x-dry"><h2>第四层 · DPO 与 PPO 怎么选</h2><details><summary>DPO 会取代 PPO 吗？</summary><p>在<b>离线偏好数据</b>场景，DPO 更简单更稳，已经成为主流选择；但 PPO 支持<b>在线采样 + 奖励模型打分</b>，在需要持续探索的场景仍有优势。</p></details><details><summary>DPO 的代价是什么？</summary><p>它依赖<b>已有的偏好数据质量</b>，且没有在线探索能力；数据分布覆盖不到的问题，DPO 学不会。另外它对超参更敏感，学习率与 beta 需要认真调。</p></details><details><summary>为什么现在又有各种 DPO 变体？</summary><p>因为基础 DPO 有几个已知弱点：对噪声偏好对敏感、容易过拟合、长度偏置。变体（如 IPO、KTO、ORPO 等）都是在针对这些点做修正。</p></details></div></section>
 <footer>Visuals · RLHF 与 DPO 对齐详解 · 仅供面试复习参考</footer>
 <section class="x-sec"><h2>核心速览</h2><div class="x-kv4"><div class="k"><b>目的</b><span>让模型「更符合人类偏好」</span><span class="x-kv4-sub">预训练学知识，对齐学取舍</span></div><div class="k"><b>RLHF 四步</b><span>SFT → 偏好数据 → 奖励模型 → RL 优化</span><span class="x-kv4-sub">流程重、超参敏感</span></div><div class="k"><b>DPO 简化</b><span>跳过奖励模型，直接优化偏好</span><span class="x-kv4-sub"><b>更简单、更稳定</b>，小数据量下常用</span></div><div class="k"><b>共同前提</b><span>需要成对的偏好标注</span><span class="x-kv4-sub">同一个问题给出「好答案/坏答案」</span></div></div></section>
 <section class="x-sec"><h2>RLHF 的完整流程</h2><div class="x-fig"><svg viewBox="0 0 680 172" xmlns="http://www.w3.org/2000/svg"><defs><marker id="mks" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#3fb950"/></marker></defs><rect x="0" y="8" width="680" height="34" rx="7" fill="#1c2430" stroke="#30363d"/><rect x="0" y="8" width="5" height="34" rx="2" fill="#58a6ff"/><text x="18" y="29" fill="#58a6ff" font-size="13" font-weight="600">① SFT 监督微调</text><text x="200" y="29" fill="#9aa7b4" font-size="12">用高质量「指令-回答」对教模型会说话</text><path d="M340 42 L340 46" stroke="#3fb950" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="48" width="680" height="34" rx="7" fill="#1c2430" stroke="#30363d"/><rect x="0" y="48" width="5" height="34" rx="2" fill="#3fb950"/><text x="18" y="69" fill="#58a6ff" font-size="13" font-weight="600">② 采集偏好数据</text><text x="200" y="69" fill="#9aa7b4" font-size="12">同题采样多个答案，人工排序/二选一</text><path d="M340 82 L340 86" stroke="#3fb950" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="88" width="680" height="34" rx="7" fill="#1c2430" stroke="#30363d"/><rect x="0" y="88" width="5" height="34" rx="2" fill="#d29922"/><text x="18" y="109" fill="#58a6ff" font-size="13" font-weight="600">③ 训练奖励模型 RM</text><text x="200" y="109" fill="#9aa7b4" font-size="12">学一个「打分器」，给回答打分</text><path d="M340 122 L340 126" stroke="#3fb950" stroke-width="1.6" marker-end="url(#mks)"/><rect x="0" y="128" width="680" height="34" rx="7" fill="#1c2430" stroke="#30363d"/><rect x="0" y="128" width="5" height="34" rx="2" fill="#f85149"/><text x="18" y="149" fill="#58a6ff" font-size="13" font-weight="600">④ RL 优化（PPO）</text><text x="200" y="149" fill="#9aa7b4" font-size="12">模型生成 → RM 打分 → 更新策略</text></svg><div class="x-cap">RLHF：先学会说话，再学会「哪句更好」，最后用强化学习去逼近偏好</div></div></section>
@@ -244,5 +284,11 @@ secs.forEach(s=>obs.observe(s));
 <details class="x-qa2"><summary>KL 约束是干什么的？</summary><p>它限制新策略与原模型的<b>分布距离</b>，防止模型为了拿高分而越跑越偏（生成奇怪但 RM 喜欢的文本）。太大约束学不动，太小约束容易崩，是需要仔细调的超参。</p></details>
 <details class="x-qa2"><summary>奖励黑客（Reward Hacking）怎么防？</summary><p>① 加强 KL 约束；② 持续改进 RM（用新的模型输出重新标注）；③ 用多角度的 RM 集成；④ 上线后持续监控输出质量，不要只看 RM 分数。</p></details>
 <details class="x-qa2"><summary>对齐之后模型变「笨」了是怎么回事？</summary><p>这就是<b>对齐税</b>：对齐过程可能牺牲了部分通用能力。缓解手段：在对齐数据中混入一定比例的预训练/通用任务数据，并控制对齐强度（不要训太多轮）。</p></details></section>
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l"><a href="dpo-explained.html">DPO 直接偏好优化全流程</a><a href="../00-overview/post-training-overview.html">大模型后训练（Post-tra…</a><a href="../01-cpt/continued-pre-training.html">CPT 继续预训练全流程</a><a href="../02-sft/fine-tuning-selection-guide.html">大模型微调方法怎么选</a></div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 训练与部署</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
 </body>
 </html>

@@ -59,6 +59,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -351,6 +369,30 @@ jobs:
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 流水线与发布的可量化目标</h2><div class="table-wrap"><table><thead><tr><th>指标</th><th>经验目标（高效团队）</th><th>怎么测</th></tr></thead><tbody><tr><td>CI 单次时长</td><td>< 10 min（PR 级 < 5 min）</td><td>流水线耗时分位数</td></tr><tr><td>构建缓存命中率</td><td>> 80%</td><td>缓存命中次数 / 总构建</td></tr><tr><td>部署前置时间（提交→上线）</td><td>< 1 小时</td><td>commit 时间 → 镜像上线时间</td></tr><tr><td>部署频率</td><td>每天多次（按需）</td><td>每周部署次数</td></tr><tr><td>变更失败率</td><td>< 15%</td><td>导致回滚/热修的部署占比</td></tr><tr><td>平均恢复时间 MTTR</td><td>< 1 小时</td><td>故障发现→恢复的时长</td></tr><tr><td>镜像构建层数 / 体积</td><td>尽量 < 300 MB</td><td>多阶段构建 + 精简基础镜像</td></tr></tbody></table></div><pre><code># ArgoCD / Flux：GitOps 的核心操作就这几个
+# 1) 手动触发同步（默认轮询间隔约 3 分钟，紧急时用）
+argocd app sync my-app
+argocd app wait my-app --health            # 等健康再返回，适合接进流水线
+
+# 2) 看为什么不同步（Out of Sync 的第一现场）
+argocd app get my-app                       # 看 Sync Status / Health
+argocd app diff my-app                      # 看 Git 与集群的实际差异（漂移就在这里）
+argocd app history my-app                   # 看历史版本，回滚靠它
+
+# 3) Flux 的等价操作
+flux reconcile source git my-app
+flux get kustomizations
+
+# 4) K8s 侧确认发布真的成功（不要只看流水线绿）
+kubectl rollout status deploy/my-app --timeout=180s
+kubectl get pods -l app=my-app -w           # 看有没有 CrashLoopBackOff
+kubectl rollout undo deploy/my-app          # 回滚到上一版本
+
+# 5) 发布后验证：就绪前的 Pod 不该接流量
+kubectl get deploy my-app -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}'</code></pre><p><b>滚动发布的两个关键参数</b>：<code>maxSurge=25%</code>（最多多起多少 Pod）与 <code>maxUnavailable=25%</code>（最多允许多少不可用）。流量高峰把 maxUnavailable 设成 0 更安全；<code>minReadySeconds</code> 默认是 0，意味着 Pod 一就绪就立刻接流量 —— 有预热需求的应用必须设成 10~30 s。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · CI/CD 与 GitOps 的七个高频坑</h2><ul><li><b>用 latest 标签</b>：导致「集群里跑的到底是哪个版本」无法回答；镜像必须打不可变 tag（commit sha）。</li><li><b>密钥进 Git</b>：GitOps 里 Git 就是事实源，明文密钥等于泄露；用 Sealed Secrets / External Secrets。</li><li><b>有人 kubectl edit 改了集群</b>：产生配置漂移，Argo 会报 Out of Sync；要开自动 prune + self-heal 或禁止手工改。</li><li><b>回滚只回滚镜像</b>：数据库迁移没回滚，新代码配旧表结构直接崩；迁移要能双向兼容（先加字段后删字段）。</li><li><b>CI 缓存永不失效</b>：依赖更新了但缓存没变，构建结果和本地不一致；缓存 key 要含 lock 文件哈希。</li><li><b>没有就绪探针</b>：容器启动了但服务还没初始化完就开始接流量，表现为发布期间一波 5xx。</li><li><b>流水线串行跑全部测试</b>：CI 越来越慢最后没人等；分层跑（单测必跑、集成测试并行、E2E 按需）。</li></ul><p class="muted">GitOps 的一条硬约束：<b>Git 里必须是「期望状态」，不能包含构建产物里的可变值</b>。镜像 tag 这类每次都变的东西，要么由 CI 提交回 Git，要么用 Image Updater 自动更新。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · GitOps 解决了什么、没解决什么</h2><details><summary>GitOps 和普通 CI/CD 的区别是什么？</summary><p>传统 CI/CD 是<b>推</b>（流水线拿到权限去集群里 apply）；GitOps 是<b>拉</b>（集群里的 Agent 盯着 Git，发现差异就同步）。差别在于：集群凭证不进 CI 系统、期望状态可审计、集群漂移能被自动纠正。</p></details><details><summary>为什么数据库迁移不适合 GitOps？</summary><p>GitOps 只保证「声明式状态最终一致」，而数据库迁移是<b>有状态的、不可逆的过程性操作</b>；它必须由流水线按顺序执行并留记录，不能用「同步到期望状态」的方式表达。</p></details><details><summary>多环境（dev/staging/prod）怎么组织仓库？</summary><p>推荐<b>同一份 manifests + 不同 overlay</b>（Kustomize）或多环境目录，避免各环境配置分叉；环境差异只体现在副本数、资源限额、域名等少数字段上，差得多就说明环境不一致该治理了。</p></details></div></section>
 <footer>
   <p>Visuals · 系统工程 / 云原生系统 / DevOps ·
   <a href="../../index.html">返回云原生目录</a> ·

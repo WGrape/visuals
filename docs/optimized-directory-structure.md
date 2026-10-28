@@ -18,7 +18,7 @@
       02-generalization/
       03-architecture-evolution/
     01-embedding/
-      01-embedding-foundations/
+      01-foundations/01-what-is-embedding/
     02-transformer/
       01-architecture/
       02-attention/

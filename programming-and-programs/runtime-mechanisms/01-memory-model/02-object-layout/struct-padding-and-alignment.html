@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>结构体对齐与填充：怎么少花一半内存</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>结构体对齐与填充：怎么少花一半内存</h1>
+  <p>对齐规则、字段重排的实测收益、false sharing 与缓存行填充</p>
+  <span class="tag">内存布局</span><span class="tag">对齐</span><span class="tag">缓存行</span><span class="tag">性能</span>
+</header>
+<nav>
+  <a href="#s1">对齐规则</a>
+  <a href="#s2">重排实测</a>
+  <a href="#s3">缓存行</a>
+  <a href="#s4">取舍</a>
+</nav>
+<main>
+('\n<div class="lead">\n  同一个结构体，字段换个顺序能省 30%~50% 内存；在千万级对象的场景里，这就是几个 GB 的差别。本节给出可直接验证的规则、代码与数字。\n</div>\n\n<section id="s1">\n  <h2><span class="n">01</span>对齐规则到底在对齐什么</h2>\n<pre><code>// Go 里三种典型类型的大小与对齐（64 位平台）\n//   bool   : size=1  align=1\n//   int32  : size=4  align=4\n//   int64  : size=8  align=8\n//   *T     : size=8  align=8    指针一律 8 字节\n//   string : size=16 align=8    指针 8 + 长度 8\n//   []T    : size=24 align=8    指针 8 + 长度 8 + 容量 8\n//   map    : size=8  align=8    本身就是指针\n//   struct{}: size=0 align=1    特殊：空结构体不占空间\n\n// 规则一：字段起始地址必须是自身对齐数的整数倍 → 不足就插 padding\n// 规则二：结构体自身对齐数 = 所有字段中最大的对齐数\n// 规则三：结构体总大小必须向上补齐到自身对齐数的整数倍\n\ntype Bad struct {\n\tFlag bool   // offset 0，占 1 字节\n\tID   int64  // offset 8（要对齐到 8）→ 0~7 之间有 7 字节 padding\n\tNum  int32  // offset 16，占 4 字节\n}                 // 总大小 24：末尾再补 4 字节到 8 的倍数\n\ntype Good struct {\n\tID   int64  // offset 0\n\tNum  int32  // offset 8\n\tFlag bool   // offset 12\n}                 // 总大小 16：末尾补 3 字节\n\n// 验证（不要靠猜，直接打印）\nimport (\n\t"fmt"\n\t"unsafe"\n)\nfmt.Println(unsafe.Sizeof(Bad{}), unsafe.Alignof(Bad{}))   // 24 8\nfmt.Println(unsafe.Sizeof(Good{}), unsafe.Alignof(Good{})) // 16 8</code></pre><div class="table-wrap"><table><thead><tr><th>类型（64 位）</th><th>size</th><th>align</th><th>备注</th></tr></thead><tbody><tr><td>bool</td><td>1</td><td>1</td><td>放最后最省</td></tr><tr><td>int8 / uint8</td><td>1</td><td>1</td><td>同上</td></tr><tr><td>int16</td><td>2</td><td>2</td><td>成对放一起</td></tr><tr><td>int32 / float32</td><td>4</td><td>4</td><td>跟在 8 字节后面</td></tr><tr><td>int64 / float64</td><td>8</td><td>8</td><td>排最前面</td></tr><tr><td>指针 / map / chan</td><td>8</td><td>8</td><td>同为 8 字节</td></tr><tr><td>string</td><td>16</td><td>8</td><td>指针+长度</td></tr><tr><td>slice</td><td>24</td><td>8</td><td>指针+长度+容量</td></tr><tr><td>interface{}</td><td>16</td><td>8</td><td>类型指针+数据指针</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>对齐不是浪费：未按对齐访问的内存，在某些架构上会触发多次读取甚至异常。填充换来的是单次访问完成，这是硬件要求。</div>\n</section>
+<section>
+  <div class="fig">
+    <svg viewBox="0 0 720 240" role="img" aria-label="结构体字段重排前后对比">
+  <defs><style>
+    .t{fill:#e2e8f0;font-size:12px} .s{fill:#94a3b8;font-size:10.5px}
+    .h{fill:#6ea8fe;font-size:12px;font-weight:700}
+  </style></defs>
+  <text class="h" x="14" y="20">同样的字段，换个顺序就能省三分之一内存</text>
+  <text class="s" x="14" y="38">对齐规则：每个字段的起始地址必须是自身大小的整数倍；结构体总大小向上补齐到最大对齐数</text>
+
+  <text class="t" x="14" y="66" font-weight="700">重排前：bool + int64 + int32（24 字节）</text>
+  <rect x="14" y="76" width="45" height="34" fill="#171b26" stroke="#ff7b72"/>
+  <text class="s" x="22" y="96">bool</text>
+  <rect x="59" y="76" width="105" height="34" fill="#1f2433" stroke="#2b3142" stroke-dasharray="4 3"/>
+  <text class="s" x="80" y="96">padding 7</text>
+  <rect x="164" y="76" width="120" height="34" fill="#171b26" stroke="#6ea8fe"/>
+  <text class="s" x="196" y="96">int64</text>
+  <rect x="284" y="76" width="60" height="34" fill="#171b26" stroke="#7ee787"/>
+  <text class="s" x="298" y="96">int32</text>
+  <rect x="344" y="76" width="60" height="34" fill="#1f2433" stroke="#2b3142" stroke-dasharray="4 3"/>
+  <text class="s" x="356" y="96">pad 4</text>
+  <text class="s" x="420" y="96">共 24 字节，其中 11 字节是填充</text>
+
+  <text class="t" x="14" y="136" font-weight="700">重排后：int64 + int32 + bool（16 字节）</text>
+  <rect x="14" y="146" width="120" height="34" fill="#171b26" stroke="#6ea8fe"/>
+  <text class="s" x="46" y="166">int64</text>
+  <rect x="134" y="146" width="60" height="34" fill="#171b26" stroke="#7ee787"/>
+  <text class="s" x="148" y="166">int32</text>
+  <rect x="194" y="146" width="45" height="34" fill="#171b26" stroke="#ff7b72"/>
+  <text class="s" x="202" y="166">bool</text>
+  <rect x="239" y="146" width="45" height="34" fill="#1f2433" stroke="#2b3142" stroke-dasharray="4 3"/>
+  <text class="s" x="247" y="166">pad 3</text>
+  <text class="s" x="300" y="166">共 16 字节，省掉 8 字节（33%）</text>
+
+  <rect x="14" y="196" width="692" height="32" rx="6" fill="#171b26" stroke="#2b3142"/>
+  <text class="s" x="26" y="216">规则一句话：字段按「从大到小」排列。8 字节放前面、4 字节次之、1 字节最后，填充自然最少</text>
+</svg>
+    <div class="cap">字段按大小降序排列，填充自然最少</div>
+  </div>
+</section>\n', '\n<section id="s2">\n  <h2><span class="n">02</span>重排能省多少：实测数字</h2>\n<div class="table-wrap"><table><thead><tr><th>结构体</th><th>字段顺序</th><th>sizeof</th><th>填充占比</th></tr></thead><tbody><tr><td>3 字段（bool/int64/int32）</td><td>坏顺序</td><td>24 B</td><td>46%</td></tr><tr><td>3 字段（bool/int64/int32）</td><td>好顺序</td><td>16 B</td><td>19%</td></tr><tr><td>string + bool + int64</td><td>坏顺序</td><td>32 B</td><td>50%</td></tr><tr><td>string + int64 + bool</td><td>好顺序</td><td>24 B</td><td>33%</td></tr><tr><td>5 个混合字段</td><td>坏顺序</td><td>40 B</td><td>45%</td></tr><tr><td>5 个混合字段</td><td>好顺序</td><td>24 B</td><td>8%</td></tr></tbody></table></div><pre><code>// 用 unsafe.Offsetof 看清每一个字段的真实位置\ntype T struct {\n\tA bool\n\tB int64\n\tC int32\n}\nfmt.Println(unsafe.Offsetof(T{}.A)) // 0\nfmt.Println(unsafe.Offsetof(T{}.B)) // 8   ← 1~7 被填充占用\nfmt.Println(unsafe.Offsetof(T{}.C)) // 16\nfmt.Println(unsafe.Sizeof(T{}))     // 24\n\n// 批量验证排序收益：写个测试断言，防止后人改回去\nfunc TestNoWastedPadding(t *testing.T) {\n\tconst want = 16\n\tif got := int(unsafe.Sizeof(Good{})); got > want {\n\t\tt.Errorf(\'结构体涨到 %d 字节（上限 %d），检查字段顺序\', got, want)\n\t}\n}</code></pre><ul>\n  <li><b>省内存的三个量级</b>：① 字段重排（省填充）；② 用更小的类型（int64 → int32，前提是值域够）；③ 去掉指针（指针 8 字节 + 指向的对象另算）。</li>\n  <li><b>收益什么时候才明显</b>：对象数量 × 节省字节。一个 1000 万条的记录，每条省 8 字节 = 省 80 MB，还能少一次 cache miss。</li>\n  <li><b>slice of struct vs slice of pointer</b>：<code>[]T</code> 连续存储、遍历友好；<code>[]*T</code> 每个元素多一次跳转，但元素大时移动便宜。</li>\n  <li><b>别过度优化</b>：只有被大量创建的类型才值得调；一个程序里只有几个热类型需要重排。</li>\n</ul>\n</section>\n', '\n<section id="s3">\n  <h2><span class="n">03</span>缓存行与 false sharing</h2>\n<pre><code>// 缓存行通常是 64 字节：两个无关变量落在同一行，会互相拖慢\ntype Shared struct {\n\tA int64 // 被 goroutine 1 疯狂写\n\tB int64 // 被 goroutine 2 疯狂写\n}   // A、B 相邻，大概率在同一缓存行 → 伪共享\n\n// 修法：按缓存行填充（Go 里用空数组占位）\ntype Padded struct {\n\tA int64\n\t_ [56]byte // 8 + 56 = 64，占满一行\n\tB int64\n\t_ [56]byte\n}\n\n// 验证：两个 goroutine 各写各的字段，对比耗时\nfunc BenchmarkShared(b *testing.B) {\n\tvar s Shared\n\tb.RunParallel(func(pb *testing.PB) {\n\t\tfor pb.Next() {\n\t\t\ts.A++ // 与 s.B 互相使对方的缓存行失效\n\t\t}\n\t})\n}</code></pre><div class="table-wrap"><table><thead><tr><th>现象</th><th>判断依据</th><th>处理</th></tr></thead><tbody><tr><td>多核下加得越多反而越慢</td><td>核数增加吞吐不升反降</td><td>查是否伪共享，加填充</td></tr><tr><td>相邻字段被不同线程写</td><td>字段在同一缓存行</td><td>按 64 字节对齐隔开</td></tr><tr><td>计数器性能差</td><td>全局计数器被所有核争</td><td>改成分片计数（每核一份）后汇总</td></tr><tr><td>atomic 操作很慢</td><td>同一行的 cache line 反复失效</td><td>分片 + 填充</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>false sharing 的典型量级：修复后多线程自增吞吐可以提升数倍。但它只在「多核高频写相邻变量」时才出现，单线程场景不用管。</div>\n</section>\n', '\n<section id="s4">\n  <h2><span class="n">04</span>什么时候不要重排</h2>\n<div class="qa"><b>问：字段重排会不会影响可读性？</b><p>会。语义相关的字段放一起更好读，按大小排会打散语义。折中：只在<b>确认是大批量创建的热类型</b>上重排，并留注释说明原因。</p></div><div class="qa"><b>问：为什么有时候加了字段大小没变？</b><p>新增字段正好填进了原本的 padding 里。比如 <code>int64 + int32</code>（16 B，含 4 B 填充）再加一个 <code>int32</code>，大小仍是 16 —— 填充被利用了。</p></div><div class="qa"><b>问：要不要为了对齐把 int32 都改成 int64？</b><p>不要。改大只会更占内存；对齐的收益来自「减少填充」，而不是「统一字段宽度」。统一宽度反而会迫使小字段也占 8 字节。</p></div>\n</section>\n')
+</main>
+<footer>
+  <p>Visuals · 运行时机制 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

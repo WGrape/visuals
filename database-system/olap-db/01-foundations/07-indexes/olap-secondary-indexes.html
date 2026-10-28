@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OLAP 二级索引：跳数 / Bitmap / 倒排 · 原理图解</title>
+<style>  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style><style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>OLAP 二级索引：跳数 / Bitmap / 倒排</h1>
+  <p>排序键之外，如何用轻量索引把"该扫哪"精确到块</p>
+  <span class="tag">跳数索引</span><span class="tag">minmax</span><span class="tag">bloom</span><span class="tag">bitmap</span><span class="tag">倒排</span>
+</header>
+<nav><a href="#why">① 为什么不够</a><a href="#skip">② 跳数索引</a><a href="#bitmap">③ Bitmap</a><a href="#inverted">④ 倒排</a><a href="#matrix">⑤ 选择矩阵</a><a href="#cost">⑥ 代价</a><a href="#qa">⑦ 常见疑问</a></nav>
+<main>
+
+<div class="lead"><b>一句话总结：</b>排序键（主键）只能按<b>前缀</b>裁剪；二级索引用更轻量的结构，把"这一块里有没有我要的数据"回答到<b>单个 granule/数据块</b>级别。</div>
+
+<section id="why"><h2><span class="n">01</span>为什么排序键不够</h2>
+<p>列存表通常有一个<b>排序键 / 主键</b>（如按时间）。查询带时间范围时能高效裁剪；但查询条件是<b>非前缀列</b>（如 <code>WHERE user_id = 123</code>），排序键就帮不上忙——只能全分区扫描。二级索引就是为这种"非排序键过滤"场景补的轻量结构。</p></section>
+
+<section id="skip"><h2><span class="n">02</span>跳数索引（Data Skipping）</h2>
+<p>跳数索引不给每行建条目，而是给<b>每个数据块（granule / 行组）</b>存一个<b>摘要</b>，查询时先读摘要，整块整块地跳过无关数据。</p>
+<div class="grid">
+<div class="card"><h4>📊 minmax</h4><p>每块存列的最大/最小值。范围查询 <code>dt BETWEEN a AND b</code> 时，块的 [min,max] 与查询区间无交集就整块跳过。最便宜，适合有序/时间列。</p></div>
+<div class="card"><h4>🌫️ bloom filter</h4><p>每块存一个布隆过滤器，回答"这个值<b>可能</b>在 / <b>一定不在</b>"。等值或 IN 查询时跳过确定不含的块。有误判但不漏。</p></div>
+<div class="card"><h4>🧮 set / token</h4><p>记录块内出现的离散值集合（低基数列），或按 token 建摘要，用于枚举/包含判断。</p></div>
+</div>
+<div class="fig"><svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+<rect x="0" y="0" width="720" height="200" fill="#171b26"/>
+<text x="14" y="24" fill="#6ea8fe" font-size="14" font-weight="700">跳数索引：整块跳过</text>
+<rect x="20" y="50" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="80" y="72" fill="#e2e8f0" font-size="11" text-anchor="middle">块1 [1,50]</text>
+<rect x="170" y="50" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="230" y="72" fill="#e2e8f0" font-size="11" text-anchor="middle">块2 [51,99]</text>
+<rect x="320" y="50" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="380" y="72" fill="#e2e8f0" font-size="11" text-anchor="middle">块3 [100,150]</text>
+<rect x="470" y="50" width="120" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/><text x="530" y="72" fill="#e2e8f0" font-size="11" text-anchor="middle">块4 [151,200]</text>
+<rect x="320" y="100" width="120" height="34" rx="6" fill="#7ee787" stroke="#7ee787"/><text x="380" y="122" fill="#0f1117" font-size="11" text-anchor="middle">✓ 命中扫描</text>
+<rect x="20" y="100" width="120" height="34" rx="6" fill="#ff7b72" stroke="#ff7b72"/><text x="80" y="122" fill="#0f1117" font-size="11" text-anchor="middle">✗ 跳过</text>
+<rect x="170" y="100" width="120" height="34" rx="6" fill="#ff7b72" stroke="#ff7b72"/><text x="230" y="122" fill="#0f1117" font-size="11" text-anchor="middle">✗ 跳过</text>
+<rect x="470" y="100" width="120" height="34" rx="6" fill="#ff7b72" stroke="#ff7b72"/><text x="530" y="122" fill="#0f1117" font-size="11" text-anchor="middle">✗ 跳过</text>
+<text x="14" y="160" fill="#94a3b8" font-size="11">查询 user_id=120 → 只有块3的 [min,max] 覆盖它，其余 3 块整块跳过。</text>
+</svg><div class="cap">minmax 摘要让 75% 的数据块免于读取</div></div></section>
+
+<section id="bitmap"><h2><span class="n">03</span>Bitmap 索引</h2>
+<p>对<b>低基数列</b>（如性别、城市、状态、枚举），Bitmap 索引给每个不同值维护一个位图：第 i 位为 1 表示第 i 行属于该值。多个条件的 AND/OR 直接做<b>位运算</b>，极快。</p>
+<table><tr><th>维度</th><th>说明</th></tr>
+<tr><td>适用</td><td>基数低（几十到几千个值）；高基数会让位图数量爆炸、存储膨胀</td></tr>
+<tr><td>优势</td><td>多条件交集/并集用位与/或，比回表过滤快几个数量级</td></tr>
+<tr><td>代价</td><td>写入时要更新位图；高基数列退化成"每行一个位图"反而更慢更大</td></tr>
+<tr><td>进阶</td><td>Roaring Bitmap 压缩位图，是 COUNT(DISTINCT) 精确去重的基础</td></tr></table></section>
+
+<section id="inverted"><h2><span class="n">04</span>倒排索引</h2>
+<p>倒排索引是"<b>值 → 行号列表</b>"的映射，适合<b>文本搜索、多值字段、ARRAY 包含</b>查询（如 <code>tags CONTAINS 'ai'</code>）。它不关心列是否有序，靠 token 分词建立 term→doc 的列表。</p>
+<p>与跳数索引的区别：倒排能精确定位到<b>行</b>（或行组），而跳数索引只能到"块"级别做排除；倒排对包含/模糊匹配友好，跳数索引对范围/等值排除友好。</p></section>
+
+<section id="matrix"><h2><span class="n">05</span>选择矩阵</h2>
+<table><tr><th>查询类型</th><th>列基数</th><th>首选索引</th></tr>
+<tr><td>范围过滤（时间/数值）</td><td>任意</td><td>排序键 + minmax 跳数</td></tr>
+<tr><td>等值 / IN（非排序键）</td><td>中低</td><td>bloom 跳数索引</td></tr>
+<tr><td>多条件 AND/OR 过滤</td><td>低</td><td>bitmap 索引</td></tr>
+<tr><td>文本 / 包含 / ARRAY</td><td>任意</td><td>倒排索引</td></tr>
+</table></section>
+
+<section id="cost"><h2><span class="n">06</span>代价与坑</h2>
+<div class="grid">
+<div class="card"><h4>✍️ 写入放大</h4><p>每行写入要同步更新索引结构，写入吞吐会下降；ClickHouse 等常在后台合并（merge）时重建跳数索引，避免逐行维护。</p></div>
+<div class="card"><h4>💾 存储开销</h4><p>索引要占空间，尤其是 bitmap 高基数、倒排大数据集。</p></div>
+<div class="card"><h4>🔄 合并一致性</h4><p>数据块被合并（compaction）后，块级摘要必须随新块重建，否则索引失效。</p></div>
+</div></section>
+
+<section id="qa"><h2><span class="n">07</span>常见疑问</h2>
+<div class="qa"><b>跳数索引会漏数据吗？</b><br>minmax 和 set 是确定的（不漏）；bloom 有"假阳性"——可能误判某块含数据而去读它，但绝不会漏掉真正含数据的块。所以 bloom 只会多读、不会少读。</div>
+<div class="qa"><b>bitmap 为什么怕高基数列？</b><br>每个不同值一个位图，若列有上百万个不同值，就要维护上百万个位图，存储和构建成本爆炸，且位图变得稀疏、位运算收益消失。</div>
+<div class="qa"><b>排序键和跳数索引怎么配合？</b><br>排序键负责"大粒度、前缀"的裁剪（最便宜），跳数索引负责"非前缀列、块级"的精细排除。两者叠加，能同时压低扫描的分区数和块数。</div>
+</section>
+
+</main>
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>引擎落地对照</h2>
+<table><tr><th>引擎</th><th>支持形态</th><th>备注</th></tr>
+<tr><td>ClickHouse</td><td>跳数索引（minmax/bloom/set/token/hypothesis）</td><td>建在 MergeTree 上，merge 时重建；无内置倒排/bitmap 表索引，但 bitmap 函数可用于去重</td></tr>
+<tr><td>Doris / StarRocks</td><td>bitmap 索引、倒排索引、bloom</td><td>倒排支持文本与 ARRAY；bitmap 用于精确去重加速</td></tr>
+<tr><td>Druid</td><td>位图（bitmap）做过滤，倒排可选</td><td> bitmap 是 segment 内过滤的核心</td></tr>
+</table>
+<details><summary>为什么"建索引"前先确认排序键？</summary><p>很多"加索引提速"的需求，其实用对排序键（让高频过滤列成为前缀）就能解决，零写入成本。只有过滤列无法成为排序前缀时，才需要二级索引。盲目加索引只会拖慢写入、增加存储。</p></details>
+</div></section>
+
+<footer>
+  <p>Visuals · 数据库系统 / OLAP 分析型数据库 ·
+  <a href="../../index.html">返回 OLAP 目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+<section class="x-dry-sec" data-dry-goods data-r16><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16><div class="x-dry">
+<h2>深度补充：OLAP 二级索引（跳数 / Bitmap / 倒排）</h2>
+<p><b>第一层 · 概念与判定</b> OLAP 列存下二级索引用于跳过无关 granule，典型三类：跳数索引（min/max、set、bloom）、Bitmap（高基数列等值/集合）、倒排（文本/多值）。判定：按查询谓词形态选型。</p>
+<table><tr><th>索引</th><th>适合谓词</th><th>代价</th></tr>
+<tr><td>跳数（min/max/bloom）</td><td>范围 / 存在性</td><td>小、写入友好</td></tr>
+<tr><td>Bitmap</td><td>等值 / IN / 集合并交</td><td>高基数列友好</td></tr>
+<tr><td>倒排</td><td>文本 / 多值包含</td><td>写入与空间大</td></tr>
+<tr><td>主键序</td><td>前缀范围</td><td>免费，靠排序</td></tr></table>
+<p><b>第三层 · 排障与边界</b></p>
+<ul>
+<li>Bitmap 在低基数列上膨胀，反而慢于扫描。</li>
+<li>跳数索引粒度（granule）太粗，跳过率低。</li>
+<li>倒排对大文本写入放大明显，需控制文档量。</li>
+<li>索引建错列（查询从不谓词）纯浪费写入与空间。</li>
+</ul>
+<details><summary>第四层 · 原理与取舍</summary><p>二级索引用“额外结构 + 写入成本”换查询时跳过数据块，代价是写入放大与存储。列存本身靠排序（主键序）就免去部分索引需求，跳数索引几乎免费所以首选；Bitmap 在高基数列的等值过滤上极快但占空间；倒排为文本多值而生。权衡是“查询加速 vs 写入/存储开销”，按真实谓词分布选型，避免为低频查询付费。</p></details>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16b><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16b><div class="x-dry">
+<h2>实例与速查：OLAP 二级索引</h2>
+<pre><code>-- ClickHouse 跳数索引（granule 级 min/max，写入友好）
+CREATE TABLE logs (ts DateTime, level String, msg String)
+ENGINE = MergeTree ORDER BY (level, ts)
+SETTINGS index_granularity = 8192;
+
+-- Bitmap 索引常用于高基数列的等值/集合过滤（如 ClickHouse 的 groupBitmap）
+SELECT groupBitmap(user_id) FROM events WHERE day = '2026-10-27';
+
+-- 倒排用于文本/多值包含，写入与空间成本大</code></pre>
+<ul>
+<li>Bitmap 在低基数列上会膨胀，反而慢于直接扫描。</li>
+<li>跳数索引粒度（granule）太粗，跳过率低，可调整 index_granularity。</li>
+<li>索引建在查询从不谓词的列上纯浪费写入与空间。</li>
+</ul>
+<details><summary>FAQ：列存还需要二级索引吗？</summary><p>需要，但优先级不同。列存靠“主键排序”已能服务前缀范围查询（免费）；二级索引用来服务非前缀谓词：跳数索引几乎免费、首选；Bitmap 适合高基数列的等值/集合；倒排为文本多值而生。按真实谓词分布选型，避免为低频查询付费。</p></details>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16c><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16c><div class="x-dry">
+<h2>常见误区与延伸</h2>
+<ul>
+<li>误区一：OLAP 也要像 OLTP 那样建很多二级索引。列存靠排序已服务前缀查询，乱建索引只增写入。</li>
+<li>误区二：Bitmap 一定快。低基数列上 Bitmap 会膨胀，反而慢于扫描。</li>
+<li>延伸：跳数索引几乎免费，是首选；倒排为文本/多值而生，写入与空间成本大。</li>
+<li>延伸：物化视图/投影（projection）是列存另一类“预计算索引”，适合固定聚合模式。</li>
+</ul>
+<p>一句话总结：OLAP 二级索引按真实谓词形态选型，跳数首选、Bitmap 管高基等值、倒排管文本，避免为低频查询付费。</p>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16d><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16d><div class="x-dry">
+<h2>决策速记</h2>
+<ul>
+<li>首选跳数：几乎免费，服务非前缀谓词。</li>
+<li>高基等值用 Bitmap：低基数列上会膨胀反而慢。</li>
+<li>文本多值用倒排：写入与空间成本大，按需。</li>
+<li>别乱建：索引建在从不谓词的列上纯浪费。</li>
+</ul>
+<p>一句话：OLAP 二级索引按谓词形态选型，避免为低频查询付费。</p>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16e><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16e><div class="x-dry">
+<h2>横向对比与追问</h2>
+<ul>
+<li>与 OLTP 二级索引比：OLTP 的 B+Tree 索引几乎必建，OLAP 列存靠排序已服务前缀查询。</li>
+<li>与物化视图比：二级索引是“加速谓词”，物化视图是“预计算聚合”，层次不同。</li>
+<li>追问：为什么 Bitmap 在高基数列才高效？低基数列 Bitmap 基数低、位数组长反而膨胀。</li>
+<li>追问：跳数索引为什么不免费到零成本？它仍要随写入维护 granule 的 min/max。</li>
+</ul>
+<p>小结：OLAP 索引按谓词形态选，跳数首选、Bitmap 管高基、倒排管文本。</p>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16f><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16f><div class="x-dry">
+<h2>速记口诀</h2>
+<p>口诀：跳数首选，Bitmap 管高基，倒排管文本，别乱建。</p>
+<ul>
+<li>列存靠排序已服务前缀查询。</li>
+<li>Bitmap 在低基数列上会膨胀。</li>
+</ul>
+</div></section>
+
+</div></section>
+<section class="x-dry-sec" data-dry-goods data-r16g><div class="x-dry">
+<section class="x-dry-sec" data-dry-goods data-r16g><div class="x-dry">
+<h2>先记三件事</h2>
+<ul>
+<li>第一件：列存靠排序已服务前缀查询，二级索引按需建。</li>
+<li>第二件：跳数索引首选（几乎免费），Bitmap 管高基，倒排管文本。</li>
+<li>第三件：索引建在从不谓词的列上纯浪费写入。</li>
+</ul>
+</div></section>
+
+</div></section>
+</body></html>

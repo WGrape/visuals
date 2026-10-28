@@ -1101,6 +1101,24 @@ with ProcessPoolExecutor(max_workers=os.cpu_count()) as ex:
 local = threading.local()
 local.value = 1      # 每个线程有独立副本</code></pre></div></section>
 <section class="x-sec" ><div class="x-dry"><h2>排障清单</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>多线程比单线程还慢</td><td>CPU 密集任务 + GIL 切换开销</td><td>换 <code>ProcessPoolExecutor</code>；或用 numpy（释放 GIL）</td></tr><tr><td>计数结果小于预期</td><td><code>+=</code> 不是原子操作</td><td>加锁；或用 <code>itertools.count()</code>/原子操作</td></tr><tr><td>死锁</td><td>锁顺序反转 / 忘了释放</td><td>固定加锁顺序；用 <code>with lock</code>；给锁加超时</td></tr><tr><td>线程数暴涨内存爆</td><td>每个线程 8MB 栈</td><td>用线程池限制数量；改协程</td></tr><tr><td>主线程退出子线程还在跑</td><td>没设 daemon 也没 join</td><td><code>t.daemon=True</code>；或显式 join</td></tr><tr><td>Queue 卡住不退出</td><td>没 task_done / 没 join</td><td>用 <code>q.join()</code> 等处理完；或设哨兵值退出</td></tr><tr><td>GIL 导致延迟抖动</td><td>某个线程长时间占用</td><td>调小 <code>sys.setswitchinterval</code>；CPU 密集挪到进程</td></tr></tbody></table></div><p class="muted"><b>判断该用线程还是进程</b>：任务在<b>等 IO</b>（网络、磁盘）→ 线程/协程；任务在<b>算</b>（循环、加密、图像处理）→ 进程。混合型任务可以把计算部分挪到 C 扩展（numpy 就是这样绕过 GIL 的）。</p></div></section>
+<section class="x-sec"><div class="x-dry"><h2>第二层 · GIL 的实测数字与选型</h2><div class="table-wrap"><table><thead><tr><th>场景</th><th>多线程收益</th><th>原因</th></tr></thead><tbody><tr><td>网络请求 / 文件读写</td><td>明显提升</td><td>等待 IO 时会释放 GIL</td></tr><tr><td>正则、序列化、纯 Python 计算</td><td>几乎无提升</td><td>始终占用 GIL</td></tr><tr><td>NumPy / pandas 大矩阵运算</td><td>部分提升</td><td>底层 C 代码会主动释放 GIL</td></tr><tr><td>C 扩展里的计算</td><td>取决于扩展是否释放 GIL</td><td>看扩展实现</td></tr></tbody></table></div><p>GIL 的切换间隔由 <b>sys.getswitchinterval()</b> 控制，默认 0.005 秒；把它调小会让切换更频繁、单线程更慢，一般不需要动。</p><p><b>可以直接跑的对比代码</b></p><pre><code>import sys, threading, time
+print(sys.getswitchinterval())        # 默认 0.005 秒
+
+def io_bound():
+    time.sleep(0.5)                  # 模拟 IO：等待时会释放 GIL
+
+# 4 个 IO 任务并发，总耗时约 0.5 秒而不是 2 秒
+ts = [threading.Thread(target=io_bound) for _ in range(4)]
+t0 = time.time()
+[t.start() for t in ts]; [t.join() for t in ts]
+print('IO 密集型并发耗时 %.2fs' % (time.time() - t0))
+
+# CPU 密集型：改用进程池才能真正并行
+from concurrent.futures import ProcessPoolExecutor
+with ProcessPoolExecutor() as ex:
+    list(ex.map(sum, [range(10_000_000)] * 4))</code></pre></div></section>
+<section class="x-sec"><div class="x-dry"><h2>第三层 · 线程的坑与替代方案</h2><ul><li>锁要<b>成对且有序</b>：多个锁按固定顺序获取，否则必然死锁；能用 RLock 就不要用裸 Lock 处理可重入场景</li><li>信号量与事件的取舍：限制并发数用 Semaphore，等某个条件成立用 Event 或 Condition</li><li>线程池的容量按<b>下游承受能力</b>定，不按 CPU 核数定；IO 型可以远大于核数</li><li>CPU 密集型不要硬扛：改用 ProcessPoolExecutor，或者换成异步 IO 处理高并发 IO</li></ul><div class="table-wrap"><table><thead><tr><th>需求</th><th>选什么</th><th>理由</th></tr></thead><tbody><tr><td>高并发网络 IO</td><td>asyncio / 异步框架</td><td>单线程即可支撑上万连接</td></tr><tr><td>CPU 密集计算</td><td>ProcessPoolExecutor</td><td>绕过 GIL，真正多核</td></tr><tr><td>少量 IO + 要共享状态</td><td>threading</td><td>共享内存方便，心智负担小</td></tr><tr><td>定时任务 + 后台清理</td><td>threading.Timer / 守护线程</td><td>简单直接</td></tr></tbody></table></div></div></section>
+
 
 <div class="xrel">
   <h2 class="xrel-t">相关页面</h2>

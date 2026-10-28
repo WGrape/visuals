@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分布式训练通信与集合通信：AllReduce / NCCL / 带宽瓶颈</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2230; --line:#2a3340;
+    --txt:#e6edf3; --sub:#9aa7b4; --accent:#58a6ff; --accent2:#bc8cff;
+    --green:#3fb950; --orange:#f0883e; --pink:#ff7b72; --yellow:#e3b341;
+    --cyan:#39c5cf; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;
+    line-height:1.7;overflow-x:hidden}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:42px;line-height:1.2;letter-spacing:-.5px}
+  h2{font-size:32px;margin-bottom:8px;letter-spacing:-.3px}
+  h3{font-size:20px;margin:22px 0 8px;color:var(--accent)}
+  p.lead{color:var(--sub);font-size:18px;max-width:780px}
+  ul{margin:10px 0 10px 22px}
+  li{margin:6px 0}
+  .tag{display:inline-block;font-size:13px;color:var(--accent2);
+    border:1px solid var(--accent2);border-radius:20px;padding:3px 14px;margin-bottom:18px}
+  .muted{color:var(--sub)}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  @media(max-width:780px){.grid2,.grid3{grid-template-columns:1fr}}
+  .kbox{background:var(--bg3);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kbox b{color:var(--accent)}
+  .pill{display:inline-block;background:var(--bg3);border:1px solid var(--line);
+    border-radius:8px;padding:4px 12px;font-size:14px;margin:4px 6px 4px 0;color:var(--sub)}
+  .hero{padding:90px 0 60px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 400px at 70% -10%,rgba(88,166,255,.18),transparent),
+               radial-gradient(600px 360px at 10% 110%,rgba(188,140,255,.14),transparent);
+    pointer-events:none}
+  code{background:#0b1f33;color:var(--cyan);padding:2px 7px;border-radius:6px;
+    font-family:"SFMono-Regular",Consolas,monospace;font-size:14px}
+  .svgbox{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px;overflow-x:auto;margin:18px 0}
+  svg{display:block;width:100%;height:auto}
+  .note{font-size:14px;color:var(--sub);border-left:3px solid var(--accent2);
+    padding:6px 14px;margin:10px 0;background:rgba(188,140,255,.06);border-radius:0 8px 8px 0}
+  .formula{background:#0b1f33;border:1px solid var(--line);border-radius:10px;
+    padding:14px 18px;font-family:"SFMono-Regular",Consolas,monospace;color:var(--cyan);
+    font-size:16px;margin:12px 0;text-align:center;overflow-x:auto}
+  .warn{font-size:14px;color:var(--sub);border-left:3px solid var(--orange);
+    padding:6px 14px;margin:10px 0;background:rgba(240,136,62,.07);border-radius:0 8px 8px 0}
+  .good{font-size:14px;color:var(--sub);border-left:3px solid var(--green);
+    padding:6px 14px;margin:10px 0;background:rgba(63,185,80,.07);border-radius:0 8px 8px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:15px}
+  th,td{padding:12px 14px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--bg3);color:var(--accent);font-weight:600}
+  tr:hover td{background:var(--bg2)}
+  footer{padding:40px 0;text-align:center;color:var(--sub);font-size:14px}
+  .toc{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:30;
+    display:flex;flex-direction:column;gap:6px}
+  .toc a{width:11px;height:11px;border-radius:50%;background:var(--line);
+    border:2px solid var(--bg);transition:.2s}
+  .toc a:hover,.toc a.act{background:var(--accent);transform:scale(1.25)}
+  @media(max-width:900px){.toc{display:none}}
+  .hl{color:var(--yellow);font-weight:600}
+  .hl2{color:var(--green);font-weight:600}
+  .hl3{color:var(--accent2);font-weight:600}
+  .fade{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+  .fade.in{opacity:1;transform:none}
+
+  .xrel{margin:34px 0 12px;padding-top:18px;border-top:1px solid}
+  .xrel-t{font-size:15px;font-weight:700;margin:0 0 13px;letter-spacing:.4px;opacity:.9}
+  .xrel-l{display:flex;flex-wrap:wrap;gap:8px 9px}
+  .xrel-l a{color:inherit;text-decoration:none;font-size:13.5px;opacity:.82;
+    padding:6px 13px;border:1px solid;border-radius:999px;line-height:1.5;
+    transition:opacity .15s,transform .15s}
+  .xrel-l a:hover{opacity:1;transform:translateY(-1px)}
+  .xrel-up{margin-top:12px;font-size:13.5px;opacity:.75}
+  .xrel-up a{color:inherit;text-decoration:none}
+  .xrel-up a:hover{opacity:1;text-decoration:underline}
+</style>
+</head>
+<body>
+<nav class="toc" id="toc"></nav>
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">训练工程</span>
+    <h1>分布式训练通信与集合通信：AllReduce / NCCL / 带宽瓶颈</h1>
+    <p class="lead">切分之后，卡与卡之间必须不断交换梯度、激活与权重。通信往往比计算更决定扩展效率——本文讲清七种集合通信原语、Ring AllReduce 为什么带宽最优、NCCL 怎么吃满 NVLink/IB，以及数据/张量/流水线三种并行的通信画像与排障。</p>
+  </div>
+</header>
+
+<section id="s1"><div class="wrap"><h2>为什么通信是分布式训练的命门</h2>
+<div class="card fade">
+  <p>算力随 GPU 数量 <span class="hl">线性</span>增长，但模型里的参数、梯度必须在卡间同步——通信量随模型规模增长，却不随卡数线性下降。结果是：<span class="hl">模型越大、卡越多，通信占比越高</span>，扩展效率（强扩展的加速比）会明显偏离理想线。</p>
+  <ul>
+    <li><b>数据并行</b>：每步要 AllReduce 一次全量梯度，通信量 ≈ 模型参数量的 2 倍（fp32）。</li>
+    <li><b>模型并行</b>：每一层前向/反向都要交换激活或中间和，通信 <span class="hl3">频率极高</span>（每层一次）。</li>
+    <li><b>流水线并行</b>：通信量最小，但用「气泡」换来的——空等也是隐性代价。</li>
+  </ul>
+</div>
+<div class="note">一句话：<b>计算可以堆卡，通信堆不动</b>。能不能把通信藏进计算里（overlap），决定了加机器到底加不加得出速度。</div>
+</div></section>
+<section id="s2"><div class="wrap"><h2>七种集合通信原语</h2>
+<p class="muted">NCCL / Gloo / MPI 都围绕这一组原语实现，理解它们是看懂所有并行策略的前提。</p>
+<table>
+  <thead><tr><th>原语</th><th>做什么</th><th>在训练中的典型用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>Broadcast</code></td><td>把一份数据从根卡发到所有卡</td><td>下发初始权重、下发超参</td></tr>
+    <tr><td><code>Scatter / Gather</code></td><td>把一份数据切分下发 / 把各卡片段收回来</td><td>数据分片加载、收集日志</td></tr>
+    <tr><td><code>Reduce</code></td><td>所有卡同位置数据做求和/最大等，结果留在一张卡</td><td>在某一卡汇总指标</td></tr>
+    <tr><td><code>AllReduce</code></td><td>所有卡做 Reduce，且<span class="hl">每张卡都拿到相同结果</span></td><td><b>数据并行的梯度同步（最常用）</b></td></tr>
+    <tr><td><code>AllGather</code></td><td>把所有卡的片段拼到每张卡</td><td>张量并行里拼回完整激活/权重</td></tr>
+    <tr><td><code>ReduceScatter</code></td><td>先做 Reduce 再按卡切分，每张卡只持有部分和的片段</td><td>ZeRO 优化器状态切分、张量并行前置步骤</td></tr>
+  </tbody>
+</table>
+<div class="kbox"><b>关键直觉：</b>AllReduce = ReduceScatter 之后再 AllGather；Ring AllReduce 正是分两步走，所以带宽最优。</div>
+</div></section>
+<section id="s3"><div class="wrap"><h2>Ring AllReduce：为什么它带宽最优</h2>
+<p>把模型的梯度张量切成 <code>N</code> 块（N = GPU 数），让 N 张卡排成一个环，分两阶段走完：</p>
+<div class="grid2">
+  <div class="card"><h3>阶段一 · ReduceScatter</h3>
+    <p>环上每张卡把自己的第 i 块发给下家、收下家的第 i-1 块并累加，传递 <span class="hl">N-1</span> 轮。结束时，每张卡恰好持有「某一块」在所有卡上的<span class="hl2">完整求和</span>，其余块仍是各碎片。</p></div>
+  <div class="card"><h3>阶段二 · AllGather</h3>
+    <p>再绕环 <span class="hl">N-1</span> 轮，把已经求完整的那一块传播出去。N-1 轮后，每张卡都集齐了全部 N 块的求和结果。</p></div>
+</div>
+<div class="svgbox">
+<svg viewBox="0 0 640 200" role="img" aria-label="Ring AllReduce">
+  <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#58a6ff"/></marker></defs>
+  <g fill="#161b22" stroke="#2a3340" stroke-width="1.5">
+    <circle cx="120" cy="100" r="34"/><circle cx="320" cy="40" r="34"/>
+    <circle cx="520" cy="100" r="34"/><circle cx="320" cy="160" r="34"/>
+  </g>
+  <g fill="#e6edf3" font-size="15" text-anchor="middle">
+    <text x="120" y="105">GPU0</text><text x="320" y="45">GPU1</text>
+    <text x="520" y="105">GPU2</text><text x="320" y="165">GPU3</text>
+  </g>
+  <g fill="#9aa7b4" font-size="11" text-anchor="middle">
+    <text x="120" y="122">块0已求和</text><text x="320" y="62">块1已求和</text>
+    <text x="520" y="122">块2已求和</text><text x="320" y="182">块3已求和</text>
+  </g>
+  <g stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#ar)">
+    <path d="M150,86 Q235,55 290,52"/><path d="M350,52 Q470,72 488,86"/>
+    <path d="M488,114 Q470,148 350,148"/><path d="M290,148 Q235,148 150,114"/>
+  </g>
+</svg>
+</div>
+<div class="formula">总通信量 ≈ 2·(N-1)/N · S  ≈  2S（S=梯度总字节数）；与 N 无关，只与数据量有关</div>
+<div class="good">这是 Ring 相比朴素「全部发到一台再广播」的优势：朴素要 2(N-1)S 且那台卡是瓶颈；Ring 把流量平摊到每张卡，<span class="hl2">没有单点瓶颈</span>，且总流量不随卡数变坏。</div>
+</div></section>
+<section id="s4"><div class="wrap"><h2>NCCL 与硬件拓扑：吃满 NVLink 才快</h2>
+<p>NCCL（NVIDIA Collective Communications Library）会按实际拓扑自动选算法，决定走哪条物理通道。瓶颈几乎永远是<span class="hl">带宽最低的那一段</span>：</p>
+<table>
+  <thead><tr><th>通道</th><th>典型带宽</th><th>范围</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><b>NVLink</b></td><td>~300–900 GB/s</td><td>同节点内 GPU 间</td><td>全互联 mesh，张量并行的最优载体</td></tr>
+    <tr><td>PCIe 4/5</td><td>~32–64 GB/s</td><td>同节点 GPU↔CPU</td><td>没 NVLink 时的兜底，慢一个量级</td></tr>
+    <tr><td>InfiniBand / RDMA</td><td>~50–400 GB/s</td><td>跨节点</td><td>数据并行的主战场，需 GPUDirect</td></tr>
+  </tbody>
+</table>
+<div class="grid2">
+  <div class="card"><h3>Tree 算法</h3><p>按层级把卡分组聚合，延迟低、适合小消息；但聚合点可能成为带宽瓶颈，跨节点时常用。</p></div>
+  <div class="card"><h3>Ring 算法</h3><p>带宽最优、无单点瓶颈，适合大消息（梯度同步）；节点内走 NVLink，跨节点在每段上仍用 Ring/Tree 拼接。</p></div>
+</div>
+<div class="warn">经验法则：<b>张量并行必须留在同一节点内</b>（靠 NVLink）；数据并行可以跨节点（靠 IB）。把 TP 跨节点，通信立刻被 PCIe/IB 拖垮。</div>
+</div></section>
+<section id="s5"><div class="wrap"><h2>DP / TP / PP 的通信画像</h2>
+<table>
+  <thead><tr><th>维度</th><th>通信原语</th><th>通信量</th><th>频率</th><th>对带宽要求</th></tr></thead>
+  <tbody>
+    <tr><td><b>数据并行 DP</b></td><td>AllReduce 梯度</td><td>~2×参数量/步</td><td>每步 1 次</td><td>中（可跨节点 IB）</td></tr>
+    <tr><td><b>张量并行 TP</b></td><td>层内 AllReduce 激活/和</td><td>~激活/中间量</td><td><span class="hl">每层多次</span></td><td><span class="hl2">极高（需 NVLink）</span></td></tr>
+    <tr><td><b>流水线并行 PP</b></td><td>P2P 收发激活</td><td>小（激活切片）</td><td>每微批 1 次</td><td>低（但有气泡）</td></tr>
+    <tr><td><b>ZeRO</b></td><td>ReduceScatter+AllGather</td><td>拆开优化器状态</td><td>每步若干次</td><td>中（省显存换通信）</td></tr>
+  </tbody>
+</table>
+<div class="note">3D 并行 = 把 TP（高带宽、节点内）叠 DP（跨节点）叠 PP（少通信）。<span class="hl3">通信最贵的 TP 放在最内层</span>，通信最省的 PP 放在最外层，这是 Megatron / FSDP 的标准排布。</div>
+</div></section>
+<section id="s6"><div class="wrap"><h2>把通信藏进计算里：六类优化</h2>
+<div class="grid2">
+  <div class="card"><h3>① 计算通信重叠</h3><p>反向时，先算完的层其梯度立刻开始 AllReduce，不必等全部层反向完。把通信时间<span class="hl2">盖在</span>后续层的计算下。</p></div>
+  <div class="card"><h3>② 梯度累积</h3><p>多个 micro-batch 的梯度在通信前先本地累加，减少 AllReduce 次数；同时让通信与下一轮前向重叠。</p></div>
+  <div class="card"><h3>③ fp16/bf16 梯度</h3><p>梯度用半精度通信，<span class="hl">体积直接减半</span>，精度损失通常可忽略。</p></div>
+  <div class="card"><h3>④ 梯度 Bucketing</h3><p>把小梯度拼成 ~25MB 的桶再发，摊薄启动延迟（NCCL 小消息延迟贵）。</p></div>
+  <div class="card"><h3>⑤ 选高带宽后端</h3><p>同节点优先 NVLink；跨节点开 GPUDirect/RDMA，避开 CPU 中转。</p></div>
+  <div class="card"><h3>⑥ 通信域切分</h3><p>节点内先 Reduce、节点间再 Reduce，分层集合通信减少跨节点流量。</p></div>
+</div>
+<div class="good">这六条里，<b>① 重叠</b>是收益最大的——它把「通信时间」从关键路径上拿掉，是强扩展能否接近线性的关键。</div>
+</div></section>
+<section id="s7"><div class="wrap"><h2>排障与选型：加机器为什么不加速</h2>
+<div class="card fade">
+  <p>常见元凶，按出现频率排序：</p>
+  <ul>
+    <li><b>通信没重叠</b>：通信串行在关键路径上，卡在等网。看 profiler 里 NCCL 占比。</li>
+    <li><b>带宽饱和</b>：TP 跨节点 / PCIe 瓶颈 / IB 没跑满。先用 <code>nvidia-smi dmon</code> 看 nvlink 利用率。</li>
+    <li><b>负载不均</b>：长尾 batch、padding 导致部分卡先idle。PP 气泡、DP 不等长序列都会触发。</li>
+    <li><b>拓扑错配</b>：NCCL 选了慢通道（如没用上 NVLink），设 <code>NCCL_DEBUG=INFO</code> 看它实际走的算法与通道。</li>
+  </ul>
+</div>
+<table>
+  <thead><tr><th>现象</th><th>先查</th><th>对策</th></tr></thead>
+  <tbody>
+    <tr><td>加卡加速比远小于 N</td><td>NCCL 时间占比</td><td>开启 overlap / 梯度累积</td></tr>
+    <tr><td>同节点快、跨节点骤降</td><td>IB / RDMA 配置</td><td>核对 GPUDirect、拓扑</td></tr>
+    <tr><td>单卡显存爆、多卡没用满</td><td>并行策略</td><td>上 ZeRO / 调 TP-PP 配比</td></tr>
+  </tbody>
+</table>
+<div class="note">工具链：<code>nvprof</code> / <code>Nsight Systems</code> 看时间线；<code>NCCL_DEBUG=INFO</code> 看通道选择；<code>nvidia-smi dmon -s pucvmet</code> 看 NVLink 流量。先定位是「算慢」还是「等通信」，再决定加机器还是改重叠。</div>
+</div></section>
+
+<div class="xrel">
+  <h2 class="xrel-t">相关页面</h2>
+  <div class="xrel-l">
+    <a href="../01-parallelism/distributed-training-parallelism.html">分布式并行训练总览</a>
+    <a href="../01-parallelism/gradient-accumulation-checkpointing.html">梯度累积与激活检查点</a>
+  </div>
+  <div class="xrel-up"><a href="../../index.html">← 返回 训练与部署</a>　·　<a href="../../../../index.html#subjects">知识地图</a></div>
+</div>
+
+<footer><p>Visuals · 模型训练与部署 / 训练工程</p></footer>
+
+<script>
+const sections=[...document.querySelectorAll('section[id]')];
+const toc=document.getElementById('toc');
+const names={s1:'命门',s2:'原语',s3:'Ring',s4:'NCCL',s5:'画像',s6:'优化',s7:'排障'};
+sections.forEach(s=>{
+  const a=document.createElement('a');a.href='#'+s.id;a.title=names[s.id]||s.id;
+  a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:'smooth'})};toc.appendChild(a);
+});
+const tocLinks=[...toc.children];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{
+  if(e.isIntersecting){tocLinks.forEach(l=>l.classList.remove('act'));
+    const i=sections.findIndex(s=>s.id===e.target.id);if(i>=0)tocLinks[i].classList.add('act');}
+});},{rootMargin:'-40% 0px -55% 0px'});
+sections.forEach(s=>io.observe(s));
+const fo=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');fo.unobserve(e.target);}});},{threshold:0.12});
+document.querySelectorAll('.fade').forEach(el=>fo.observe(el));
+</script>
+</body>
+</html>

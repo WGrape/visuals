@@ -59,6 +59,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -319,6 +337,40 @@ SELECT city, SUM(amount) FROM events GROUP BY event_date, city;</code></pre>
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 建表与导入的关键参数</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>常见取值</th><th>说明</th></tr></thead><tbody><tr><td>replication_num</td><td>3</td><td>副本数，生产不要设 1</td></tr><tr><td>分桶数 BUCKETS</td><td>BE 数 × 磁盘数 × 2 ~ 4</td><td>太少并行度不足，太多元数据膨胀</td></tr><tr><td>单 tablet 体积</td><td>压缩后 1 ~ 10 GB</td><td>超过会拖慢 compaction 与均衡</td></tr><tr><td>数据模型</td><td>Duplicate / Aggregate / Unique</td><td>需要去重选 Unique，只追加选 Duplicate</td></tr><tr><td>Stream Load 单批</td><td>100 MB ~ 1 GB</td><td>太小批次多 compaction 压力大，太大失败重来代价高</td></tr><tr><td>导入 label</td><td>每次唯一</td><td>相同 label 会被当作重复而丢弃（用于幂等）</td></tr><tr><td>max_filter_ratio</td><td>0（严格）或 0.0001</td><td>容忍脏数据比例，别设太大掩盖质量问题</td></tr><tr><td>物化视图刷新</td><td>导入时同步/异步</td><td>异步有短暂不一致窗口</td></tr></tbody></table></div><pre><code>-- 建表：分桶字段必须是高基数、常用于 JOIN 或过滤的列
+CREATE TABLE orders (
+    dt        DATE,
+    user_id   BIGINT,
+    amount    DECIMAL(18,2)
+)
+DUPLICATE KEY(dt, user_id)            -- Duplicate 模型：只追加不去重
+PARTITION BY RANGE(dt) (
+    PARTITION p202610 VALUES [('2026-10-01'), ('2026-11-01'))
+)
+DISTRIBUTED BY HASH(user_id) BUCKETS 32
+PROPERTIES ('replication_num' = '3');
+
+-- 看 BE 与 tablet 状态（数据不均、副本缺失都从这里看）
+SHOW BACKENDS\G
+SHOW PROC '/backends';
+
+-- 看某表的 tablet 分布与大小
+ADMIN SHOW TABLET STATUS FROM db WHERE TableName = 'orders' LIMIT 20;
+
+-- 看 JOIN 到底走了哪种策略（Broadcast / Shuffle / Colocate）
+EXPLAIN SELECT a.user_id, sum(b.amount)
+FROM a JOIN b ON a.user_id = b.user_id GROUP BY a.user_id;
+
+-- Stream Load 导入（注意 label 幂等与超时）
+curl -u root: -H 'label:orders_20261025_01' -H 'column_separator:,' \
+     -T orders.csv http://fe:8030/api/db/orders/_stream_load
+
+-- 导入作业与 compaction 状态
+SHOW LOAD WHERE LABEL = 'orders_20261025_01';
+SHOW PROC '/compaction';</code></pre><p><b>分桶数怎么定</b>：先估单表总数据量，除以「目标单 tablet 体积（压缩后 1~10 GB）」得到桶数，再跟 <code>BE 数 × 磁盘数 × 2~4</code> 取较大者。桶数是建表时定死的，扩容后需要重建表才能调。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · Doris / StarRocks 的六个高频问题</h2><ul><li><b>查询只快了一点点</b>：分桶键没落在 JOIN/过滤列上，扫描还是要全表；重建表换分桶键，或加物化视图。</li><li><b>数据倾斜</b>：分桶键基数太低（如性别、状态），某些桶特别大；换成高基数列，或复合分桶键。</li><li><b>导入频繁报 label 已存在</b>：重试时复用了同一 label（这是特性不是 bug）；要重导就换 label，要幂等就复用。</li><li><b>Unique 模型写入变慢</b>：Unique 需要去重写放大，高吞吐场景用 Aggregate/ Duplicate + 查询时去重。</li><li><b>compaction 堆积</b>：小批次高频导入导致版本数暴涨；调大批次、降导入频率，看 <code>SHOW PROC /compaction</code>。</li><li><b>物化视图没被命中</b>：查询的聚合粒度与视图不一致；用 <code>EXPLAIN</code> 确认是否命中，必要时按查询重写视图。</li></ul><p class="muted">排查顺序：<b>BE 存活与磁盘 → tablet 分布是否均衡 → EXPLAIN 看扫描量与 JOIN 策略 → 导入与 compaction 状态</b>。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么它比 ClickHouse 更适合 JOIN</h2><details><summary>同样是大宽表查询，两者差别到底在哪？</summary><p>ClickHouse 的单表扫描与向量化极致优化，JOIN 走广播/哈希，大表 JOIN 大表时内存压力大；Doris/StarRocks 有<b>分布式 shuffle JOIN 与 colocate JOIN</b>，能把 JOIN 下推并按分桶并行，多表关联更稳。</p></details><details><summary>colocate JOIN 为什么快？</summary><p>建表时让两张表用相同的分桶键与桶数，相同 key 的行落在同一个 BE 上，JOIN 变成<b>本地 JOIN</b>，省掉网络 shuffle。代价是两张表的分桶方式被绑死，改分桶要一起改。</p></details><details><summary>物化视图值得建吗？</summary><p>值得，但要按<b>查询模式</b>建而不是按表建：先统计高频聚合的粒度与维度组合，只给 Top 几个建；每个视图都有写入放大与存储成本，建太多会拖慢导入。</p></details></div></section>
 <footer>
   <p>Visuals · 数据库系统 / OLAP / Doris-StarRocks ·
   <a href="../../index.html">返回目录</a> ·

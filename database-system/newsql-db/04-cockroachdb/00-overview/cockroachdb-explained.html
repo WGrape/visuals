@@ -59,6 +59,24 @@
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <header>
@@ -302,6 +320,32 @@ ALTER PARTITION europe OF TABLE users
 </section>
 
 </main>
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 关键默认值与运维命令</h2><div class="table-wrap"><table><thead><tr><th>项</th><th>默认值 / 常见值</th><th>含义</th></tr></thead><tbody><tr><td>num_replicas（zone 配置）</td><td>3</td><td>每个 range 的副本数，跨地域部署常设 5</td></tr><tr><td>range_max_bytes</td><td>512 MiB</td><td>range 超过就分裂；也是数据均衡的单位</td></tr><tr><td>range_min_bytes</td><td>128 MiB</td><td>低于就可能被合并</td></tr><tr><td>--max-offset（时钟偏移上限）</td><td>500 ms</td><td>节点间时钟偏移超过此值节点会自杀保护</td></tr><tr><td>默认隔离级别</td><td>Serializable</td><td>最强隔离，且不用显式加锁</td></tr><tr><td>事务重试错误码</td><td>40001</td><td>客户端必须自己重试，驱动不会代劳</td></tr><tr><td>SQL 端口 / Admin UI</td><td>26257 / 8080</td><td>8080 也是排查的第一入口</td></tr><tr><td>follower reads 延迟</td><td>约 5 s 以上 stale</td><td>用 <code>AS OF SYSTEM TIME</code> 换取本地读</td></tr></tbody></table></div><pre><code>-- 1) 看集群健康与副本状态（先看这个，再看别的）
+SELECT node_id, address, is_live, ranges, leaseholders
+FROM crdb_internal.kv_node_status ORDER BY node_id;
+
+-- 2) 看 range 分布是否均衡（不均衡就是热点或容量问题）
+SELECT range_id, start_key, end_key, replicas, range_size / 1024 / 1024 AS mb
+FROM crdb_internal.ranges ORDER BY range_size DESC LIMIT 20;
+
+-- 3) 看副本不足的 range（有输出说明有副本没补上）
+SELECT range_id, replicas FROM crdb_internal.ranges
+WHERE array_length(replicas, 1) &lt; 3 LIMIT 20;
+
+-- 4) 改 zone 配置：跨地域部署把副本分布写清楚
+ALTER DATABASE app CONFIGURE ZONE USING
+  num_replicas = 5,
+  constraints = '{+region=us-east: 2, +region=us-west: 2, +region=eu: 1}';
+
+-- 5) 陈旧读：用 5 秒前的快照读，避免跨地域 round-trip
+SELECT count(*) FROM orders AS OF SYSTEM TIME '-5s' WHERE status = 'PAID';
+
+-- 6) 会话级参数（排查写冲突时临时用，别长期开）
+SET default_transaction_isolation = 'SERIALIZABLE';
+SHOW ZONE CONFIGURATION FOR TABLE orders;</code></pre><p><b>跨地域写延迟怎么估</b>：一次写入要等多数派副本确认，耗时约等于<code>一轮跨地域 RTT × 需要确认的副本轮次</code>。同地域 3 副本常在个位数毫秒，跨洲 5 副本轻易到上百毫秒 —— 这是地理分区必须先把数据 locality 设对的原因。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · CockroachDB 的六个高频故障</h2><ul><li><b>节点反复重启 / 自杀</b>：多半是节点间时钟偏移超过 <code>--max-offset</code>（默认 500 ms）。查 NTP 偏移，把 chrony/ntpd 配好再上线。</li><li><b>写冲突报 40001</b>：这不是 bug 而是 Serializable 下的正常重试信号；客户端必须捕获并实现重试，Go 用 <code>crdb.ExecuteTx</code> 之类的封装。</li><li><b>单个 range 特别大且不分裂</b>：单调递增主键（如自增 ID、时间戳前缀）导致写入集中在最后一个 range；改用 UUID 或哈希前缀打散。</li><li><b>跨地域查询慢</b>：数据 locality 没设对，读要跨区取；用 <code>REGIONAL BY ROW</code> 表或 follower reads。</li><li><b>长事务被别的写推走</b>：CRDB 会主动 abort 阻塞别人的事务；把大事务拆小，避免交互式事务里等人。</li><li><b>副本长期不足</b>：节点下线或磁盘满后副本无法补齐；查 <code>crdb_internal.ranges</code> 里 replicas < 3 的行，并看磁盘水位。</li></ul><p class="muted">排查顺序：<b>节点存活与时钟 → range 均衡与副本数 → 事务重试率 → 慢查询里的 locality</b>。前两项是集群健康，后两项是应用适配。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么能 Serializable 又不用锁</h2><details><summary>Serializable 不是最慢的隔离级别吗，为什么 CRDB 敢默认开？</summary><p>它用的是<b>乐观并发 + 混合逻辑时钟</b>：事务并行执行，提交时检查读写冲突，冲突则让一方重试（40001）。代价转移到重试率上，冲突少时几乎无成本，冲突多时重试会毁掉吞吐。</p></details><details><summary>HLC（混合逻辑时钟）解决什么问题？</summary><p>纯物理时钟有偏移，纯逻辑时钟无法做跨节点快照读。HLC 把两者结合：用物理时钟保证接近真实时间，用逻辑部分保证因果序，从而在不依赖原子钟的前提下给出全局有序的时间戳。</p></details><details><summary>地理分区的代价是什么？</summary><p>把数据按地域绑定后，跨地域访问同一行会变慢，且 locality 变更要重新搬迁数据；所以得先在业务上想清楚「哪些数据只属于哪个地域」，再落到表结构。</p></details></div></section>
 <footer>
   <p>Visuals · 数据库系统 / NewSQL / CockroachDB ·
   <a href="../../index.html">返回目录</a> ·

@@ -15,6 +15,21 @@
 <section class="panel" data-depth-note><h2>预算一次突发扩容</h2><p>假设平时保留 5 个热实例，突然有 100 个并发请求，每个实例只能同时处理 1 个请求；至少一部分请求要排队或等待新实例。即便单个冷启动只需 500 毫秒，100 个实例同时启动还可能争抢镜像下载、CPU 和数据库连接，使实际 P99 更长。压测要模拟突发到达，而不是把 100 个请求均匀摊到一分钟。比较方案时同时算预置实例费用、冷启动期间的用户损失和下游扩容能力，并记录平台并发配额与限流行为。</p></section>
 <section class="panel" data-depth-followup><h2>进一步验证</h2><p>如果函数启动时需要读取密钥或配置服务，还要测这些外部依赖在冷启动路径上的延迟与失败率。把配置缓存进镜像会缩短启动，却可能带来过期和密钥轮换问题；每次启动都远程读取则更依赖控制面的稳定性。优化必须同时满足安全更新与尾延迟要求。</p></section>
 <section class="panel" data-final-case><h2>补充判断</h2><p>测试报告应写明运行时、内存或 CPU 配额、包大小、地域、并发配额与平台版本。同一函数在这些条件变化后，冷启动分布可能明显不同；引用一次旧基准作为长期结论会误导容量规划。</p></section>
+<section class="panel" data-dry-goods><h2>第一层 · 概念与判定：冷启动到底冷在哪</h2><p><b>冷启动</b>指函数实例从零到能处理第一个请求的耗时。它不是一个整体，而是好几个阶段叠加，<b>先拆开才能优化</b>。</p><div class="table-wrap"><table><thead><tr><th>阶段</th><th>做什么</th><th>典型耗时</th><th>能否优化</th></tr></thead><tbody><tr><td>调度与资源准备</td><td>分配容器/微虚拟机</td><td><b>50 – 300 ms</b></td><td>用预置并发规避</td></tr><tr><td>运行时初始化</td><td>启动 JVM / Node / Python</td><td><b>10 – 1000 ms</b></td><td>换运行时（如 Go）</td></tr><tr><td>代码加载与初始化</td><td>加载依赖、执行全局初始化</td><td><b>10 ms – 数秒</b></td><td><b>最该优化</b></td></tr><tr><td>VPC 网络配置（如启用）</td><td>分配 ENI</td><td><b>历史 1 – 10 s</b></td><td>云厂商已大幅优化，但仍建议评估</td></tr></tbody></table></div><p><b>判定原则：</b>先看 P99 还是 P50 受影响。冷启动只影响<b>首次请求</b>，如果 QPS 高、实例常热，影响可忽略；如果流量稀疏或突发，冷启动会实打实反映在用户延迟上。</p></section><section class="panel"><h2>第二层 · 参数·命令·量化：各运行时差多少</h2><div class="table-wrap"><table><thead><tr><th>运行时</th><th>冷启动典型量级</th><th>说明</th></tr></thead><tbody><tr><td><b>Go / Rust（编译型）</b></td><td><b>10 – 80 ms</b></td><td>单二进制，最快</td></tr><tr><td><b>Node.js</b></td><td><b>50 – 300 ms</b></td><td>启动快，但依赖多时会变慢</td></tr><tr><td><b>Python</b></td><td><b>100 – 500 ms</b></td><td>导入重型库（pandas/numpy）会到秒级</td></tr><tr><td><b>Java（传统 JVM）</b></td><td><b>1 – 5 s</b></td><td>JVM 启动 + 类加载，最慢</td></tr><tr><td><b>Java（GraalVM 原生镜像）</b></td><td><b>50 – 200 ms</b></td><td>编译成原生可执行文件，接近 Go</td></tr><tr><td><b>容器镜像部署</b></td><td><b>1 – 10 s</b></td><td>拉取镜像 + 启动，比 zip 包慢一个量级</td></tr></tbody></table></div><p><b>观测冷启动耗时</b></p><pre><code># 用云厂商 CLI 直接观察冷启动（以 AWS Lambda 为例）
+# ① 更新代码后强制产生一次冷启动
+aws lambda update-function-code --function-name myfn --zip-file fileb://fn.zip
+
+# ② 立即调用，观察 Init Duration 字段
+aws lambda invoke --function-name myfn /dev/stdout \
+  --log-type Tail --query 'LogResult' --output text | base64 -d
+# 日志中的关键字段：
+#   Init Duration: 312.45 ms   &lt;-- 这就是冷启动耗时
+#   Duration: 8.32 ms          &lt;-- 这是函数本身执行耗时
+
+# ③ 连续调用第二次，Init Duration 消失 —— 实例已热
+# 冷启动只发生在实例首次创建或并发扩容时</code></pre><p><b>成本直觉：</b>预置并发能彻底消除冷启动，但要<b>为常驻实例付费</b>。100 个预置实例、每实例 512 MB，按小时计费成本可能远超按量计费。</p></section>
+<section class="panel"><h2>第三层 · 排障与边界</h2><p><b>高频坑清单：</b></p><ul><li>① <b>把重活写在全局初始化里</b>：如全局建数据库连接池、加载大字典，每次冷启动都重做</li><li>② <b>依赖包过大</b>：把整个 SDK 或全部库打进包，加载时间线性上涨</li><li>③ <b>以为冷启动只发生一次</b>：并发上升时每个新实例都要冷启动，突发流量会集体变慢</li><li>④ <b>没设最小实例</b>：流量归零后再来的第一个请求必然冷</li><li>⑤ <b>用容器镜像而非 zip</b>：方便但冷启动慢一个量级</li><li>⑥ <b>在冷启动里做网络调用</b>：拉远程配置、鉴权，把网络延迟算进冷启动</li></ul><p><b>优化清单（按顺序做）：</b></p><ul><li>① 全局初始化<b>只留必要的</b>，连接改成懒加载（首次调用时建，后续复用）</li><li>② 精简依赖包，移除未使用的库；Python 用 <code>--target</code> 只打包需要的</li><li>③ 换更快的运行时（Go / Node 优于 Java / Python）</li><li>④ Java 考虑 GraalVM 原生镜像或 SnapStart 类能力</li><li>⑤ 对延迟敏感的核心接口配<b>预置并发</b>，其他接口按量</li><li>⑥ 非核心路径用<b>异步调用</b>，让用户不等冷启动</li></ul></section>
+<section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>Serverless 一定比常驻服务慢吗？</summary><p>稳态下<b>不慢</b> —— 热实例的处理延迟与常驻容器几乎一样。Serverless 的代价集中在<b>冷启动</b>和<b>多实例冷启动的集中爆发</b>上。所以结论是：<b>流量平稳时 Serverless 几乎无损，流量稀疏或突发时才明显</b>。如果你的服务 QPS 恒定且很高，常驻容器反而更省成本。</p></details><details><summary>预置并发该开多少？</summary><p>按<b>基线并发</b>开，而不是按峰值开。比如平时 10 并发、峰值 200 并发，就预置 10–20，峰值超出部分的冷启动交给用户容忍（或异步化）。全部按峰值预置会失去 Serverless 的成本优势，那还不如直接用常驻容器。<b>预置是为了消除常态冷启动，不是为了消除所有冷启动。</b></p></details><details><summary>冷启动能被完全消除吗？</summary><p>不能完全，只能降低概率和影响。因为以下情况必然产生新实例：并发超出现有实例数、实例被回收（通常 5–15 分钟空闲）、代码更新、可用区故障转移。能做的是：让冷启动<b>更快</b>（精简包、换运行时）、让它<b>更少发生</b>（预置并发、定时预热）、以及让它<b>不影响用户</b>（异步调用、预热请求）。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>平均延迟很低，为什么用户仍会遇到慢请求？</summary><p>冷启动可能集中在尾部。需要看首请求和 P95/P99，而不只看平均值。</p></details></section>
 <footer>继续阅读：<a href="serverless-architecture.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

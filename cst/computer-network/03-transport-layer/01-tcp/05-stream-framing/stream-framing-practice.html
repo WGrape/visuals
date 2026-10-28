@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP 流边界实战：长度前缀 / 分隔符 / JSONL 怎么写对</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>TCP 流边界实战：长度前缀 / 分隔符 / JSONL 怎么写对</h1>
+  <p>应用层如何把字节流切成完整消息：四种方案、可直接抄的实现、五个高频坑。</p>
+  <span class="tag">TCP</span><span class="tag">网络编程</span><span class="tag">粘包</span><span class="tag">帧</span>
+</header>
+<nav>
+  <a href="#len">长度前缀</a>
+  <a href="#delim">分隔符</a>
+  <a href="#pit">坑</a>
+  <a href="#cmp">选型</a>
+</nav>
+<main>
+
+<div class="lead">
+  TCP 是字节流，没有消息边界。应用层必须自己把字节流切成一条条消息：长度前缀、分隔符、JSONL、protobuf 变长，四种各有所长。这里给可直接照抄的实现与排雷清单。
+</div>
+
+<section id="len">
+  <h2><span class="n">01</span>长度前缀帧：最通用</h2>
+<p>先发 4 字节大端长度，再发 payload。读端先读满 4 字节拿到长度，再读满 payload。这是 RPC / 消息队列最常用的方案。</p><pre><code>// Go：写一帧（4 字节大端长度 + body）
+func writeFrame(w io.Writer, body []byte) error {
+    var hdr [4]byte
+    binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+    if _, err := w.Write(hdr[:]); err != nil { return err }
+    _, err := w.Write(body)
+    return err
+}
+
+// 读一帧：先读长度，再读足 body；net.Conn 不保证一次读全
+func readFrame(r io.Reader) ([]byte, error) {
+    var hdr [4]byte
+    if _, err := io.ReadFull(r, hdr[:]); err != nil { return nil, err }
+    n := binary.BigEndian.Uint32(hdr[:])
+    buf := make([]byte, n)
+    if _, err := io.ReadFull(r, buf); err != nil { return nil, err }
+    return buf, nil
+}
+
+# Python：struct 打包长度（网络字节序 '&gt;I' = 4 字节无符号）
+import struct, socket
+def send_frame(sock, body: bytes):
+    sock.sendall(struct.pack('&gt;I', len(body)) + body)
+def recv_frame(sock):
+    hdr = recv_exact(sock, 4)          # 循环读满 4 字节
+    n = struct.unpack('&gt;I', hdr)[0]
+    return recv_exact(sock, n)
+def recv_exact(sock, n):
+    buf = b''
+    while len(buf) &lt; n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk: raise ConnectionError('peer closed')
+        buf += chunk
+    return buf</code></pre>
+</section>
+
+<section id="delim">
+  <h2><span class="n">02</span>分隔符与 JSONL</h2>
+<p>文本协议（如 Redis 的 RESP、日志管道）常用换行或特定分隔符。'
+' 分隔的 JSON Lines 可读性最好，但 body 本身不能含未转义的换行；需要转义时改用 netstring 或长度前缀。</p><pre><code># Python：JSONL 一行一条消息，send 端每条加 \n
+import json
+def send_jsonl(sock, obj):
+    sock.sendall((json.dumps(obj) + "\n").encode())
+def recv_jsonl(sock):
+    buf = b''
+    while True:
+        buf += sock.recv(4096)
+        if b'\n' in buf:
+            line, buf = buf.split(b'\n', 1)
+            return json.loads(line.decode())   # 注意 buf 需缓存到下次</code></pre>
+</section>
+
+<section id="pit">
+  <h2><span class="n">03</span>五个高频坑</h2>
+<ul>
+  <li><b>partial read</b>：一次 recv 可能只到半条消息，必须循环读到满足长度再解析。</li>
+  <li><b>粘包</b>：两次 send 可能被 TCP 合并成一次 recv，读端按长度切，永远别假设一次 recv 对应一条消息。</li>
+  <li><b>拆包</b>：一条消息可能分两次 recv 才到全，buf 必须跨调用缓存。</li>
+  <li><b>Nagle + 小包</b>：频繁发小帧会等合并，延迟飙升，交互式协议设 TCP_NODELAY。</li>
+  <li><b>长度上限</b>：必须校验 n，拒绝超大值（防内存打爆），例如 cap 在 16MB 以内。</li>
+</ul><div class="lead warn"><b>要点：</b>核心心法：先按「长度/分隔符」把字节流切成完整帧，再对整帧做反序列化。任何直接 json.loads(sock.recv(...)) 的写法都是错的。</div>
+</section>
+
+<section id="cmp">
+  <h2><span class="n">04</span>四种方案怎么选</h2>
+<div class="table-wrap"><table><thead><tr><th>方案</th><th>优点</th><th>缺点</th><th>适用</th></tr></thead><tbody><tr><td>长度前缀</td><td>无转义、二进制友好、最稳</td><td>需要先知长度</td><td>RPC / MQ / 自定义协议</td></tr><tr><td>换行分隔</td><td>人类可读、易调试</td><td>body 不能含裸换行</td><td>日志、JSONL、CLI</td></tr><tr><td>netstring</td><td>标准、可嵌套</td><td>略冗长</td><td>老式文本协议</td></tr><tr><td>protobuf 变长</td><td>自带长度、强 schema</td><td>需 IDL 与编解码</td><td>跨语言服务</td></tr></tbody></table></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 计算机网络 ·
+  <a href="../../../index.html">返回目录</a> ·
+  <a href="../../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>基数爆炸：Prometheus 最常见的自伤</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>基数爆炸：Prometheus 最常见的自伤</h1>
+  <p>序列数怎么算、多少算多、排查命令与降基数的五种手段</p>
+  <span class="tag">Prometheus</span><span class="tag">基数</span><span class="tag">监控</span><span class="tag">时序库</span>
+</header>
+<nav>
+  <a href="#s1">怎么算</a>
+  <a href="#s2">多少算多</a>
+  <a href="#s3">排查</a>
+  <a href="#s4">降基数</a>
+</nav>
+<main>
+('\n<div class="lead">\n  Prometheus 绝大多数「内存爆了 / 查询变慢 / 抓取超时」都不是配置问题，而是基数爆炸。本节给出基数的算法、数量级、排查命令与五种降基数手段。\n</div>\n\n<section id="s1">\n  <h2><span class="n">01</span>基数到底怎么算</h2>\n<pre><code># 一个 metric 的序列数 = 所有 label 取值数的乘积\n#   series = |label1| * |label2| * ... * |labelN|\n\n# 例：http_requests_total{method, status, route, user_id}\n#   method  : GET/POST/PUT/DELETE/PATCH      → 5\n#   status  : 200/301/400/404/500/502/503    → 7\n#   route   : /api/a, /api/b, ...            → 20\n#   user_id : 每个用户一个值                 → 100000\n#   series  = 5 * 7 * 20 * 100000 = 70,000,000   ← 爆炸\n\n# 去掉 user_id 之后：5 * 7 * 20 = 700   ← 正常\n# 结论：基数由「取值数最多」的那个 label 主导，\n#   其他 label 只有几个取值，乘上去影响很小</code></pre><div class="table-wrap"><table><thead><tr><th>label 类型</th><th>典型取值数</th><th>能不能做 label</th></tr></thead><tbody><tr><td>method / status / 状态码</td><td>5 ~ 20</td><td>可以</td></tr><tr><td>service / instance / job</td><td>几十 ~ 几百</td><td>可以</td></tr><tr><td>route（模板化路径）</td><td>几十 ~ 几百</td><td>可以（必须模板化）</td></tr><tr><td>URL 原始路径（含 id）</td><td>无限</td><td><b>绝对不行</b></td></tr><tr><td>user_id / order_id</td><td>十万 ~ 亿</td><td><b>绝对不行</b></td></tr><tr><td>trace_id / request_id</td><td>无限</td><td><b>绝对不行</b></td></tr><tr><td>错误 message 全文</td><td>无限</td><td><b>绝对不行</b></td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>判断标准一句话：<b>取值集合是否会随时间无上限增长</b>。会增长的就不能做 label，只能进日志或追踪系统。</div>\n</section>
+<section>
+  <div class="fig">
+    <svg viewBox="0 0 720 240" role="img" aria-label="基数是怎么被 label 组合放大的">
+  <defs><style>
+    .t{fill:#e2e8f0;font-size:12px} .s{fill:#94a3b8;font-size:10.5px}
+    .h{fill:#6ea8fe;font-size:12px;font-weight:700}
+  </style></defs>
+  <text class="h" x="14" y="20">序列数是各 label 取值数的乘积，不是相加</text>
+  <text class="s" x="14" y="38">每多一个高基数 label，序列数就乘上去</text>
+
+  <rect x="14" y="54" width="330" height="150" rx="8" fill="#171b26" stroke="#7ee787"/>
+  <text class="t" x="28" y="78" font-weight="700" fill="#7ee787">低基数（正常）</text>
+  <text class="s" x="28" y="100">http_requests_total{method, status, route}</text>
+  <text class="s" x="28" y="120">method: 5 种 × status: 10 种 × route: 20 条</text>
+  <text class="s" x="28" y="142">序列数 = 5 × 10 × 20 = 1,000</text>
+  <text class="s" x="28" y="164">每个 label 取值都有限且可控</text>
+  <text class="s" x="28" y="186">这是设计良好的指标</text>
+
+  <rect x="360" y="54" width="346" height="150" rx="8" fill="#171b26" stroke="#ff7b72"/>
+  <text class="t" x="374" y="78" font-weight="700" fill="#ff7b72">高基数（自伤）</text>
+  <text class="s" x="374" y="100">http_requests_total{route, user_id}</text>
+  <text class="s" x="374" y="120">route: 20 条 × user_id: 100,000 个</text>
+  <text class="s" x="374" y="142">序列数 = 20 × 100,000 = 2,000,000</text>
+  <text class="s" x="374" y="164">加一个 label，序列数涨了 2000 倍</text>
+  <text class="s" x="374" y="186">内存、磁盘、查询延迟一起爆</text>
+
+  <rect x="14" y="216" width="692" height="18" rx="5" fill="#171b26" stroke="#2b3142"/>
+  <text class="s" x="28" y="229">经验阈值：单个 metric 的序列数超过 1 万就要看一眼，超过 10 万基本要改设计</text>
+</svg>
+    <div class="cap">label 取值数是相乘的：一个高基数 label 就能放大几千倍</div>
+  </div>
+</section>\n', '\n<section id="s2">\n  <h2><span class="n">02</span>多少算多：数量级与资源占用</h2>\n<div class="table-wrap"><table><thead><tr><th>活跃序列数</th><th>状态</th><th>典型内存</th><th>说明</th></tr></thead><tbody><tr><td>< 10 万</td><td>健康</td><td>几百 MB ~ 1 GB</td><td>单实例轻松</td></tr><tr><td>10 万 ~ 100 万</td><td>要关注</td><td>数 GB</td><td>需要规划与治理</td></tr><tr><td>100 万 ~ 1000 万</td><td>高负载</td><td>十 GB 级</td><td>要考虑拆分或远程存储</td></tr><tr><td>> 1000 万</td><td>通常已出问题</td><td>数十 GB 级</td><td>先查是不是有高基数 label</td></tr></tbody></table></div><pre><code># 一个粗略的内存估算（head block，仅作量级参考）\n#   每条活跃序列大致几 KB 级开销（索引 + 最新样本 + chunk 元数据）\n#   100 万条活跃序列 → 数 GB 内存，且随 chunk 保留期增加\n# 所以「内存爆了」的第一反应应该是：查序列数，而不是加机器</code></pre><ul>\n  <li><b>抓取间隔不改变基数</b>：它改变的是样本数量（磁盘），不是序列数（内存）。</li>\n  <li><b>histogram 的 bucket 也算基数</b>：一个 histogram 有 N 个 bucket 就是 N 条序列（外加 _sum/_count）。bucket 越多，序列数越多。</li>\n  <li><b>target 频繁上下线也会涨序列</b>：每次 instance 变化都产生新序列；K8s 环境下 Pod 名变动要特别小心。</li>\n  <li><b>保留期不影响内存</b>：只影响磁盘；内存主要由「活跃序列数」决定。</li>\n</ul>\n</section>\n', '\n<section id="s3">\n  <h2><span class="n">03</span>排查：三条命令定位元凶</h2>\n<pre><code># 1) 哪个 metric 的序列最多（Top 10）\ntopk(10, count by (__name__)({__name__=~\'.+\'}))\n\n# 2) 哪个 label 的取值最多（把 __name__ 换成上一步查出来的 metric）\ntopk(10, count by (route)(http_requests_total))\n\n# 3) 总序列数与增长趋势\nprometheus_tsdb_head_series           # 当前 head block 的序列数\nprometheus_tsdb_head_series_created_total  # 累计创建过的序列数\n#   判读：created_total 远大于 head_series → 有大量序列被反复创建（ churn ）\n\n# 4) 抓取与存储健康\nprometheus_target_interval_length_seconds\nprometheus_tsdb_head_chunks\nprometheus_tsdb_head_chunks_created_total\n\n# 5) 离线分析（推荐，能看到最占地方的 label）\npromtool tsdb analyze /path/to/data\n# 输出里会直接列出：最多的序列、最多的 label 对、churn 比例</code></pre><div class="table-wrap"><table><thead><tr><th>现象</th><th>第一怀疑</th><th>确认命令</th><th>处理</th></tr></thead><tbody><tr><td>内存持续涨</td><td>序列数在涨</td><td>head_series</td><td>查 topk 找元凶 label</td></tr><tr><td>查询变慢</td><td>单次要扫太多序列</td><td>topk count by</td><td>加聚合规则或降基数</td></tr><tr><td>磁盘涨得快</td><td>样本多或 churn 高</td><td>tsdb analyze</td><td>调抓取间隔或保留期</td></tr><tr><td>抓取超时</td><td>单个 target 序列太多</td><td>scrape_duration_seconds</td><td>减少该 target 的指标</td></tr><tr><td>重启后恢复慢</td><td>head block 太大</td><td>wal 回放耗时</td><td>降基数、缩短保留</td></tr></tbody></table></div>\n</section>\n', '\n<section id="s4">\n  <h2><span class="n">04</span>五种降基数手段</h2>\n<ol>\n  <li><b>删掉高基数 label</b>：把 user_id / URL 原路径这类字段从 label 里移除，需要下钻分析的放日志。</li>\n  <li><b>路径模板化</b>：<code>/user/123</code> → <code>/user/{id}</code>，这是服务端最常见的修复点。</li>\n  <li><b>用记录规则预聚合</b>：<code>record: svc:requests:rate5m</code> 把细粒度聚合掉，只留需要的维度。</li>\n  <li><b>减少 histogram bucket</b>：默认 bucket 数量不少，按实际 SLO 精简到 5~8 个。</li>\n  <li><b>按职责拆分实例</b>：不同团队/环境分开部署，避免一个实例的基数被无关指标拖垮。</li>\n</ol><div class="qa"><b>问：能不能先加内存顶过去？</b><p>能顶一时，但基数通常是<b>乘法增长</b>：加一次 label 就可能翻几十倍。在加机器之前，先用 topk 找到那个取值最多的 label，往往删一个字段就解决。</p></div><div class="qa"><b>问：为什么 label 不能存用户 ID，日志就可以？</b><p>因为 Prometheus 的索引是「序列 → 样本」，每个 label 组合都是一条独立序列，要常驻内存；日志是按行存的，写进去就落盘，成本模型完全不同。</p></div><div class="qa"><b>问：降基数和降采样是一回事吗？</b><p>不是。降基数是减少<b>序列条数</b>（省内存），降采样是减少<b>样本密度</b>（省磁盘）。内存爆了要降基数，磁盘爆了才考虑降采样。</p></div>\n</section>\n')
+</main>
+<footer>
+  <p>Visuals · 时序数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

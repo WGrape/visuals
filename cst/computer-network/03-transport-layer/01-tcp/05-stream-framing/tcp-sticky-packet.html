@@ -48,6 +48,24 @@ svg{display:block;margin:18px auto;max-width:100%}
 footer{padding:22px 32px;color:#7a8b9c;font-size:.88em;border-top:1px solid #eef1f6;background:#fafbfd}
 footer a{color:#667eea}
 </style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -284,6 +302,44 @@ footer a{color:#667eea}
 
 </main>
 
+
+<section class="x-dry-sec"><div class="x-dry"><h2>第二层 · 三种分帧方案与可运行代码</h2><div class="table-wrap"><table><thead><tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th><th>适用</th></tr></thead><tbody><tr><td>定长</td><td>每条消息固定 N 字节</td><td>最简单</td><td>浪费空间、不灵活</td><td>字段固定的协议</td></tr><tr><td>分隔符</td><td>用特殊字符（如换行）分隔</td><td>人可读</td><td>内容要转义、扫描成本高</td><td>文本协议（Redis/HTTP 头）</td></tr><tr><td>长度前缀</td><td>头部写明 body 长度</td><td><b>最常用</b>、无需转义</td><td>要处理半包与长度字段字节序</td><td>二进制协议、RPC</td></tr></tbody></table></div><pre><code>// 长度前缀分帧（Go）：解决粘包/拆包的标准做法
+// 帧格式：| 4 字节长度（大端）| body |
+func WriteFrame(w io.Writer, body []byte) error {
+	var head [4]byte
+	binary.BigEndian.PutUint32(head[:], uint32(len(body)))
+	if _, err := w.Write(head[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(body)
+	return err
+}
+
+// 关键：一次 Read 不保证读满，必须循环读到够
+func ReadFrame(r io.Reader) ([]byte, error) {
+	var head [4]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil { // 用 ReadFull，不能用 Read
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(head[:])
+	if n &gt; maxFrameSize {          // 必须有上限，否则一个畸形长度就能打爆内存
+		return nil, ErrFrameTooLarge
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+// 文本协议用 bufio.Scanner 按行分帧（分隔符方案）
+sc := bufio.NewScanner(conn)
+sc.Buffer(make([]byte, 64*1024), 1024*1024)  // 别忘调大缓冲，否则长行会报错
+for sc.Scan() {
+	handle(sc.Bytes())
+}</code></pre><p><b>为什么必须循环读</b>：<code>Read</code> 返回的是「<b>当前已到达的字节数</b>」，可能远小于你要的长度。TCP 只保证字节顺序，不保证消息边界 —— 所以<b>读一个完整帧一定要用 io.ReadFull 或自己循环</b>，这是新手最常见的 bug 来源。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第三层 · 六个高频误解</h2><ul><li><b>误解：用 sleep 分隔消息就能解决</b>：sleep 只是降低了概率，网络拥塞或拆包时照样粘在一起。</li><li><b>误解：一次 send 对应一次 recv</b>：不对。发送次数与接收次数没有对应关系，只有字节流是连续的。</li><li><b>误解：关掉 Nagle 就不粘包了</b>：TCP_NODELAY 只影响小包合并策略，不影响接收端的字节流语义。</li><li><b>误解：粘包是 TCP 的 bug</b>：这是<b>字节流协议的固有特性</b>，分帧是应用层责任。</li><li><b>误解：长度字段用变长就行</b>：变长编码（varint）要先能完整读到编码本身，实现更复杂，先定长起步。</li><li><b>误解：只处理粘包不用管拆包</b>：两者是同一个问题的两面 —— 缓冲里不足一帧时要等，多于一帧时要循环解析。</li></ul><p class="muted">实现要点三句话：<b>读满才解析、留上限防攻击、缓冲跨多次读保留</b>。任何自研协议都必须实现这三件事。</p></div></section>
+<section class="x-dry-sec"><div class="x-dry"><h2>第四层 · 为什么 TCP 不做分帧</h2><details><summary>既然大家都需要分帧，为什么 TCP 不内置消息边界？</summary><p>因为 TCP 的定位是<b>可靠的字节流</b>：字节流能表达任何上层协议（文件传输不需要消息边界），而一旦内置消息语义，就会限制它能承载的应用。这是分层设计的选择。</p></details><details><summary>UDP 为什么没有粘包问题？</summary><p>UDP 是<b>数据报</b>协议，一次发送对应一个数据报，边界天然存在；代价是不保证可靠、不保证顺序、且有大小限制。所以「要不要边界」本质上是 TCP/UDP 的取舍之一。</p></details><details><summary>HTTP 是怎么分帧的？</summary><p>HTTP/1.1 用 <b>Content-Length 或 Transfer-Encoding: chunked</b> 标识 body 边界，头部用空行结束；HTTP/2 则改为二进制帧，每帧自带长度 —— 本质上都是上面三种方案的工程化版本。</p></details></div></section>
 <footer>
   <p>本文依据 TCP 字节流语义、Nagle 算法（RFC 896）与常见工业协议（HTTP/2 分帧、gRPC、Netty LengthFieldBasedFrameDecoder）整理。</p>
   <p style="margin-top:8px">相关阅读：<a href="../04-reliable-delivery/tcp-reliable-transmission.html">TCP 可靠传输</a> · <a href="../00-overview/tcp-header-format.html">TCP 头部格式</a> · <a href="../../../04-application-layer/04-web/01-http/03-message-format/http-packet-format-dynamic.html">HTTP 报文格式</a></p>

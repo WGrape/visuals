@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ulimit、文件描述符与 OOM 排查实战</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+<style>
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>ulimit、文件描述符与 OOM 排查实战</h1>
+  <p>进程能开多少文件、连接为什么被拒、OOM 怎么定位</p>
+  <span class="tag">ulimit</span><span class="tag">文件描述符</span><span class="tag">OOM</span><span class="tag">Linux</span>
+</header>
+<nav>
+  <a href="#fd">fd 上限</a>
+  <a href="#ulimit">ulimit</a>
+  <a href="#oom">OOM 排查</a>
+  <a href="#cgroup">cgroup</a>
+</nav>
+<main>
+
+<div class="lead">
+  高并发服务最常见的两件事：fd 耗尽报 Too many open files，以及 OOM 被内核杀进程。两者都有明确的排查命令。
+</div>
+
+<section id="fd">
+  <h2><span class="n">01</span>文件描述符上限</h2>
+<ul>
+  <li>每个 socket、文件、pipe 都占一个 fd。</li>
+  <li>fd 耗尽 → accept/open 失败，报 Too many open files。</li>
+  <li>有系统级(fs.file-max)与进程级(nofile)两道闸。</li>
+</ul><div class="lead warn"><b>要点：</b>连接数 = fd 数。长连接服务的 fd 上限要按预期并发连接数预留余量。</div>
+</section>
+
+<section id="ulimit">
+  <h2><span class="n">02</span>ulimit 与系统参数</h2>
+<pre><code>ulimit -n                 # 看当前进程软限
+cat /proc/sys/fs/file-max # 系统级上限
+cat /proc/sys/fs/file-nr  # 已分配 / 可用 / 上限
+# /etc/security/limits.conf
+* soft nofile 65535
+* hard nofile 65535</code></pre><div class="lead warn"><b>要点：</b>改 limits.conf 后需重新登录或重启服务才生效；systemd 服务要在 unit 里设 LimitNOFILE。</div>
+</section>
+
+<section id="oom">
+  <h2><span class="n">03</span>OOM 排查</h2>
+<pre><code>dmesg | grep -i 'killed process'   # 看谁被 OOM killer 杀
+cat /proc/<pid>/oom_score              # 当前 OOM 分数
+cat /proc/<pid>/oom_score_adj          # 可调保护(-1000~1000)
+echo -500 > /proc/<pid>/oom_score_adj  # 降低被杀概率</code></pre><div class="lead warn"><b>要点：</b>OOM killer 在内存耗尽时按 oom_score 选进程杀；关键进程可调低 oom_score_adj 保命。</div>
+</section>
+
+<section id="cgroup">
+  <h2><span class="n">04</span>cgroup 内存限制</h2>
+<pre><code># cgroup v2 限制某进程组内存
+systemd-run --scope -p MemoryMax=512M ./myapp
+# 容器内超限会触发容器内 OOM，而非整机 OOM</code></pre><div class="lead warn"><b>要点：</b>容器内存限制本质是 cgroup；设太小且没留余量，应用会频繁被 OOM，表现为「莫名重启」。</div>
+</section>
+
+<section id="qa">
+  <h2><span class="n">05</span>常见疑问</h2>
+<div class="qa"><b>问：改了 limits.conf 不生效？</b><p>服务由 systemd 拉起时要在其 unit 设 LimitNOFILE；交互 shell 需要重新登录加载 PAM 限制。</p></div><div class="qa"><b>问：怎么判断是 OOM 还是普通崩溃？</b><p>看 dmesg 是否有 Out of memory: Killed process，以及进程退出码；OOM 杀的进程通常没有 core。</p></div>
+</section>
+
+
+<section class="x-dry-sec" data-dry-goods><div class="x-dry"><h2>第一层 · 概念与判定</h2><p>文件描述符（fd）是内核为进程打开的文件/套接字/管道分配的非负整数句柄，数量有限；<b>泄漏或上限过低</b>会导致 "Too many open files" 或连接拒绝。</p><ul><li>三档限制：进程级（ulimit -n）、系统级（fs.file-max）、用户级（limits.conf）。</li><li>fd 耗尽与 OOM 不同：前者是句柄表满，后者是内存满，但 fd 泄漏常伴随内存泄漏。</li><li>判定：服务在高并发下报 open files 错误或连接数上不去 → 查 fd。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第二层 · 参数·命令·量化</h2><p>排查与设置：</p><p><b>示例</b></p><pre><code># 当前进程 fd 数
+ls /proc/$PID/fd | wc -l
+lsof -p $PID | wc -l
+
+# 进程/系统上限
+ulimit -n
+cat /proc/sys/fs/file-max
+cat /proc/sys/fs/file-nr   # 已分配/未用/上限
+
+# systemd 服务提上限
+# [Service] LimitNOFILE=65535</code></pre></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第三层 · 排障与边界</h2><ul><li><b>fd 泄漏</b>：代码没关连接/socket/文件，长跑后缓慢涨到上限；用 lsof 看增长趋势定位未关点。</li><li><b>ephemeral 端口耗尽</b>：客户端短时大量出连，TIME_WAIT 占满 3 万端口；调 tcp_tw_reuse 或连接池。</li><li><b>改了 ulimit 不生效</b>：systemd 服务需在 unit 里设 LimitNOFILE，光改 /etc/security/limits.conf 对服务无效。</li><li><b>file-max 过小</b>：容器/轻量系统默认值低，高并发直接触顶；按比例上调。</li></ul></div></section>
+<section class="x-dry-sec" ><div class="x-dry"><h2>第四层 · 原理与取舍</h2><p>内核用位图/数组管理 fd，上限本质是为防止单进程拖垮系统而设的配额。epoll 把「监听海量 fd」从 O(n) 轮询降到 O(活跃数)，所以高并发靠 epoll + 足够 fd 上限，而非无限堆 fd。</p><details><summary>fd 和端口是同一回事吗？</summary><p>不是。fd 是进程内句柄（含文件/pipe/socket），端口是网络四元组的出口；客户端连太多会先耗端口，服务端主要耗 fd。</p></details><details><summary>为什么容器里 ulimit 改了没用？</summary><p>容器由 systemd/cgroup 管，limits.conf 只对登录 shell 生效；要在 service unit 设 LimitNOFILE。</p></details></div></section>
+</main>
+<footer>
+  <p>Visuals · 计算机操作系统 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>
