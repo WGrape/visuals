@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -125,6 +143,15 @@ kubectl -n kube-system logs -l k8s-app=kube-dns --tail=50</code></pre>
 </ol><div class="qa"><b>问：为什么 Service IP 直连不通但 Pod IP 能通？</b><p>Service IP 是虚拟 IP，靠 kube-proxy 的 iptables/ipvs 规则做 DNAT 到 Pod IP；直连 Pod IP 绕过了这层。Service 不通说明规则没生成（常因 Endpoint 为空或 kube-proxy 没同步），而不是后端挂了。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：先定位断在哪一層</h2><p>K8s 网络有清晰分层：<b>Pod IP → Service（ClusterIP） → DNS 解析 → Ingress/出口</b>。排查第一原则是分层二分，而不是上来就到处改。</p><div class="tw"><table><thead><tr><th>现象</th><th>优先怀疑层</th></tr></thead><tbody><tr><td>Pod 间直接 IP 不通</td><td>CNI / 网络策略</td></tr><tr><td>Service 名连不上</td><td>Endpoints / kube-proxy</td></tr><tr><td>svc 名字解析失败</td><td>CoreDNS</td></tr><tr><td>外部进不来</td><td>Ingress / LB / 端口</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：排查命令与关键参数</h2><div class="tw"><table><thead><tr><th>动作</th><th>命令</th><th>看什么</th></tr></thead><tbody><tr><td>进 Pod 测连通</td><td>kubectl exec -it POD -- curl -s SVC:PORT</td><td>通断 + 延迟</td></tr><tr><td>看 Service 后端</td><td>kubectl get endpoints SVC</td><td>是否 0 endpoints</td></tr><tr><td>查 DNS</td><td>kubectl exec -- nslookup SVC</td><td>能否解析到 ClusterIP</td></tr><tr><td>看路由/规则</td><td>ip route / iptables -t nat -L -n</td><td>规则是否命中</td></tr></tbody></table></div><p class="x-dry-cap">K8s 网络分层排查命令</p><pre><code># 一条链快速定位
+kubectl get pods -o wide                 # 看 Pod IP
+kubectl get svc,endpoints my-svc         # 看有无就绪后端
+kubectl exec -it $POD -- sh -c 'curl -s my-svc:8080/health; echo'
+kubectl exec -it $POD -- nslookup my-svc # 解析是否 OK
+# 网络策略是否拦了
+kubectl get networkpolicy -n $NS
+# CNI 层面（以 cilium 为例）
+cilium endpoint list | grep -i $POD</code></pre><p><b>数量级：</b>Pod 间同节点 RT 通常 &lt;0.2ms，跨节点走 overlay 约 0.3–1ms；CoreDNS 默认副本少时高并发解析会超时，是常见隐性瓶颈。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个高频坑</h2><ul><li><b>NetworkPolicy 悄悄拦了</b>：默认拒绝或忘了放行，Pod 能起但互相不通——先看 policy 再怀疑 CNI</li><li><b>Service 0 endpoints</b>：selector 写错或 Pod 没就绪（readiness 失败），流量无处可去</li><li><b>CoreDNS 解析超时</b>：副本过少/资源被挤，svc 名解析慢或失败，表现为「间歇连不上」</li><li><b>MTU 不匹配</b>：overlay（vxlan/ipip）会吃掉约 50 字节 MTU，未调小会导致大包被丢、握手卡住</li><li><b>kube-proxy 模式差异</b>：iptables 规则膨胀后更新慢、ipvs 需要 ip_vs 模块，模式选错排查完全不同</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>iptables 模式和 ipvs 模式该怎么选？</summary><p>iptables 是默认，规则线性匹配，<b>Service 上千后规则膨胀、更新延迟明显</b>；ipvs 用哈希表做负载均衡，规模大时更稳定、转发更快，但依赖内核 ip_vs 模块且某些旧版特性支持弱。经验：小规模无所谓，Service 数量大（数百+）或追求稳定转发选 ipvs。</p></details><details><summary>为什么 overlay 网络要特意调小 MTU？</summary><p>VXLAN/IPIP 等隧道会在原包外再封一层头（约 50 字节），<b>若 Pod MTU 仍是 1500，封装后超过物理网卡的 1500 就会被分片或丢弃</b>，表现为大文件/大响应传输卡顿、TLS 握手偶发失败。把 Pod 侧 MTU 调成 1450 之类留足封装余量即可。</p></details><details><summary>CoreDNS 为什么经常成为隐性瓶颈？</summary><p>因为几乎所有 Service 名访问都先走 DNS，而 CoreDNS 默认副本少、且和别的 Pod 抢资源。一旦它抖动，<b>表现不是「解析完全失败」而是「偶发超时重试」</b>，极难联想到 DNS。做法：给它独立资源请求 + 适当副本数 + 必要时 nodeLocalDNS 缓存。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 架构设计 ·

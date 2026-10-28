@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -125,6 +143,17 @@ go tool trace trace.out
 <div class="table-wrap"><table><thead><tr><th>旋钮</th><th>作用</th><th>何时动</th></tr></thead><tbody><tr><td>GOMAXPROCS</td><td>并行度</td><td>容器里没自动对齐时</td></tr><tr><td>GOGC</td><td>GC 触发阈值</td><td>分配多、想降 GC 频率</td></tr><tr><td>GODEBUG=schedtrace</td><td>看队列积压</td><td>怀疑调度不均时</td></tr><tr><td>GODEBUG=gctrace=1</td><td>看 GC 频率</td><td>怀疑 GC 拖累时</td></tr></tbody></table></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：GMP 是什么，何时看调度</h2><p>G（goroutine）、M（内核线程）、P（处理器上下文，持有可运行 G 的本地队列）。关注调度通常因为<b>协程暴涨、P 不够用、或 syscall 把 M 占死</b>。</p><div class="tw"><table><thead><tr><th>现象</th><th>怀疑点</th></tr></thead><tbody><tr><td>goroutine 数只涨不跌</td><td>泄漏 / 没 cancel</td></tr><tr><td>CPU 用不满</td><td>GOMAXPROCS 偏小或被限</td></tr><tr><td>syscall 卡顿传染</td><td>M 被阻塞、P 被 handoff</td></tr><tr><td>延迟毛刺</td><td>GC 抢占 / 偷 G</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：关键旋钮与观测</h2><div class="tw"><table><thead><tr><th>项</th><th>默认/取值</th><th>作用</th></tr></thead><tbody><tr><td>GOMAXPROCS</td><td>= 可见 CPU 数</td><td>并行执行 G 的 P 数</td></tr><tr><td>本地队列长度</td><td>每 P 约 256</td><td>超过进全局队列</td></tr><tr><td>sysmon</td><td>runtime 后台</td><td>抢占长 G、GC、netpoll</td></tr><tr><td>work-stealing</td><td>P 空闲偷 G</td><td>负载均衡</td></tr></tbody></table></div><p class="x-dry-cap">Go 调度观测：GOMAXPROCS 与 schedtrace</p><pre><code># 查看/限制并行度
+GOMAXPROCS=4 ./app                 # 只用到 4 个 P
+go env -w GOMAXPROCS=...           # 一般不设，让 runtime 定
+
+# 周期性打印调度器状态（每 1000ms）
+GODEBUG=schedtrace=1000 ./app
+# 输出示例: sched: gomaxprocs=8 idleprocs=2 threads=12 spinningthreads=1 ...
+
+# 代码里看协程数
+n := runtime.NumGoroutine()
+runtime.GOMAXPROCS(0)              // 读当前值</code></pre><p><b>数量级：</b>每 P 本地可运行队列约 <b>256</b> 个 G，超出才进全局队列；sysmon 每约 20us 醒来一次做抢占扫描，长循环（&gt;10ms）会被强制让出。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个坑</h2><ul><li><b>容器里 GOMAXPROCS 读错</b>：默认按宿主可见核数，容器 cgroup 只给 2 核却开 64 个 P，线程争抢、上下文切换暴涨——用 automaxprocs 或显式设</li><li><b>syscall 阻塞整条 M</b>：阻塞式系统调用会把 M 占住，runtime 只能新开 M 顶上，M 数飙升</li><li><b>goroutine 泄漏</b>：channel 没人收 / context 没 cancel，NumGoroutine 单调上升直到 OOM</li><li><b>全局队列争用</b>：本地队列打满后全挤全局队列，成了锁热点</li><li><b>误以为加 P 就快</b>：P 超过物理核只是增加切换，真瓶颈在 IO 或锁时加 P 无效</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么容器里 GOMAXPROCS 常常要手动对齐 cgroup？</summary><p>因为 Go 默认用 runtime.NumCPU() 看<b>宿主机</b>的核数，而容器靠 cgroup 限额（比如 2 核）。宿主 64 核时 Go 会开 64 个 P，但容器只拿到 2 核的调度时间，于是大量 P 互相抢、上下文切换和调度开销反而拖慢。让 GOMAXPROCS 等于 cgroup 限额（automaxprocs 自动读）才能跑满又不内耗。</p></details><details><summary>sysmon 和 work-stealing 分别解决什么？</summary><p>sysmon 是 runtime 的<b>后台监控 M</b>：周期性扫描，对运行过久的 G 做异步抢占（避免一个死循环饿死全 P）、触发 GC、把陷入 syscall 的 P 重新 handoff 出去；work-stealing 则是<b>负载均衡</b>：某 P 本地队列空了，就从别的 P 或全局队列『偷』一半 G 来跑，避免有的 P 忙死有的闲死。</p></details><details><summary>为什么 Go 能在用户态轻松调度百万 goroutine？</summary><p>因为调度单位是 G，切换在<b>用户态</b>（G-M-P 模型），不进内核、不换页表；G 初始栈仅 2KB 且动态增长，百万 G 内存也才约 2GB。对比 OS 线程 8MB 栈 + 内核调度，开几千就到内存/切换上限。代价是碰到阻塞 syscall 时 M 被占，需要 runtime 额外开 M 兜底。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · Go 语言 ·

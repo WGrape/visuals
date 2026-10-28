@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -126,6 +144,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }</code></pre>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：什么时候该上 context</h2><p>context 解决三件事：<b>取消信号、超时截止、请求域传值</b>。不是所有函数都需要它——纯本地计算、没有 IO 等待的函数硬塞 context 反而啰嗦。</p><div class="tw"><table><thead><tr><th>场景</th><th>用 context</th><th>说明</th></tr></thead><tbody><tr><td>HTTP/gRPC 请求处理链</td><td>✓</td><td>请求结束要取消下游</td></tr><tr><td>带超时的下游调用</td><td>✓</td><td>WithTimeout/WithDeadline</td></tr><tr><td>跨 goroutine 共享请求 ID</td><td>✓</td><td>WithValue</td></tr><tr><td>纯 CPU 计算无 IO</td><td>✗</td><td>传 context 没意义</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：四种派生与写法</h2><div class="tw"><table><thead><tr><th>派生</th><th>用途</th><th>注意</th></tr></thead><tbody><tr><td>WithCancel</td><td>手动取消</td><td>必须 defer cancel()</td></tr><tr><td>WithTimeout</td><td>相对超时</td><td>底层是 Deadline</td></tr><tr><td>WithDeadline</td><td>绝对截止</td><td>到时自动 cancel</td></tr><tr><td>WithValue</td><td>传请求域值</td><td>只放必要元数据</td></tr></tbody></table></div><p class="x-dry-cap">Go context 超时 + 透传子 goroutine</p><pre><code>// 标准套路：拿到 ctx，defer cancel，超时 100ms
+ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+defer cancel()                 // 防止 goroutine/资源泄漏
+resp, err := doRPC(ctx, req)
+if err != nil {
+    if errors.Is(err, context.DeadlineExceeded) {
+        // 超时分支
+    }
+}
+
+// 把 ctx 透传给子 goroutine
+go func(ctx context.Context) {
+    select {
+    case &lt;-ctx.Done():          // 父取消/超时这里立刻收到
+        return
+    case resCh &lt;- work():
+    }
+}(ctx)</code></pre><p><b>数量级：</b>一个请求链路里 ctx 派生十几层是常态；cancel 是幂等的，重复调用安全；但漏写一次 cancel 就泄漏一个 timer/goroutine。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个经典坑</h2><ul><li><b>开了 goroutine 却没传 ctx</b>：父请求取消了，子 goroutine 还在跑——必须把 ctx 当第一个参数透传下去</li><li><b>忘记 defer cancel()</b>：WithCancel/Timeout 背后挂了 timer 和 goroutine，不 cancel 就泄漏</li><li><b>用 context.Value 当正常参数</b>：它本意只放请求域元数据（traceID/user），塞业务参数破坏可读性且无类型检查</li><li><b>传 nil context</b>：应传 context.Background()/TODO()，传 nil 调用方一取就 panic</li><li><b>在库里擅自存 context 到结构体</b>：context 应是显式参数，存进 struct 让生命周期不可控</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 context 要作为第一个参数显式传递，而不是全局或 struct 字段？</summary><p>因为取消是<b>树状的、有作用域的</b>：一个请求派生出 N 个子调用，父取消要能广播给全部子孙。显式参数让调用链一眼可见取消边界，也避免把生命周期悄悄绑死在结构体上。Go 官方约定 ctx 是第一个形参，正是为了让「取消信号往哪传」在签名上就清楚。</p></details><details><summary>WithValue 为什么劝你少用？</summary><p>因为它<b>绕过了编译期类型检查</b>：取值时靠 key 断言，写错 key 取不到、类型不对就 nil/panic，IDE 也帮不上忙。它只适合放真正的请求域元数据（trace id、租户），不该替代函数参数。能写成普通参数的，一律别进 context.Value。</p></details><details><summary>cancel 为什么必须调用，且放在 defer？</summary><p>WithCancel/WithTimeout 会挂一个<b>定时器 + 一个 goroutine 监听</b>，不 cancel 它们就一直活着（泄漏）。defer cancel() 保证函数退出时一定释放，且 cancel 幂等——多次调用无害。这是 Go 里最容易被忽视、也最容易累积成内存/goroutine 泄漏的地方。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · Go 语言 ·

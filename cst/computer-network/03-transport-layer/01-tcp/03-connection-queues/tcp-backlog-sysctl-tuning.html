@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -119,6 +137,18 @@ sysctl -w net.core.somaxconn=4096
  sysctl -w net.ipv4.tcp_max_syn_backlog=8192</code></pre><div class="qa"><b>问：为什么调了 somaxconn 还是排队？</b><p>因为还要看应用 listen 的 backlog 和它取 min；另外全连接队列满时，内核会直接丢弃新来的 ACK，客户端表现为连接超时而非拒绝，排障时要同时看 Recv-Q 和 ListenOverflows。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：backlog 管的是哪两段队列</h2><p>TCP 建连有两个队列：<b>半连接队列（SYN 收到、未完成三次握手）</b>和<b>全连接队列（握手完成、等 accept 取走）</b>。backlog 调优本质是防止高并发连接暴增时这两个队列溢出丢连接。</p><div class="tw"><table><thead><tr><th>队列</th><th>存放</th><th>溢出后果</th></tr></thead><tbody><tr><td>半连接 SYN 队列</td><td>已收 SYN、未 ACK</td><td>新连接 SYN 被丢/超时</td></tr><tr><td>全连接 accept 队列</td><td>已建连、等 accept</td><td>完成握手的连接被拒</td></tr><tr><td>应用 accept 慢</td><td>队列堆积</td><td>Overflow 计数涨</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：内核参数与观测</h2><div class="tw"><table><thead><tr><th>参数</th><th>默认</th><th>作用</th></tr></thead><tbody><tr><td>net.core.somaxconn</td><td>128（部分 4096）</td><td>全连接队列上限</td></tr><tr><td>net.ipv4.tcp_max_syn_backlog</td><td>1024</td><td>半连接队列上限</td></tr><tr><td>listen(fd, backlog)</td><td>应用传值</td><td>实际取 min(backlog, somaxconn)</td></tr><tr><td>syn cookies</td><td>队列满时启用</td><td>防 SYN flood 但丢选项</td></tr></tbody></table></div><p class="x-dry-cap">TCP backlog 调参与溢出观测</p><pre><code># 调大两个队列
+sysctl -w net.core.somaxconn=4096
+sysctl -w net.ipv4.tcp_max_syn_backlog=8192
+
+# 看队列是否溢出（Recv-Q 长期贴着 Send-Q 即溢出）
+ss -lntp
+# 输出: State  Recv-Q Send-Q  Local Address:Port
+#        LISTEN 200    4096    0.0.0.0:8080
+#        ↑当前全连接等待数   ↑accept 队列上限(min(backlog,somaxconn))
+
+# 溢出计数
+nstat -az TcpExtListenOverflows TcpExtListenDrops</code></pre><p><b>数量级：</b>默认 somaxconn=128 很小，秒级上千新建连接时极易溢出；实际 accept 队列长度 = <b>min(应用 backlog, somaxconn)</b>，两者任一偏小都成瓶颈。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>应用 backlog 被 somaxconn 盖住</b>：代码写 listen(sfd, 1024) 但 somaxconn=128，实际队列只有 128——取 min 是铁律</li><li><b>只调 somaxconn 不调 syn 队列</b>：SYN flood 或瞬时暴增时半连接队列满，连接卡在握手前</li><li><b>accept 线程太慢</b>：队列上限调得再大，消费慢照样堆积溢出，根因在应用吞吐</li><li><b>容器/网络命名空间独立</b>：sysctl 要在对应 netns 里设，宿主机调了容器不生效</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么实际 accept 队列是 min(backlog, somaxconn)？</summary><p>因为 backlog 是<b>应用向内核申请的期望值</b>，而 somaxconn 是<b>内核允许的上限</b>，内核取两者较小值落地。所以任一方偏小都会成为天花板——常见错误是代码写了大 backlog，却忘了系统 somaxconn 默认只有 128。调优必须两者一起看。</p></details><details><summary>半连接队列满了怎么办，syn cookie 是免费午餐吗？</summary><p>满了会开启 <b>syn cookie</b>：不在内存里存半连接状态，而是把连接信息编码进 SYN+ACK 的序列号，等客户端 ACK 时解码还原。好处是扛住 SYN flood 不耗内存；<b>代价是握手期间无法携带 TCP 选项（如窗口缩放、SACK）</b>，可能影响后续吞吐。所以优先把 tcp_max_syn_backlog 调大，cookie 是兜底而非首选。</p></details><details><summary>全连接队列溢出为什么比想象中隐蔽？</summary><p>溢出时内核直接<b>丢弃完成三次握手的连接或回 RST</b>，客户端表现为『连上了又被秒断』或『偶发连接失败』，服务端日志往往没报错，只悄悄累加 ListenOverflows/ListenDrops 计数。排查高并发连接失败，第一反应就该 ss -lntp 看 Recv-Q 是否贴着 Send-Q、再查 nstat 溢出计数。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 计算机网络 ·

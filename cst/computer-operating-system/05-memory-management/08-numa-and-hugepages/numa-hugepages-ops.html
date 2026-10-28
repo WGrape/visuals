@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -117,6 +135,19 @@ hugeadm --pool-list
 # Oracle/PostgreSQL/DPDK 等按文档把共享内存映射到 hugetlbfs</code></pre><div class="table-wrap"><table><thead><tr><th>对比</th><th>透明大页 THP</th><th>标准大页</th></tr></thead><tbody><tr><td>是否需改应用</td><td>否，自动</td><td>是，需显式映射</td></tr><tr><td>典型收益</td><td>通用、省心</td><td>减少 TLB miss，延迟更稳</td></tr><tr><td>风险</td><td>碎片/停顿</td><td>占内存、配置繁琐</td></tr></tbody></table></div><div class="qa"><b>问：什么时候该上大页？</b><p>当程序的「工作集」很大且 TLB miss 成为瓶颈（如大 buffer pool、JVM 大堆、DPDK）。小内存或短生命周期进程上大页纯属浪费。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：NUMA 与大页解决什么</h2><p>NUMA 是多路服务器内存分节点、<b>本地访问快、跨节点慢</b>的架构；大页（2MB/1GB）减少 TLB miss、降低页表开销。两者都面向<b>大内存、低延迟</b>场景（数据库、DPDK、JVM 大堆）。</p><div class="tw"><table><thead><tr><th>你的情况</th><th>要管</th><th>不用管</th></tr></thead><tbody><tr><td>单机多路 + 大内存 DB</td><td>NUMA 绑核绑内存</td><td>—</td></tr><tr><td>吞吐敏感、TLB miss 高</td><td>大页</td><td>—</td></tr><tr><td>小内存普通服务</td><td>OS 默认即可</td><td>折腾反而降性能</td></tr><tr><td>短生命周期批处理</td><td>默认</td><td>收益不抵复杂度</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：查看与配置</h2><div class="tw"><table><thead><tr><th>目标</th><th>命令/参数</th><th>说明</th></tr></thead><tbody><tr><td>看拓扑</td><td>numactl --hardware</td><td>节点数、各节点内存、距离</td></tr><tr><td>绑内存到本地</td><td>numactl --membind=0 --cpubind=0 CMD</td><td>避免跨节点访存</td></tr><tr><td>静态大页预留</td><td>vm.nr_hugepages=N（sysctl）</td><td>开机就锁，不可动态挪</td></tr><tr><td>透明大页</td><td>/sys/kernel/mm/transparent_hugepage/enabled</td><td>always/madvise/never</td></tr></tbody></table></div><p class="x-dry-cap">NUMA 与大页查看/配置</p><pre><code># 查看 NUMA 拓扑与内存分布
+numactl --hardware
+numactl --show                      # 当前进程的绑核绑内存
+
+# 预留 1024 个 2MB 大页（共 2GB）
+sysctl -w vm.nr_hugepages=1024
+grep Huge /proc/meminfo             # HugePages_Total/Free, Hugepagesize
+
+# 透明大页：数据库场景常关，避免碎片抖动
+echo never &gt; /sys/kernel/mm/transparent_hugepage/enabled
+
+# 让某进程只用节点 0 的内存与 CPU
+numactl --cpubind=0 --membind=0 /usr/bin/mydb</code></pre><p><b>数量级：</b>跨 NUMA 节点访存延迟约为本地的 <b>1.5–2 倍</b>；2MB 大页相比 4KB 小页，TLB 覆盖提升约 512 倍，能显著压低 TLB miss 率。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>进程跨节点跑</b>：没绑核也没绑内存，OS 调度把线程放到节点1、内存却分配在节点0，访存延迟翻倍</li><li><b>透明大页（THP）抖动</b>：always 模式下后台做规整（khugepaged）造成 CPU 尖刺和时延毛刺，DB 常被建议关</li><li><b>大页预留不足或过多</b>：预留少了应用起不来，预留多了普通内存被锁死、别的应用 OOM</li><li><b>只在启动后改 nr_hugepages</b>：内存已碎片化可能分配不出连续大页，应在开机/低负载时预留</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么跨 NUMA 节点访存会明显变慢？</summary><p>NUMA 下内存控制器按节点分布，<b>访问本地节点内存走直连通道，跨节点要先过 QPI/UPI 互连</b>，延迟和带宽都打折。当线程在节点1、数据在节点0，每次访存都跨互连，延迟约 1.5–2 倍、带宽也降。所以「计算靠近数据」——绑核同时绑内存——是 NUMA 调优的核心。</p></details><details><summary>静态大页和透明大页（THP）怎么取舍？</summary><p>静态大页（nr_hugepages）是<b>启动时锁定的连续物理页</b>，无运行时开销、稳定，但占用后不能挪作他用、配置不灵活；THP 由内核自动把小页合并成大页，省心，但 <b>khugepaged 规整会带来 CPU 抖动和时延毛刺</b>。数据库/低延迟场景通常选静态大页或关 THP；普通应用可开 THP 图方便。</p></details><details><summary>为什么大页能降低 TLB miss？</summary><p>TLB 缓存的是「虚拟页→物理页框」的映射，条目有限。4KB 小页时，<b>一个 TLB 条目只覆盖 4KB</b>，大内存工作集要海量条目，频繁 miss 回页表；2MB 大页一条目覆盖 512 倍内存，同样 TLB 能映射大得多的工作集，miss 率骤降、访存更快。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 计算机操作系统 ·
