@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -164,6 +182,25 @@ res = await loop.run_in_executor(None, blocking_io, arg)</code></pre><ul>
 </ul>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：asyncio 适合什么</h2><p>asyncio 是<b>单线程事件循环 + 协程</b>，专为<b>IO 密集型、高并发连接</b>设计（网络/磁盘异步）。CPU 密集任务用它反而慢——它不绕开 GIL。</p><div class="tw"><table><thead><tr><th>场景</th><th>用 asyncio</th><th>别用</th></tr></thead><tbody><tr><td>万级并发 HTTP 调用</td><td>✓</td><td>多线程开不起</td></tr><tr><td>爬虫/网关/WS 推送</td><td>✓</td><td>—</td></tr><tr><td>本地重计算</td><td>✗（用多进程）</td><td>GIL 占满</td></tr><tr><td>调用阻塞 SDK</td><td>需 run_in_executor</td><td>直接 await 卡循环</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：核心 API 与超时</h2><div class="tw"><table><thead><tr><th>API</th><th>用途</th><th>注意</th></tr></thead><tbody><tr><td>asyncio.run(main)</td><td>入口启动循环</td><td>一次性</td></tr><tr><td>await coro</td><td>挂起等结果</td><td>忘了 await 不执行</td></tr><tr><td>asyncio.gather(*ts)</td><td>并发多任务</td><td>异常需处理</td></tr><tr><td>wait_for(coro, 5)</td><td>超时包裹</td><td>避免永久挂起</td></tr></tbody></table></div><p class="x-dry-cap">asyncio 并发与超时示例</p><pre><code>import asyncio, time
+
+async def fetch(i):
+    await asyncio.sleep(0.1)          # 模拟 IO 等待
+    return i
+
+async def main():
+    # 并发 100 个，总耗时约 0.1s 而非 10s
+    res = await asyncio.gather(*[fetch(i) for i in range(100)])
+    # 超时保护：超 5s 抛 TimeoutError
+    try:
+        await asyncio.wait_for(fetch(999), timeout=5)
+    except asyncio.TimeoutError:
+        ...
+
+# 阻塞函数丢到线程池，别直接 await
+await asyncio.get_running_loop().run_in_executor(None, blocking_io)
+
+asyncio.run(main())</code></pre><p><b>数量级：</b>单事件循环可承载<b>数万</b>并发协程；并发 100 个 0.1s 的 IO 任务总耗时约 0.1s（串行则要 10s），提速近 100×。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个坑</h2><ul><li><b>阻塞事件循环</b>：在 async 函数里写了 time.sleep 或重同步 IO，整个循环卡死，所有协程等它——用 await asyncio.sleep 或 run_in_executor</li><li><b>忘记 await</b>：写成 do() 而非 await do()，协程对象不执行，静默无结果</li><li><b>混用同步库</b>：import 一个阻塞 SDK 直接调，等于卡循环——必须包进 executor 或换异步版</li><li><b>loop 已关还提交</b>：asyncio.run 退出后循环关闭，再 schedule 任务直接报错</li><li><b>cancel 不处理 CancelledError</b>：超时取消后没捕获，堆栈噪声且资源可能没清理</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>asyncio 和多线程到底差在哪，为什么 IO 密集更合适？</summary><p>多线程靠内核调度、每个线程独立栈，开几千就内存/切换爆炸；asyncio 在<b>单线程里用事件循环手动切换</b>协程，切换零内核开销、内存极小，且<b>没有锁竞争</b>（单线程）。代价是任一协程写同步重活就卡全循环。IO 密集时大部分时间在等，切换极廉价，所以碾压多线程。</p></details><details><summary>为什么 asyncio 救不了 CPU 密集任务？</summary><p>因为 Python 有<b>GIL</b>，同一时刻只有一个线程在跑字节码。asyncio 仍是单线程，CPU 密集计算照样占满 GIL，协程再怎么切也抢不到并行。CPU 密集要绕开 GIL：用 multiprocessing 多进程，或把热点丢 C 扩展/Numba。asyncio 的舞台就是「等 IO」，不是「算」。</p></details><details><summary>gather 和 wait 有什么区别，异常怎么处理？</summary><p>gather 一次性等所有任务，<b>任一抛异常整体即报错</b>（可用 return_exceptions=True 改收异常对象）；wait 更灵活，能设 FIRST_COMPLETED/timeout 提前返回。生产中建议 gather(return_exceptions=True) 或给每个任务单独 try，避免一个失败把整批拖垮、且错误被吞。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · Python ·
