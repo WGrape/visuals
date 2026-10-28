@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -121,6 +139,16 @@ FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10;</code></pre>
 </ul><div class="qa"><b>问：为什么改了参数没生效？</b><p>很多参数是 `postmaster` 级，要重启；`sighup` 级只需 reload；`user`/`superuser` 级可在会话内 SET。改前先看 `pg_settings.context`，别白等 reload。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：先找受限资源</h2><p>PG 调优先问瓶颈在<b>内存（shared_buffers/work_mem）、连接、IO（checkpoint）、还是统计/执行计划</b>。盲目调参不如先定位。</p><div class="tw"><table><thead><tr><th>症状</th><th>怀疑点</th></tr></thead><tbody><tr><td>大量磁盘读、缓存命中低</td><td>shared_buffers 偏小</td></tr><tr><td>复杂查询报内存错/变慢</td><td>work_mem 不足</td></tr><tr><td>连接数高、CPU 闲</td><td>连接风暴/缺连接池</td></tr><tr><td>写入抖动、checkpoint 慢</td><td>checkpoint/WAL 设置</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：核心参数与经验值</h2><div class="tw"><table><thead><tr><th>参数</th><th>经验取值</th><th>作用</th></tr></thead><tbody><tr><td>shared_buffers</td><td>RAM 的 25%</td><td>PG 自身缓存</td></tr><tr><td>effective_cache_size</td><td>RAM 的 50%–75%</td><td>帮优化器估缓存命中</td></tr><tr><td>work_mem</td><td>每操作用量</td><td>排序/哈希，别设太大</td></tr><tr><td>max_connections</td><td>配合连接池设小</td><td>直连过多拖垮</td></tr><tr><td>checkpoint_timeout</td><td>5–15 min</td><td>控制刷盘频率</td></tr></tbody></table></div><p class="x-dry-cap">PostgreSQL 核心调优参数</p><pre><code>-- postgresql.conf 关键项
+shared_buffers = 4GB                 -- 机器 16G 时取 25%
+effective_cache_size = 12GB          -- 50%-75% RAM
+work_mem = 64MB                      -- 每个排序/哈希操作，连接多时要小
+max_connections = 100                -- 别直连爆，前面加 pgbouncer
+checkpoint_timeout = 10min
+wal_buffers = 16MB
+
+-- 看缓存命中率（应 &gt; 99%）
+SELECT sum(heap_blks_hit)/(sum(heap_blks_hit)+sum(heap_blks_read)) FROM pg_stat_database;</code></pre><p><b>数量级：</b>shared_buffers 经验上限约 RAM 的 <b>25%–40%</b>（再大边际收益骤降）；work_mem 是<b>每操作</b>额度，100 连接各开 10 个排序就是 1000 倍，极易撑爆内存——要小。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>连接风暴</b>：max_connections 高 + 应用直连，短连接风暴打满，正确做法是前面挂 pgbouncer 连接池复用</li><li><b>work_mem 设太大</b>：它是每操作额度，乘上并发就是天文数字，OOM 或 swap 反而更慢——宁小勿大</li><li><b>autovacuum 滞后</b>：MVCC 旧版本不清理，表膨胀、索引失效、查询变慢——监控 pg_stat_user_tables 死元组</li><li><b>统计信息过期</b>：没定期 ANALYZE，优化器选错执行计划（全表扫代替索引）——看 default_statistics_target</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 PG 前面一定要加连接池（pgbouncer）？</summary><p>因为每个 PG 连接是<b>一个后端进程</b>，占内存且上下文切换贵；应用直连高并发时连接数爆炸，CPU 花在进程调度而非干活。pgbouncer 用<b>少量常驻连接服务大量应用连接</b>（事务级复用），把连接数压到数据库舒适区。所以 max_connections 该设小，连接池扛前面。</p></details><details><summary>shared_buffers 为什么不是越大越好？</summary><p>因为 PG 的数据还会借操作系统的<b>页缓存（OS cache）</b>，二者互补。shared_buffers 太大，OS 页缓存被挤、且 PG 自身管理开销上升，边际收益在 25%–40% RAM 后急剧下降。effective_cache_size 则是<b>告诉优化器「OS 层还有多少缓存可用」</b>，帮它更准确地选索引还是顺序扫。</p></details><details><summary>MVCC 为什么必须用 autovacuum 兜底？</summary><p>PG 的 MVCC 更新/删除不直接改原行，而是留旧版本，<b>旧版本要靠 vacuum 回收</b>。不回收会导致表/索引膨胀、死元组累积、索引失效、查询越跑越慢，甚至事务 ID 回卷（xid wraparound）威胁数据可用。autovacuum 就是后台自动做这件事的保命机制。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 数据库系统 ·

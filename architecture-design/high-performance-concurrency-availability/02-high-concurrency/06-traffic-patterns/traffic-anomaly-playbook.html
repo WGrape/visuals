@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -124,6 +142,20 @@ def backoff(n):
 </ul><div class="qa"><b>问：限流和熔断有什么区别？</b><p>限流是「入口守门」，控制进来的量；熔断是「出口保险」，在依赖已经不稳时主动断流，保护下游也保护自己。两者通常叠加使用。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：先给异常定类型</h2><p>流量异常大致四类：<b>突发洪峰、慢调用扩散、恶意刷子/爬虫、级联雪崩</b>。类型不同处置手段完全不同，先定性再动手。</p><div class="tw"><table><thead><tr><th>现象</th><th>类型</th><th>首选手段</th></tr></thead><tbody><tr><td>QPS 暴涨但 RT 正常</td><td>突发洪峰</td><td>限流</td></tr><tr><td>RT 慢慢变长、线程耗尽</td><td>慢调用扩散</td><td>熔断 + 超时</td></tr><tr><td>少数 IP 高频</td><td>刷子/爬虫</td><td>黑名单 + 限速</td></tr><tr><td>一个依赖挂、全链路变慢</td><td>级联雪崩</td><td>降级 + 熔断</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：三道闸的阈值</h2><div class="tw"><table><thead><tr><th>手段</th><th>典型参数</th><th>触发条件</th></tr></thead><tbody><tr><td>限流（令牌桶）</td><td>QPS 上限、突发</td><td>超过预设容量</td></tr><tr><td>熔断</td><td>错误率&gt;50% + 窗口请求数</td><td>依赖持续失败</td></tr><tr><td>超时</td><td>下游 &lt; 上游超时</td><td>调用过久</td></tr><tr><td>降级</td><td>返回兜底/缓存</td><td>非核心不可用时</td></tr></tbody></table></div><p class="x-dry-cap">限流/熔断/超时典型配置</p><pre><code># 限流：令牌桶，允许短时突发
+# Sentinel/网关示例：单机 QPS=1000, 突发=2000
+flow:
+  qps: 1000
+  burst: 2000
+
+# 熔断：10 秒内错误率 &gt; 50% 且请求 &gt;= 20 则打开
+circuit:
+  errorRatio: 0.5
+  minRequests: 20
+  window: 10s
+  openDuration: 30s
+
+# 超时：下游超时必须小于上游给的总时间，避免层层叠加</code></pre><p><b>数量级：</b>熔断错误率阈值常设 <b>50%</b>、窗口 10s 且最小请求 20 才统计；级联里一层超时 200ms，若 5 层无短路会叠加到 1s+，所以每层都要有独立超时与熔断。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>熔断后不恢复探测</b>：一直开着把流量全掐死——要有半开态试探，恢复后渐进放量</li><li><b>限流误杀正常流量</b>：阈值按峰值定太低，正常高峰也被拦——留突发余量、按实例容量算</li><li><b>超时层层叠加</b>：A→B→C 每层都设 1s 超时，总允许 3s，远超用户耐心且资源空耗——下游超时必须 &lt; 上游</li><li><b>只限入口不限依赖</b>：网关拦了入口，但内部某个慢依赖仍把线程池拖垮——限流/熔断要下钻到依赖层</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>限流、熔断、降级三者怎么分工？</summary><p>限流是<b>入口节流</b>（别让超过系统容量的请求进来）；熔断是<b>故障隔离</b>（依赖挂了就快速失败，不把线程/连接耗在等它上）；降级是<b>保核心</b>（非关键功能直接返回兜底，腾资源给主链路）。三者层级不同：限流防过载、熔断防扩散、降级保可用，通常要一起上。</p></details><details><summary>为什么熔断要有「半开」状态，而不是开/关两态？</summary><p>因为故障恢复后需要<b>试探性地放一点流量</b>验证依赖是否已好，而不是一次性全量恢复（可能依赖只是抖动，全量回来又被打挂）。半开态放少量请求，成功则关闭熔断、失败则继续打开——这是避免「恢复即被冲垮」的关键。</p></details><details><summary>为什么超时层层叠加是大忌？</summary><p>因为每多一跳，用户感知的延迟是<b>各层超时之和</b>，而资源（线程/连接）被占用的时间也是叠加的。一层 200ms 看似温和，5 层链路就是 1s，且每层都在等，连接池/线程池被长时间占用，极易引发雪崩。正确做法：下游超时严格小于上游分配的时间，并配熔断做快速失败。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 架构设计 ·

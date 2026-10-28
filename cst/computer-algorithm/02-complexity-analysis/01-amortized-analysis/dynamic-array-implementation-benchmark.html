@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -124,6 +142,20 @@ print(total_copy, total_copy/n)  # ≈ 1e6, 1.0</code></pre>
 </ul><div class="qa"><b>问：为什么均摊 O(1) 不能替代尾延迟？</b><p>因为那一次「刚好满了」的 append 要搬整个数组，是真实的 O(N) 毛刺。延迟敏感场景（如高频交易、实时音频）要预分配或容忍毛刺，不能只看平均值。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：动态数组与 amortized 分析</h2><p>动态数组（vector/ArrayList）在<b>容量不足时申请更大块、拷贝旧数据</b>，让随机访问 O(1) 又免手动管内存。amortized 分析回答：「单次 append 最坏 O(n)，但均摊后是否还是 O(1)」。</p><div class="tw"><table><thead><tr><th>操作</th><th>均摊复杂度</th><th>说明</th></tr></thead><tbody><tr><td>末尾 append（容量够）</td><td>O(1)</td><td>直接写</td></tr><tr><td>末尾 append（需扩容）</td><td>O(n) 偶发</td><td>均摊后仍 O(1)</td></tr><tr><td>中间插入</td><td>O(n)</td><td>搬移后续元素</td></tr><tr><td>随机访问</td><td>O(1)</td><td>数组本质优势</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：扩容因子与代价</h2><div class="tw"><table><thead><tr><th>因子</th><th>内存浪费上限</th><th>扩容次数（append N）</th></tr></thead><tbody><tr><td>×2（常见）</td><td>约 50%</td><td>约 log2(N) 次</td></tr><tr><td>×1.5（std::vector）</td><td>约 33%</td><td>略多</td></tr><tr><td>×1.618（黄金比）</td><td>约 38%</td><td>中间值</td></tr></tbody></table></div><p class="x-dry-cap">动态数组 ×2 扩容实现</p><pre><code>// 朴素 ×2 扩容：容量不够就新建 2 倍数组并拷贝
+func (a *Vec) Push(x int) {
+    if a.len == a.cap {
+        newCap := a.cap * 2
+        if newCap == 0 { newCap = 1 }
+        buf := make([]int, newCap)
+        copy(buf, a.buf)        // O(a.len) 拷贝
+        a.buf, a.cap = buf, newCap
+    }
+    a.buf[a.len] = x
+    a.len++
+}
+
+// 基准：N=1e7 append，×2 约 24 次扩容，总拷贝 ≈ 2N 个元素（均摊 O(1)）</code></pre><p><b>数量级：</b>×2 扩容下 append N 个元素总拷贝量约 <b>2N</b>（等比数列求和上限），均摊每次仅常数次搬移；但峰值内存是实际数据的约 2 倍。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>从不 reserve</b>：已知要塞 1e6 个元素却让它一次次扩容，白白多拷几十次——先在构造时 reserve</li><li><b>中间频繁插入</b>：把 O(1) append 的数组当链表用，每次插中间都 O(n) 搬移，整体退化成 O(n^2)</li><li><b>按引用/切片持有旧底层数组</b>：扩容后旧 buf 仍被某切片引用，内存迟迟不释放（隐性泄漏）</li><li><b>误以为峰值内存=数据量</b>：×2 因子下最多浪费约 50% 容量，评估内存上限要按 cap 而非 len</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么说 append 的均摊复杂度是 O(1)？</summary><p>把一次扩容的 O(k) 拷贝成本<b>均摊</b>到它「换来」的接下来 k 次 append 上：这 k 次本都是 O(1)，各分摊 1 份拷贝费，加上自身 1 单位，每次约 3 倍常数——仍是 O(1)。数学上靠「账本法」：每次 append 存 2 信用，扩容时消费 k 信用，始终非负，故均摊 O(1)。</p></details><details><summary>扩容因子为什么很多选 1.5 而不是 2？</summary><p>×2 每次都申请「刚释放大小」的 2 倍，<b>旧块永远无法被后续复用（因为新需求总是超过旧块剩余）</b>，内存碎片多、峰值浪费~50%；×1.5（或黄金比）让累计已释放空间渐近逼近下一次需求，旧块有概率被重利用，内存更紧凑，代价是扩容次数略多。</p></details><details><summary>什么时候该用链表而不是动态数组？</summary><p>当你<b>大量在头部/中间插入删除</b>（链表 O(1) 且不需搬移），且不需要随机下标访问时。反之，随机访问多、主要末尾追加、在意缓存命中率，动态数组因为<b>内存连续、缓存友好</b>远胜链表（链表节点散落、cache miss 高）。大多数业务「数组打底 + 偶尔 reserve」就够。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 计算机算法 ·
