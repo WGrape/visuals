@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -119,6 +137,13 @@ print(g.send(10))   # 20</code></pre>
 <div class="qa"><b>问：想写同步风格却要并发？</b><p>Go 的 goroutine 最自然：直接 go func()，runtime 接管调度。</p></div><div class="qa"><b>问：单线程高并发 IO？</b><p>Python asyncio / Node 事件循环足够，且无需考虑数据竞争。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：协程到底是什么</h2><p>协程是<b>用户态的轻量并发单元</b>，切换不进内核，开销远小于线程。但它有三种形态，差异比「都叫协程」大得多。</p><div class="tw"><table><thead><tr><th>形态</th><th>代表</th><th>栈</th></tr></thead><tbody><tr><td>有栈协程</td><td>Go goroutine</td><td>各自有栈，抢占式调度</td></tr><tr><td>无栈协程</td><td>Python async / C++20 co_await</td><td>共享栈/状态机，靠 await 让出</td></tr><tr><td>生成器式</td><td>Python generator</td><td>最简，只能单向 yield</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：栈与数量级</h2><div class="tw"><table><thead><tr><th>实现</th><th>初始栈</th><th>可开数量级</th><th>切换成本</th></tr></thead><tbody><tr><td>Go goroutine</td><td><b>2KB 起</b>，动态扩</td><td>百万级</td><td>百 ns（用户态）</td></tr><tr><td>Python asyncio</td><td>无独立栈</td><td>数万（受事件循环）</td><td>切换靠回调</td></tr><tr><td>C++20 协程</td><td>编译器决定</td><td>取决于帧</td><td>近乎零开销</td></tr><tr><td>OS 线程</td><td>默认 8MB</td><td>数千（内存上限）</td><td>µs 级（进内核）</td></tr></tbody></table></div><p class="x-dry-cap">Go 百万协程 vs Python asyncio 示例</p><pre><code>// Go：轻松起百万 goroutine（栈按需增长）
+for i := 0; i &lt; 1_000_000; i++ {
+    go func(id int) { do(id) }(i)
+}
+// Python：asyncio 单线程，await 才让出
+async def main():
+    await asyncio.gather(*[do(i) for i in range(100_000)])</code></pre><p><b>数量级直觉：</b>线程默认 8MB 栈，开 1000 个就是 8GB；goroutine 2KB 起步，100 万也才约 2GB，且多数用不到。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：三个高频坑</h2><ul><li><b>goroutine 泄漏</b>：开了没退出（channel 没人收/context 没 cancel），数量只涨不跌——用 pprof 看 goroutine 数</li><li><b>阻塞事件循环</b>：asyncio 里写了同步重活或 time.sleep，整个循环卡死，所有协程等它</li><li><b>忘记取消</b>：context 没传下去，超时/退出时子协程继续跑</li><li><b>共享变量竞态</b>：无栈协程在 await 点可能切换，await 之间的非原子操作会交错——该加锁加锁</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么「栈归属」在协程里这么重要？</summary><p>有栈协程（Go）每个单元独立栈，调度器可<b>抢占</b>，写起来像同步代码、不怕阻塞；代价是栈内存与调度开销。无栈协程（Python/C++20）不单独占栈，靠 await 显式让出，零栈开销、可海量，但<b>必须主动 await</b>，一旦在协程里跑同步重活就阻塞整个循环。选型先看「你的负载是 IO 等待多还是计算多」。</p></details><details><summary>Go 为什么能轻松开百万 goroutine？</summary><p>因为 goroutine 初始栈仅 <b>2KB</b> 且动态增长，调度在用户态（G-M-P 模型），切换不进内核；而线程 8MB 栈 + 内核调度，开几千就内存/上下文切换爆了。百万 goroutine 的前提是<b>大部分时间在 IO 等待</b>，真在计算它们也会占满 CPU。</p></details><details><summary>无栈协程（async/await）的致命限制是什么？</summary><p>它<b>没有自己的调用栈</b>，不能在内层函数里「挂起后回到外层」——所有 await 必须在 async 函数链上显式写出。所以同步库、阻塞调用在协程里会卡死整个事件循环，必须全程 async 化或用 run_in_executor 丢到线程池。这是无栈协程轻量但「侵入性强」的根源。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 运行时机制 ·

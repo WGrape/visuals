@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -131,6 +149,18 @@ fd = open("log", O_WRONLY|O_DSYNC); write(fd, buf)   # 返回即已落盘</code>
 </ul><div class="table-wrap"><table><thead><tr><th>手段</th><th>模拟什么</th><th>验证点</th></tr></thead><tbody><tr><td>dm-flakey</td><td>设备层掉电</td><td>文件不出现半份</td></tr><tr><td>kill -9</td><td>进程崩溃</td><td>重启后数据完整</td></tr><tr><td>dd oflag=direct</td><td>绕内核缓存写</td><td>性能/语义对照</td></tr></tbody></table></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：什么时候必须 fsync</h2><p>只要数据是<b>崩溃后不能丢</b>的（元数据、钱包流水、配置），写完就要 fsync；纯缓存/可重建的临时文件则不必。</p><div class="tw"><table><thead><tr><th>写的是什么</th><th>需要 fsync</th></tr></thead><tbody><tr><td>数据库 WAL / redo log</td><td>✓ 每笔或每组</td></tr><tr><td>提交后的新配置文件</td><td>✓ 一次</td></tr><tr><td>下载到一半的临时文件</td><td>✗ 完成后才 fsync</td></tr><tr><td>纯日志(丢了可补)</td><td>视重要度</td><td>批量即可</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：三者差异与代价</h2><div class="tw"><table><thead><tr><th>调用</th><th>刷新内容</th><th>刷新元数据</th><th>相对代价</th></tr></thead><tbody><tr><td>fsync(fd)</td><td>✓</td><td>✓</td><td>最慢（含元数据）</td></tr><tr><td>fdatasync(fd)</td><td>✓</td><td>✗（除非大小变）</td><td>略快</td></tr><tr><td>sync()</td><td>全部脏页</td><td>全部</td><td>最重，别常调</td></tr></tbody></table></div><p class="x-dry-cap">Python 安全写：写临时 + fsync + 原子 rename + fsync 目录</p><pre><code># 安全写文件三步法（防半份 + 防断电丢）
+import os
+def safe_write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())          # 落盘数据
+    os.rename(tmp, path)              # 原子替换
+    # 注意：rename 后还需 fsync 父目录，否则目录项可能没落盘
+    dirfd = os.open(os.path.dirname(path), os.O_RDONLY)
+    os.fsync(dirfd); os.close(dirfd)</code></pre><p><b>数量级：</b>一次 fsync 约 <b>0.1–10ms</b>（取决于盘与是否写透），比不 fsync 慢 10–1000 倍；所以高频写要靠批量与 WAL  amortize。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个坑</h2><ul><li><b>只写不 fsync</b>：数据在 page cache，断电即丢——以为写成功了其实没落盘</li><li><b>覆盖式写</b>：直接写原文件，崩溃时文件变成「半新半旧」无法恢复——必须写 .tmp 再 rename</li><li><b>忘 fsync 目录</b>：rename 成功但父目录项没落盘，崩溃后新文件「不存在」——rename 后 fsync 父目录</li><li><b>误解 O_DIRECT</b>：它绕过 page cache 但不保证顺序与原子，仍需 fsync/fua</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么「写临时文件 + rename」是原子且安全的？</summary><p>因为 POSIX 保证 <code>rename</code> 对同一个文件系统是<b>原子操作</b>：要么旧文件在、要么新文件在，不会出现「写了一半」的中间态。配合先写 .tmp 再 rename，崩溃时要么看到旧文件（.tmp 残留可清），要么看到完整新文件。这才是「断电不丢、不半份」的标准做法，而不是原地覆盖。</p></details><details><summary>fdatasync 比 fsync 快在哪，能随便用吗？</summary><p>fsync 刷新<b>数据+所有元数据</b>（包括 mtime、大小）；fdatasync 在文件大小没变时<b>只刷数据、跳过元数据更新</b>，少一次元数据写，所以略快。但当本次写入改变了文件大小，两者差不多。对 append-only 日志可优先 fdatasync 省一点；对改变大小的写完仍建议 fsync 一次保元数据。</p></details><details><summary>为什么 rename 之后还要 fsync 父目录？</summary><p>因为 rename 只把「新文件已存在」这件事记进目录的 page cache，<b>目录项本身没落盘</b>。崩溃后文件系统恢复可能看不到这次 rename，新文件仍然「不存在」，但数据其实已经在盘上（成了孤儿 inode）。所以关键写入要 fsync 父目录，确保目录项持久化——这是最常漏的一步。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 操作系统 ·
