@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -112,6 +130,18 @@
 </ul><div class="qa"><b>问：什么时候该从「单库+脚本」升级到大数据栈？</b><p>当单机写不进（写吞吐到顶）、算不动（批处理超时）、或需要实时（分钟级以内）时再升。提前上重武器只会把简单问题复杂化——很多团队卡在「为了用而用」。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：最小可用 pipeline 长什么样</h2><p>一条最小 pipeline 只回答三件事：<b>数据从哪来、存哪、怎么算、结果去哪</b>。不足这四条就不叫 pipeline，只是脚本。</p><div class="tw"><table><thead><tr><th>环节</th><th>最小组件</th><th>跳过会怎样</th></tr></thead><tbody><tr><td>采集 / 接入</td><td>Kafka 或 S3 落地</td><td>没有统一入口，下游各读各的，schema 失控</td></tr><tr><td>存储</td><td>一个湖仓（Hudi/Iceberg on S3）</td><td>数据堆在散落文件，没法增量读</td></tr><tr><td>计算</td><td>Spark / Flink / DuckDB</td><td>全靠手写 SQL 脚本，无法调度与重试</td></tr><tr><td>调度</td><td>Airflow / DolphinScheduler</td><td>依赖靠人记，失败没人重跑</td></tr><tr><td>产出</td><td>结果写回库或下发</td><td>算完即弃，业务用不上</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：组件选型与容量起步</h2><div class="tw"><table><thead><tr><th>场景</th><th>推荐组合</th><th>单机起步规格</th></tr></thead><tbody><tr><td>数据 &lt; 100GB / 天</td><td>DuckDB + S3 + Cron</td><td>8C16G 足够，免集群</td></tr><tr><td>100GB–10TB / 天</td><td>Spark on K8s + Iceberg</td><td>3× 8C32G worker</td></tr><tr><td>实时（秒级）</td><td>Flink + Kafka</td><td>JobManager 4C + 2× TaskManager 8C</td></tr><tr><td>即席查询</td><td>Trino / ClickHouse</td><td> coordinator 8C + 2× 16C</td></tr></tbody></table></div><p class="x-dry-cap">Spark 提交 + Iceberg 建表示例</p><pre><code># Spark 提交：控制并发与内存，避免 OOM
+spark-submit --master k8s://... \
+  --conf spark.executor.instances=3 \
+  --conf spark.executor.memory=16g \
+  --conf spark.executor.cores=4 \
+  --conf spark.sql.shuffle.partitions=200 \
+  app.py
+
+# Iceberg 表建表（分区按天，控制小文件）
+CREATE TABLE lake.events (id bigint, ts timestamp, payload string)
+PARTITIONED BY (days(ts))
+TBLPROPERTIES ('write.target-file-size-bytes'='536870912')</code></pre><p><b>容量直觉：</b>shuffle 分区数按「Executor 总核数 × 2～3」设；单分区目标文件 512MB，过小会产生海量小文件拖垮元数据。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个高频坑</h2><ul><li><b>小文件爆炸</b>：流式每 5 分钟提交一次，几月后元数据被压垮——用 <code>rewrite_manifests</code> / <code>OPTIMIZE</code> 定时合并</li><li><b>schema 漂移</b>：上游加字段下游崩——读写用 schema evolution，下游默认宽容模式（多字段忽略、少字段填 null）</li><li><b>迟到数据</b>：事件时间晚到导致分区遗漏——用 watermark + 允许延迟窗口，或定时重算近 N 天</li><li><b>任务依赖死锁</b>：A 等 B、B 等 A，调度器干转——用 Airflow 的 <code>depends_on_past</code> 与明确的 DAG 边界</li><li><b>资源抢占</b>：Spark 和 Flink 混部抢核——用 K8s 的 resource quota 与 priority class 隔离</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么不直接上 Hadoop 全家桶？</summary><p>传统 HDFS + Hive 需要常驻集群与专人运维，小数据量下性价比极低。现代做法是<b>存算分离</b>：对象存储（S3/OSS）当底座，计算按需起 Spark/Flink，峰时扩容、谷时归零，成本按扫描量计。只有数据量稳过 PB 级、且查询模式固定，自建集群才划算。</p></details><details><summary>湖仓（Lakehouse）和纯数仓（如 ClickHouse）怎么选？</summary><p>湖仓（Iceberg/Hudi + Trino）胜在<b>一份存储多种计算</b>、可回溯、成本低，适合离线/准实时与数据科学；ClickHouse 等专数仓胜在<b>单表极速聚合</b>，适合固定报表与服务端查询。常见架构是湖仓做底座，热数据同步到 ClickHouse 扛高并发读。</p></details><details><summary>为什么要有调度层，Cron 不够吗？</summary><p>Cron 只管「到点跑」，不管<b>依赖、重试、告警、血缘</b>。真实 pipeline 是 DAG：任务失败要自动重试并通知，上游晚到下游要等，改动要可回溯。没有调度层，这些全靠人肉，规模一大必然漏跑和脏数据。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 系统架构 ·

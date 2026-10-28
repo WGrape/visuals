@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -117,6 +135,23 @@ nodetool flush              # 内存表刷盘</code></pre><div class="lead warn"
 </ul><div class="qa"><b>问：什么时候不该用 Cassandra？</b><p>需要复杂事务、跨行 ACID、或强一致读的场景；以及团队没有运维分布式存储经验时，先用托管方案更稳。</p></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：建模第一原则</h2><p>Cassandra 是<b>按查询建模</b>的宽列库，不是按实体建模的关系库。先写查询，再反推表结构；一张表服务一类查询，宁可冗余也不要 JOIN。</p><div class="tw"><table><thead><tr><th>关系库思路</th><th>Cassandra 思路</th></tr></thead><tbody><tr><td>三张表 + JOIN</td><td>每张高频查询一张宽表</td></tr><tr><td>任意维度过滤</td><td>分区键决定能高效查的维度</td></tr><tr><td>范式化去重</td><td>故意冗余，换写入放大换读性能</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：一致性级别与读写</h2><div class="tw"><table><thead><tr><th>场景</th><th>一致性级别</th><th>含义</th></tr></thead><tbody><tr><td>用户读写强一致</td><td>QUORUM（读写都）</td><td>R+W&gt;副本数，不丢不旧</td></tr><tr><td>埋点/日志</td><td>ONE / ANY</td><td>能写就写，丢点无妨</td></tr><tr><td>读多写少看最新</td><td>LOCAL_ONE 读 + QUORUM 写</td><td>读快、写稳</td></tr><tr><td>跨 DC</td><td>LOCAL_QUORUM</td><td>不出 DC，降延迟</td></tr></tbody></table></div><p class="x-dry-cap">Cassandra 建表 + 一致性 + 运维命令</p><pre><code>-- 建表：分区键 + 聚簇键，控制单行大小
+CREATE TABLE events (
+  device_id text,
+  day date,
+  ts timeuuid,
+  payload text,
+  PRIMARY KEY ((device_id, day), ts)
+) WITH CLUSTERING ORDER BY (ts DESC);
+
+-- 一致性级别按需设
+CONSISTENCY QUORUM;
+SELECT * FROM events WHERE device_id='d1' AND day='2026-10-28';
+
+-- 运维：看是否出现热点/大分区
+nodetool cfstats keyspace.events
+nodetool toppartitions keyspace events 10
+nodetool tpstats   # 看读写队列堆积</code></pre><p><b>数量级：</b>单分区建议 <b>&lt; 100MB</b>（硬上限约 2GB 但会拖慢修复）；副本数 RF=3 时 QUORUM = 2；读放大随聚簇列增多而增大。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：四个反模式</h2><ul><li><b>用递增时间戳/自增 id 做分区键</b>：所有写打到最新分区，热点炸——改用哈希/随机前缀打散</li><li><b>大分区</b>：一个设备一年的数据塞一个分区，compaction 与读取都崩——按时间再分桶</li><li><b>无界宽行</b>：不停 append 不出 TTL，分区无限涨——设 default_time_to_live 或定期归档</li><li><b>二级索引滥用</b>：高基数列上建索引等于全集群扫描——改成本地索引用低基数列或物化视图</li><li><b>读前先读修复</b>：开了 read_repair 高比例，读延迟被修复拖垮——降低 repair_chance</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 Cassandra 不适合 JOIN 和聚合？</summary><p>因为它把数据<b>按分区键散列到各节点</b>，JOIN 意味着跨节点拉数据，网络开销让性能崩溃。它的设计前提是<b>查询模式已知且简单</b>：一次主键（分区键+聚簇键）定位一行或一段。所以建模时就把 JOIN 摊平进表，用写入冗余换读取的单次命中——这是宽列库的代价交换。</p></details><details><summary>一致性级别 QUORUM 和 ALL 怎么选？</summary><p>QUORUM 是<b>可用性与一致性的平衡点</b>：R+W&gt;RF 保证读到最新写入，且允许一个副本挂掉仍可用。ALL 要等全部副本，强一致但一个慢副本就拖垮延迟、一个挂就写不进。除非金融级强一致且副本极稳，否则生产用 QUORUM，个别关键读再升 ALL。</p></details><details><summary>为什么写能这么快，读却容易慢？</summary><p>写走 LSM：先写内存 memtable 再批量刷 SSTable，几乎顺序写，所以快；但读要合并 memtable + 多层 SSTable（可能还有墓碑），分区越大、版本越多越慢。所以调优核心是<b>控制分区大小 + 合理 compaction 策略（STCS/LCS/TWCS）</b>，让读只扫少量文件。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 数据库系统 ·

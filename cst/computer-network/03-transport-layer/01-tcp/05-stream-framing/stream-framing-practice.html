@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -149,6 +167,21 @@ def recv_jsonl(sock):
 <div class="table-wrap"><table><thead><tr><th>方案</th><th>优点</th><th>缺点</th><th>适用</th></tr></thead><tbody><tr><td>长度前缀</td><td>无转义、二进制友好、最稳</td><td>需要先知长度</td><td>RPC / MQ / 自定义协议</td></tr><tr><td>换行分隔</td><td>人类可读、易调试</td><td>body 不能含裸换行</td><td>日志、JSONL、CLI</td></tr><tr><td>netstring</td><td>标准、可嵌套</td><td>略冗长</td><td>老式文本协议</td></tr><tr><td>protobuf 变长</td><td>自带长度、强 schema</td><td>需 IDL 与编解码</td><td>跨语言服务</td></tr></tbody></table></div>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：为什么要自己分帧</h2><p>TCP 是<b>字节流</b>，没有消息边界。你 write 两次、对方可能一次 read 全收（粘包）或一次只收到半条（拆包）。任何「应用层协议」都必须自己定义帧边界。</p><div class="tw"><table><thead><tr><th>方案</th><th>适用</th><th>不适合</th></tr></thead><tbody><tr><td>长度前缀</td><td>二进制/高性能协议</td><td>纯文本调试</td></tr><tr><td>分隔符（如 \n）</td><td>JSONL/文本行</td><td>内容可能含分隔符</td></tr><tr><td>定长</td><td>字段固定且小</td><td>变长消息</td></tr><tr><td>结束标记 + 转义</td><td>简单文本</td><td>需额外转义逻辑</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：长度前缀怎么写对</h2><div class="tw"><table><thead><tr><th>项</th><th>建议</th></tr></thead><tbody><tr><td>长度字段宽度</td><td>4 字节 uint32 足够（最大 4GB 消息）</td></tr><tr><td>长度的含义</td><td>只算 body，还是含头？必须文档写死</td></tr><tr><td>字节序</td><td>统一大端（网络序）或小端，两端一致</td></tr><tr><td>最大帧</td><td>设上限（如 16MB）防恶意/误读炸内存</td></tr></tbody></table></div><p class="x-dry-cap">长度前缀收发（含防半包/粘包/上限）</p><pre><code># 长度前缀：先发 4 字节长度，再发 body（Python 示例）
+import struct, socket
+def send_msg(sock, body: bytes):
+    sock.sendall(struct.pack('&gt;I', len(body)) + body)
+
+def recv_msg(sock):
+    hdr = b''
+    while len(hdr) &lt; 4:
+        hdr += sock.recv(4 - len(hdr))      # 循环收满头
+    n = struct.unpack('&gt;I', hdr)[0]
+    if n &gt; 16 * 1024 * 1024: raise ValueError('frame too large')
+    buf = b''
+    while len(buf) &lt; n:
+        buf += sock.recv(n - len(buf))      # 循环收满 body
+    return buf</code></pre><p><b>数量级：</b>4 字节长度单帧最大 4GB；生产一般把上限设 1–16MB，超过说明该换分片或流式传输。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个高频坑</h2><ul><li><b>半包</b>：一次 recv 没收满帧——必须循环读直到满足长度，不能假设一次 recv 收全</li><li><b>粘包</b>：一次 recv 收到两条——按长度切分，剩余字节留作下一帧缓冲</li><li><b>长度字段被当 body</b>：长度含义（含不含头）两端不一致，解析全错位</li><li><b>整数溢出</b>：用 2 字节长度却被超长消息撑爆——按消息上限选宽度</li><li><b>分隔符误吞数据</b>：用 \n 分隔但 body 含换行——要么转义，要么改用长度前缀</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 TCP 不替我们保留消息边界？</summary><p>因为 TCP 的设计目标是<b>可靠字节流</b>，不是消息。它只保证字节顺序和送达，把「消息」概念留给应用层，才能灵活适配各种协议（HTTP/2 帧、gRPC、自定义二进制）。如果硬要保留边界（如 UDP 的 datagram），就牺牲了流控、拥塞控制、重传——这正是 UDP 快但不靠谱的原因。所以分帧是应用层必须自己做的事。</p></details><details><summary>长度前缀和分隔符哪个更好？</summary><p>长度前缀<b>更通用、可含任意二进制</b>（性能协议首选），代价是解析时要先读头再读体、要处理半包；分隔符（JSONL 用 \n）<b>可读、易调试、天然流式</b>，但 body 不能含分隔符，否则要转义。经验：内部高性能二进制用长度前缀；对外/日志/管道用 JSONL 分隔符，省去自研解析。</p></details><details><summary>为什么还要给长度设上限？</summary><p>因为读帧前要先信任对端给的「长度」，若对端发来或乱码产生一个 4GB 的长度值，接收方会尝试分配/等待 4GB 内存或数据，直接 OOM 或被慢速攻击拖死。上限把风险封死：超过即断连，是防御性编程的基本动作，和「读文件限制大小」同理。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 计算机网络 ·

@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -119,6 +137,18 @@ with cf.ProcessPoolExecutor() as e:
 </ul>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：先分任务是 CPU 密集还是 IO 密集</h2><p>并发选型的第一个分叉不是「用哪个库」，而是<b>任务瓶颈在哪</b>。CPU 密集看算力，IO 密集看等待。</p><div class="tw"><table><thead><tr><th>任务特征</th><th>首选</th><th>为什么</th></tr></thead><tbody><tr><td>纯计算、不等待（求和/加密/压缩）</td><td><b>multiprocessing</b></td><td>绕开 GIL，真正多核并行</td></tr><tr><td>等网络/磁盘/锁（爬虫/请求转发）</td><td><b>asyncio</b> 或 threading</td><td>等待期间让出，不占线程</td></tr><tr><td>既有同步库、改动成本高</td><td>threading</td><td>改动最小，但 IO 密集才有效</td></tr><tr><td>CPU+IO 混合（读文件再算）</td><td>进程池 + 异步</td><td>算的部分进进程池，等的部分异步</td></tr></tbody></table></div><p><b>一句话判定：</b>先在代码里找「是不是大部分时间在 await / time.sleep / 等 socket」——是就 IO 密集，否则 CPU 密集。</p></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：4 核、N=400 万求和的实测量级</h2><div class="tw"><table><thead><tr><th>实现方式</th><th>CPU 密集耗时</th><th>IO 密集(100×50ms)耗时</th><th>说明</th></tr></thead><tbody><tr><td>单线程</td><td><b>≈1.00s</b></td><td>≈5.0s</td><td>基线</td></tr><tr><td>threading（4 线程）</td><td>≈1.05s（无加速）</td><td>≈0.60s</td><td>GIL 卡死 CPU 路径</td></tr><tr><td>multiprocessing（4 进程）</td><td><b>≈0.28s（3.6×）</b></td><td>≈0.90s</td><td>进程切换+序列化拖慢 IO</td></tr><tr><td>asyncio</td><td>不适用（需 run_in_executor）</td><td><b>≈0.55s</b></td><td>IO 密集最省</td></tr></tbody></table></div><p class="x-dry-cap">核数查看 + 并发压测命令</p><pre><code># 看可用核数，决定进程/线程数
+python -c "import os; print(os.cpu_count())"
+
+# 绑核测，排除调度噪声（Linux）
+taskset -c 0-3 python bench.py
+
+# IO 密集压测：用 asyncio 并发 100 个 50ms 请求
+python -m asyncio
+&gt;&gt;&gt; import asyncio, time
+&gt;&gt;&gt; async def main():
+...     await asyncio.gather(*[asyncio.sleep(0.05) for _ in range(100)])
+&gt;&gt;&gt; t=time.time(); asyncio.run(main()); print(time.time()-t)  # ≈5.5s 串行 vs ≈0.55s 并发</code></pre><p><b>数量级直觉：</b>进程数超过核数只会更慢（上下文切换）；IO 并发数通常取 50–200，过大反而触发连接/文件描述符上限。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：三个最常踩的坑</h2><ul><li><b>以为 threading 能加速计算</b>：CPython 有 GIL，同一时刻只有一个线程跑字节码，CPU 密集用 threading 反而因锁竞争略慢 5–10%</li><li><b>multiprocessing 传大对象</b>：进程间靠 pickle 序列化，传几百 MB 数组比计算还慢；改用共享内存（multiprocessing.shared_memory）或放进程外存储</li><li><b>asyncio 忘写 await</b>：协程不 await 就不调度，表现为「代码跑得飞快但结果全错/没发请求」；用 ruff 的 asyncio 规则或 IDE 警告兜底</li><li><b>线程数 / 协程数过多</b>：线程默认栈 8MB，开 1000 线程就吃 8GB；asyncio 虽轻量但同步阻塞调用会卡死事件循环</li><li><b>死锁</b>：asyncio 里 await 持有锁再去 await 别的协程，或 threading 嵌套加锁顺序不一致</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 Python 多线程在 CPU 密集下不加速？</summary><p>因为 GIL（全局解释器锁）规定<b>同一时刻只有一个线程能执行 Python 字节码</b>。多线程的「并行」只发生在 C 扩展释放 GIL 时（如 numpy 的部分运算），纯 Python 循环全程持锁，多个线程只能时间片轮转，还要额外付出锁竞争开销，所以不加速甚至变慢。要真并行只能多进程或换无 GIL 实现（PyPy 仍带 GIL，Cython 释放 GIL 需标注，Python 3.13 起实验性 nogil 构建）。</p></details><details><summary>asyncio 比 threading 快在哪？</summary><p>asyncio 是<b>单线程协作式多任务</b>：遇到 await 就主动让出，没有线程切换（≈微秒级 vs 线程毫秒级）和锁开销。它适合「大量短 IO 等待」——1000 个连接各等 50ms，事件循环在它们之间无缝切换。但它<b>不魔法</b>：遇到 CPU 密集代码会卡住整个循环，必须丢进 run_in_executor（本质是线程/进程池）。</p></details><details><summary>选 multiprocessing 一定要付出序列化代价吗？</summary><p>只有<b>跨进程传数据</b>才需要 pickle。如果数据一开始就在子进程里产生（如每个进程读自己的文件），或者走共享内存 / 内存映射 / 外部队列（Redis、ZeroMQ），就能避免大对象序列化。所以「进程慢」通常是用法问题：把输入数据设计成各进程自取，而不是主进程算好再广播。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · Python ·

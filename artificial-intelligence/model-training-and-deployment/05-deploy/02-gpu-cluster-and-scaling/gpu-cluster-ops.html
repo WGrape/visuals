@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -121,6 +139,21 @@ NCCL_DEBUG=INFO python train.py
 # 拓扑：NVLink（快）vs PCIe vs 跨节点 IB（慢）</code></pre>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：运维四个面</h2><p>GPU 集群运维围绕四件事：<b>看得清显存/利用率、调度得开、能弹性扩缩、多卡通信不堵</b>。缺一个，要么烧钱要么训崩。</p><div class="tw"><table><thead><tr><th>面</th><th>核心问题</th><th>工具</th></tr></thead><tbody><tr><td>看卡</td><td>卡在算还是在空转</td><td>nvidia-smi / DCGM / Prometheus</td></tr><tr><td>调度</td><td>任务怎么分到卡上</td><td>K8s + 设备插件 / Slurm</td></tr><tr><td>伸缩</td><td>峰谷怎么省</td><td>HPA / KEDA + 队列</td></tr><tr><td>通信</td><td>多卡间带宽够吗</td><td>NCCL + NVLink/IB</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：看卡与调度参数</h2><div class="tw"><table><thead><tr><th>指标</th><th>健康区间</th><th>危险信号</th></tr></thead><tbody><tr><td>GPU 利用率</td><td>60%–95%</td><td>长期 &lt; 20%（IO 瓶颈/小 batch）</td></tr><tr><td>显存占用</td><td>&lt; 90%</td><td>频繁 OOM 或 &gt; 95% 抖动</td></tr><tr><td>SM 效率</td><td>40%–80%</td><td>过低=启动 kernel 太碎</td></tr><tr><td>NVLink 带宽</td><td>接近理论值</td><td>掉速=拓扑错/线缆松</td></tr></tbody></table></div><p class="x-dry-cap">GPU 看卡 + K8s 申请 + NCCL 调试</p><pre><code># 看卡：利用率 + 显存 + 进程
+nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total \
+  --format=csv -l 1
+
+# 持续采样到 Prometheus（DCGM-exporter）
+kubectl apply -f dcgm-exporter.yaml
+
+# K8s 申请整卡 / 半卡
+resources:
+  limits:
+    nvidia.com/gpu: 1        # 整卡
+    # nvidia.com/gpu: 0.5    # MIG 或时间片，需调度器支持
+
+# 多卡训练起 NCCL 调试
+NCCL_DEBUG=INFO torchrun --nproc_per_node=8 train.py</code></pre><p><b>数量级：</b>一块 A100 80GB 训 7B 模型约吃 15–20GB（fp16），13B 约 30GB；利用率长期低于 20% 基本是数据加载没跟上（没用 prefetch / num_workers 太小）。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：五个高频故障</h2><ul><li><b>OOM</b>：batch 太大或梯度没释放——降 batch、开梯度检查点（重算换显存）、用 ZeRO/FSDP 切分</li><li><b>利用率低</b>：DataLoader 单进程读不动——设 num_workers=4×核数、pin_memory=True、开 prefetch</li><li><b>多卡卡死</b>：NCCL 某张卡没起来——NCCL_DEBUG=INFO 看哪张卡挂了，常是拓扑/NVLink 或 IB 配置错</li><li><b>显存碎片</b>：反复申请释放导致大块申请失败——用 cudaMallocAsync 或重启任务，训练前预热</li><li><b>抢占/漂移</b>：弹性训练被回收节点后状态丢——用 checkpoint 每 N 步落盘，支持 resume</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>NVLink 和 InfiniBand 分别解决什么？</summary><p>NVLink 是<b>单机内</b>卡间直连，带宽 300–900 GB/s，远高于 PCIe（≈64 GB/s），解决单机 8 卡通信瓶颈；InfiniBand 是<b>跨机</b>网络，几百 GB/s，解决多机间梯度同步。两者不是替代关系：单机内靠 NVLink，跨机靠 IB，缺一个多卡扩展就卡在慢的那段。没有 IB 时多机走 TCP 网络，带宽掉一个数量级，大模型训练基本不可行。</p></details><details><summary>为什么显存不够不能直接堆 batch？</summary><p>因为显存里除了激活还有<b>优化器状态与梯度</b>：AdamW 对每参数额外存 2 份（m、v），7B 模型 fp16 权重 14GB，但优化器状态能再吃 28GB。所以单纯加 batch 会先撞优化器显存。正解是 ZeRO/FSDP：把优化器状态和梯度<b>分片到各卡</b>，显存随卡数近线性下降。</p></details><details><summary>弹性伸缩对训练友好吗？</summary><p>对<b>无状态推理</b>极其友好：多副本 HPA 直接加减；对<b>有状态训练</b>则麻烦，节点被回收要能 resume：周期性 checkpoint + 容错 launcher（如 TorchElastic）。所以训练集群通常保活固定规模，推理集群才做弹性——别把两者调度策略混用。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 人工智能 ·

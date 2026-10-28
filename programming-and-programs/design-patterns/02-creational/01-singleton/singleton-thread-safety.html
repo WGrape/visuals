@@ -59,6 +59,24 @@
   .qa b{color:var(--accent2)}
   footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
   footer a{color:var(--accent);text-decoration:none}
+
+.x-dry-sec{margin:26px 0}
+.x-dry{font-size:1rem;line-height:1.75}
+.x-dry h2{font-size:1.28rem;margin:0 0 14px;line-height:1.35}
+.x-dry p{margin:10px 0}
+.x-dry .tw{overflow-x:auto;margin:14px 0}
+.x-dry table{width:100%;min-width:560px;border-collapse:collapse;font-size:.94rem}
+.x-dry th,.x-dry td{border:1px solid rgba(128,128,128,.45);padding:9px 11px;text-align:left;vertical-align:top}
+.x-dry th{font-weight:700;background:rgba(128,128,128,.14)}
+.x-dry tbody tr:nth-child(even){background:rgba(128,128,128,.05)}
+.x-dry pre{overflow:auto;background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:14px 16px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-size:.88rem;margin:12px 0}
+.x-dry code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.x-dry ul{margin:12px 0;padding-left:22px}
+.x-dry li{margin:7px 0}
+.x-dry details{background:rgba(128,128,128,.1);border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:11px 15px;margin:12px 0}
+.x-dry summary{cursor:pointer;font-weight:700}
+.x-dry details p{margin:8px 0 0}
+
 </style>
 </head>
 <body>
@@ -140,6 +158,23 @@ db = Database()  # import 多次也只执行一次</code></pre>
 </ul>
 </section>
 
+<div class="x-dry"><section class="x-dry-sec" data-dry-goods><h2>第一层 · 概念与判定：什么时候真的需要单例</h2><p>单例保证<b>一个进程内只有一个实例</b>，常用于配置中心、连接池、日志器。但多数情况是过度设计——能用依赖注入 / 模块级变量替代就不要用单例。</p><div class="tw"><table><thead><tr><th>信号</th><th>该用单例</th><th>不该用</th></tr></thead><tbody><tr><td>全局唯一且昂贵（连接池/客户端）</td><td>✓</td><td>单纯的「工具类」也用单例</td></tr><tr><td>需要跨模块共享同一状态</td><td>✓</td><td>只是想少传参数</td></tr><tr><td>测试需要可替换实现</td><td>✗（单例难 mock）</td><td>—</td></tr></tbody></table></div></section><section class="x-dry-sec" data-dry-goods><h2>第二层 · 参数·命令·量化：三种实现的代价</h2><div class="tw"><table><thead><tr><th>实现</th><th>线程安全</th><th>首次访问开销</th><th>备注</th></tr></thead><tbody><tr><td>饿汉（模块加载即建）</td><td>天然安全</td><td>启动期一次性</td><td>可能提前初始化用不到的对象</td></tr><tr><td>Go sync.Once</td><td><b>安全</b></td><td>≈一次原子 CAS</td><td>官方推荐，约 10–20ns 首次</td></tr><tr><td>双重检查锁（DCL）</td><td>需 volatile/atomic</td><td>首次加锁</td><td>Java C++ 易写错</td></tr><tr><td>Python 模块 / 元类</td><td>解释器级锁，安全</td><td>几乎无感</td><td>GIL 兜底</td></tr></tbody></table></div><p class="x-dry-cap">Go 单例：sync.Once vs 裸双重检查</p><pre><code>// Go：sync.Once 是最省心的写法
+var once sync.Once
+var instance *Client
+func Get() *Client {
+    once.Do(func() { instance = newClient() })
+    return instance
+}
+
+// 反例：裸双重检查在 Go 里没必要，且手写易漏
+func GetBad() *Client {
+    if instance == nil {          // 读没加锁，可能重复建
+        mu.Lock()
+        if instance == nil { instance = newClient() }
+        mu.Unlock()
+    }
+    return instance
+}</code></pre><p><b>数量级：</b>sync.Once 首次约 10–20ns，之后每次只做一次原子读（≈1ns）；裸锁每次读都进临界区，高并发下差距可达几十倍。</p></section><section class="x-dry-sec" data-dry-goods><h2>第三层 · 排障与边界：双重检查为什么容易写错</h2><ul><li><b>指令重排导致拿到半初始化对象</b>：Java/C++ 里未用 volatile 的 DCL，构造可能被重排，线程 B 读到非 null 但字段还没赋值</li><li><b>Go 里 DCL 完全没必要</b>：once.Do 已封装内存屏障，手写锁既丑又慢还易错</li><li><b>延迟初始化的隐藏成本</b>：第一次请求突然变慢（建连接/读配置），压测要覆盖冷启动</li><li><b>单例 + 可变状态</b>：多个 goroutine 改同一个实例字段，需要实例内部自己加锁，单例只保证唯一不保证内部安全</li><li><b>测试污染</b>：单例跨测试共享状态，一个测试改了配置另一个测试炸——需要 reset 钩子</li></ul></section><section class="x-dry-sec" data-dry-goods><h2>第四层 · 原理与取舍</h2><details><summary>为什么 Java 的双重检查必须加 volatile？</summary><p>因为 JVM 允许<b>指令重排序</b>：new 对象分「分配内存→初始化→赋值引用」三步，未同步时可能先赋值引用再初始化（把步骤 2、3 重排）。线程 A 正在构造，线程 B 看到 instance != null 就直接返回，拿到一个<b>字段全 0 的半成品</b>。volatile 在此处有双重作用：保证可见性，并通过内存屏障禁止构造与赋值的重排序。</p></details><details><summary>Go 为什么不需要 volatile 版 DCL？</summary><p>Go 的内存模型没有 Java 那种「构造重排」陷阱，且 <code>sync.Once</code> 内部用了正确的原子操作与屏障，保证 once.Do 里的函数<b>完全执行完</b>后才对其他 goroutine 可见。所以直接 once.Do(new) 即可，手写 DCL 既不更快也不更安全，纯属多余。</p></details><details><summary>单例和全局变量有什么区别，谁更糟？</summary><p>单例至少把「唯一性」和「获取方式」封装起来，可替换、可懒加载；裸全局变量则完全暴露、无处不在可改，还难测试。但两者本质都是<b>隐式共享状态</b>，都会增加耦合。更优解是显式注入：调用方持有实例，测试时传一个假实现——代价只是多一个参数，换来可测与清晰。</p></details></section></div>
 </main>
 <footer>
   <p>Visuals · 设计模式 ·
