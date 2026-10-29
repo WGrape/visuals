@@ -58,7 +58,7 @@
       01-generation-metrics/
       02-watermark-and-forensics/
   model-llm/
-    01-development/
+    01-overview/
       01-history/
     02-principle/
       01-scaling-laws/
