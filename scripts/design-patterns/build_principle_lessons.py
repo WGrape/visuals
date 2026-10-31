@@ -3,7 +3,7 @@ from html import escape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "programming-and-programs/design-patterns"
-OUT = ROOT / "01-overview/02-design-principles"
+OUT = ROOT / "01-foundations/02-design-principles"
 LESSONS = []
 
 

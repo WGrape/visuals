@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JVM 垃圾回收：分代模型与回收器全景</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>JVM 垃圾回收：分代模型与回收器全景</h1>
+  <p>从可达性分析到 Serial / Parallel / CMS / G1 / ZGC / Shenandoah 的选型</p>
+  <span class="tag">JVM</span><span class="tag">GC</span><span class="tag">分代</span><span class="tag">G1</span><span class="tag">ZGC</span><span class="tag">回收器</span>
+</header>
+<nav>
+  <a href="#gen">① 分代</a>
+  <a href="#reach">② 可达性</a>
+  <a href="#family">③ 回收器</a>
+  <a href="#trigger">④ 触发</a>
+  <a href="#myth">⑤ 误区</a>
+  <a href="#qa">⑥ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  一句话：JVM 用「可达性分析」判定死对象，按「分代」假设（多数对象朝生夕死）组织堆，并提供从 Serial 到 ZGC 的一系列回收器，在吞吐与停顿间取舍。
+</div>
+
+<section id="gen">
+  <h2><span class="n">01</span>分代模型</h2>
+<p>堆分代建立在经验规律“大多数对象很快不可达”上。新生代（Eden + 2 个 Survivor）高频小回收（Minor GC），存活对象老龄化进入老年代；老年代低频大回收（Major/Full GC）。</p><div class="table-wrap"><table><thead><tr><th>区域</th><th>作用</th><th>回收频率</th><th>停顿</th></tr></thead><tbody><tr><td>Eden</td><td>新对象诞生地</td><td>高</td><td>低（Minor）</td></tr><tr><td>Survivor S0/S1</td><td>复制存活对象</td><td>高</td><td>低</td></tr><tr><td>老年代</td><td>长命对象</td><td>低</td><td>高（Major/Full）</td></tr></tbody></table></div><pre><code>// 典型分代参数
+-Xmn256m                       # 新生代大小
+-XX:SurvivorRatio=8           # Eden:Survivor = 8:1
+-XX:MaxTenuringThreshold=15   # 熬过多少次 Minor 进入老年代</code></pre>
+</section>
+
+<section id="reach">
+  <h2><span class="n">02</span>可达性分析</h2>
+<p>从 GC Roots（虚拟机栈引用、静态变量、JNI 引用等）出发，能到达的对象存活，不可达的回收。相比引用计数，它天然处理循环引用。</p><ul>
+  <li>GC Roots 包括：栈帧局部变量、静态字段、常量池、JNI 全局引用。</li>
+  <li>强/软/弱/虚引用决定回收时机：软引用内存不足才收，弱引用下次 GC 就收。</li>
+</ul>
+</section>
+
+<section id="family">
+  <h2><span class="n">03</span>回收器家族</h2>
+<div class="table-wrap"><table><thead><tr><th>回收器</th><th>方式</th><th>停顿</th><th>适用</th></tr></thead><tbody><tr><td>Serial</td><td>单线程 STW</td><td>长</td><td>单核/客户端</td></tr><tr><td>Parallel</td><td>多线程 STW</td><td>长但快</td><td>吞吐优先/批处理</td></tr><tr><td>CMS(已弃)</td><td>并发标记清除</td><td>中</td><td>老中低延迟（碎片问题）</td></tr><tr><td>G1</td><td>分 Region 增量</td><td>可控(设目标)</td><td>大堆+中低延迟主流</td></tr><tr><td>ZGC</td><td>染色指针+读屏障</td><td>亚毫秒</td><td>超大堆+极低延迟</td></tr><tr><td>Shenandoah</td><td>Brooks 指针+读屏障</td><td>亚毫秒</td><td>同 ZGC 路线</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>选型口诀：小堆求简单用 Serial；吞吐用 Parallel；可预测停顿用 G1；超低延迟大堆用 ZGC/Shenandoah。</div>
+</section>
+
+<section id="trigger">
+  <h2><span class="n">04</span>回收触发</h2>
+<ul>
+  <li>Minor GC：Eden 满时触发，只扫新生代，频繁但快。</li>
+  <li>Mixed/Full GC：老年代占用达阈值、或晋升失败、或显式 System.gc()（建议禁用）。</li>
+  <li>并发模式失败：并发回收来不及，退化为 STW 全量回收——需监控。</li>
+</ul>
+</section>
+
+<section id="myth">
+  <h2><span class="n">05</span>常见误区</h2>
+<ul>
+  <li>“Full GC 一定会 STW”：是，Full GC 通常全停顿；但 G1/ZGC 把大部分工作并发化，Full GC 才是兜底。</li>
+  <li>“G1 没有停顿”：G1 停顿可控（设 MaxGCPauseMillis）但非零，目标过激会增大 CPU 开销。</li>
+  <li>“ZGC 万能”：用更高内存/CPU 换停顿，小堆反而 G1 更划算。</li>
+  <li>“System.gc() 能立刻回收”：只是建议，且可能触发昂贵 Full GC，生产禁用。</li>
+</ul>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+<div class="qa"><b>问：为什么分代有效？</b><p>因为大部分对象短命，对新生代高频小回收成本低，老年代少回收，总体开销大降；代价是处理跨代引用（卡表/记忆集）。</p></div><div class="qa"><b>问：ZGC 为什么亚毫秒？</b><p>着色指针标记对象状态、读屏障在访问时完成并发 relocation，几乎不 STW 搬移对象，停顿与堆大小基本无关。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 编程与程序 / 运行时机制 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

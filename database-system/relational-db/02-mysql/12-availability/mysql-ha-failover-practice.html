@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 高可用故障切换：MGR / Orchestrator 实操</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>MySQL 高可用故障切换：MGR / Orchestrator 实操</h1>
+  <p>怎么切、怎么防脑裂、切完怎么校验——把架构图变成运维动作。</p>
+  <span class="tag">MySQL</span><span class="tag">高可用</span><span class="tag">MGR</span><span class="tag">故障切换</span>
+</header>
+<nav>
+  <a href="#cmp">对照</a>
+  <a href="#mgr">MGR</a>
+  <a href="#orch">Orchestrator</a>
+  <a href="#check">校验</a>
+</nav>
+<main>
+
+<div class="lead">
+  理论页画了 MGR / 主从 / MHA 的架构图。本页给运维动作：怎么切、怎么防脑裂、切完怎么校验。
+</div>
+
+<section id="cmp">
+  <h2><span class="n">01</span>方案对照：MGR / 主从 / Orchestrator</h2>
+<div class="table-wrap"><table><thead><tr><th>方案</th><th>切换方式</th><th>脑裂风险</th><th>适用</th></tr></thead><tbody><tr><td>异步主从+VIP</td><td>人工/脚本漂 VIP</td><td>高（双写）</td><td>读多写少、能容忍丢数据</td></tr><tr><td>半同步+VIP</td><td>脚本检测切换</td><td>中</td><td>多数生产</td></tr><tr><td>MGR(单主)</td><td>组内自动选主</td><td>低（多数派）</td><td>强一致首选</td></tr><tr><td>Orchestrator</td><td>基于拓扑自动</td><td>中低</td><td>复杂拓扑、跨机房</td></tr></tbody></table></div><div class="lead warn"><b>要点：</b>脑裂的本质是旧主没真死却继续写。所有防脑裂方案都靠 fencing：要么旧主被仲裁杀掉（STONITH），要么写被多数派拒绝（MGR）。</div>
+</section>
+
+<section id="mgr">
+  <h2><span class="n">02</span>MGR 故障切换与状态查看</h2>
+<p>MGR 单主模式下，主节点故障后组内自动选新主，应用通过读写分离中间件感知新主。</p><pre><code>-- 查看组成员与角色
+SELECT MEMBER_ID, MEMBER_HOST, MEMBER_ROLE, MEMBER_STATE
+FROM performance_schema.replication_group_members;
+-- 查看是否发生切换、当前主
+SELECT * FROM performance_schema.replication_group_member_stats\G
+-- 强制指定主（极低频，仅应急）
+SELECT group_replication_set_as_primary('new_primary_uuid');</code></pre><ul>
+  <li>MEMBER_STATE 必须全是 ONLINE，否则集群不可用</li>
+  <li>切换是秒级，但应用连接池要配置故障节点剔除 + 重连新主，否则连接池还指向旧主</li>
+  <li>MGR 要求每个事务的写集在多数派确认，网络分区时少数派自动只读，天然防脑裂</li>
+</ul>
+</section>
+
+<section id="orch">
+  <h2><span class="n">03</span>Orchestrator / mysqlrpladmin 手动切换</h2>
+<p>基于拓扑的切换工具，适合还用传统主从、又想要自动化的场景。</p><pre><code># Orchestrator 手动/自动故障转移
+orchestrator-client -c topology -i mydb-1   # 看复制拓扑
+orchestrator-client -c failover -i mydb-1   # 对指定实例触发切换
+orchestrator-client -c recover -i mydb-1    # 恢复（自动找新主）
+
+# 官方 mysqlrpladmin（utilities 套件，已逐步淘汰）
+mysqlrpladmin --slaves=slave1,slave2 --master=old-master \
+  --new-master=candidate --rpl-user=repl:pass failover</code></pre><div class="lead info"><b>要点：</b>Orchestrator 的 recover 与 failover 区别：failover 是已知主挂了主动切；recover 是它自己探测后自动切。生产开 auto-recover + 告警。</div>
+</section>
+
+<section id="check">
+  <h2><span class="n">04</span>切后校验清单</h2>
+<ul>
+  <li>确认新主 READ_ONLY=OFF、旧主被置 READ_ONLY=ON（防双写）</li>
+  <li>校验主从延迟 Seconds_Behind_Master / 延迟事务数接近 0</li>
+  <li>应用写流量是否落到新主（看连接池路由、慢查询日志 host）</li>
+  <li>VIP / 域名 / 中间件配置是否已指向新主</li>
+  <li>旧主恢复后先设为从库追平，再决定回归还是下线</li>
+</ul><div class="qa"><b>问：半同步丢数据吗？</b><p>半同步要求至少一个从库收到 relay log 才提交，主宕机时若事务已发从库则安全；若主在收到 ACK 前宕机，事务在主上回滚、从库也没有，不会双写，但会存在主提交未达从的极小窗口，这是半同步与全同步的取舍。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 关系型数据库 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

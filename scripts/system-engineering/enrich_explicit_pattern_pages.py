@@ -61,7 +61,7 @@ def add(path, hook, roles, steps, intro, options, code, edge):
     LESSONS.append(locals())
 
 
-add("cache-system/04-consistency/01-cache-patterns/cache-patterns.html",
+add("cache-system/05-consistency/01-cache-patterns/cache-patterns.html",
     "同样是“读写缓存”，真正不同的是：谁负责访问数据库，以及什么时候写数据库。",
     "应用|缓存层|数据库|异步刷盘",
     "发起操作^应用读取或更新一个商品。^0|确定责任^Cache-Aside 由应用管回源；Through 由缓存层管。^0,1|同步或异步^Write-Through 同步写库，Write-Behind 稍后刷盘。^1,2,3|选择代价^比较延迟、一致性和故障恢复。^0,1,2,3",
@@ -70,7 +70,7 @@ add("cache-system/04-consistency/01-cache-patterns/cache-patterns.html",
     "function readAside(key):\n  value = cache.get(key)\n  if value == MISS:\n    value = db.get(key)\n    cache.set(key, value, ttl)\n  return value\n\nfunction writeAside(key, value):\n  db.update(key, value)\n  cache.delete(key)\n\n// Through/Behind 的 DB 访问位于缓存层实现中。",
     "选型关键：Cache-Aside 简单但并非强一致；Through 依赖缓存层的读写代理能力；Write-Behind 用延迟和丢失风险换写吞吐。")
 
-add("cache-system/04-consistency/01-cache-patterns/cache-aside-detail.html",
+add("cache-system/05-consistency/01-cache-patterns/cache-aside-detail.html",
     "读时“先查缓存，未命中再回源”；写时“先写数据库，再删缓存”。并发时仍可能短暂读到旧值。",
     "读请求|缓存|数据库|写请求",
     "读缓存^读请求先尝试 cache.get。^0,1|未命中回源^缓存未命中时查询数据库。^0,2|写入更新^写请求先提交数据库，再删除旧缓存。^3,2,1|并发窗口^旧读请求可能在删缓存后回填旧值。^0,1,2,3",
@@ -79,7 +79,7 @@ add("cache-system/04-consistency/01-cache-patterns/cache-aside-detail.html",
     "function read(key):\n  cached = cache.get(key)\n  if cached != MISS: return cached\n  value = db.get(key)\n  cache.set(key, value, ttl)\n  return value\n\nfunction write(key, value):\n  db.update(key, value)   // 先提交权威数据\n  cache.delete(key)      // 再使旧缓存失效",
     "需要更严格新鲜度时，可用版本号、条件回填或串行化关键路径；延迟双删只缓解特定时序，不提供强一致保证。")
 
-add("cache-system/04-consistency/01-cache-patterns/read-write-through.html",
+add("cache-system/05-consistency/01-cache-patterns/read-write-through.html",
     "Read-Through 管“未命中时谁加载”；Write-Through 与 Write-Behind 管“写入何时落库”。这不是同一个维度。",
     "应用|缓存代理|数据库|异步队列",
     "读取数据^应用只向缓存代理请求数据。^0,1|缓存未命中^Read-Through 代理自己去数据库加载。^1,2|同步写入^Write-Through 等数据库写成功才确认。^1,2|异步写入^Write-Behind 先入持久队列，稍后刷库。^1,3,2",

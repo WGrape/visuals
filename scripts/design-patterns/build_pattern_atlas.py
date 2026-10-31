@@ -7,7 +7,7 @@ from build_pattern_lessons import PAGES
 from pattern_atlas_data import ATLAS
 
 ROOT = Path(__file__).resolve().parents[2] / "programming-and-programs/design-patterns"
-OUT = ROOT / "01-overview/01-patterns-intro/all-patterns-at-a-glance.html"
+OUT = ROOT / "01-foundations/01-patterns-intro/all-patterns-at-a-glance.html"
 LABELS = {
     "02-creational": ("创建型", "对象怎样被创建"),
     "03-structural": ("结构型", "对象怎样被组合"),

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JVM GC 调优实战：参数、日志与排障</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>JVM GC 调优实战：参数、日志与排障</h1>
+  <p>先量后调：-Xmx 给够，再选回收器，再设停顿目标</p>
+  <span class="tag">JVM</span><span class="tag">GC调优</span><span class="tag">参数</span><span class="tag">日志</span><span class="tag">排障</span>
+</header>
+<nav>
+  <a href="#param">① 关键参数</a>
+  <a href="#log">② GC 日志</a>
+  <a href="#read">③ 读日志</a>
+  <a href="#scene">④ 场景</a>
+  <a href="#diag">⑤ 排障</a>
+  <a href="#qa">⑥ 疑问</a>
+</nav>
+<main>
+
+<div class="lead">
+  一句话：GC 调优顺序是「先给够堆（-Xmx）→ 选回收器 → 设停顿目标 → 看日志验证」，不要一上来就调一堆旋钮。
+</div>
+
+<section id="param">
+  <h2><span class="n">01</span>关键参数</h2>
+<div class="table-wrap"><table><thead><tr><th>参数</th><th>含义</th><th>建议</th></tr></thead><tbody><tr><td>-Xms / -Xmx</td><td>初始/最大堆</td><td>设相等避免动态扩缩；按存活对象×3~4 估</td></tr><tr><td>-Xss</td><td>线程栈</td><td>默认 1MB；线程多可降到 256k~512k</td></tr><tr><td>-XX:NewRatio</td><td>老年代:新生代</td><td>默认 2；吞吐型可加大老年代</td></tr><tr><td>-XX:+UseG1GC</td><td>选 G1</td><td>JDK9+ 默认</td></tr><tr><td>-XX:MaxGCPauseMillis</td><td>G1 停顿目标</td><td>如 200ms，过激增 CPU</td></tr><tr><td>-XX:+UseZGC</td><td>选 ZGC</td><td>大堆低延迟</td></tr><tr><td>-XX:MaxMetaspaceSize</td><td>元空间上限</td><td>防类加载泄漏撑爆</td></tr><tr><td>-XX:MaxDirectMemorySize</td><td>堆外上限</td><td>Direct Buffer 上限</td></tr></tbody></table></div>
+</section>
+
+<section id="log">
+  <h2><span class="n">02</span>开启 GC 日志</h2>
+<pre><code># JDK9+ 统一日志：把 GC 日志写到文件，含停顿/吞吐
+java -Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=100M \
+     -XX:+UseG1GC -Xmx4g -jar app.jar
+
+# 老版本（-Xloggc 风格）
+# -Xloggc:gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps</code></pre>
+</section>
+
+<section id="read">
+  <h2><span class="n">03</span>怎么读日志</h2>
+<ul>
+  <li>看吞吐量：非 GC 时间占比，目标 &gt; 95%（即 GC 占比 &lt; 5%）。</li>
+  <li>看停顿：单次 STW 时长是否超 SLA；G1 看 “Pause young/mixed” 时长。</li>
+  <li>看晋升：Promotion failed / 老年代增长过快 = 新生代太小或对象过早晋升。</li>
+  <li>看并发失败：CMS/ZGC 出现 “concurrent mode failure” = 回收跟不上分配。</li>
+</ul>
+</section>
+
+<section id="scene">
+  <h2><span class="n">04</span>典型场景</h2>
+<div class="table-wrap"><table><thead><tr><th>场景</th><th>方向</th></tr></thead><tbody><tr><td>延迟敏感（API）</td><td>G1/ZGC + 设 MaxGCPauseMillis；减小 -Xmn 让 Minor 快</td></tr><tr><td>吞吐优先（批处理）</td><td>Parallel；给大堆少 GC</td></tr><tr><td>元空间 OOM</td><td>加 -XX:MaxMetaspaceSize，查类加载泄漏</td></tr><tr><td>GC 停顿超 SLA</td><td>先查对象存活率（是否缓存泄漏），再调回收器/并发线程</td></tr><tr><td>堆外 OOM</td><td>降 -XX:MaxDirectMemorySize 或排查 Buffer 未释放</td></tr></tbody></table></div>
+</section>
+
+<section id="diag">
+  <h2><span class="n">05</span>排障工具清单</h2>
+<ul>
+  <li>jstat -gcutil &lt;pid&gt; 1000：实时看各代占用与 GC 次数/时间。</li>
+  <li>jmap -histo:live &lt;pid&gt;：按类看对象数/占用，定位大对象。</li>
+  <li>jmap -dump:live,format=b,file=heap.hprof &lt;pid&gt;：堆转储，MAT 分析泄漏。</li>
+  <li>jstack &lt;pid&gt;：线程栈，定位 STW 期间卡在哪。</li>
+  <li>jcmd GC.heap_dump / VM.native_memory：堆/本地内存诊断。</li>
+</ul>
+</section>
+
+<section id="qa">
+  <h2><span class="n">06</span>常见疑问</h2>
+<div class="qa"><b>问：GC 停顿突然变长？</b><p>先看是否大对象分配或一次性堆暴涨；再查并发是否被关闭；ZGC 停顿与堆大小基本无关，若变长常是系统页回收/日志干扰，需结合指标看。</p></div><div class="qa"><b>问：是不是该把 -Xmx 调小？</b><p>不一定。堆太小会频繁 GC、每次更快但总开销更高；先按存活对象×3~4 给够，再谈调优。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 编程与程序 / 运行时机制 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

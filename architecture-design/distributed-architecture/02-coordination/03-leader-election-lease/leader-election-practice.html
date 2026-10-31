@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>选主与租约实现：etcd / Redis / ZooKeeper</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>选主与租约实现：etcd / Redis / ZooKeeper</h1>
+  <p>三种可落地的 Leader Election 实现，并点出防脑裂的 fencing 陷阱。</p>
+  <span class="tag">选主</span><span class="tag">Lease</span><span class="tag">etcd</span><span class="tag">Redis</span><span class="tag">ZooKeeper</span>
+</header>
+<nav>
+  <a href="#etcd">etcd</a>
+  <a href="#redis">Redis</a>
+  <a href="#zk">ZooKeeper</a>
+  <a href="#cmp">对照</a>
+</nav>
+<main>
+
+<div class="lead">
+  理论页讲了 Leader Election 与 Lease 的原理。本页给三种可落地的实现：etcd、Redis、ZooKeeper，并点出防脑裂的关键陷阱。
+</div>
+
+<section id="etcd">
+  <h2><span class="n">01</span>etcd：lease + 原子 CAS</h2>
+<p>etcd 的 lease 自带 TTL 自动过期，配合事务 CAS 实现谁拿到 key 谁就是主，过期即释放。</p><pre><code># 申请一个 15s 的租约
+lease=$(etcdctl lease grant 15 | awk '{print $2}')
+# 用事务原子地把自己的租约绑到 leader key（仅当 key 不存在时才成功）
+etcdctl txn put --lease=$lease leader/key "$(hostname)" \
+  --precond='CREATE'
+# 后台每 5s 续租（看门狗）
+etcdctl lease keep-alive $lease &amp;
+# 失去主：进程退出 / 续租失败 =&gt; lease 过期 =&gt; key 消失 =&gt; 别人可抢</code></pre><div class="lead info"><b>要点：</b>etcd 客户端通常有 campaign/revoke 高层 API 封装上述流程，直接用更省心；续租间隔必须小于 lease TTL 的一半。</div>
+</section>
+
+<section id="redis">
+  <h2><span class="n">02</span>Redis：SET NX + 看门狗</h2>
+<p>用 SET key val NX PX 原子抢锁，值用唯一 token 防止误删别人的锁；后台看门狗延长过期。</p><pre><code># 伪代码（Redisson 等已封装）
+# 抢锁：仅当 key 不存在时设置，带 30s 过期和唯一 token
+SET leader:svc "token-abc" NX PX 30000
+# 续租（看门狗，每 10s 执行）
+PEXPIRE leader:svc 30000
+# 释放：用 Lua 保证只删自己的 token，避免误删他人锁
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end</code></pre><div class="lead warn"><b>要点：</b>Redis 主从异步复制下，主宕机瞬间锁可能未同步到从，从升级后丢锁——这是 Redis 锁的固有风险。要求强一致用 Redlock（多实例多数派）或 etcd/ZK。</div>
+</section>
+
+<section id="zk">
+  <h2><span class="n">03</span>ZooKeeper：临时顺序节点</h2>
+<p>创建临时(ephemeral)顺序节点，序号最小者为主；会话断开节点自动消失，触发重新选主。</p><pre><code># Curator 的 LeaderLatch 封装了下面所有细节
+# 1. 在 /election 下建 ephemeral_sequential 节点
+# 2. 取自己序号；若自己是最小 =&gt; 成为 leader
+# 3. 监听比自己小一号的节点；它消失 =&gt; 重新判断
+# 伪代码：
+path = zk.create("/election/node-", EPHEMERAL|SEQUENTIAL)
+children = zk.get_children("/election")
+if min(children) == path:  becomeLeader()</code></pre><div class="lead info"><b>要点：</b>ZK 的 ephemeral 节点依赖会话；网络抖动导致会话过期也会丢主，所以选主逻辑要能容忍短暂无主而非反复切换（加退避）。</div>
+</section>
+
+<section id="cmp">
+  <h2><span class="n">04</span>三方案对照与脑裂陷阱</h2>
+<div class="table-wrap"><table><thead><tr><th>维度</th><th>etcd</th><th>Redis</th><th>ZooKeeper</th></tr></thead><tbody><tr><td>一致性</td><td>强（Raft）</td><td>弱（异步复制）</td><td>强（Zab）</td></tr><tr><td>锁自动释放</td><td>lease 过期</td><td>PX 过期</td><td>会话断</td></tr><tr><td>防误删</td><td>CAS/事务</td><td>Lua 校验 token</td><td>序号 ownership</td></tr><tr><td>强一致锁</td><td>是</td><td>需 Redlock</td><td>是</td></tr></tbody></table></div><ul>
+  <li>脑裂根因：旧主还活着却以为自己失主，继续写 =&gt; 双主。所有方案都靠 TTL/lease 过期兜底</li>
+  <li>缓解：主在持锁期间做写操作前校验我还是主吗；写带 fencing token，旧主的 token 更小被拒</li>
+  <li>切主后务必有退避 + 优雅降级，避免惊群式重新选主</li>
+</ul><div class="qa"><b>问：fencing token 是什么？</b><p>一个单调递增的数字：每次选主成功 +1，写存储时带着它；存储只接受比已见最大 token 更大的写，旧主带着小 token 的写被拒绝，从而即使旧主脑裂也无法污染数据。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 分布式架构 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

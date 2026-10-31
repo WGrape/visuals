@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slab 分配器：观测、调参与泄漏排查</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f1117; --panel:#171b26; --panel2:#1f2433; --border:#2b3142;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#6ea8fe; --accent2:#7ee787;
+    --warn:#f0a868; --danger:#ff7b72; --purple:#d2a8ff; --cyan:#56d4dd;
+  }
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.75;font-size:15px;padding:0 0 60px}
+  header{padding:46px 20px 30px;text-align:center;
+    background:radial-gradient(1100px 360px at 50% -10%,rgba(110,168,254,.18),transparent);
+    border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 10px;font-size:29px}
+  header p{color:var(--muted);margin:0}
+  .tag{display:inline-block;margin:14px 6px 0;padding:4px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12.5px}
+  nav{position:sticky;top:0;z-index:20;background:rgba(15,17,23,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+  nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:5px 10px;border-radius:8px;
+    border:1px solid transparent;transition:.18s}
+  nav a:hover{color:var(--text);background:var(--panel);border-color:var(--border)}
+  main{max-width:1000px;margin:0 auto;padding:28px 20px}
+  section{margin:44px 0;scroll-margin-top:68px}
+  h2{font-size:22px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-weight:700;margin-right:10px}
+  h3{font-size:17px;margin:24px 0 8px;color:#dbe4ef}
+  p{margin:12px 0}
+  .muted{color:var(--muted)}
+  .lead{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0}
+  .ok{border-left-color:var(--accent2)}
+  .warn{border-left-color:var(--warn)}
+  .bad{border-left-color:var(--danger)}
+  code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+    font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;color:#e6edf3}
+  pre{background:#0b0e13;border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+    overflow:auto;font-size:13px;line-height:1.7;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#abb2bf}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:16px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:15px;color:var(--accent)}
+  .card p{font-size:13.5px;color:var(--muted);margin:6px 0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--accent);font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+  .fig{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:18px 0;overflow-x:auto}
+  .fig svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .cap{text-align:center;color:var(--muted);font-size:12.5px;margin-top:10px}
+  ul,ol{margin:12px 0 12px 22px}
+  li{margin:6px 0}
+  .qa{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
+  .qa b{color:var(--accent2)}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:30px 20px;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Slab 分配器：观测、调参与泄漏排查</h1>
+  <p>从 /proc/slabinfo 到内核参数，把 Slab 理论落到可操作的观测与调优。</p>
+  <span class="tag">内存管理</span><span class="tag">Slab</span><span class="tag">Linux内核</span><span class="tag">调优</span>
+</header>
+<nav>
+  <a href="#observe">观测</a>
+  <a href="#tune">调参</a>
+  <a href="#leak">泄漏排查</a>
+  <a href="#cmp">对比</a>
+</nav>
+<main>
+
+<div class="lead">
+  理论页把 Slab 的 object/buffer/page 三层结构讲清楚了。本页聚焦可操作部分：怎么看 slab 占了多少、怎么调每 slab 的批量与回收、以及 dentry/inode 缓存暴涨时如何快速止血。
+</div>
+
+<section id="observe">
+  <h2><span class="n">01</span>观测：slabtop 与 /proc/slabinfo</h2>
+<p>最常用的是 slabtop（实时排序）和 /proc/slabinfo（持久可读）。要看某个 cache 的细节，直接读 sysfs。</p><ul>
+  <li>slabtop -s c  # 按 cache 大小排序，立刻看到谁是内存大户</li>
+  <li>cat /proc/slabinfo | awk '$3*$4 &gt; 1048576'  # 单 cache 占用 &gt;1MB 的</li>
+  <li>ls /sys/kernel/slab/  # 每个 slab cache 一个目录</li>
+  <li>cat /sys/kernel/slab/kmalloc-2k/object_size  # 单个对象大小</li>
+</ul><pre><code># 看 dentry / inode 这两个最容易暴涨的 cache
+grep -E '^(dentry|inode_cache)' /proc/slabinfo
+# 输出示例（各列含义见下）：
+# name &lt;active_objs&gt; &lt;num_objs&gt; &lt;objsize&gt; &lt;objperslab&gt; &lt;pagesperslab&gt; ...
+# dentry  51234  52000   192   21    1 : tunables ...
+# 关键：active_objs 接近 num_objs 且还在涨 =&gt; 对象被持续持有</code></pre><div class="lead info"><b>要点：</b>slabtop 的 OBJ 列和 /proc/slabinfo 的 active_objs 不等，是因为 slab 以整页批量分配，存在已分配但未使用的余量；真正判断泄漏看 active_objs 的增长趋势而非绝对值。</div>
+</section>
+
+<section id="tune">
+  <h2><span class="n">02</span>调参：min_partial / cpu_partial / reclaim</h2>
+<p>每个 slab cache 在 sysfs 下都有 tunables，影响每 CPU 缓存批量和部分满 slab 的保留数量。</p><div class="table-wrap"><table><thead><tr><th>参数</th><th>作用</th><th>调大/调小的后果</th></tr></thead><tbody><tr><td>cpu_partial</td><td>每 CPU 部分满 slab 的对象上限</td><td>调大=减少锁竞争但费内存</td></tr><tr><td>min_partial</td><td>每 CPU 最少保留的部分满 slab 数</td><td>调大=分配更快但更碎</td></tr><tr><td>order</td><td>单 slab 占用页数的 2 的对数</td><td>调大=减少内部碎片但更易分配失败</td></tr><tr><td>reclaim_account</td><td>是否计入内存回收</td><td>开启=压力下更易回收</td></tr></tbody></table></div><pre><code># 临时调大某 cache 的 cpu_partial（重启失效，需内核开启 CONFIG_SLUB）
+echo 120 &gt; /sys/kernel/slab/kmalloc-2k/cpu_partial
+# 永久生效需改启动参数或写 udev 规则；生产环境先观测再定</code></pre><div class="lead warn"><b>要点：</b>SLUB（主流默认）下这些 tunables 大多直接写在 sysfs；老 SLAB 分配器才有 /proc/slabinfo 里的 tunables 列。调参前务必确认分配器类型：dmesg | grep -i slab。</div>
+</section>
+
+<section id="leak">
+  <h2><span class="n">03</span>排查：slab 内存泄漏与 dentry 暴涨</h2>
+<p>典型症状是 free 显示可用内存不少，但 slab 持续上涨、业务 OOM。按下面顺序定位。</p><ul>
+  <li>先确认是哪种 cache 在涨：watch -n1 'grep -E "dentry|inode|buffer_head" /proc/slabinfo'</li>
+  <li>若是 dentry/inode，多半是遍历大量小文件 + 未限制导致；可临时 drop：echo 2 &gt; /proc/sys/vm/drop_caches（只清 dentry/inode，不丢数据）</li>
+  <li>若是业务对象 cache，查对应内核模块/驱动是否有 kmalloc 未 kfree</li>
+  <li>长期方案：限制容器 memory 或调大 vfs_cache_pressure（默认 100，调大=更积极回收 dentry/inode）</li>
+</ul><pre><code># vfs_cache_pressure：控制回收 dentry/inode 的积极性
+# 默认 100；设为 200 表示比回收 page cache 更积极地回收目录项
+sysctl -w vm.vfs_cache_pressure=200
+# 写入 /etc/sysctl.conf 持久化
+echo 'vm.vfs_cache_pressure=200' &gt;&gt; /etc/sysctl.conf</code></pre><div class="lead warn"><b>要点：</b>drop_caches 的 1/2/3：1=pagecache，2=dentries+inodes，3=全清。生产只清 2 最安全；清 1/3 可能瞬间打满磁盘读（重新读回 page cache）。</div>
+</section>
+
+<section id="cmp">
+  <h2><span class="n">04</span>对比：buddy / slab / kmalloc</h2>
+<p>三者是分层关系：buddy 管页框，slab 在页上切对象，kmalloc 是 slab 对任意尺寸的封装。</p><div class="table-wrap"><table><thead><tr><th>机制</th><th>管理单位</th><th>适用场景</th></tr></thead><tbody><tr><td>buddy</td><td>页框(4KB 起，2 的幂)</td><td>物理页分配，大块内存</td></tr><tr><td>slab</td><td>固定大小对象</td><td>内核对象（task_struct、inode 等）</td></tr><tr><td>kmalloc</td><td>任意小对象</td><td>驱动/内核里临时小内存</td></tr><tr><td>vmalloc</td><td>虚拟连续、物理未必连续</td><td>大块、不要求物理连续</td></tr></tbody></table></div><div class="qa"><b>问：为什么不用 kmalloc 直接管所有内存？</b><p>kmalloc 底层仍是 slab；slab 的价值是把同尺寸对象聚成一池，避免伙伴系统按页分配带来的内部碎片和初始化开销。</p></div>
+</section>
+
+</main>
+<footer>
+  <p>Visuals · 计算机操作系统 ·
+  <a href="../../index.html">返回目录</a> ·
+  <a href="../../../../index.html">返回知识地图</a></p>
+</footer>
+</body>
+</html>

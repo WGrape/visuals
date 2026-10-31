@@ -140,6 +140,8 @@ def audit():
             for chapter in chapter_dirs:
                 chapters += 1
                 check_overview_name(chapter, errors)
+                if chapter.name.endswith("-overview"):
+                    errors.append(f"二级学科不应以概览作为三级章节：{chapter.relative_to(ROOT)}")
                 contained = [p for p in chapter.rglob("*") if is_lesson(p)]
                 articles += len(contained)
                 for page in contained:
