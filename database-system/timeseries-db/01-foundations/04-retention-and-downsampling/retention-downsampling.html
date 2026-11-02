@@ -3,7 +3,30 @@
 <title>时序数据保留与降采样设计 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
 <body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
 <header><span class="eyebrow">VISUALS · 知识专题</span><h1>时序数据保留与降采样设计</h1><p class="lead">原始数据和长期趋势需要不同时间粒度；聚合规则必须保持指标语义。</p></header>
-<section class="panel"><h2>核心机制</h2><p>保留策略决定每种粒度的数据保存多久。常见做法是短期保留原始点，长期保存分钟或小时聚合；写入、存储成本与可追溯细节随之改变。</p><p>Gauge 可以记录均值、最小、最大与样本数；Counter 应先处理重置并计算区间增量或速率。直接平均累计计数器值会生成误导性趋势。</p></section>
+<section class="panel"><h2>时间范围保留与降采样分层（图解）</h2>
+<svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#56d4dd">分层保留策略（Retention Policy）</text>
+      <!-- layers -->
+      <g font-size="11.5">
+        <rect x="40" y="36" width="640" height="34" rx="6" fill="#1b3a2a" stroke="#7ee787"/>
+        <text x="58" y="58" fill="#7ee787">原始精度（秒级）</text>
+        <text x="230" y="58" fill="#94a3b8">保留 7 天</text>
+        <text x="360" y="58" fill="#94a3b8">→ 用于排障、细粒度分析</text>
+
+        <rect x="40" y="76" width="640" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="58" y="98" fill="#d2a8ff">降采样（1 分钟聚合）</text>
+        <text x="230" y="98" fill="#94a3b8">保留 30 天</text>
+        <text x="360" y="98" fill="#94a3b8">→ 用于日常看板</text>
+
+        <rect x="40" y="116" width="640" height="34" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="58" y="138" fill="#d2a8ff">降采样（1 小时聚合）</text>
+        <text x="230" y="138" fill="#94a3b8">保留 1 年</text>
+        <text x="360" y="138" fill="#94a3b8">→ 用于趋势、容量规划</text>
+      </g>
+      <text x="360" y="172" text-anchor="middle" font-size="11.5" fill="#7ee787">固定频率采样时，分钟与小时聚合可减少样本点数；存储节省需实测</text>
+      <text x="360" y="194" text-anchor="middle" font-size="11.5" fill="#94a3b8">这样既保住了近期可排查性，又让长期存储成本可控</text>
+    </svg>
+<h2>核心机制</h2><p>保留策略决定每种粒度的数据保存多久。常见做法是短期保留原始点，长期保存分钟或小时聚合；写入、存储成本与可追溯细节随之改变。</p><p>Gauge 可以记录均值、最小、最大与样本数；Counter 应先处理重置并计算区间增量或速率。直接平均累计计数器值会生成误导性趋势。</p></section>
 <section class="panel"><h2>用一个例子看过程</h2><pre><code>原始点：每 10 秒，保留 7 天
 1 分钟汇总：保留 90 天
 1 小时汇总：保留 2 年</code></pre>
@@ -36,5 +59,5 @@ prometheus --storage.tsdb.retention.size=50GB</code></pre><p><b>成本直觉：<
 <section class="panel"><h2>第三层 · 排障与边界</h2><p><b>高频坑清单：</b></p><ul><li>① <b>InfluxDB 默认无限保留</b>：不显式设置 RP，磁盘必然被写满，这是新手最常见的生产事故</li><li>② <b>降采样把 peak 值平均掉了</b>：用 <code>mean</code> 聚合会抹掉尖峰，监控场景要同时保留 <code>max</code></li><li>③ <b>聚合函数选错</b>：计数器类指标（如请求总数）要用 <code>sum</code> 或 <code>last</code>，用 <code>mean</code> 会失真</li><li>④ <b>CQ 只处理新数据</b>：InfluxDB 的 CQ <b>不会回溯</b>历史数据，建 CQ 之前的旧数据仍是原始精度</li><li>⑤ <b>降采样后查不到细节</b>：故障复盘时要看秒级细节却发现只有 5 分钟粒度 —— 原始精度至少要留够排障窗口</li><li>⑥ <b>时区问题</b>：按天聚合时注意 <code>GROUP BY time(1d)</code> 的对齐起点是 UTC 零点</li></ul><p><b>排查顺序：</b>磁盘涨 → 先查各 RP 的实际占用 → 确认 CQ 是否真的在跑 → 再确认降采样后的数据是否被正常查询（而不是只写不读）。</p></section>
 <section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么不干脆永久保留原始数据？</summary><p>成本之外，还有<b>查询性能</b>问题：查一年跨度、10 秒粒度，要扫描 315 万个点，即使列存也要几秒。而查一年、1 小时粒度只要 8760 个点，毫秒级返回。更关键的是<b>收益递减</b>：三个月前的秒级数据，几乎不会有人去逐秒看，它只占空间不产生价值。</p></details><details><summary>降采样会丢掉告警能力吗？</summary><p>会，而且是常被忽略的点。<code>mean</code> 会把短促尖峰平均掉，比如某接口 1 分钟内 5xx 突增到 50%，5 分钟均值的 <code>mean</code> 可能只有 5%，告警就漏了。<b>正确做法是聚合时同时保留多个统计量</b>：<code>mean</code> 用于看趋势、<code>max</code> 用于告警、<code>count</code> 用于算速率。</p></details><details><summary>连续查询和定时任务（cron）比有什么优劣？</summary><p>CQ 的优势是<b>由数据库内部执行、无需外部依赖、不会重复或漏跑</b>；劣势是<b>只处理新数据、调试困难、复杂逻辑写不了</b>。外部任务（如 Spark 批处理）能做任意复杂聚合与回溯，但要自己解决调度、幂等、失败重试。简单降采样用 CQ，复杂数仓加工用外部任务。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>为什么不能把每天 24 个小时 P99 直接取平均作为全天 P99？</summary><p>百分位依赖全部样本的排序分布；小时 P99 的平均值不保留样本数量和分布信息。</p></details></section>
-<footer>继续阅读：<a href="../00-overview/tsdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<footer>继续阅读：<a href="../00-tsdb-workload-model/tsdb-workload-boundaries.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

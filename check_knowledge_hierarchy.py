@@ -34,9 +34,9 @@ def check_sibling_numbers(parent, directories, errors):
         errors.append(f"同层目录编号重复或断档：{parent.relative_to(ROOT)}，编号 {numbers}")
 
 
-def check_overview_name(directory, errors):
-    if directory.name.startswith("00-") and directory.name != "00-overview":
-        errors.append(f"概览目录应命名为 00-overview：{directory.relative_to(ROOT)}")
+def check_topic_name(directory, errors):
+    if "overview" in directory.name.lower():
+        errors.append(f"知识目录不能以 overview 命名：{directory.relative_to(ROOT)}")
 
 
 class IndexLinks(HTMLParser):
@@ -139,9 +139,7 @@ def audit():
                 errors.append(f"二级目录缺少三级目录：{subject.relative_to(ROOT)}")
             for chapter in chapter_dirs:
                 chapters += 1
-                check_overview_name(chapter, errors)
-                if chapter.name.endswith("-overview"):
-                    errors.append(f"二级学科不应以概览作为三级章节：{chapter.relative_to(ROOT)}")
+                check_topic_name(chapter, errors)
                 contained = [p for p in chapter.rglob("*") if is_lesson(p)]
                 articles += len(contained)
                 for page in contained:
@@ -171,7 +169,7 @@ def audit():
                     check_sibling_numbers(directory, children, errors)
                 for descendant in chapter.rglob("*"):
                     if descendant.is_dir():
-                        check_overview_name(descendant, errors)
+                        check_topic_name(descendant, errors)
                         if not NUMBERED.match(descendant.name):
                             errors.append(f"四级及更深目录未编号：{descendant.relative_to(ROOT)}")
                 for file in chapter.iterdir():

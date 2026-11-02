@@ -3,7 +3,31 @@
 <title>时序库 Series 基数与标签设计 - Visuals</title><link rel="stylesheet" href="../../../../assets/knowledge-lesson.css"></head>
 <body><main class="lesson"><a class="back" href="../../index.html">← 返回学科目录</a>
 <header><span class="eyebrow">VISUALS · 知识专题</span><h1>时序库 Series 基数与标签设计</h1><p class="lead">标签组合决定独立时间线的数量；样本量相同，基数也可能相差几个数量级。</p></header>
-<section class="panel"><h2>核心机制</h2><p>一个 series 通常由指标名与一组标签值确定。每个唯一组合都可能增加索引、元数据与写入状态成本；将请求 ID、用户 ID 直接做标签，容易制造持续增长的基数。</p><p>基数是组合数，不是单个标签的取值数之和。实际组合未必是全笛卡尔积，需从真实写入中估计活跃 series 和新 series 创建速率。</p></section>
+<section class="panel"><h2>时间线如何由标签组合形成（图解）</h2>
+<svg width="720" height="215" viewBox="0 0 720 215">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#d2a8ff">Series = metric + tags</text>
+      <!-- metric name + tags -->
+      <rect x="40" y="34" width="640" height="34" rx="6" fill="#1f2433" stroke="#2b3142"/>
+      <text x="56" y="56" font-family="monospace" font-size="12" fill="#e2e8f0">http_requests_total</text>
+      <text x="240" y="56" font-family="monospace" font-size="12" fill="#d2a8ff">{method="GET", status="200", instance="10.0.0.1:8080"}</text>
+      <text x="620" y="56" font-family="monospace" font-size="12" fill="#7ee787">= 一条时间线</text>
+
+      <!-- series id -->
+      <rect x="40" y="76" width="640" height="30" rx="6" fill="#2a2340" stroke="#d2a8ff"/>
+      <text x="360" y="96" text-anchor="middle" font-size="11.5" fill="#d2a8ff">TSDB 会把它映射成一个内部 SeriesID（如 12345），实际存储只存 ID</text>
+
+      <!-- points -->
+      <text x="40" y="128" font-size="11.5" fill="#94a3b8">该时间线上的数据点：</text>
+      <g font-family="monospace" font-size="11">
+        <rect x="40" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="50" y="154" fill="#94a3b8">t=1000  v=42</text>
+        <rect x="196" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="206" y="154" fill="#94a3b8">t=1010  v=44</text>
+        <rect x="352" y="136" width="150" height="26" fill="#1f2433" stroke="#2b3142"/><text x="362" y="154" fill="#94a3b8">t=1020  v=45</text>
+        <rect x="508" y="136" width="160" height="26" fill="#1f2433" stroke="#2b3142"/><text x="518" y="154" fill="#94a3b8">t=1030  v=47</text>
+      </g>
+      <text x="360" y="184" text-anchor="middle" font-size="11.5" fill="#7ee787">同一 Series 的点物理上连续存放 → 时间戳差值固定(10)、值变化小 → 极易压缩</text>
+      <text x="360" y="204" text-anchor="middle" font-size="11" fill="#f0a868">⚠️ 每多一种 tag 取值组合就多一条时间线，tag 基数失控 = 时间线爆炸</text>
+    </svg>
+<h2>核心机制</h2><p>一个 series 通常由指标名与一组标签值确定。每个唯一组合都可能增加索引、元数据与写入状态成本；将请求 ID、用户 ID 直接做标签，容易制造持续增长的基数。</p><p>基数是组合数，不是单个标签的取值数之和。实际组合未必是全笛卡尔积，需从真实写入中估计活跃 series 和新 series 创建速率。</p></section>
 <section class="panel"><h2>用一个例子看过程</h2><pre><code>metric=http_requests
 method=4 种，status=5 种，instance=100 台
 理论上限：4 × 5 × 100 = 2000 条 series。</code></pre>
@@ -32,5 +56,5 @@ influx -execute 'SHOW SERIES CARDINALITY'</code></pre><p><b>告警阈值建议�
 <section class="panel"><h2>第三层 · 排障与边界：基数爆炸的高频坑</h2><p><b>会炸的 label（绝对不要拿来做 label）：</b></p><ul><li><b>user_id / device_id</b>：用户量多大基数就多大，是最常见的作死写法</li><li><b>URL path</b>：带 ID 的路径（如 /order/12345）每个请求一条新时间线</li><li><b>IP 地址</b>：尤其客户端 IP，量级完全不可控</li><li><b>trace_id / request_id</b>：每条请求唯一，基数等于请求数</li><li><b>时间戳 / 随机值</b>：完全失控，监控系统会被瞬间打爆</li><li><b>错误详情 message</b>：错误信息多变，应放到日志而不是 label</li></ul><p><b>排查顺序：</b></p><ul><li>① 先查 <code>numSeries</code> 总量与增长曲线，确认是不是基数问题</li><li>② 用 <code>topk</code> 找出贡献最大的指标名</li><li>③ 对该指标逐个 label 做 <code>count by</code>，定位元凶 label</li><li>④ 确认是<b>持续爆炸</b>还是<b>周期性 churn</b>（如每天新增一批 pod），两者解法不同</li><li>⑤ 改法：高基数字段移到日志；或用 <code>metric_relabel_configs</code> 直接 drop 掉该 label</li><li>⑥ 已经产生的存量 series 要等保留期自然过期，删 label 不会立刻释放内存</li></ul></section>
 <section class="panel"><h2>第四层 · 原理与取舍</h2><details><summary>为什么基数爆炸比数据点多更致命？</summary><p>因为时序数据库是<b>按 series 组织内存与索引</b>的。数据点多只是磁盘变大、查询变慢；而每新增一条 series，都要在内存索引里占一份结构（约 3 KB）。基数爆炸会直接推高内存常驻，最终 OOM —— 是<b>可用性</b>问题，不是性能问题。</p></details><details><summary>高基数字段想保留，除了移走还有其他办法吗？</summary><p>有，但都有代价：① 用<b>直方图 / 分位数</b>替代按用户拆分，用统计代替明细；② 用 <b>recording rule</b> 预聚合成低基数指标，原始高基数数据不入库；③ 分实例按业务拆分，把爆炸限制在单个实例内；④ 改用<b>列存 / 日志型</b>系统（如 ClickHouse）存明细，它按列组织，对高基数更友好。</p></details><details><summary>churn 为什么比稳态高基数更危险？</summary><p>稳态高基数只是内存占用大，但<b>可预测</b>；churn 是不断有新 series 产生、旧的又过期，导致索引频繁重建、head block 频繁 flush，同时查询要扫描的 series 集合不断变化，缓存命中率崩塌。典型场景是拿 pod 名或容器 ID 做 label，K8s 环境尤其常见。</p></details></section>
 <section class="panel"><h2>自检</h2><details><summary>把 UUID 作为每条请求的 tag 会发生什么？</summary><p>几乎每次请求都创建新 series，索引和元数据负担持续增长；单次请求细节更适合日志或追踪。</p></details></section>
-<footer>继续阅读：<a href="../00-overview/tsdb-explained.html">相关基础课程</a> · © 2026 Visuals</footer></main>
+<footer>继续阅读：<a href="../00-tsdb-workload-model/tsdb-workload-boundaries.html">相关基础课程</a> · © 2026 Visuals</footer></main>
 <script src="../../../../assets/knowledge-lesson.js"></script></body></html>

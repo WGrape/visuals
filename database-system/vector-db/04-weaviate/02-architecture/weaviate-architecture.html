@@ -69,10 +69,42 @@
   <span class="tag">Weaviate 架构</span><span class="tag">Schema-first</span><span class="tag">flatSearchCutoff</span><span class="tag">动态 ef</span>
 </header>
 
-<nav><a href="#arch">Schema-first 与六个层次</a><a href="#defaults">两个反直觉默认值</a><a href="#deploy">部署形态怎么选</a><a href="#scale">分片与副本：desiredCount 的语义</a><a href="#compare">三产品选型速查</a><a href="#card">速记卡</a><a href="../00-overview/weaviate-explained.html">← 概览</a><a href="../01-hybrid-retrieval/weaviate-hybrid-search-fusion.html">混合检索</a></nav>
+<nav><a href="#arch">Schema-first 与六个层次</a><a href="#defaults">两个反直觉默认值</a><a href="#deploy">部署形态怎么选</a><a href="#scale">分片与副本：desiredCount 的语义</a><a href="#compare">三产品选型速查</a><a href="#card">速记卡</a><a href="../00-weaviate-workload-selection/weaviate-workload-selection.html">← 概览</a><a href="../01-hybrid-retrieval/weaviate-hybrid-search-fusion.html">混合检索</a></nav>
 
 <main>
-<section id="arch"><h2><span class="n">①</span>Schema-first 与六个层次</h2><p>Weaviate 与 Milvus、Qdrant 最大的理念差异是<b>Schema-first + 内置向量化</b>：它假定「你告诉我要存什么对象、用哪个模型向量化」，剩下的向量生成、存入、检索它全包。</p><p>这个理念带来两个直接后果：<b>上手极快</b>（不用自己调 embedding API），以及<b>耦合较深</b>（换模型意味着全量重算，向量化在写入路径上）。</p><table><tr><th>层</th><th>组成</th><th>说明</th></tr><tr><td>接入层</td><td>REST / GraphQL / gRPC</td><td><b>GraphQL 是主接口</b>，与另两家风格不同</td></tr><tr><td>Schema 层</td><td>Class（≈ 表）+ Property（≈ 字段）+ 交叉引用</td><td>写入前必须定义 Schema（除非开 auto-schema）</td></tr><tr><td>索引层（双轨）</td><td>HNSW 向量索引 + 倒排索引（BM25、过滤）</td><td>同一个查询可同时用两条索引</td></tr><tr><td>存储层</td><td><b>LSM-based</b> 存储（对象 + 倒排）+ HNSW 文件</td><td>写多读多都走 LSM</td></tr><tr><td>模块层</td><td><code>text2vec-*</code> / <code>reranker-*</code> / <code>generative-*</code></td><td>可插拔，编译进镜像或运行时配置</td></tr><tr><td>分布式</td><td>sharding（默认 1）+ replication factor</td><td>多租户走 tenant = shard 模型</td></tr></table></section><section id="defaults"><h2><span class="n">②</span>两个反直觉默认值</h2><p>Weaviate 有两个<b>反直觉的默认值</b>，不知道就会误判性能表现：</p><table><tr><th>参数</th><th>默认值</th><th>含义</th><th>为什么重要</th></tr><tr><td><code>flatSearchCutoff</code></td><td><b>40000</b></td><td>对象数低于此阈值时<b>不走 HNSW，直接暴力扫描</b></td><td>小数据集上「改 ef 没反应」是正常的 —— 它在暴力扫</td></tr><tr><td><code>ef</code>（查询）</td><td><b>-1</b>（动态）</td><td>按结果数自动算 ef，受 <code>dynamicEfMin</code>(100) / <code>dynamicEfMax</code>(500) / <code>dynamicEfFactor</code>(8) 约束</td><td>不显式设置时 ef 是自动的，手工调参前先关掉动态</td></tr></table><pre><code>{
+<section id="arch"><h2>Schema 与对象模型的结构图</h2>
+<svg width="720" height="235" viewBox="0 0 720 235">
+      <text x="360" y="20" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6ea8fe">Class Article 的结构</text>
+      <rect x="40" y="34" width="640" height="54" rx="8" fill="#1f2433" stroke="#56d4dd"/>
+      <text x="360" y="56" text-anchor="middle" font-size="13" font-weight="700" fill="#56d4dd">Class: Article</text>
+      <text x="360" y="76" text-anchor="middle" font-size="11.5" fill="#94a3b8">vectorizer: text2vec-openai ｜ vectorIndexType: hnsw</text>
+
+      <line x1="200" y1="90" x2="150" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="360" y1="90" x2="360" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+      <line x1="520" y1="90" x2="570" y2="118" stroke="#7ee787" stroke-width="1.5"/>
+
+      <g font-size="11">
+        <rect x="40" y="122" width="190" height="90" rx="8" fill="#171b26" stroke="#7ee787"/>
+        <text x="135" y="144" text-anchor="middle" font-size="12" fill="#7ee787">属性 Properties</text>
+        <text x="135" y="164" text-anchor="middle" fill="#94a3b8">title: text</text>
+        <text x="135" y="184" text-anchor="middle" fill="#94a3b8">content: text</text>
+        <text x="135" y="204" text-anchor="middle" fill="#94a3b8">publishedAt: date</text>
+
+        <rect x="265" y="122" width="190" height="90" rx="8" fill="#2a2340" stroke="#d2a8ff"/>
+        <text x="360" y="144" text-anchor="middle" font-size="12" fill="#d2a8ff">向量 Vector</text>
+        <text x="360" y="164" text-anchor="middle" fill="#94a3b8">由 vectorizer 自动生成</text>
+        <text x="360" y="184" text-anchor="middle" fill="#94a3b8">或外部提供（BYOV）</text>
+        <text x="360" y="204" text-anchor="middle" fill="#94a3b8">HNSW 索引</text>
+
+        <rect x="490" y="122" width="190" height="90" rx="8" fill="#14303a" stroke="#56d4dd"/>
+        <text x="585" y="144" text-anchor="middle" font-size="12" fill="#56d4dd">交叉引用</text>
+        <text x="585" y="164" text-anchor="middle" fill="#94a3b8">author → Author 类</text>
+        <text x="585" y="184" text-anchor="middle" fill="#94a3b8">category → Category</text>
+        <text x="585" y="204" text-anchor="middle" fill="#94a3b8">可跨对象联合检索</text>
+      </g>
+      <text x="360" y="228" text-anchor="middle" font-size="11" fill="#94a3b8">每个对象 = 属性 + 自动生成的向量 + 引用关系</text>
+    </svg>
+<h2><span class="n">①</span>Schema-first 与六个层次</h2><p>Weaviate 与 Milvus、Qdrant 最大的理念差异是<b>Schema-first + 内置向量化</b>：它假定「你告诉我要存什么对象、用哪个模型向量化」，剩下的向量生成、存入、检索它全包。</p><p>这个理念带来两个直接后果：<b>上手极快</b>（不用自己调 embedding API），以及<b>耦合较深</b>（换模型意味着全量重算，向量化在写入路径上）。</p><table><tr><th>层</th><th>组成</th><th>说明</th></tr><tr><td>接入层</td><td>REST / GraphQL / gRPC</td><td><b>GraphQL 是主接口</b>，与另两家风格不同</td></tr><tr><td>Schema 层</td><td>Class（≈ 表）+ Property（≈ 字段）+ 交叉引用</td><td>写入前必须定义 Schema（除非开 auto-schema）</td></tr><tr><td>索引层（双轨）</td><td>HNSW 向量索引 + 倒排索引（BM25、过滤）</td><td>同一个查询可同时用两条索引</td></tr><tr><td>存储层</td><td><b>LSM-based</b> 存储（对象 + 倒排）+ HNSW 文件</td><td>写多读多都走 LSM</td></tr><tr><td>模块层</td><td><code>text2vec-*</code> / <code>reranker-*</code> / <code>generative-*</code></td><td>可插拔，编译进镜像或运行时配置</td></tr><tr><td>分布式</td><td>sharding（默认 1）+ replication factor</td><td>多租户走 tenant = shard 模型</td></tr></table></section><section id="defaults"><h2><span class="n">②</span>两个反直觉默认值</h2><p>Weaviate 有两个<b>反直觉的默认值</b>，不知道就会误判性能表现：</p><table><tr><th>参数</th><th>默认值</th><th>含义</th><th>为什么重要</th></tr><tr><td><code>flatSearchCutoff</code></td><td><b>40000</b></td><td>对象数低于此阈值时<b>不走 HNSW，直接暴力扫描</b></td><td>小数据集上「改 ef 没反应」是正常的 —— 它在暴力扫</td></tr><tr><td><code>ef</code>（查询）</td><td><b>-1</b>（动态）</td><td>按结果数自动算 ef，受 <code>dynamicEfMin</code>(100) / <code>dynamicEfMax</code>(500) / <code>dynamicEfFactor</code>(8) 约束</td><td>不显式设置时 ef 是自动的，手工调参前先关掉动态</td></tr></table><pre><code>{
   "class": "Doc",
   "vectorIndexConfig": {
     "distance": "cosine",
@@ -99,7 +131,7 @@
 </main>
 
 <footer>
-  Weaviate 的调参前提是<b>先搞清它在走哪条索引</b>：对象数低于 40000 时它根本不走 HNSW，此时调 ef 是白费力气。<br>延伸：<a href="../00-overview/weaviate-explained.html">Weaviate 原理</a> · <a href="../03-vectorizer-and-modules/weaviate-vectorizer-modules.html">向量化模块</a>
+  Weaviate 的调参前提是<b>先搞清它在走哪条索引</b>：对象数低于 40000 时它根本不走 HNSW，此时调 ef 是白费力气。<br>延伸：<a href="../00-weaviate-workload-selection/weaviate-workload-selection.html">Weaviate 原理</a> · <a href="../03-vectorizer-and-modules/weaviate-vectorizer-modules.html">向量化模块</a>
 </footer>
 
 </body>
