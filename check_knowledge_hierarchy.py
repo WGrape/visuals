@@ -28,10 +28,10 @@ def lesson_title(source):
 
 
 def check_sibling_numbers(parent, directories, errors):
-    """Numbered topic siblings must not reuse or skip a position."""
+    """Numbered topic siblings must start at 01 without reuse or gaps."""
     numbers = sorted(int(path.name[:2]) for path in directories if NUMBERED.match(path.name))
-    if len(numbers) > 1 and numbers != list(range(numbers[0], numbers[-1] + 1)):
-        errors.append(f"同层目录编号重复或断档：{parent.relative_to(ROOT)}，编号 {numbers}")
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        errors.append(f"同层目录编号须从 01 连续排列：{parent.relative_to(ROOT)}，编号 {numbers}")
 
 
 def check_topic_name(directory, errors):
